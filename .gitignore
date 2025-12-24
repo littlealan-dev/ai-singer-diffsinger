@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# MacOS
+.DS_Store
+
+# Media & Models
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.aif
+*.aiff
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.tar
+*.tar.gz
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# Artifacts
+outputs/
+assets/
+logs/
+runs/
+checkpoints/
+cache/
+tmp/
