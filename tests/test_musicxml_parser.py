@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from src.musicxml import parse_musicxml
+
+
+TEST_XML = (
+    Path(__file__).resolve().parents[1]
+    / "assets"
+    / "test_data"
+    / "amazing-grace-satb-verse1.xml"
+)
+
+
+class MusicXmlParserTests(unittest.TestCase):
+    def test_parse_basic(self) -> None:
+        score = parse_musicxml(TEST_XML)
+        self.assertEqual(score.title, "Amazing Grace— How Sweet the Sound")
+        self.assertEqual(len(score.parts), 1)
+        self.assertGreater(len(score.tempos), 0)
+        self.assertEqual(score.tempos[0].bpm, 120.0)
+        self.assertEqual(score.parts[0].part_name, "SOPRANO ALTO")
+
+    def test_offsets_use_absolute_beats(self) -> None:
+        score = parse_musicxml(TEST_XML)
+        part = score.parts[0]
+        offsets = [event.offset_beats for event in part.notes]
+        self.assertTrue(all(b >= a for a, b in zip(offsets, offsets[1:])))
+        self.assertGreater(offsets[-1], offsets[0])
+
+    def test_lyrics_only_filters_primary_part(self) -> None:
+        score = parse_musicxml(TEST_XML, lyrics_only=True)
+        part = score.parts[0]
+        self.assertGreater(len(part.notes), 0)
+        self.assertEqual(part.notes[0].lyric, "1.A")
+        self.assertTrue(all(event.lyric is not None for event in part.notes))
+
+    def test_lyrics_only_keeps_non_lyric_parts(self) -> None:
+        score = parse_musicxml(TEST_XML, lyrics_only=True, part_index=1)
+        part = score.parts[0]
+        self.assertGreater(len(part.notes), 0)
+        self.assertTrue(any(event.lyric is None for event in part.notes))
+
+    def test_tie_type_extraction(self) -> None:
+        score = parse_musicxml(TEST_XML)
+        part = score.parts[0]
+        tie_types = [event.tie_type for event in part.notes if event.tie_type is not None]
+        self.assertTrue(tie_types)
+        self.assertIn("start", tie_types)
+
+    def test_keep_rests_includes_rest_events(self) -> None:
+        score = parse_musicxml(TEST_XML, keep_rests=True)
+        part = score.parts[0]
+        self.assertTrue(any(event.is_rest for event in part.notes))
+        offsets = [event.offset_beats for event in part.notes]
+        self.assertTrue(all(b >= a for a, b in zip(offsets, offsets[1:])))
+
+    def test_keep_rests_false_excludes_rests(self) -> None:
+        score = parse_musicxml(TEST_XML, keep_rests=False)
+        part = score.parts[0]
+        self.assertFalse(any(event.is_rest for event in part.notes))
+
+
+if __name__ == "__main__":
+    unittest.main()
