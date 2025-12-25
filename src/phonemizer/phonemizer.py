@@ -85,6 +85,7 @@ class Phonemizer:
         
         self._phoneme_to_id = self._load_phoneme_inventory(self.phonemes_path)
         self._dictionary = self._load_dictionary(self.dictionary_path)
+        self._vowel_symbols, self._glide_symbols = self._load_symbol_types(self.dictionary_path)
         self._language_map = self._load_language_map(self.languages_path) if self.languages_path else {}
         self._g2p: Optional[G2p] = None
 
@@ -103,6 +104,12 @@ class Phonemizer:
             lang_ids.append(lang_id)
             
         return PhonemeResult(phonemes=phonemes, ids=ids, language_ids=lang_ids)
+
+    def is_vowel(self, phoneme: str) -> bool:
+        return phoneme in self._vowel_symbols
+
+    def is_glide(self, phoneme: str) -> bool:
+        return phoneme in self._glide_symbols
 
     def _phonemize_token(self, token: str) -> List[str]:
         raw = token.strip()
@@ -221,6 +228,26 @@ class Phonemizer:
             if key not in dictionary:
                 dictionary[key] = [str(p) for p in phonemes]
         return dictionary
+
+    def _load_symbol_types(self, path: Path) -> tuple[set[str], set[str]]:
+        if not path.exists():
+            return set(), set()
+        data = yaml.safe_load(path.read_text(encoding="utf8"))
+        symbols = data.get("symbols", []) if isinstance(data, dict) else []
+        vowels = {"SP", "AP"}
+        glides = set()
+        for entry in symbols:
+            if not isinstance(entry, dict):
+                continue
+            symbol = str(entry.get("symbol", "")).strip()
+            symbol_type = str(entry.get("type", "")).strip().lower()
+            if not symbol:
+                continue
+            if symbol_type == "vowel":
+                vowels.add(symbol)
+            if symbol_type in ("semivowel", "liquid"):
+                glides.add(symbol)
+        return vowels, glides
 
     def _phonemes_match_language(self, phonemes: Iterable[str]) -> bool:
         for phoneme in phonemes:

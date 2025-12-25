@@ -21,6 +21,7 @@ class NoteEvent:
     pitch_hz: Optional[float]
     lyric: Optional[str]
     syllabic: Optional[str]
+    lyric_is_extended: bool
     is_rest: bool
     tie_type: Optional[str]
     voice: Optional[str]
@@ -173,6 +174,7 @@ def _collect_part_events(
     )
     active_lyric: Optional[str] = None
     active_syllabic: Optional[str] = None
+    active_extend = False
     events: list[NoteEvent] = []
     for element in elements:
         is_rest = element.isRest
@@ -180,16 +182,20 @@ def _collect_part_events(
         if is_rest:
             if keep_rests:
                 events.append(_make_rest_event(element, offset_beats=offset))
+            active_extend = False
             continue
         lyric_text, syllabic, is_extended = _extract_lyric_text(element)
+        tie_type = element.tie.type if element.tie is not None else None
         include = True
         lyric_value = lyric_text
         syllabic_value = syllabic
+        lyric_extended = False
         if lyrics_only and has_lyric_text:
             if lyric_text is None:
-                if is_extended and active_lyric is not None:
+                if (active_extend or tie_type in ("start", "continue", "stop")) and active_lyric is not None:
                     lyric_value = active_lyric
                     syllabic_value = active_syllabic
+                    lyric_extended = True
                 else:
                     include = False
         if include:
@@ -199,11 +205,17 @@ def _collect_part_events(
                     offset_beats=offset,
                     lyric=lyric_value,
                     syllabic=syllabic_value,
+                    lyric_extended=lyric_extended,
                 )
             )
         if lyric_text is not None:
             active_lyric = lyric_text
             active_syllabic = syllabic
+            active_extend = is_extended
+        elif tie_type in ("start", "continue"):
+            active_extend = True
+        elif tie_type == "stop" and not active_extend:
+            active_extend = False
     return events
 
 
@@ -230,6 +242,7 @@ def _make_note_event(
     offset_beats: float,
     lyric: Optional[str],
     syllabic: Optional[str],
+    lyric_extended: bool,
 ) -> NoteEvent:
     pitch = None
     if isinstance(element, chord.Chord):
@@ -252,6 +265,7 @@ def _make_note_event(
         pitch_hz=pitch_hz,
         lyric=lyric,
         syllabic=syllabic,
+        lyric_is_extended=lyric_extended,
         is_rest=False,
         tie_type=tie_type,
         voice=voice,
@@ -273,6 +287,7 @@ def _make_rest_event(
         pitch_hz=None,
         lyric=None,
         syllabic=None,
+        lyric_is_extended=False,
         is_rest=True,
         tie_type=None,
         voice=None,

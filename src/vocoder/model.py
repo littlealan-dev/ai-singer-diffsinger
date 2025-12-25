@@ -1,0 +1,44 @@
+import onnxruntime as ort
+import numpy as np
+from pathlib import Path
+from typing import Dict, Any
+
+class Vocoder:
+    """
+    HiFi-GAN Vocoder (vocoder.onnx).
+    Inputs: mel, f0
+    Outputs: waveform
+    """
+    def __init__(self, model_path: Path, device: str = "cpu"):
+        self.model_path = model_path
+        self.device = device
+        self.session = self._load_session()
+        self.input_names = [node.name for node in self.session.get_inputs()]
+        self.output_names = [node.name for node in self.session.get_outputs()]
+
+    def _load_session(self) -> ort.InferenceSession:
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Model not found at {self.model_path}")
+        
+        providers = ["CPUExecutionProvider"]
+        if self.device == "cuda":
+            providers.insert(0, "CUDAExecutionProvider")
+        elif self.device == "coreml":
+            providers.insert(0, "CoreMLExecutionProvider")
+            
+        return ort.InferenceSession(str(self.model_path), providers=providers)
+
+    def forward(self, mel: np.ndarray, f0: np.ndarray) -> np.ndarray:
+        """
+        Args:
+            mel: [B, T, n_mel] (or [B, n_mel, T]? Check usage)
+            f0: [B, T]
+        Returns:
+            waveform: [B, output_len]
+        """
+        inputs = {
+            "mel": mel,
+            "f0": f0
+        }
+        outputs = self.session.run(self.output_names, inputs)
+        return outputs[0]
