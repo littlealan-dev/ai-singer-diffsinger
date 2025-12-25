@@ -57,6 +57,10 @@ class Pipeline:
         self.root = voicebank_path
         self.device = device
         self.logger = logging.getLogger(__name__)
+        self.variance_predict_energy = False
+        self.variance_predict_breathiness = False
+        self.variance_predict_voicing = False
+        self.variance_predict_tension = False
         
         self.config = self._load_pipeline_config()
         self.phonemizer = self._init_phonemizer()
@@ -147,6 +151,10 @@ class Pipeline:
              conf = yaml.safe_load((dsvariance_path / "dsconfig.yaml").read_text())
              if "variance" in conf:
                  variance_path = dsvariance_path / conf["variance"]
+                 self.variance_predict_energy = bool(conf.get("predict_energy", False))
+                 self.variance_predict_breathiness = bool(conf.get("predict_breathiness", False))
+                 self.variance_predict_voicing = bool(conf.get("predict_voicing", False))
+                 self.variance_predict_tension = bool(conf.get("predict_tension", False))
                  return VarianceModel(variance_path.resolve(), self.device)
         self.logger.info("Variance model not found. Will use zero variances.")
         return None
@@ -599,7 +607,7 @@ class Pipeline:
 
         spk_embed_frames = self._repeat_embed(self.spk_embed, n_frames).astype(np.float32)
         expr = np.ones((1, n_frames), dtype=np.float32)
-        retake = np.zeros((1, n_frames), dtype=bool)
+        retake = np.ones((1, n_frames), dtype=bool)
 
         if self.pitch:
             pitch_encoder_out = encoder_out
@@ -616,7 +624,7 @@ class Pipeline:
                 "note_midi": note_midi_pitch[None, :].astype(np.float32),
                 "note_rest": note_rest_pitch[None, :],
                 "note_dur": np.array(note_dur, dtype=np.int64)[None, :],
-                "pitch": np.zeros((1, n_frames), dtype=np.float32),
+                "pitch": np.full((1, n_frames), 60.0, dtype=np.float32),
                 "expr": expr,
                 "retake": retake,
                 "spk_embed": spk_embed_frames,
@@ -649,6 +657,16 @@ class Pipeline:
                     "ph_dur": ph_durations_pitch[None, :].astype(np.int64),
                 }
                 variance_encoder_out = self.variance_linguistic.run(variance_ling_inputs)[0]
+            num_variances = sum(
+                [
+                    int(self.variance_predict_energy),
+                    int(self.variance_predict_breathiness),
+                    int(self.variance_predict_voicing),
+                    int(self.variance_predict_tension),
+                ]
+            )
+            if num_variances <= 0:
+                num_variances = 3
             variance_inputs = {
                 "encoder_out": variance_encoder_out,
                 "ph_dur": ph_durations_pitch[None, :].astype(np.int64),
@@ -656,10 +674,12 @@ class Pipeline:
                 "breathiness": np.zeros((1, n_frames), dtype=np.float32),
                 "voicing": np.zeros((1, n_frames), dtype=np.float32),
                 "tension": np.zeros((1, n_frames), dtype=np.float32),
-                "retake": np.zeros((1, n_frames, 3), dtype=bool),
+                "retake": np.ones((1, n_frames, num_variances), dtype=bool),
                 "spk_embed": spk_embed_frames,
                 "steps": np.array(self.config.steps, dtype=np.int64),
             }
+            if self.variance_predict_energy:
+                variance_inputs["energy"] = np.zeros((1, n_frames), dtype=np.float32)
             variance_out = self.variance.run(variance_inputs)
             breathiness, voicing, tension = variance_out
         else:
