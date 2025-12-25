@@ -328,6 +328,7 @@ class Pipeline:
         output_path: Optional[Path] = None,
         *,
         debug_dir: Optional[Path] = None,
+        voice_id: Optional[str] = None,
         stop_after: Optional[str] = None,
     ):
         score = parse_musicxml(score_path, keep_rests=True)
@@ -337,6 +338,35 @@ class Pipeline:
         notes = score.parts[0].notes
         if not notes:
             raise ValueError("No notes found in the selected MusicXML part.")
+
+        voice_pitches: Dict[str, List[float]] = {}
+        for note in notes:
+            if note.is_rest or note.voice is None or note.pitch_midi is None:
+                continue
+            voice_pitches.setdefault(note.voice, []).append(note.pitch_midi)
+        selected_voice: Optional[str] = None
+        if voice_id is not None:
+            if voice_id not in voice_pitches:
+                raise ValueError(f"voice_id '{voice_id}' not found in the selected part.")
+            selected_voice = voice_id
+        elif "1" in voice_pitches:
+            selected_voice = "1"
+        elif len(voice_pitches) > 1:
+            selected_voice = max(
+                voice_pitches.items(),
+                key=lambda item: sum(item[1]) / len(item[1]),
+            )[0]
+        elif len(voice_pitches) == 1:
+            selected_voice = next(iter(voice_pitches.keys()))
+
+        if selected_voice is not None:
+            notes = [note for note in notes if note.voice == selected_voice]
+        elif voice_pitches:
+            # Fallback to notes with any explicit voice labels.
+            notes = [note for note in notes if note.voice is not None]
+
+        if not notes:
+            raise ValueError("No notes left after applying voice selection.")
 
         note_start_frames: List[int] = []
         note_end_frames: List[int] = []

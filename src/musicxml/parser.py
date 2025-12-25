@@ -280,6 +280,10 @@ def _make_rest_event(
 ) -> NoteEvent:
     measure_ctx = element.getContextByClass(stream.Measure)
     measure_number = measure_ctx.number if measure_ctx is not None else None
+    voice = None
+    voice_ctx = element.getContextByClass(stream.Voice)
+    if voice_ctx is not None:
+        voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
     return NoteEvent(
         offset_beats=offset_beats,
         duration_beats=float(element.duration.quarterLength),
@@ -290,6 +294,6 @@ def _make_rest_event(
         lyric_is_extended=False,
         is_rest=True,
         tie_type=None,
-        voice=None,
+        voice=voice,
         measure_number=measure_number,
     )
