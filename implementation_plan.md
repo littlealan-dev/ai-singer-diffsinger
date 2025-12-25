@@ -19,7 +19,7 @@ Build a minimal, standalone Python backend to validate the DiffSinger OpenUtau-c
 - `soundfile`
 - `pyyaml`
 - `music21` (for parsing MusicXML)
-- `g2p_en` (for English Grapheme-to-Phoneme conversion, as voicebank lacks internal dictionary)
+- `g2p_en` (English G2P fallback when a token is missing in the voicebank dictionary)
 - `jieba` (optional, for Chinese/Pinyin support if needed later)
 
 ### Project Structure (Reference Strategy)
@@ -32,7 +32,7 @@ Build a minimal, standalone Python backend to validate the DiffSinger OpenUtau-c
 
 #### [NEW] [src/phonemizer/base.py](file:///Users/alanchan/antigravity/ai-singer-diffsinger/src/phonemizer/base.py)
 - `Phonemizer` class.
-- **Dependency**: Uses `g2p_en` (or similar simple G2P) to convert Lyrics -> ARPABET/Phonemes.
+- **Dependency**: Uses `g2p_en` as a fallback when dictionary lookup fails.
 - **Mapping**: Loads `phonemes.json` (via `dsconfig.yaml` key `phonemes`, e.g. `dsmain/phonemes.json`) to map ARPABET symbols (e.g., `AA`) to Model IDs (e.g., `8`).
 - **Logic**: 
   1. Input: "Hello"
@@ -51,13 +51,16 @@ Build a minimal, standalone Python backend to validate the DiffSinger OpenUtau-c
 - Outputs: Audio Waveform.
 
 #### [NEW] [src/pipeline.py](file:///Users/alanchan/antigravity/ai-singer-diffsinger/src/pipeline.py)
-- Orchestrator that:
-    1.  Parses MusicXML (extracts lyrics + note duration + pitch).
-    2.  Reads `voice/dsconfig.yaml` to locate `dsmain/phonemes.json` and `dsmain/acoustic.onnx`.
-    3.  Loads dictionary from `voice/dsdur/dsdict.yaml` (or `dsdur/dsdict-<lang>.yaml`).
-    4.  Instantiates `Phonemizer` and `AcousticModel`.
-    5.  Calls Phonemizer -> Acoustic -> Vocoder.
-    6.  Saves WAV.
+- Implement `Phonemizer` class that emulates OpenUtau's hybrid logic.
+- **Phonemization Priority**:
+    1. **Voicebank Dictionary Override**: Load the appropriate `dsdict-<lang>.yaml` based on the requested language (falling back to `dsdict.yaml`).
+    2. **G2P Fallback**:
+        - For **English**: Use `g2p_en` if a token is not found in the dictionary.
+        - For **Other Languages**: Rely on `dsdict.yaml` or provide language-specific plugins (Phase 2).
+- **Mapping & Prefixing**:
+    - Convert phonemes to the voicebank's internal format.
+    - Handle language prefixes (e.g., `en/`, `ja/`, `zh/`) based on `use_lang_id` from `dsconfig.yaml`.
+- **Validation**: Ensure all final phonemes exist in `phonemes.json`.
 
 ## Verification Plan
 
