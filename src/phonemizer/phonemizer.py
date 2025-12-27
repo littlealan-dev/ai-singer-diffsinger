@@ -115,6 +115,10 @@ class Phonemizer:
         raw = token.strip()
         if not raw:
             return []
+        if raw in self._phoneme_to_id:
+            return [raw]
+        if raw.upper() in self._phoneme_to_id:
+            return [raw.upper()]
         normalized = self._normalize_grapheme(raw)
         if normalized and normalized in self._dictionary:
             return self._validate_phonemes(self._dictionary[normalized], raw)

@@ -3,5 +3,5 @@ numpy>=1.24.0
 soundfile>=0.12.1
 pyyaml>=6.0.1
 music21>=9.1.0
-librosa>=0.10.1
 g2p_en>=2.1.0
+RestrictedPython>=7.0

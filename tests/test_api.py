@@ -1,0 +1,215 @@
+"""
+Tests for the SVS Backend API module.
+
+Tests cover the core public APIs defined in api_design.md.
+"""
+
+import unittest
+from pathlib import Path
+import json
+
+from src.api import (
+    parse_score,
+    modify_score,
+    phonemize,
+    list_voicebanks,
+    get_voicebank_info,
+    save_audio,
+)
+
+
+ROOT_DIR = Path(__file__).parent.parent
+VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
+TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
+OUTPUT_DIR = ROOT_DIR / "tests/output"
+
+
+class TestParseScore(unittest.TestCase):
+    """Tests for parse_score API."""
+    
+    def test_parse_returns_dict(self):
+        """parse_score should return a JSON-serializable dict."""
+        score = parse_score(TEST_XML)
+        self.assertIsInstance(score, dict)
+        # Should be JSON-serializable
+        json.dumps(score)
+    
+    def test_parse_has_required_keys(self):
+        """Score dict should have title, tempos, parts, structure."""
+        score = parse_score(TEST_XML)
+        self.assertIn("title", score)
+        self.assertIn("tempos", score)
+        self.assertIn("parts", score)
+        self.assertIn("structure", score)
+    
+    def test_parse_extracts_title(self):
+        """Should extract title from MusicXML."""
+        score = parse_score(TEST_XML)
+        self.assertIsNotNone(score["title"])
+        self.assertIn("Amazing Grace", score["title"])
+    
+    def test_parse_extracts_notes(self):
+        """Should extract notes from parts."""
+        score = parse_score(TEST_XML)
+        self.assertGreater(len(score["parts"]), 0)
+        part = score["parts"][0]
+        self.assertIn("notes", part)
+        self.assertGreater(len(part["notes"]), 0)
+    
+    def test_parse_note_has_required_fields(self):
+        """Each note should have offset, duration, pitch, etc."""
+        score = parse_score(TEST_XML)
+        note = score["parts"][0]["notes"][0]
+        self.assertIn("offset_beats", note)
+        self.assertIn("duration_beats", note)
+        self.assertIn("pitch_midi", note)
+        self.assertIn("lyric", note)
+
+
+class TestModifyScore(unittest.TestCase):
+    """Tests for modify_score API."""
+    
+    def test_modify_transposes_notes(self):
+        """modify_score should be able to transpose notes."""
+        score = parse_score(TEST_XML)
+        original_pitch = score["parts"][0]["notes"][0]["pitch_midi"]
+        
+        # Note: RestrictedPython disallows augmented assignment (+=) for object items
+        # So we use explicit assignment instead
+        modify_score(score, """
+for part in score['parts']:
+    for note in part['notes']:
+        if note['pitch_midi']:
+            note['pitch_midi'] = note['pitch_midi'] + 12
+        """)
+        
+        new_pitch = score["parts"][0]["notes"][0]["pitch_midi"]
+        self.assertEqual(new_pitch, original_pitch + 12)
+
+    
+    def test_modify_sets_velocity(self):
+        """modify_score should be able to set velocity."""
+        score = parse_score(TEST_XML)
+        
+        modify_score(score, """
+for part in score['parts']:
+    for note in part['notes']:
+        note['velocity'] = 0.8
+        """)
+        
+        velocity = score["parts"][0]["notes"][0].get("velocity")
+        self.assertEqual(velocity, 0.8)
+    
+    def test_modify_can_filter_parts(self):
+        """modify_score should be able to filter parts."""
+        score = parse_score(TEST_XML)
+        
+        modify_score(score, """
+score['parts'] = [p for p in score['parts'] if 'SOPRANO' in (p.get('part_name') or '').upper()]
+        """)
+        
+        self.assertGreater(len(score["parts"]), 0)
+    
+    def test_modify_syntax_error_raises(self):
+        """Invalid code should raise SyntaxError."""
+        score = parse_score(TEST_XML)
+        with self.assertRaises(SyntaxError):
+            modify_score(score, "this is not valid python!!!")
+
+
+class TestPhonemize(unittest.TestCase):
+    """Tests for phonemize API."""
+    
+    @classmethod
+    def setUpClass(cls):
+        if not VOICEBANK_PATH.exists():
+            raise unittest.SkipTest(f"Voicebank not found at {VOICEBANK_PATH}")
+        try:
+            import nltk
+            nltk.data.find("corpora/cmudict")
+        except Exception:
+            raise unittest.SkipTest("cmudict not available for g2p_en")
+    
+    def test_phonemize_returns_dict(self):
+        """phonemize should return a dict with required keys."""
+        result = phonemize(["hello", "world"], VOICEBANK_PATH)
+        self.assertIsInstance(result, dict)
+        self.assertIn("phonemes", result)
+        self.assertIn("phoneme_ids", result)
+        self.assertIn("language_ids", result)
+        self.assertIn("word_boundaries", result)
+    
+    def test_phonemize_produces_phonemes(self):
+        """phonemize should produce phoneme sequences."""
+        result = phonemize(["amazing"], VOICEBANK_PATH)
+        self.assertGreater(len(result["phonemes"]), 0)
+        self.assertEqual(len(result["phonemes"]), len(result["phoneme_ids"]))
+    
+    def test_phonemize_word_boundaries_match(self):
+        """Word boundaries should match input word count."""
+        result = phonemize(["hello", "world", "test"], VOICEBANK_PATH)
+        self.assertEqual(len(result["word_boundaries"]), 3)
+
+
+class TestVoicebankAPIs(unittest.TestCase):
+    """Tests for list_voicebanks and get_voicebank_info APIs."""
+    
+    def test_list_voicebanks(self):
+        """list_voicebanks should return a list."""
+        voicebanks = list_voicebanks(ROOT_DIR / "assets/voicebanks")
+        self.assertIsInstance(voicebanks, list)
+        self.assertGreater(len(voicebanks), 0)
+    
+    def test_list_voicebanks_has_required_fields(self):
+        """Each voicebank info should have id, name, path."""
+        voicebanks = list_voicebanks(ROOT_DIR / "assets/voicebanks")
+        vb = voicebanks[0]
+        self.assertIn("id", vb)
+        self.assertIn("name", vb)
+        self.assertIn("path", vb)
+    
+    def test_get_voicebank_info(self):
+        """get_voicebank_info should return capabilities."""
+        if not VOICEBANK_PATH.exists():
+            self.skipTest(f"Voicebank not found at {VOICEBANK_PATH}")
+        
+        info = get_voicebank_info(VOICEBANK_PATH)
+        self.assertIn("name", info)
+        self.assertIn("has_pitch_model", info)
+        self.assertIn("has_variance_model", info)
+        self.assertIn("sample_rate", info)
+
+
+class TestSaveAudio(unittest.TestCase):
+    """Tests for save_audio API."""
+    
+    def setUp(self):
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        self.output_file = OUTPUT_DIR / "test_output.wav"
+        if self.output_file.exists():
+            self.output_file.unlink()
+    
+    def test_save_audio_creates_file(self):
+        """save_audio should create a WAV file."""
+        import numpy as np
+        waveform = np.sin(np.linspace(0, 100, 44100)).tolist()  # 1 second sine wave
+        
+        result = save_audio(waveform, self.output_file, sample_rate=44100)
+        
+        self.assertTrue(Path(result["path"]).exists())
+        self.assertGreater(result["duration_seconds"], 0)
+    
+    def test_save_audio_returns_metadata(self):
+        """save_audio should return path, duration, sample_rate."""
+        import numpy as np
+        waveform = np.zeros(44100).tolist()
+        
+        result = save_audio(waveform, self.output_file, sample_rate=44100)
+        
+        self.assertIn("path", result)
+        self.assertIn("duration_seconds", result)
+        self.assertIn("sample_rate", result)
+
+
+if __name__ == "__main__":
+    unittest.main()
