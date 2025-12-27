@@ -1,235 +1,258 @@
-# DiffSinger SVS Backend – Architecture Context
+# DiffSinger SVS Backend – Architecture
 
 ## Purpose
 
-This project implements a backend-only Singing Voice Synthesis (SVS) pipeline based on:
-- DiffSinger acoustic models (ONNX)
-- An external neural vocoder
+This project implements a backend-only Singing Voice Synthesis (SVS) pipeline. Given a music score (MusicXML) and a trained voice model (voicebank), it generates a sung vocal audio file.
 
-Immediate objective:
-- Validate the end-to-end pipeline using the DiffSinger community **PC-HiFi-GAN** vocoder (non-commercial)
+**Current Status**: Core pipeline implemented and ready for end-to-end validation.
 
-Future objective:
-- Swap to a commercial-use vocoder later with minimal refactor
-- Expose backend capabilities via an **MCP server** so an LLM-driven chat UI can call tools/APIs to achieve user goals
-
-This document defines authoritative architectural decisions and constraints. Treat it as the source of truth.
+**Future Goal**: Expose the backend via an MCP server so an LLM-driven chat UI can orchestrate synthesis from natural language prompts.
 
 ---
 
-## Target User Experience (Future)
+## How It Works (Bird's Eye View)
 
-We are aiming for an “AI image generator”-style workflow:
-- User uploads a MusicXML file
-- User provides a natural language prompt in a chat window (e.g., “sing it softly, sad, airy, with gentle vibrato”)
-- An LLM interprets the prompt and orchestrates backend calls to synthesize the vocal audio
-
-We will NOT build the UI in the current phase, but the backend architecture MUST be compatible with this future LLM-driven integration.
-
----
-
-## High-Level Architecture
-
-[Future Chat UI]
-  - User uploads MusicXML
-  - User enters natural-language prompt
-        ↓
-[LLM Orchestrator]
-  - Interprets intent
-  - Calls tools via MCP
-        ↓
-[MCP Server (Tool Wrapper)]
-  - Stable tool/API surface for LLM
-  - Validates inputs
-  - Orchestrates underlying services
-        ↓
-[SVS Backend Services]
-  - Preprocessing (MusicXML → phonemes/pitch/duration/etc.)
-  - DiffSinger Acoustic Inference (ONNX Runtime → mel)
-  - Vocoder (mel → waveform)
-        ↓
-[Outputs]
-  - WAV audio
-  - Optional intermediate artifacts (mel, alignment, logs)
-
-  ---
-
-## Core Decisions (Locked)
-
-### Acoustic Model
-- Engine: DiffSinger
-- Model format: ONNX (often distributed as OpenUtau voicebanks)
-- Runtime: onnxruntime (CPU first)
-- OpenUtau is NOT used as a dependency/runtime (it is only a packaging format for some voicebanks)
-
-### Phonemizer (Frontend)
-- **Constraint**: Must use a G2P (Grapheme-to-Phoneme) module compatible with the specific DiffSinger/OpenUtau voicebank (usually the "DiffSinger Phonemizer" logic).
-- **Reason**: Acoustic models are trained on specific phoneme sets (e.g., ARPABET, Pinyin). Generic phonemizers (like espeak) will fail unless the model was explicitly trained on them.
-- **Implementation**: We must replicate the OpenUtau dictionary lookup and phoneme mapping logic (Text → Phoneme IDs).
-
-### Vocoder (Phase 1 – Validation Only)
-- Use DiffSinger community **PC-HiFi-GAN** vocoder to ensure compatibility and validate the pipeline
-- Licensing is acknowledged as non-commercial; this phase is for technical validation only
-
-### Vocoder (Phase 2 – Commercial-Ready)
-- Design must allow easy switching to a commercial-use vocoder later (e.g., MIT HiFi-GAN, BigVGAN)
-- **Critical Constraint**: The replacement vocoder MUST be trained/adapted to accept the exact **Mel Spectrogram Contract** (sample rate, hop size, n_mels, fmin, fmax) produced by the Acoustic Model.
-- Switching vocoder should not require changes to:
-  - DiffSinger ONNX inference code
-  - Preprocessing pipeline
-  - MCP tool interface (only configuration / implementation swaps)
-
-### MCP Integration (Future)
-- The SVS backend must be wrapped by an MCP server so an LLM can:
-  - Discover available tools
-  - Decide which tools to call and in what order
-  - Pass user assets (MusicXML) and parameters (prompt-derived controls)
-- The MCP server is the stable “contract boundary” between LLM and backend services
+```
+┌─────────────────┐
+│   MusicXML      │  Your music score with lyrics, notes, and timing
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  Score Parser   │  Extracts notes, lyrics, pitches, durations, tempo
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│   Phonemizer    │  Converts lyrics ("hello") → phonemes (["hh","ah","l","ow"])
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ Duration Model  │  Predicts how long each phoneme should last
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  Pitch Model    │  Adds realistic pitch curves (vibrato, transitions)
+│   (optional)    │  Falls back to flat MIDI notes if unavailable
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ Acoustic Model  │  Generates a Mel Spectrogram (the "blueprint" of sound)
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│    Vocoder      │  Converts Mel Spectrogram → audible waveform (WAV)
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│   Output WAV    │  The final sung audio file
+└─────────────────┘
+```
 
 ---
 
-## Critical Design Principle: Isolation Boundaries
+## Project Structure
 
-Two strict modular boundaries must be preserved:
-
-1) Vocoder Isolation
-- Vocoder is a pluggable module; no vocoder-specific assumptions inside the acoustic model code
-
-2) MCP Tool Contract Isolation
-- The MCP server provides stable tools that do not leak internal implementation details
-- The LLM should not call internal services directly; it calls MCP tools only
-
----
-
-## Vocoder Abstraction Contract
-
-All vocoders must implement a stable interface:
-- Input: mel spectrogram (numpy array)
-- Output: waveform samples (numpy array)
-
-Example interface (conceptual):
-
-- infer(mel) -> waveform
-
-Notes:
-- Mel tensor layout and normalization MUST be consistent across vocoders via a single “Mel Contract”
-- **Constraint**: The Mel Contract is dictated by the **Acoustic Model**. The Vocoder must be compatible with *these* specific physics parameters, or use a high-quality signal adapter (though matching training params is preferred).
-- Any vocoder-specific mel scaling must be handled inside the vocoder adapter, not upstream
+```
+ai-singer-diffsinger/
+├── src/
+│   ├── musicxml/
+│   │   └── parser.py         # MusicXML parsing (uses music21)
+│   ├── phonemizer/
+│   │   └── phonemizer.py     # Text-to-phoneme conversion
+│   ├── acoustic/
+│   │   └── model.py          # ONNX model wrappers
+│   ├── vocoder/
+│   │   └── model.py          # Vocoder wrapper
+│   └── pipeline.py           # Main orchestrator
+├── assets/
+│   ├── voicebanks/           # DiffSinger voicebanks (ONNX models + configs)
+│   └── test_data/            # Sample MusicXML files for testing
+├── tests/
+│   ├── test_musicxml_parser.py
+│   ├── test_phonemizer.py
+│   └── test_end_to_end.py
+└── third_party/              # Reference implementations (not runtime dependencies)
+    ├── DiffSinger/           # Original DiffSinger repo (reference only)
+    └── OpenUtau/             # OpenUtau source (reference only)
+```
 
 ---
 
-## MCP Server Responsibilities (Future)
+## The Pipeline Workflow
 
-The MCP server is a wrapper/orchestrator that exposes tools to the LLM. It should:
-- Provide tool discovery and schemas (inputs/outputs)
-- Validate parameters and file types
-- Orchestrate calls to internal services
-- Return structured results to the LLM
+The `Pipeline` class in `src/pipeline.py` is the main entry point. Here's how it processes a song:
 
-The MCP server is NOT responsible for:
-- Training models
-- UI rendering
-- Long-running job management beyond basic request/response (future enhancement)
+### Step 1: Load Voicebank
+
+When you create a `Pipeline`, it scans the voicebank folder for:
+
+| Folder | Contains | Required? |
+|--------|----------|-----------|
+| `dsdur/` | Duration model (`dur.onnx`) + Linguistic encoder | ✅ Yes |
+| `dspitch/` | Pitch predictor (`pitch.onnx`) | ⚡ Recommended |
+| `dsvariance/` | Breathiness/tension predictor | ⚠️ Optional |
+| Root or `dsmain/` | Acoustic model (`acoustic.onnx`) | ✅ Yes |
+| `dsvocoder/` or path in config | Vocoder (`vocoder.onnx`) | ✅ Yes |
+
+The pipeline auto-discovers available models and gracefully falls back when optional ones are missing.
+
+### Step 2: Parse the Score
+
+The `parse_musicxml()` function reads your MusicXML file and extracts:
+- **Notes**: Pitch (MIDI number), duration (in beats)
+- **Lyrics**: The text to sing
+- **Tempo**: BPM changes throughout the piece
+- **Rests**: Silent gaps between phrases
+
+### Step 3: Convert Lyrics to Phonemes
+
+The `Phonemizer` converts each lyric syllable into phonemes:
+
+```
+"hello" → ["hh", "ah", "l", "ow"]
+"world" → ["w", "er", "l", "d"]
+```
+
+It uses a **hybrid approach**:
+1. **Dictionary Lookup**: Check the voicebank's `dsdict.yaml` first
+2. **G2P Fallback**: Use machine learning (`g2p_en`) for unknown words
+
+Each phoneme is also mapped to:
+- A **token ID** (integer the model understands)
+- A **language ID** (for multilingual voicebanks)
+
+### Step 4: Predict Durations
+
+The **Linguistic Encoder** converts phonemes into a rich representation, then the **Duration Model** predicts how many audio frames each phoneme should occupy.
+
+The pipeline aligns these predictions to match your original note timings, ensuring the singing stays in sync with the beat.
+
+### Step 5: Predict Pitch (Optional)
+
+If the voicebank includes a pitch model:
+- It generates a natural-sounding F0 (fundamental frequency) curve
+- Adds subtle vibrato, smooth transitions between notes, and expressive nuances
+
+If no pitch model is available:
+- The pipeline uses a **naive fallback**: flat MIDI note frequencies
+- This sounds robotic but still works
+
+### Step 6: Generate the Spectrogram
+
+The **Acoustic Model** takes all the processed data:
+- Phoneme IDs and durations
+- Pitch curve (F0)
+- Optional variance parameters (breathiness, tension)
+- Speaker embedding (voice identity)
+
+It outputs a **Mel Spectrogram** — a visual representation of sound that captures the voice's timbre and characteristics.
+
+### Step 7: Vocode to Audio
+
+The **Vocoder** (HiFi-GAN) converts the Mel Spectrogram into an actual audio waveform. This is the final step that produces the `.wav` file you can listen to.
 
 ---
 
-## Proposed MCP Tools (Draft)
+## Key Concepts
 
-These are draft tool concepts for future integration (exact naming may evolve):
+### Voicebank
 
-1) register_asset
-- Input: MusicXML file content or file reference
-- Output: asset_id
+A voicebank is a trained voice model package containing:
+- ONNX neural network files
+- Configuration files (`dsconfig.yaml`)
+- Phoneme dictionaries
+- Speaker embeddings
 
-2) parse_musicxml
-- Input: asset_id
-- Output: structured score representation (notes, lyrics, tempo, measures)
+Think of it as a "voice profile" — each voicebank sounds like a different singer.
 
-3) synthesize_mel
-- Input:
-  - asset_id OR structured score
-  - optional performance controls (derived from user prompt)
-- Output:
-  - mel_id OR mel array (depending on storage strategy)
-  - metadata (sample_rate, hop_length, n_mels, etc.)
+### Phonemes
 
-4) vocode_audio
-- Input: mel_id or mel array
-- Output: wav_id or wav bytes + metadata
+Phonemes are the smallest units of speech sound. Unlike letters, they represent actual pronunciation:
+- "cat" → `k ae t` (3 phonemes)
+- "though" → `dh ow` (2 phonemes despite 6 letters)
 
-5) synthesize_audio (convenience)
-- Input:
-  - asset_id
-  - performance controls
-  - vocoder choice (config-driven)
-- Output: wav_id / wav bytes
+The voicebank was trained on a specific phoneme set, so we must convert lyrics to that exact format.
 
-Important:
-- Even if synthesize_audio exists, the lower-level tools must remain available to allow the LLM to debug/iterate (e.g., change only vocoder, or inspect mel).
+### Mel Spectrogram
 
----
+A Mel Spectrogram is a way to represent audio visually:
+- Time flows left to right
+- Frequency (pitch) goes bottom to top
+- Color intensity shows loudness
 
-## Current Implementation Plan
+Neural networks are excellent at generating these, and vocoders are excellent at converting them back to audio.
 
-### Phase 1 (Now): End-to-End Validation
-- Implement:
-  - ONNX DiffSinger acoustic inference wrapper (onnxruntime)
-  - Vocoder adapter for PC-HiFi-GAN
-  - End-to-end pipeline runner (MusicXML preprocessing can be minimal/mock initially if needed, but aim to integrate properly)
-- Goal:
-  - Generate audible WAV from a known test MusicXML + voicebank
+### Speaker Embedding
 
-### Phase 2 (Later): Commercial Vocoder Swap
-- Replace vocoder adapter with a commercial-use model
-- Ensure:
-  - Same Mel Contract
-  - Minimal configuration-only changes
-  - No changes to DiffSinger inference module
-
-### Phase 3 (Later): MCP Server Wrapper + LLM Chat UI Integration
-- Implement MCP server exposing the tool surface described above
-- UI remains out-of-scope until MCP tools are stable
-- LLM prompt interpretation will map natural language instructions to structured “performance controls” (future work)
+A vector (list of numbers) that captures a voice's unique characteristics. Changing the embedding changes the voice identity while keeping the same lyrics and melody.
 
 ---
 
 ## Technology Stack
 
-- Language: Python 3.10+
-- ONNX Runtime: onnxruntime (CPU first)
-- Acoustic model: DiffSinger ONNX voicebanks
-- Vocoder:
-  - Phase 1: PC-HiFi-GAN (community, non-commercial)
-  - Phase 2: commercial-use vocoder (MIT HiFi-GAN / BigVGAN)
-- Interface layer (future): MCP server
-- No UI code in current scope
+| Component | Technology |
+|-----------|------------|
+| Language | Python 3.10+ |
+| AI Runtime | ONNX Runtime (CPU, extensible to GPU) |
+| Score Parsing | music21 |
+| G2P | g2p_en (English), voicebank dictionaries |
+| Audio I/O | soundfile, numpy |
+| Config | PyYAML |
 
 ---
 
-## Non-Goals (Explicit)
+## Design Principles
 
-- No model training
-- No OpenUtau UI/editor dependency
-- No real-time streaming (batch rendering only)
-- No full-featured prompt-to-technique control yet (only placeholder schema is fine)
-- No full UI build in this phase
+### 1. Modular & Swappable
+
+Each component (Phonemizer, Duration Model, Pitch Model, Acoustic, Vocoder) is isolated. You can:
+- Swap vocoders without changing the pipeline
+- Use different voicebanks without code changes
+- Add new languages by extending the Phonemizer
+
+### 2. Graceful Degradation
+
+Missing optional models don't crash the pipeline:
+- No pitch model? Uses flat MIDI notes
+- No variance model? Uses neutral defaults
+
+### 3. Voicebank-Driven Configuration
+
+The voicebank's `dsconfig.yaml` tells the pipeline:
+- Sample rate and hop size
+- Which models to load
+- Phoneme and language mappings
+
+No hardcoded assumptions about any specific voicebank.
 
 ---
 
-## Future Extensions (Out of Scope for Now)
+## Current Limitations
 
-- Prompt → performance control mapping (LLM interpreter)
-- Technique/emotion embeddings
-- Multi-singer routing and voice selection
-- Queueing, job persistence, and caching
-- SaaS concerns (auth, billing, quotas)
-- Voicebank marketplace ingestion/verification
+- **English only** (for G2P fallback; dictionary-based phonemes work for other languages)
+- **Batch processing** (no real-time streaming)
+- **Single voice per render** (no multi-singer mixing yet)
+
+---
+
+## Future Roadmap
+
+### Phase 2: Commercial Vocoder
+Replace the validation vocoder with a commercially-licensed one (e.g., MIT HiFi-GAN).
+
+### Phase 3: MCP Server
+Wrap the pipeline as an MCP server so an LLM can:
+- Accept natural language instructions ("sing it softly with vibrato")
+- Translate them to synthesis parameters
+- Call the pipeline and return audio
+
+### Phase 4: Expression Controls
+Add support for dynamic controls like:
+- Breathiness / Tension curves
+- Gender shifting
+- Emotion / style embeddings
 
 ---
 
 ## Summary
 
-- Phase 1 uses PC-HiFi-GAN for compatibility validation only (non-commercial acknowledged)
-- Architecture must keep vocoder swappable via a strict adapter boundary
-- Future integration will be via an MCP server so an LLM can discover and call backend tools from a chat UI
-- The MCP tool contract must be stable and implementation-agnostic
+This backend transforms sheet music into sung audio using neural networks. The `Pipeline` class orchestrates the flow from MusicXML through text-to-phoneme conversion, duration/pitch prediction, acoustic synthesis, and finally vocoding. The architecture is designed to be voicebank-agnostic and vocoder-swappable, preparing for future LLM integration via MCP.
