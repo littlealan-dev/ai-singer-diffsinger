@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
 from src.api.voicebank import load_voicebank_config, load_speaker_embed
+from src.api.vocode import vocode
 
 
 # Cache for loaded models
@@ -569,4 +570,61 @@ def synthesize_mel(
         "mel": mel.tolist(),
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
+    }
+
+
+def synthesize_audio(
+    phoneme_ids: List[int],
+    durations: List[int],
+    f0: List[float],
+    voicebank: Union[str, Path],
+    *,
+    breathiness: Optional[List[float]] = None,
+    tension: Optional[List[float]] = None,
+    voicing: Optional[List[float]] = None,
+    language_ids: Optional[List[int]] = None,
+    vocoder_path: Optional[Union[str, Path]] = None,
+    device: str = "cpu",
+) -> Dict[str, Any]:
+    """
+    Generate audio by running mel synthesis and vocoding.
+    
+    Args:
+        phoneme_ids: Token IDs
+        durations: Frames per phoneme
+        f0: Pitch curve in Hz
+        voicebank: Voicebank path or ID
+        breathiness, tension, voicing: Variance curves (optional)
+        language_ids: Language ID per phoneme (optional)
+        vocoder_path: Optional explicit vocoder path
+        device: Device for inference
+        
+    Returns:
+        Dict with:
+        - waveform: Audio samples as list
+        - sample_rate: Audio sample rate
+        - hop_size: Samples per frame
+    """
+    mel_result = synthesize_mel(
+        phoneme_ids=phoneme_ids,
+        durations=durations,
+        f0=f0,
+        voicebank=voicebank,
+        breathiness=breathiness,
+        tension=tension,
+        voicing=voicing,
+        language_ids=language_ids,
+        device=device,
+    )
+    audio_result = vocode(
+        mel=mel_result["mel"],
+        f0=f0,
+        voicebank=voicebank,
+        vocoder_path=vocoder_path,
+        device=device,
+    )
+    return {
+        "waveform": audio_result["waveform"],
+        "sample_rate": audio_result["sample_rate"],
+        "hop_size": mel_result["hop_size"],
     }

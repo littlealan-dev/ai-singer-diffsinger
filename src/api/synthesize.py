@@ -6,9 +6,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
-from src.api.score import parse_score
-from src.api.inference import predict_durations, predict_pitch, predict_variance, synthesize_mel
-from src.api.vocode import vocode
+from src.api.phonemize import phonemize
+from src.api.inference import (
+    predict_durations,
+    predict_pitch,
+    predict_variance,
+    synthesize_audio,
+)
 from src.api.voicebank import load_voicebank_config
 from src.phonemizer.phonemizer import Phonemizer
 
@@ -218,13 +222,7 @@ def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
     )
 
 
-def _build_phoneme_groups(
-    notes: List[Dict[str, Any]],
-    start_frames: List[int],
-    end_frames: List[int],
-    timing_midi: List[float],
-    phonemizer: Phonemizer,
-) -> Dict[str, Any]:
+def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     word_groups: List[Dict[str, Any]] = []
     current_group: Optional[Dict[str, Any]] = None
 
@@ -252,10 +250,46 @@ def _build_phoneme_groups(
             current_group["notes"].append(note)
             current_group["note_indices"].append(idx)
 
+    return word_groups
+
+
+def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    phonemes = phoneme_result.get("phonemes", [])
+    ids = phoneme_result.get("phoneme_ids", [])
+    lang_ids = phoneme_result.get("language_ids", [])
+    boundaries = phoneme_result.get("word_boundaries", [])
+
+    word_phonemes: List[Dict[str, Any]] = []
+    offset = 0
+    for count in boundaries:
+        count = int(count)
+        if count <= 0:
+            word_phonemes.append({"phonemes": [], "ids": [], "lang_ids": []})
+            continue
+        word_phonemes.append(
+            {
+                "phonemes": phonemes[offset:offset + count],
+                "ids": ids[offset:offset + count],
+                "lang_ids": lang_ids[offset:offset + count],
+            }
+        )
+        offset += count
+    return word_phonemes
+
+
+def _build_phoneme_groups(
+    word_groups: List[Dict[str, Any]],
+    start_frames: List[int],
+    end_frames: List[int],
+    timing_midi: List[float],
+    phonemizer: Phonemizer,
+    word_phonemes: List[Dict[str, Any]],
+) -> Dict[str, Any]:
     sp_id = phonemizer._phoneme_to_id["SP"]
 
     phrase_groups: List[Dict[str, Any]] = []
     note_phonemes: Dict[int, List[str]] = {}
+    word_idx = 0
     for group in word_groups:
         notes_in_group = group["notes"]
         note_indices = group["note_indices"]
@@ -264,6 +298,7 @@ def _build_phoneme_groups(
             phrase_groups.append(
                 {
                     "position": start_frames[note_idx],
+                    "phonemes": ["SP"],
                     "ids": [sp_id],
                     "lang_ids": [0],
                     "tone": float(timing_midi[note_idx]),
@@ -273,11 +308,13 @@ def _build_phoneme_groups(
             note_phonemes[note_idx] = ["SP"]
             continue
 
-        lyric = notes_in_group[0].get("lyric", "") or ""
-        ph_res = phonemizer.phonemize_tokens([lyric])
-        phonemes = list(ph_res.phonemes) or ["SP"]
-        ids = list(ph_res.ids) if ph_res.phonemes else [sp_id]
-        lang_ids = list(ph_res.language_ids) if ph_res.phonemes else [0]
+        if word_idx >= len(word_phonemes):
+            raise ValueError("Phoneme list does not match the selected notes.")
+        word_data = word_phonemes[word_idx]
+        word_idx += 1
+        phonemes = list(word_data.get("phonemes", [])) or ["SP"]
+        ids = list(word_data.get("ids", [])) if word_data.get("phonemes") else [sp_id]
+        lang_ids = list(word_data.get("lang_ids", [])) if word_data.get("phonemes") else [0]
 
         is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
         is_glide = [phonemizer.is_glide(p) for p in phonemes]
@@ -322,6 +359,7 @@ def _build_phoneme_groups(
         if word_entries[0]["phonemes"]:
             if phrase_groups:
                 prev_note_idx = phrase_groups[-1].get("note_idx")
+                phrase_groups[-1].setdefault("phonemes", []).extend(word_entries[0]["phonemes"])
                 phrase_groups[-1]["ids"].extend(word_entries[0]["ids"])
                 phrase_groups[-1]["lang_ids"].extend(word_entries[0]["lang_ids"])
                 if prev_note_idx is not None:
@@ -336,6 +374,7 @@ def _build_phoneme_groups(
                     phrase_groups.append(
                         {
                             "position": note_start,
+                            "phonemes": word_entries[0]["phonemes"],
                             "ids": word_entries[0]["ids"],
                             "lang_ids": word_entries[0]["lang_ids"],
                             "tone": float(timing_midi[note_idx]),
@@ -356,6 +395,7 @@ def _build_phoneme_groups(
             phrase_groups.append(
                 {
                     "position": entry["position"],
+                    "phonemes": entry["phonemes"],
                     "ids": entry["ids"],
                     "lang_ids": entry["lang_ids"],
                     "tone": float(timing_midi[note_idx]) if note_idx is not None else 0.0,
@@ -381,10 +421,12 @@ def _build_phoneme_groups(
     word_boundaries = [len(group["ids"]) for group in phrase_groups]
     phoneme_ids = [pid for group in phrase_groups for pid in group["ids"]]
     language_ids = [lid for group in phrase_groups for lid in group["lang_ids"]]
+    phonemes = [ph for group in phrase_groups for ph in group.get("phonemes", [])]
     word_pitches = [group["tone"] for group in phrase_groups]
 
     return {
         "phoneme_ids": phoneme_ids,
+        "phonemes": phonemes,
         "language_ids": language_ids,
         "word_boundaries": word_boundaries,
         "word_durations": word_durations,
@@ -393,71 +435,85 @@ def _build_phoneme_groups(
     }
 
 
-def synthesize(
+def align_phonemes_to_notes(
     score: Dict[str, Any],
     voicebank: Union[str, Path],
     *,
     part_index: int = 0,
     voice_id: Optional[str] = None,
-    device: str = "cpu",
+    include_phonemes: bool = False,
 ) -> Dict[str, Any]:
     """
-    Run the full synthesis pipeline (steps 2-7) in one call.
-    
-    This is a convenience API that chains:
-    phonemize → predict_durations → predict_pitch → predict_variance → synthesize_mel → vocode
+    Align phonemes to notes and compute timing inputs for inference steps.
     
     Args:
         score: Score JSON dict (from parse_score)
         voicebank: Voicebank path or ID
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
-        device: Device for inference
+        include_phonemes: Include phoneme strings in output
         
     Returns:
         Dict with:
-        - waveform: Audio samples as list
-        - sample_rate: Sample rate
-        - duration_seconds: Audio duration
+        - phoneme_ids: Token IDs
+        - language_ids: Language ID per phoneme
+        - word_boundaries: Phoneme counts per word
+        - word_durations: Frames per word group
+        - word_pitches: MIDI pitch per word group
+        - note_durations: Frames per note (for pitch)
+        - note_pitches: MIDI pitch per note (for pitch)
+        - note_rests: Rest flags per note (for pitch)
+        - phonemes: Optional phoneme strings
     """
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
-    
-    # Calculate frame duration in milliseconds
+
     sample_rate = config.get("sample_rate", 44100)
     hop_size = config.get("hop_size", 512)
     frame_ms = hop_size / sample_rate * 1000.0
-    
-    # Extract notes and tempos from score
+
     if not score.get("parts"):
         raise ValueError("Score has no parts")
-    
     part = score["parts"][part_index]
     notes = part.get("notes", [])
     tempos = score.get("tempos", [{"offset_beats": 0.0, "bpm": 120.0}])
-    
     if not notes:
         raise ValueError("Part has no notes")
 
     notes = _select_voice_notes(notes, voice_id)
     if not notes:
         raise ValueError("No notes left after applying voice selection")
-    
-    # Compute proper timing from tempo
-    start_frames, end_frames, note_durations, note_pitches, note_rests = _compute_note_timing(
+
+    start_frames, end_frames, _, note_pitches, _ = _compute_note_timing(
         notes,
         tempos,
         frame_ms,
     )
     pitch_note_durations = _compute_pitch_note_durations(start_frames, end_frames)
 
+    word_groups = _group_notes(notes)
+    lyrics: List[str] = []
+    for group in word_groups:
+        if group["is_rest"]:
+            continue
+        lyric = group["notes"][0].get("lyric", "") or ""
+        lyrics.append(lyric)
+
+    word_phonemes: List[Dict[str, Any]] = []
+    if lyrics:
+        phoneme_result = phonemize(lyrics, voicebank_path)
+        word_phonemes = _split_phonemize_result(phoneme_result)
+        if len(word_phonemes) != len(lyrics):
+            raise ValueError("Phonemize output does not match the selected notes.")
+
     phonemizer = _init_phonemizer(voicebank_path)
     ph_result = _build_phoneme_groups(
-        notes,
+        word_groups,
         start_frames,
         end_frames,
         note_pitches,
         phonemizer,
+        word_phonemes,
     )
 
     if not ph_result["phoneme_ids"]:
@@ -477,60 +533,107 @@ def synthesize(
         )
         computed_note_rests.append(is_rest)
         prev_rest = is_rest
+
+    result = {
+        "phoneme_ids": ph_result["phoneme_ids"],
+        "language_ids": ph_result["language_ids"],
+        "word_boundaries": ph_result["word_boundaries"],
+        "word_durations": ph_result["word_durations"],
+        "word_pitches": ph_result["word_pitches"],
+        "note_durations": pitch_note_durations,
+        "note_pitches": note_pitches,
+        "note_rests": computed_note_rests,
+    }
+    if include_phonemes:
+        result["phonemes"] = ph_result["phonemes"]
+    return result
+
+
+def synthesize(
+    score: Dict[str, Any],
+    voicebank: Union[str, Path],
+    *,
+    part_index: int = 0,
+    voice_id: Optional[str] = None,
+    device: str = "cpu",
+) -> Dict[str, Any]:
+    """
+    Run the full synthesis pipeline (steps 2-6) in one call.
+    
+    This is a convenience API that chains:
+    align_phonemes_to_notes → predict_durations → predict_pitch → predict_variance → synthesize_audio
+    
+    Args:
+        score: Score JSON dict (from parse_score)
+        voicebank: Voicebank path or ID
+        part_index: Which part to synthesize (default: 0)
+        voice_id: Which voice to synthesize within a part (default: soprano)
+        device: Device for inference
+        
+    Returns:
+        Dict with:
+        - waveform: Audio samples as list
+        - sample_rate: Sample rate
+        - duration_seconds: Audio duration
+    """
+    voicebank_path = Path(voicebank)
+    config = load_voicebank_config(voicebank_path)
+    
+    sample_rate = config.get("sample_rate", 44100)
+
+    alignment = align_phonemes_to_notes(
+        score,
+        voicebank_path,
+        part_index=part_index,
+        voice_id=voice_id,
+        include_phonemes=False,
+    )
     
     # Step 3: Predict durations
     dur_result = predict_durations(
-        phoneme_ids=ph_result["phoneme_ids"],
-        word_boundaries=ph_result["word_boundaries"],
-        note_durations=ph_result["word_durations"],
-        note_pitches=ph_result["word_pitches"],
+        phoneme_ids=alignment["phoneme_ids"],
+        word_boundaries=alignment["word_boundaries"],
+        note_durations=alignment["word_durations"],
+        note_pitches=alignment["word_pitches"],
         voicebank=voicebank_path,
-        language_ids=ph_result["language_ids"],
+        language_ids=alignment["language_ids"],
         device=device,
     )
     
     # Step 4: Predict pitch
     pitch_result = predict_pitch(
-        phoneme_ids=ph_result["phoneme_ids"],
+        phoneme_ids=alignment["phoneme_ids"],
         durations=dur_result["durations"],
-        note_pitches=note_pitches,
-        note_durations=pitch_note_durations,
-        note_rests=computed_note_rests,
+        note_pitches=alignment["note_pitches"],
+        note_durations=alignment["note_durations"],
+        note_rests=alignment["note_rests"],
         voicebank=voicebank_path,
-        language_ids=ph_result["language_ids"],
+        language_ids=alignment["language_ids"],
         encoder_out=dur_result["encoder_out"],
         device=device,
     )
     
     # Step 5: Predict variance
     var_result = predict_variance(
-        phoneme_ids=ph_result["phoneme_ids"],
+        phoneme_ids=alignment["phoneme_ids"],
         durations=dur_result["durations"],
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
-        language_ids=ph_result["language_ids"],
+        language_ids=alignment["language_ids"],
         encoder_out=dur_result["encoder_out"],
         device=device,
     )
     
-    # Step 6: Synthesize mel
-    mel_result = synthesize_mel(
-        phoneme_ids=ph_result["phoneme_ids"],
+    # Step 6: Synthesize audio
+    audio_result = synthesize_audio(
+        phoneme_ids=alignment["phoneme_ids"],
         durations=dur_result["durations"],
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
         breathiness=var_result["breathiness"],
         tension=var_result["tension"],
         voicing=var_result["voicing"],
-        language_ids=ph_result["language_ids"],
-        device=device,
-    )
-    
-    # Step 7: Vocode
-    audio_result = vocode(
-        mel=mel_result["mel"],
-        f0=pitch_result["f0"],
-        voicebank=voicebank_path,
+        language_ids=alignment["language_ids"],
         device=device,
     )
     

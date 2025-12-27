@@ -13,7 +13,7 @@ This document defines the public APIs for the Singing Voice Synthesis backend. T
 
 ---
 
-## API Overview (7 Pipeline Steps + Utilities)
+## API Overview (6 Pipeline Steps + Utilities)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -26,15 +26,15 @@ This document defines the public APIs for the Singing Voice Synthesis backend. T
 ├─────────────────────────────────────────────────────────────────────────┤
 │  STEP 1: parse_score        │  MusicXML → Score JSON                    │
 │  UTILITY: modify_score      │  Execute Python code on Score JSON        │
-│  STEP 2: phonemize          │  Lyrics → Phoneme tokens + IDs            │
+│  STEP 2: align_phonemes_to_notes │ Score → Phonemes + note timing       │
 │  STEP 3: predict_durations  │  Phonemes → Duration per phoneme          │
 │  STEP 4: predict_pitch      │  Notes → F0 curve (Hz)                    │
 │  STEP 5: predict_variance   │  → Breathiness, tension, voicing          │
-│  STEP 6: synthesize_mel     │  All inputs → Mel spectrogram             │
-│  STEP 7: vocode             │  Mel → Audio waveform                     │
+│  STEP 6: synthesize_audio   │  Mel + vocoder → Audio waveform           │
 │  OUTPUT: save_audio         │  Waveform → File                          │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  CONVENIENCE: synthesize    │  Score → Audio (runs steps 2-7)           │
+│  UTILITY: phonemize         │  Lyrics → Phonemes + IDs + boundaries     │
+│  CONVENIENCE: synthesize    │  Score → Audio (runs steps 2-6)           │
 │  METADATA: list_voicebanks  │  List available voices                    │
 │  METADATA: get_voicebank_info │  Query voice capabilities               │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -84,7 +84,7 @@ for i, note in enumerate(bar_12):
 
 ---
 
-## Step 2: `phonemize`
+## Utility: `phonemize`
 
 Convert lyrics to phoneme sequences.
 
@@ -96,19 +96,62 @@ Convert lyrics to phoneme sequences.
 | **Output** | `phonemes`: List of phoneme strings |
 | | `phoneme_ids`: List of token IDs |
 | | `language_ids`: List of language IDs (for multilingual) |
+| | `word_boundaries`: List of phoneme counts per word |
 | **Purpose** | Text-to-phoneme conversion with voicebank dictionary |
 
 **Example:**
 ```
 phonemize(["hello", "world"], voicebank="Raine_Rena")
 → {
-    "phonemes": ["hh", "ah", "l", "ow", "w", "er", "l", "d"],
-    "phoneme_ids": [15, 4, 21, 32, 45, 12, 21, 8],
+    "phonemes": ["en/hh", "en/ah", "en/l", "en/ow", "en/w", "en/er", "en/l", "en/d"],
+    "phoneme_ids": [26, 10, 31, 35, 47, 22, 31, 17],
     "language_ids": [1, 1, 1, 1, 1, 1, 1, 1]
   }
 ```
 
 ---
+
+## Step 2: `align_phonemes_to_notes`
+
+Prepare phonemes and note timing for inference.
+
+This is the required entry point for step-by-step workflows, consolidating the timing
+logic used by `synthesize(...)` so an LLM does not re-implement beat → frame conversion.
+
+| Attribute | Description |
+|-----------|-------------|
+| **Input** | `score`: Score JSON dict |
+| | `voicebank`: Voicebank path or ID |
+| | `part_index`: Part index (default: 0) |
+| | `voice_id`: Voice selection within a part (optional) |
+| | `include_phonemes`: Include phoneme strings in output (default: false) |
+| **Output** | `phoneme_ids`: Token IDs |
+| | `phonemes`: Phoneme strings (optional) |
+| | `language_ids`: Language ID per phoneme |
+| | `word_boundaries`: Phoneme counts per word |
+| | `word_durations`: Frames per word group |
+| | `word_pitches`: MIDI pitch per word group |
+| | `note_durations`: Frames per note (for pitch) |
+| | `note_pitches`: MIDI pitch per note (for pitch) |
+| | `note_rests`: Rest flags per note |
+| **Purpose** | Provide ready-to-use inputs for `predict_durations` and `predict_pitch` |
+
+**Example:**
+```
+align_phonemes_to_notes(score, voicebank="Raine_Rena", voice_id="soprano", include_phonemes=True)
+→ {
+  "phoneme_ids": [...],
+  "phonemes": ["en/hh", "en/ah", "en/l", "en/ow", ...],
+  "language_ids": [...],
+  "word_boundaries": [...],
+  "word_durations": [...],
+  "word_pitches": [...],
+  "note_durations": [...],
+  "note_pitches": [...],
+  "note_rests": [...]
+}
+```
+
 
 ## Step 3: `predict_durations`
 
@@ -117,11 +160,15 @@ Predict timing for each phoneme.
 | Attribute | Description |
 |-----------|-------------|
 | **Input** | `phoneme_ids`: From phonemize step |
-| | `note_durations`: Duration of each note (beats) |
-| | `note_pitches`: MIDI pitch of each note |
+| | `word_boundaries`: Phoneme counts per word |
+| | `note_durations`: Duration per word in frames (use `word_durations` from step 2) |
+| | `note_pitches`: MIDI pitch per word (use `word_pitches` from step 2) |
 | | `voicebank`: Voicebank path or ID |
+| | `language_ids`: Language ID per phoneme (optional) |
 | **Output** | `durations`: Frames per phoneme |
 | | `total_frames`: Total audio frames |
+| | `encoder_out`: Encoder features for downstream steps |
+| | `x_masks`: Encoder masks |
 | **Purpose** | Determine phoneme timing aligned to musical rhythm |
 
 ---
@@ -135,11 +182,15 @@ Generate natural pitch curves.
 | **Input** | `phoneme_ids`: From phonemize step |
 | | `durations`: From predict_durations step |
 | | `note_pitches`: MIDI pitch per note |
-| | `note_durations`: Duration per note |
+| | `note_durations`: Frames per note |
+| | `note_rests`: Rest flags per note |
 | | `voicebank`: Voicebank path or ID |
+| | `language_ids`: Language ID per phoneme (optional) |
+| | `encoder_out`: Encoder output from predict_durations (optional) |
 | **Output** | `f0`: Pitch curve in Hz (one value per frame) |
+| | `pitch_midi`: Pitch curve in MIDI notes |
 | **Purpose** | Add vibrato, transitions, and natural pitch variation |
-| **Fallback** | If no pitch model, returns flat MIDI-derived frequencies |
+| **Fallback** | If no pitch model, returns MIDI-derived frequencies |
 
 ---
 
@@ -153,6 +204,8 @@ Generate expressive parameters (optional step).
 | | `durations`: From predict_durations step |
 | | `f0`: From predict_pitch step |
 | | `voicebank`: Voicebank path or ID |
+| | `language_ids`: Language ID per phoneme (optional) |
+| | `encoder_out`: Encoder output from predict_durations (optional) |
 | **Output** | `breathiness`: Breathiness curve (0.0–1.0 per frame) |
 | | `tension`: Tension curve |
 | | `voicing`: Voicing curve |
@@ -161,9 +214,9 @@ Generate expressive parameters (optional step).
 
 ---
 
-## Step 6: `synthesize_mel`
+## Step 6: `synthesize_audio`
 
-Generate the Mel spectrogram.
+Generate audio by running mel synthesis and vocoding.
 
 | Attribute | Description |
 |-----------|-------------|
@@ -172,25 +225,34 @@ Generate the Mel spectrogram.
 | | `f0`: Pitch curve |
 | | `breathiness`, `tension`, `voicing`: Variance curves (optional) |
 | | `voicebank`: Voicebank path or ID |
-| **Output** | `mel`: Mel spectrogram [frames × mel_bins] |
+| | `language_ids`: Language ID per phoneme (optional) |
+| | `vocoder_path`: Optional explicit vocoder path |
+| **Output** | `waveform`: Audio samples (numpy array) |
 | | `sample_rate`: Audio sample rate |
 | | `hop_size`: Samples per frame |
-| **Purpose** | Core acoustic synthesis |
+| **Purpose** | End-to-end acoustic synthesis |
 
 ---
 
-## Step 7: `vocode`
+## Internal APIs (advanced / debugging)
 
-Convert Mel spectrogram to audio waveform.
+These APIs are kept for debugging and advanced workflows, but are not exposed as public MCP endpoints.
+
+### `synthesize_mel`
 
 | Attribute | Description |
 |-----------|-------------|
-| **Input** | `mel`: Mel spectrogram from synthesize_mel |
-| | `f0`: Pitch curve |
-| | `vocoder`: Vocoder path (optional, uses voicebank default) |
-| **Output** | `waveform`: Audio samples (numpy array) |
-| | `sample_rate`: Sample rate |
-| **Purpose** | Final audio generation |
+| **Input** | `phoneme_ids`, `durations`, `f0`, variance curves, `voicebank`, `language_ids` |
+| **Output** | `mel`, `sample_rate`, `hop_size` |
+| **Purpose** | Inspect mel output before vocoding |
+
+### `vocode`
+
+| Attribute | Description |
+|-----------|-------------|
+| **Input** | `mel`, `f0`, `voicebank`, `vocoder_path` |
+| **Output** | `waveform`, `sample_rate` |
+| **Purpose** | Swap vocoders or benchmark vocoder-only behavior |
 
 ---
 
@@ -211,25 +273,39 @@ Write audio to a file.
 
 ## Convenience: `synthesize`
 
-Run the full pipeline (steps 2–7) in one call.
+Run the full pipeline (steps 2–6) in one call.
 
 | Attribute | Description |
 |-----------|-------------|
 | **Input** | `score`: Score JSON dict |
 | | `voicebank`: Voicebank path or ID |
-| | `options`: Synthesis options (optional) |
+| | `part_index`: Part index (default: 0) |
+| | `voice_id`: Voice selection within a part (optional) |
+| | `device`: Inference device (default: "cpu") |
 | **Output** | `waveform`: Audio samples |
 | | `sample_rate`: Sample rate |
+| | `duration_seconds`: Audio duration |
 | **Purpose** | Simple end-to-end synthesis |
+
+`voice_id` accepts a numeric voice (e.g. `"1"`) or labels like `"soprano"`, `"alto"`, `"tenor"`, `"bass"`.
 
 Equivalent to calling:
 ```
-phonemes = phonemize(score.lyrics, voicebank)
-durations = predict_durations(phonemes, score, voicebank)
-f0 = predict_pitch(phonemes, durations, score, voicebank)
-variance = predict_variance(phonemes, durations, f0, voicebank)
-mel = synthesize_mel(phonemes, durations, f0, variance, voicebank)
-waveform = vocode(mel, f0, voicebank)
+prep = align_phonemes_to_notes(score, voicebank)
+dur = predict_durations(prep['phoneme_ids'], prep['word_boundaries'], prep['word_durations'], prep['word_pitches'], voicebank, language_ids=prep['language_ids'])
+pitch = predict_pitch(prep['phoneme_ids'], dur['durations'], prep['note_pitches'], prep['note_durations'], prep['note_rests'], voicebank, language_ids=prep['language_ids'], encoder_out=dur['encoder_out'])
+var = predict_variance(prep['phoneme_ids'], dur['durations'], pitch['f0'], voicebank, language_ids=prep['language_ids'], encoder_out=dur['encoder_out'])
+audio = synthesize_audio(
+  prep['phoneme_ids'],
+  dur['durations'],
+  pitch['f0'],
+  voicebank,
+  breathiness=var['breathiness'],
+  tension=var['tension'],
+  voicing=var['voicing'],
+  language_ids=prep['language_ids'],
+)
+waveform = audio['waveform']
 ```
 
 ---
@@ -275,7 +351,7 @@ Get detailed information about a voicebank.
 ### Simple Render (using convenience API)
 ```
 1. score = parse_score("song.xml")
-2. audio = synthesize(score, "Raine_Rena")
+2. audio = synthesize(score, "Raine_Rena", voice_id="soprano")
 3. save_audio(audio, "output.wav")
 ```
 
@@ -283,13 +359,21 @@ Get detailed information about a voicebank.
 ```
 1. score = parse_score("song.xml")
 2. modify_score(score, "...transpose up 12...")
-3. phonemes = phonemize(score.lyrics, "Raine_Rena")
-4. durations = predict_durations(phonemes, score.notes, "Raine_Rena")
-5. f0 = predict_pitch(phonemes, durations, score.notes, "Raine_Rena")
-6. variance = predict_variance(phonemes, durations, f0, "Raine_Rena")
-7. mel = synthesize_mel(phonemes, durations, f0, variance, "Raine_Rena")
-8. audio = vocode(mel, f0)
-9. save_audio(audio, "output.wav")
+3. prep = align_phonemes_to_notes(score, "Raine_Rena", voice_id="soprano")
+4. dur = predict_durations(prep['phoneme_ids'], prep['word_boundaries'], prep['word_durations'], prep['word_pitches'], "Raine_Rena", language_ids=prep['language_ids'])
+5. pitch = predict_pitch(prep['phoneme_ids'], dur['durations'], prep['note_pitches'], prep['note_durations'], prep['note_rests'], "Raine_Rena", language_ids=prep['language_ids'], encoder_out=dur['encoder_out'])
+6. var = predict_variance(prep['phoneme_ids'], dur['durations'], pitch['f0'], "Raine_Rena", language_ids=prep['language_ids'], encoder_out=dur['encoder_out'])
+7. audio = synthesize_audio(
+    prep['phoneme_ids'],
+    dur['durations'],
+    pitch['f0'],
+    "Raine_Rena",
+    breathiness=var['breathiness'],
+    tension=var['tension'],
+    voicing=var['voicing'],
+    language_ids=prep['language_ids'],
+)
+8. save_audio(audio, "output.wav")
 ```
 
 ### Debug Phonemes Only
@@ -317,12 +401,9 @@ The score JSON captures all singing-voice-related information from MusicXML.
 ```
 ScoreJSON
 ├── title: string | null           # Work title
-├── composer: string | null        # Composer name
 ├── tempos: TempoEvent[]           # Tempo markings
-├── time_signatures: TimeSig[]     # Time signature changes
-├── key_signatures: KeySig[]       # Key signature changes
 ├── parts: Part[]                  # Voice parts
-└── structure: Structure           # Repeats, endings, jumps
+└── structure: Structure           # Repeats, endings, jumps (placeholder)
 ```
 
 ### Note (comprehensive)
@@ -330,41 +411,15 @@ ScoreJSON
 Note
 ├── offset_beats: float            # Position in score
 ├── duration_beats: float          # Note length in beats
-├── measure_number: int            # Bar number
-├── beat_in_measure: float         # Position within the bar
-├── voice: string | null           # Voice number
-│
-├── # Pitch
-├── pitch_midi: float | null       # MIDI note (60 = C4), null for rests
+├── measure_number: int | null     # Bar number
+├── voice: string | null           # Voice number within the part
+├── pitch_midi: float | null       # MIDI note (null for rests)
 ├── pitch_hz: float | null         # Frequency in Hz
-├── is_rest: bool                  # True if rest
-│
-├── # Lyrics
 ├── lyric: string | null           # The sung text
 ├── syllabic: string | null        # "begin", "middle", "end", "single"
-├── lyric_extend: bool             # Melisma (held syllable)
-│
-├── # Dynamics
-├── dynamic: string | null         # "pp","p","mp","mf","f","ff","sfz"
-├── velocity: float | null         # 0.0–1.0
-├── crescendo: string | null       # "start", "stop"
-├── diminuendo: string | null      # "start", "stop"
-│
-├── # Articulation
-├── staccato: bool
-├── tenuto: bool
-├── accent: bool
-├── breath_mark: bool
-├── fermata: bool
-│
-├── # Connections
-├── tie_type: string | null        # "start", "stop", "continue"
-├── slur_type: string | null       # "start", "stop", "continue"
-│
-└── # Synthesis hints
-    ├── breathiness: float | null
-    ├── tension: float | null
-    └── vibrato_depth: float | null
+├── lyric_is_extended: bool        # Melisma (held syllable)
+├── is_rest: bool                  # True if rest
+└── tie_type: string | null        # "start", "stop", "continue"
 ```
 
 ### Structure
@@ -396,10 +451,9 @@ Structure
 
 The `modify_score` API executes code in a restricted environment:
 
-1. **RestrictedPython**: Compile with restrictions
+1. **RestrictedPython**: Used when installed; otherwise falls back to unsafe `exec`
 2. **Limited namespace**: Only `score`, `math`, basic builtins
 3. **No I/O**: No file access, network, imports
-4. **Timeout**: 5 second execution limit
 
 ---
 
@@ -409,15 +463,15 @@ The `modify_score` API executes code in a restricted environment:
 |---|-----|---------|
 | 1 | `parse_score` | MusicXML → JSON |
 | — | `modify_score` | Python code on JSON |
-| 2 | `phonemize` | Lyrics → Phonemes |
+| 2 | `align_phonemes_to_notes` | Score → Phonemes + note timing |
+| — | `phonemize` | Lyrics → Phonemes |
 | 3 | `predict_durations` | Phonemes → Timing |
 | 4 | `predict_pitch` | Notes → F0 curve |
 | 5 | `predict_variance` | → Expressiveness |
-| 6 | `synthesize_mel` | → Mel spectrogram |
-| 7 | `vocode` | Mel → Audio |
+| 6 | `synthesize_audio` | Mel + vocoder → Audio |
 | — | `save_audio` | Audio → File |
-| — | `synthesize` | All-in-one (steps 2-7) |
+| — | `synthesize` | All-in-one (steps 2-6) |
 | — | `list_voicebanks` | Discover voices |
 | — | `get_voicebank_info` | Query capabilities |
 
-**Total: 12 APIs** — 7 pipeline steps + 5 utilities
+**Total: 12 APIs** — 6 pipeline steps + 6 utilities

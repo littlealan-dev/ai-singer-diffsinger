@@ -12,6 +12,7 @@ from src.api import (
     parse_score,
     modify_score,
     phonemize,
+    align_phonemes_to_notes,
     list_voicebanks,
     get_voicebank_info,
     save_audio,
@@ -149,6 +150,47 @@ class TestPhonemize(unittest.TestCase):
         """Word boundaries should match input word count."""
         result = phonemize(["hello", "world", "test"], VOICEBANK_PATH)
         self.assertEqual(len(result["word_boundaries"]), 3)
+
+
+class TestAlignPhonemesToNotes(unittest.TestCase):
+    """Tests for align_phonemes_to_notes API."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not VOICEBANK_PATH.exists():
+            raise unittest.SkipTest(f"Voicebank not found at {VOICEBANK_PATH}")
+
+    def test_align_returns_required_keys(self):
+        """align_phonemes_to_notes should return timing + phoneme inputs."""
+        score = parse_score(TEST_XML)
+        result = align_phonemes_to_notes(
+            score,
+            VOICEBANK_PATH,
+            voice_id="soprano",
+            include_phonemes=True,
+        )
+
+        self.assertIn("phoneme_ids", result)
+        self.assertIn("phonemes", result)
+        self.assertIn("language_ids", result)
+        self.assertIn("word_boundaries", result)
+        self.assertIn("word_durations", result)
+        self.assertIn("word_pitches", result)
+        self.assertIn("note_durations", result)
+        self.assertIn("note_pitches", result)
+        self.assertIn("note_rests", result)
+
+    def test_align_lengths_are_consistent(self):
+        """Returned arrays should align on expected dimensions."""
+        score = parse_score(TEST_XML)
+        result = align_phonemes_to_notes(score, VOICEBANK_PATH, voice_id="soprano")
+
+        self.assertEqual(len(result["phoneme_ids"]), len(result["language_ids"]))
+        self.assertEqual(len(result["word_boundaries"]), len(result["word_durations"]))
+        self.assertEqual(len(result["word_boundaries"]), len(result["word_pitches"]))
+        self.assertEqual(len(result["note_durations"]), len(result["note_pitches"]))
+        self.assertEqual(len(result["note_durations"]), len(result["note_rests"]))
+        self.assertEqual(sum(result["word_boundaries"]), len(result["phoneme_ids"]))
 
 
 class TestVoicebankAPIs(unittest.TestCase):
