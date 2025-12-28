@@ -52,6 +52,39 @@ Parse a MusicXML file into a JSON structure.
 | **Output** | Score as JSON dict (see schema below) |
 | **Purpose** | Convert music notation to LLM-readable format |
 
+**Input example:**
+```
+parse_score("assets/test_data/amazing-grace-satb-verse1.xml")
+```
+
+**Output example:**
+```json
+{
+  "title": "Amazing Grace",
+  "tempos": [{"offset_beats": 0.0, "bpm": 120.0}],
+  "parts": [
+    {
+      "notes": [
+        {
+          "offset_beats": 0.0,
+          "duration_beats": 1.0,
+          "measure_number": 1,
+          "voice": "1",
+          "pitch_midi": 69,
+          "pitch_hz": 440.0,
+          "lyric": "A-",
+          "syllabic": "begin",
+          "lyric_is_extended": false,
+          "is_rest": false,
+          "tie_type": null
+        }
+      ]
+    }
+  ],
+  "structure": {"repeats": [], "endings": [], "jumps": []}
+}
+```
+
 ---
 
 ## Utility: `modify_score`
@@ -82,6 +115,20 @@ for i, note in enumerate(bar_12):
 """)
 ```
 
+**Output example (truncated):**
+```json
+{
+  "parts": [
+    {
+      "notes": [
+        {"measure_number": 12, "velocity": 0.35},
+        {"measure_number": 12, "velocity": 0.40}
+      ]
+    }
+  ]
+}
+```
+
 ---
 
 ## Utility: `phonemize`
@@ -105,7 +152,8 @@ phonemize(["hello", "world"], voicebank="Raine_Rena")
 → {
     "phonemes": ["en/hh", "en/ah", "en/l", "en/ow", "en/w", "en/er", "en/l", "en/d"],
     "phoneme_ids": [26, 10, 31, 35, 47, 22, 31, 17],
-    "language_ids": [1, 1, 1, 1, 1, 1, 1, 1]
+    "language_ids": [1, 1, 1, 1, 1, 1, 1, 1],
+    "word_boundaries": [4, 4]
   }
 ```
 
@@ -152,7 +200,6 @@ align_phonemes_to_notes(score, voicebank="Raine_Rena", voice_id="soprano", inclu
 }
 ```
 
-
 ## Step 3: `predict_durations`
 
 Predict timing for each phoneme.
@@ -170,6 +217,28 @@ Predict timing for each phoneme.
 | | `encoder_out`: Encoder features for downstream steps |
 | | `x_masks`: Encoder masks |
 | **Purpose** | Determine phoneme timing aligned to musical rhythm |
+
+**Input example:**
+```
+predict_durations(
+  phoneme_ids=[26, 10, 31],
+  word_boundaries=[3],
+  word_durations=[120],
+  word_pitches=[69],
+  voicebank="Raine_Rena",
+  language_ids=[1, 1, 1],
+)
+```
+
+**Output example:**
+```json
+{
+  "durations": [40, 40, 40],
+  "total_frames": 120,
+  "encoder_out": "<array>",
+  "x_masks": "<array>"
+}
+```
 
 ---
 
@@ -192,6 +261,27 @@ Generate natural pitch curves.
 | **Purpose** | Add vibrato, transitions, and natural pitch variation |
 | **Fallback** | If no pitch model, returns MIDI-derived frequencies |
 
+**Input example:**
+```
+predict_pitch(
+  phoneme_ids=[26, 10, 31],
+  durations=[40, 40, 40],
+  note_pitches=[69],
+  note_durations=[120],
+  note_rests=[False],
+  voicebank="Raine_Rena",
+  language_ids=[1, 1, 1],
+)
+```
+
+**Output example:**
+```json
+{
+  "f0": [440.1, 439.9, 440.2, "..."],
+  "pitch_midi": [69.0, 69.0, 69.0, "..."]
+}
+```
+
 ---
 
 ## Step 5: `predict_variance`
@@ -211,6 +301,26 @@ Generate expressive parameters (optional step).
 | | `voicing`: Voicing curve |
 | **Purpose** | Add expressiveness (airy voice, tense voice, etc.) |
 | **Fallback** | Returns zeros if no variance model |
+
+**Input example:**
+```
+predict_variance(
+  phoneme_ids=[26, 10, 31],
+  durations=[40, 40, 40],
+  f0=[440.0, 440.0, 440.0],
+  voicebank="Raine_Rena",
+  language_ids=[1, 1, 1],
+)
+```
+
+**Output example:**
+```json
+{
+  "breathiness": [0.02, 0.03, 0.02, "..."],
+  "tension": [0.10, 0.11, 0.10, "..."],
+  "voicing": [0.95, 0.96, 0.95, "..."]
+}
+```
 
 ---
 
@@ -232,6 +342,29 @@ Generate audio by running mel synthesis and vocoding.
 | | `hop_size`: Samples per frame |
 | **Purpose** | End-to-end acoustic synthesis |
 
+**Input example:**
+```
+synthesize_audio(
+  phoneme_ids=[26, 10, 31],
+  durations=[40, 40, 40],
+  f0=[440.0, 440.0, 440.0],
+  voicebank="Raine_Rena",
+  breathiness=[0.02, 0.03, 0.02],
+  tension=[0.10, 0.11, 0.10],
+  voicing=[0.95, 0.96, 0.95],
+  language_ids=[1, 1, 1],
+)
+```
+
+**Output example:**
+```json
+{
+  "waveform": [0.001, 0.004, -0.003, "..."],
+  "sample_rate": 44100,
+  "hop_size": 512
+}
+```
+
 ---
 
 ## Internal APIs (advanced / debugging)
@@ -246,6 +379,26 @@ These APIs are kept for debugging and advanced workflows, but are not exposed as
 | **Output** | `mel`, `sample_rate`, `hop_size` |
 | **Purpose** | Inspect mel output before vocoding |
 
+**Input example:**
+```
+synthesize_mel(
+  phoneme_ids=[26, 10, 31],
+  durations=[40, 40, 40],
+  f0=[440.0, 440.0, 440.0],
+  voicebank="Raine_Rena",
+  language_ids=[1, 1, 1],
+)
+```
+
+**Output example:**
+```json
+{
+  "mel": [[0.12, 0.08, 0.04], "..."],
+  "sample_rate": 44100,
+  "hop_size": 512
+}
+```
+
 ### `vocode`
 
 | Attribute | Description |
@@ -253,6 +406,23 @@ These APIs are kept for debugging and advanced workflows, but are not exposed as
 | **Input** | `mel`, `f0`, `voicebank`, `vocoder_path` |
 | **Output** | `waveform`, `sample_rate` |
 | **Purpose** | Swap vocoders or benchmark vocoder-only behavior |
+
+**Input example:**
+```
+vocode(
+  mel=[[0.12, 0.08, 0.04], "..."],
+  f0=[440.0, 440.0, 440.0],
+  voicebank="Raine_Rena",
+)
+```
+
+**Output example:**
+```json
+{
+  "waveform": [0.001, 0.004, -0.003, "..."],
+  "sample_rate": 44100
+}
+```
 
 ---
 
@@ -266,8 +436,24 @@ Write audio to a file.
 | | `output_path`: File path |
 | | `sample_rate`: Sample rate |
 | | `format`: "wav" or "mp3" (default: "wav") |
-| **Output** | File path |
+| **Output** | `path`: Saved file path |
+| | `duration_seconds`: Audio duration |
+| | `sample_rate`: Sample rate |
 | **Purpose** | Persist the generated audio |
+
+**Input example:**
+```
+save_audio([0.001, 0.004, -0.003], "outputs/demo.wav", sample_rate=44100)
+```
+
+**Output example:**
+```json
+{
+  "path": "/abs/path/outputs/demo.wav",
+  "duration_seconds": 0.00007,
+  "sample_rate": 44100
+}
+```
 
 ---
 
@@ -286,6 +472,20 @@ Run the full pipeline (steps 2–6) in one call.
 | | `sample_rate`: Sample rate |
 | | `duration_seconds`: Audio duration |
 | **Purpose** | Simple end-to-end synthesis |
+
+**Input example:**
+```
+synthesize(score, "Raine_Rena", voice_id="soprano")
+```
+
+**Output example:**
+```json
+{
+  "waveform": [0.001, 0.004, -0.003, "..."],
+  "sample_rate": 44100,
+  "duration_seconds": 24.50
+}
+```
 
 `voice_id` accepts a numeric voice (e.g. `"1"`) or labels like `"soprano"`, `"alto"`, `"tenor"`, `"bass"`.
 
@@ -320,6 +520,11 @@ List available voicebanks.
 | **Output** | List of voicebank info objects |
 | **Purpose** | Discover available voices |
 
+**Input example:**
+```
+list_voicebanks("assets/voicebanks")
+```
+
 **Output example:**
 ```json
 [
@@ -347,6 +552,11 @@ Get detailed information about a voicebank.
 | **Input** | `voicebank`: Voicebank path or ID |
 | **Output** | Capabilities object |
 | **Purpose** | Query what models/languages are supported |
+
+**Input example:**
+```
+get_voicebank_info("Raine_Rena_2.01")
+```
 
 **Output example:**
 ```json
