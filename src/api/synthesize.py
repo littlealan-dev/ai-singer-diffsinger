@@ -593,8 +593,8 @@ def synthesize(
     dur_result = predict_durations(
         phoneme_ids=alignment["phoneme_ids"],
         word_boundaries=alignment["word_boundaries"],
-        note_durations=alignment["word_durations"],
-        note_pitches=alignment["word_pitches"],
+        word_durations=alignment["word_durations"],
+        word_pitches=alignment["word_pitches"],
         voicebank=voicebank_path,
         language_ids=alignment["language_ids"],
         device=device,

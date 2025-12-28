@@ -119,8 +119,8 @@ def _load_acoustic_model(voicebank_path: Path, device: str = "cpu") -> AcousticM
 def predict_durations(
     phoneme_ids: List[int],
     word_boundaries: List[int],
-    note_durations: List[float],
-    note_pitches: List[float],
+    word_durations: List[float],
+    word_pitches: List[float],
     voicebank: Union[str, Path],
     *,
     language_ids: Optional[List[int]] = None,
@@ -132,8 +132,8 @@ def predict_durations(
     Args:
         phoneme_ids: Token IDs from phonemize
         word_boundaries: Phoneme count per word from phonemize
-        note_durations: Duration of each note in frames
-        note_pitches: MIDI pitch of each note
+        word_durations: Duration of each word group in frames
+        word_pitches: MIDI pitch of each word group
         voicebank: Voicebank path
         language_ids: Language ID per phoneme (optional)
         device: Device to run inference on
@@ -154,7 +154,7 @@ def predict_durations(
     # Prepare tensors
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     word_div_tensor = np.array(word_boundaries, dtype=np.int64)[None, :]
-    word_dur_tensor = np.array(note_durations, dtype=np.int64)[None, :]
+    word_dur_tensor = np.array(word_durations, dtype=np.int64)[None, :]
     
     if language_ids is None:
         language_ids = [0] * len(phoneme_ids)
@@ -173,7 +173,7 @@ def predict_durations(
     
     # Expand note pitches to phoneme level
     ph_midi = []
-    for midi, count in zip(note_pitches, word_boundaries):
+    for midi, count in zip(word_pitches, word_boundaries):
         ph_midi.extend([int(round(midi))] * count)
     ph_midi_tensor = np.array(ph_midi, dtype=np.int64)[None, :]
     
@@ -185,7 +185,7 @@ def predict_durations(
     ph_dur_pred = duration_out[0]
     
     # Align durations to match note timing
-    ph_durations = _align_durations(ph_dur_pred, word_boundaries, [int(d) for d in note_durations])
+    ph_durations = _align_durations(ph_dur_pred, word_boundaries, [int(d) for d in word_durations])
     
     return {
         "durations": ph_durations.tolist(),

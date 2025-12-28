@@ -161,8 +161,8 @@ Predict timing for each phoneme.
 |-----------|-------------|
 | **Input** | `phoneme_ids`: From phonemize step |
 | | `word_boundaries`: Phoneme counts per word |
-| | `note_durations`: Duration per word in frames (use `word_durations` from step 2) |
-| | `note_pitches`: MIDI pitch per word (use `word_pitches` from step 2) |
+| | `word_durations`: Duration per word in frames (from step 2) |
+| | `word_pitches`: MIDI pitch per word (from step 2) |
 | | `voicebank`: Voicebank path or ID |
 | | `language_ids`: Language ID per phoneme (optional) |
 | **Output** | `durations`: Frames per phoneme |
