@@ -36,22 +36,35 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
         List of voicebank info dicts with:
         - id: Directory name
         - name: Display name from character.yaml
-        - path: Absolute path
+        - path: Relative path (project-root relative when under it)
     """
+    root_dir = Path(__file__).parent.parent.parent
     if search_path is None:
         # Default to assets/voicebanks relative to project root
-        search_path = Path(__file__).parent.parent.parent / "assets" / "voicebanks"
+        search_path = root_dir / "assets" / "voicebanks"
     
     search_path = Path(search_path)
     if not search_path.exists():
         return []
+
+    resolved_root = root_dir.resolve()
+    resolved_search = search_path.resolve()
+    if resolved_search == resolved_root or resolved_root in resolved_search.parents:
+        rel_base = resolved_root
+    else:
+        rel_base = resolved_search
     
     voicebanks = []
     for item in search_path.iterdir():
         if item.is_dir() and (item / "dsconfig.yaml").exists():
+            resolved_item = item.resolve()
+            try:
+                relative_path = resolved_item.relative_to(rel_base)
+            except ValueError:
+                relative_path = resolved_item.relative_to(resolved_search)
             info = {
                 "id": item.name,
-                "path": str(item.resolve()),
+                "path": str(relative_path),
             }
             # Try to get name from character.yaml
             char_file = item / "character.yaml"

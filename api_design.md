@@ -320,6 +320,22 @@ List available voicebanks.
 | **Output** | List of voicebank info objects |
 | **Purpose** | Discover available voices |
 
+**Output example:**
+```json
+[
+  {
+    "id": "Raine_Rena_2.01",
+    "name": "Raine Rena",
+    "path": "assets/voicebanks/Raine_Rena_2.01"
+  },
+  {
+    "id": "Raine_Reizo_2.01",
+    "name": "Raine Reizo",
+    "path": "assets/voicebanks/Raine_Reizo_2.01"
+  }
+]
+```
+
 ---
 
 ## Metadata: `get_voicebank_info`
