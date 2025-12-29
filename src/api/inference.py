@@ -2,6 +2,7 @@
 Inference APIs for duration, pitch, variance, and mel synthesis.
 """
 
+import logging
 import yaml
 import numpy as np
 from pathlib import Path
@@ -10,6 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
 from src.api.voicebank import load_voicebank_config, load_speaker_embed
 from src.api.vocode import vocode
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 
 # Cache for loaded models
@@ -143,6 +147,21 @@ def predict_durations(
         - durations: Frames per phoneme
         - total_frames: Total audio frames
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "predict_durations input=%s",
+            summarize_payload(
+                {
+                    "phoneme_ids": phoneme_ids,
+                    "word_boundaries": word_boundaries,
+                    "word_durations": word_durations,
+                    "word_pitches": word_pitches,
+                    "voicebank": str(voicebank),
+                    "language_ids": language_ids,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -187,12 +206,15 @@ def predict_durations(
     # Align durations to match note timing
     ph_durations = _align_durations(ph_dur_pred, word_boundaries, [int(d) for d in word_durations])
     
-    return {
+    result = {
         "durations": ph_durations.tolist(),
         "total_frames": int(ph_durations.sum()),
         "encoder_out": encoder_out,  # Pass through for next steps
         "x_masks": x_masks,
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("predict_durations output=%s", summarize_payload(result))
+    return result
 
 
 def _align_durations(
@@ -271,6 +293,23 @@ def predict_pitch(
         - f0: Pitch curve in Hz (one value per frame)
         - pitch_midi: Pitch curve in MIDI notes
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "predict_pitch input=%s",
+            summarize_payload(
+                {
+                    "phoneme_ids": phoneme_ids,
+                    "durations": durations,
+                    "note_pitches": note_pitches,
+                    "note_durations": note_durations,
+                    "note_rests": note_rests,
+                    "voicebank": str(voicebank),
+                    "language_ids": language_ids,
+                    "encoder_out": encoder_out,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -282,10 +321,13 @@ def predict_pitch(
     if pitch_model is None:
         # Fallback: naive MIDI-derived pitch
         f0 = _naive_pitch(note_pitches, note_durations, note_rests)
-        return {
+        result = {
             "f0": f0[:n_frames].tolist(),
             "pitch_midi": _hz_to_midi(f0[:n_frames]).tolist(),
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("predict_pitch output=%s", summarize_payload(result))
+        return result
     
     pitch_linguistic = _load_pitch_linguistic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path)
@@ -307,10 +349,13 @@ def predict_pitch(
         pitch_encoder_out = encoder_out
     else:
         f0 = _naive_pitch(note_pitches, note_durations, note_rests)
-        return {
+        result = {
             "f0": f0[:n_frames].tolist(),
             "pitch_midi": _hz_to_midi(f0[:n_frames]).tolist(),
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("predict_pitch output=%s", summarize_payload(result))
+        return result
 
     note_midi = np.array(note_pitches, dtype=np.float32)[None, :]
     note_rest = np.array(note_rests, dtype=bool)[None, :]
@@ -336,10 +381,13 @@ def predict_pitch(
     pitch_pred = pitch_model.run(pitch_inputs)[0]
     pitch_midi = pitch_pred.astype(np.float32)
     f0 = 440.0 * (2.0 ** ((pitch_midi - 69.0) / 12.0))
-    return {
+    result = {
         "f0": f0[0].tolist(),
         "pitch_midi": pitch_midi[0].tolist(),
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("predict_pitch output=%s", summarize_payload(result))
+    return result
 
 
 def _naive_pitch(
@@ -394,6 +442,21 @@ def predict_variance(
         - tension: Tension curve
         - voicing: Voicing curve
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "predict_variance input=%s",
+            summarize_payload(
+                {
+                    "phoneme_ids": phoneme_ids,
+                    "durations": durations,
+                    "f0": f0,
+                    "voicebank": str(voicebank),
+                    "language_ids": language_ids,
+                    "encoder_out": encoder_out,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     n_frames = len(f0)
     
@@ -402,11 +465,14 @@ def predict_variance(
     
     if variance_model is None:
         # Fallback: zeros
-        return {
+        result = {
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
             "voicing": [0.0] * n_frames,
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("predict_variance output=%s", summarize_payload(result))
+        return result
 
     config = load_voicebank_config(voicebank_path)
     variance_conf = _load_variance_config(voicebank_path)
@@ -429,11 +495,14 @@ def predict_variance(
     elif encoder_out is not None:
         variance_encoder_out = encoder_out
     else:
-        return {
+        result = {
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
             "voicing": [0.0] * n_frames,
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("predict_variance output=%s", summarize_payload(result))
+        return result
 
     pitch_midi = _hz_to_midi(np.array(f0, dtype=np.float32))
     pitch_midi = pitch_midi.astype(np.float32)[None, :]
@@ -474,21 +543,27 @@ def predict_variance(
     elif len(variance_out) >= 3:
         breathiness, voicing, tension = variance_out[:3]
     else:
-        return {
+        result = {
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
             "voicing": [0.0] * n_frames,
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("predict_variance output=%s", summarize_payload(result))
+        return result
 
     breathiness = np.squeeze(breathiness).astype(np.float32)
     voicing = np.squeeze(voicing).astype(np.float32)
     tension = np.squeeze(tension).astype(np.float32)
 
-    return {
+    result = {
         "breathiness": breathiness.tolist(),
         "tension": tension.tolist(),
         "voicing": voicing.tolist(),
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("predict_variance output=%s", summarize_payload(result))
+    return result
 
 
 def synthesize_mel(
@@ -521,6 +596,23 @@ def synthesize_mel(
         - sample_rate: Audio sample rate
         - hop_size: Samples per frame
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "synthesize_mel input=%s",
+            summarize_payload(
+                {
+                    "phoneme_ids": phoneme_ids,
+                    "durations": durations,
+                    "f0": f0,
+                    "voicebank": str(voicebank),
+                    "breathiness": breathiness,
+                    "tension": tension,
+                    "voicing": voicing,
+                    "language_ids": language_ids,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -566,11 +658,14 @@ def synthesize_mel(
     
     mel = acoustic.run(acoustic_inputs)[0]
     
-    return {
+    result = {
         "mel": mel.tolist(),
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("synthesize_mel output=%s", summarize_payload(result))
+    return result
 
 
 def synthesize_audio(
@@ -605,6 +700,24 @@ def synthesize_audio(
         - sample_rate: Audio sample rate
         - hop_size: Samples per frame
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "synthesize_audio input=%s",
+            summarize_payload(
+                {
+                    "phoneme_ids": phoneme_ids,
+                    "durations": durations,
+                    "f0": f0,
+                    "voicebank": str(voicebank),
+                    "breathiness": breathiness,
+                    "tension": tension,
+                    "voicing": voicing,
+                    "language_ids": language_ids,
+                    "vocoder_path": str(vocoder_path) if vocoder_path else None,
+                    "device": device,
+                }
+            ),
+        )
     mel_result = synthesize_mel(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -623,8 +736,11 @@ def synthesize_audio(
         vocoder_path=vocoder_path,
         device=device,
     )
-    return {
+    result = {
         "waveform": audio_result["waveform"],
         "sample_rate": audio_result["sample_rate"],
         "hop_size": mel_result["hop_size"],
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("synthesize_audio output=%s", summarize_payload(result))
+    return result

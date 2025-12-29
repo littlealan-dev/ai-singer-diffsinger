@@ -2,6 +2,7 @@
 Convenience synthesize API - runs the full pipeline.
 """
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
@@ -16,6 +17,9 @@ from src.api.inference import (
 )
 from src.api.voicebank import load_voicebank_config
 from src.phonemizer.phonemizer import Phonemizer
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 
 class TimeAxis:
@@ -572,6 +576,19 @@ def align_phonemes_to_notes(
         - note_rests: Rest flags per note (for pitch)
         - phonemes: Optional phoneme strings
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "align_phonemes_to_notes input=%s",
+            summarize_payload(
+                {
+                    "score": score,
+                    "voicebank": str(voicebank),
+                    "part_index": part_index,
+                    "voice_id": voice_id,
+                    "include_phonemes": include_phonemes,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
 
@@ -653,6 +670,8 @@ def align_phonemes_to_notes(
     }
     if include_phonemes:
         result["phonemes"] = ph_result["phonemes"]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("align_phonemes_to_notes output=%s", summarize_payload(result))
     return result
 
 
@@ -691,6 +710,23 @@ def synthesize(
         - sample_rate: Sample rate
         - duration_seconds: Audio duration
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "synthesize input=%s",
+            summarize_payload(
+                {
+                    "score": score,
+                    "voicebank": str(voicebank),
+                    "part_index": part_index,
+                    "voice_id": voice_id,
+                    "articulation": articulation,
+                    "airiness": airiness,
+                    "intensity": intensity,
+                    "clarity": clarity,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -782,8 +818,11 @@ def synthesize(
     waveform = audio_result["waveform"]
     duration = len(waveform) / sample_rate
     
-    return {
+    result = {
         "waveform": waveform,
         "sample_rate": sample_rate,
         "duration_seconds": duration,
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("synthesize output=%s", summarize_payload(result))
+    return result

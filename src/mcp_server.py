@@ -4,9 +4,12 @@ import argparse
 import json
 import sys
 import traceback
+import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.mcp.tools import call_tool, list_tools
+from src.mcp.logging_utils import summarize_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
@@ -29,6 +32,8 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
     method = request.get("method")
     request_id = request.get("id")
     params = request.get("params", {}) or {}
+    logger = logging.getLogger(__name__)
+    logger.debug("MCP request method=%s params=%s", method, summarize_payload(params))
 
     if method == "initialize":
         result = {
@@ -39,7 +44,9 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
         return _result_response(request_id, result)
 
     if method == "tools/list":
-        return _result_response(request_id, {"tools": list_tools()})
+        result = {"tools": list_tools()}
+        logger.debug("MCP response id=%s result=%s", request_id, summarize_payload(result))
+        return _result_response(request_id, result)
 
     if method == "tools/call":
         name = params.get("name")
@@ -56,6 +63,7 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
             )
         try:
             result = call_tool(name, arguments, device)
+            logger.debug("MCP response id=%s result=%s", request_id, summarize_payload(result))
             return _result_response(request_id, result)
         except Exception as exc:
             return _result_response(
@@ -96,7 +104,27 @@ def run_server(device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="SVS MCP server (stdio).")
     parser.add_argument("--device", default="cpu", help="Inference device (internal only).")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--log-dir", default="logs", help="Directory for log files.")
+    parser.add_argument(
+        "--service-name",
+        default="mcp_server",
+        help="Service name used for the log filename.",
+    )
     args = parser.parse_args()
+    level = logging.DEBUG if args.debug else logging.INFO
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{args.service_name}.log"
+    handlers = [
+        logging.StreamHandler(sys.stderr),
+        logging.FileHandler(log_path, encoding="utf-8"),
+    ]
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=handlers,
+    )
     run_server(args.device)
 
 

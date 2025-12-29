@@ -9,6 +9,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
+
 # Try to import RestrictedPython for sandboxing, fall back to unsafe exec
 try:
     from RestrictedPython import compile_restricted
@@ -16,7 +20,7 @@ try:
     HAS_RESTRICTED_PYTHON = True
 except ImportError:
     HAS_RESTRICTED_PYTHON = False
-    logging.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
+    logger.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
 
 from src.musicxml.parser import parse_musicxml, ScoreData
 
@@ -45,6 +49,18 @@ def parse_score(
             "parts": [{"part_id": ..., "part_name": ..., "notes": [...]}]
         }
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "parse_score input=%s",
+            summarize_payload(
+                {
+                    "file_path": str(file_path),
+                    "part_id": part_id,
+                    "part_index": part_index,
+                    "expand_repeats": expand_repeats,
+                }
+            ),
+        )
     score_data = parse_musicxml(
         file_path,
         part_id=part_id,
@@ -62,6 +78,8 @@ def parse_score(
         "jumps": [],
     }
     
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("parse_score output=%s", summarize_payload(score_dict))
     return score_dict
 
 
@@ -160,6 +178,11 @@ def modify_score(score: Dict[str, Any], code: str) -> Dict[str, Any]:
                     note['pitch_midi'] += 12
         ''')
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "modify_score input=%s",
+            summarize_payload({"score": score, "code": code}),
+        )
     if HAS_RESTRICTED_PYTHON:
         # Use restricted execution
         try:
@@ -181,6 +204,7 @@ def modify_score(score: Dict[str, Any], code: str) -> Dict[str, Any]:
         }
         exec(code, namespace)
     
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("modify_score output=%s", summarize_payload(score))
     return score
-
 

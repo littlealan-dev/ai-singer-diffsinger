@@ -2,6 +2,7 @@
 Vocoder API.
 """
 
+import logging
 import yaml
 import numpy as np
 from pathlib import Path
@@ -9,6 +10,9 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.vocoder.model import Vocoder
 from src.api.voicebank import load_voicebank_config
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 
 # Cache for loaded vocoders
@@ -80,6 +84,19 @@ def vocode(
         - waveform: Audio samples as list
         - sample_rate: Sample rate
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "vocode input=%s",
+            summarize_payload(
+                {
+                    "mel": mel,
+                    "f0": f0,
+                    "voicebank": str(voicebank),
+                    "vocoder_path": str(vocoder_path) if vocoder_path else None,
+                    "device": device,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -102,7 +119,10 @@ def vocode(
     # Run vocoder
     waveform = vocoder.forward(mel_np, f0_np)
     
-    return {
+    result = {
         "waveform": waveform.flatten().tolist(),
         "sample_rate": config.get("sample_rate", 44100),
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("vocode output=%s", summarize_payload(result))
+    return result

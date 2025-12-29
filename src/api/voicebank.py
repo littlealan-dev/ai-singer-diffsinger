@@ -2,11 +2,15 @@
 Voicebank management APIs.
 """
 
+import logging
 import yaml
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 def load_voicebank_config(voicebank_path: Union[str, Path]) -> Dict[str, Any]:
     """
@@ -18,11 +22,19 @@ def load_voicebank_config(voicebank_path: Union[str, Path]) -> Dict[str, Any]:
     Returns:
         Config dict from dsconfig.yaml
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "load_voicebank_config input=%s",
+            summarize_payload({"voicebank_path": str(voicebank_path)}),
+        )
     path = Path(voicebank_path)
     config_path = path / "dsconfig.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"dsconfig.yaml not found at {config_path}")
-    return yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text())
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("load_voicebank_config output=%s", summarize_payload(config))
+    return config
 
 
 def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict[str, Any]]:
@@ -38,6 +50,11 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
         - name: Display name from character.yaml
         - path: Relative path (project-root relative when under it)
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "list_voicebanks input=%s",
+            summarize_payload({"search_path": str(search_path) if search_path else None}),
+        )
     root_dir = Path(__file__).parent.parent.parent
     if search_path is None:
         # Default to assets/voicebanks relative to project root
@@ -78,6 +95,8 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
                 info["name"] = item.name
             voicebanks.append(info)
     
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("list_voicebanks output=%s", summarize_payload(voicebanks))
     return voicebanks
 
 
@@ -97,6 +116,11 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         - speakers: List of speaker names/embeddings
         - sample_rate: Audio sample rate
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "get_voicebank_info input=%s",
+            summarize_payload({"voicebank": str(voicebank)}),
+        )
     path = Path(voicebank)
     config = load_voicebank_config(path)
     
@@ -127,7 +151,7 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         except Exception:
             pass
     
-    return {
+    result = {
         "name": name,
         "path": str(path.resolve()),
         "languages": languages,
@@ -139,6 +163,9 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("get_voicebank_info output=%s", summarize_payload(result))
+    return result
 
 
 def load_speaker_embed(
@@ -155,6 +182,16 @@ def load_speaker_embed(
     Returns:
         Speaker embedding as numpy array
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "load_speaker_embed input=%s",
+            summarize_payload(
+                {
+                    "voicebank": str(voicebank),
+                    "speaker_name": speaker_name,
+                }
+            ),
+        )
     path = Path(voicebank)
     config = load_voicebank_config(path)
     
@@ -177,4 +214,7 @@ def load_speaker_embed(
     if not embed_path.exists():
         raise FileNotFoundError(f"Speaker embedding not found: {embed_path}")
     
-    return np.frombuffer(embed_path.read_bytes(), dtype=np.float32)
+    embed = np.frombuffer(embed_path.read_bytes(), dtype=np.float32)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("load_speaker_embed output=%s", summarize_payload(embed))
+    return embed

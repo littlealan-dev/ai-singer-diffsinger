@@ -25,11 +25,18 @@ class TestMcpEndToEnd(unittest.TestCase):
             self.skipTest(f"Test score not found at {self.score_path}")
 
         self.proc = subprocess.Popen(
-            [str(self.python_path), "-m", "src.mcp_server", "--device", "cpu"],
+            [
+                str(self.python_path),
+                "-m",
+                "src.mcp_server",
+                "--device",
+                "cpu",
+                "--debug",
+            ],
             cwd=self.root_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
         )
 
@@ -60,11 +67,23 @@ class TestMcpEndToEnd(unittest.TestCase):
         self._next_id += 1
         self.proc.stdin.write(json.dumps(request) + "\n")
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            stderr = self.proc.stderr.read()
-            raise RuntimeError(f"MCP server closed unexpectedly. stderr={stderr}")
-        response = json.loads(line)
+        response = None
+        while response is None:
+            line = self.proc.stdout.readline()
+            if not line:
+                stderr = self.proc.stderr.read() if self.proc.stderr else ""
+                raise RuntimeError(f"MCP server closed unexpectedly. stderr={stderr}")
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not stripped.startswith("{"):
+                print(stripped)
+                continue
+            try:
+                response = json.loads(stripped)
+            except json.JSONDecodeError:
+                print(stripped)
+                continue
         if "error" in response:
             raise RuntimeError(f"MCP error: {response['error']}")
         if "result" not in response:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List
+import logging
 
 from src.mcp.handlers import HANDLERS
+from src.mcp.logging_utils import summarize_payload
 
 
 @dataclass(frozen=True)
@@ -372,4 +374,8 @@ def call_tool(name: str, arguments: Dict[str, Any], device: str) -> Any:
     if name not in HANDLERS:
         raise ValueError(f"Unknown tool: {name}")
     handler = HANDLERS[name]
-    return handler(arguments, device)
+    logger = logging.getLogger(__name__)
+    logger.debug("Dispatch tool=%s args=%s", name, summarize_payload(arguments))
+    result = handler(arguments, device)
+    logger.debug("Return tool=%s result=%s", name, summarize_payload(result))
+    return result

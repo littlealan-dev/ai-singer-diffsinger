@@ -14,6 +14,9 @@ The MCP server exposes the backend APIs as JSON-RPC methods over stdio.
 Notes:
 - `--device` is a server startup option and is not exposed to MCP tools.
 - Voicebank inputs are **IDs only** (directory names under `assets/voicebanks`).
+- Use `--debug` to enable MCP request/response logging to stderr.
+- Logs are also written to `logs/<service-name>.log` (default: `logs/mcp_server.log`).
+- Override with `--log-dir` and `--service-name` to keep separate files per service.
 
 ### Request/response basics
 

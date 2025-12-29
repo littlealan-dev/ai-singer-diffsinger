@@ -2,11 +2,15 @@
 Phonemization API.
 """
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from src.phonemizer.phonemizer import Phonemizer
 from src.api.voicebank import load_voicebank_config
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 
 def phonemize(
@@ -39,6 +43,17 @@ def phonemize(
             "word_boundaries": [4, 4]
           }
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "phonemize input=%s",
+            summarize_payload(
+                {
+                    "lyrics": lyrics,
+                    "voicebank": str(voicebank),
+                    "language": language,
+                }
+            ),
+        )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
@@ -71,12 +86,15 @@ def phonemize(
         all_lang_ids.extend(result.language_ids)
         word_boundaries.append(len(result.phonemes))
     
-    return {
+    result = {
         "phonemes": all_phonemes,
         "phoneme_ids": all_ids,
         "language_ids": all_lang_ids,
         "word_boundaries": word_boundaries,
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("phonemize output=%s", summarize_payload(result))
+    return result
 
 
 def _find_dictionary(voicebank_path: Path) -> Path:

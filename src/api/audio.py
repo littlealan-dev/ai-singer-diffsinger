@@ -2,10 +2,16 @@
 Audio output API.
 """
 
-import numpy as np
-import soundfile as sf
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
+import soundfile as sf
+
+from src.mcp.logging_utils import get_logger, summarize_payload
+
+logger = get_logger(__name__)
 
 
 def save_audio(
@@ -30,6 +36,18 @@ def save_audio(
         - duration_seconds: Audio duration
         - sample_rate: Sample rate used
     """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "save_audio input=%s",
+            summarize_payload(
+                {
+                    "waveform": waveform,
+                    "output_path": str(output_path),
+                    "sample_rate": sample_rate,
+                    "format": format,
+                }
+            ),
+        )
     output_path = Path(output_path)
     
     # Ensure parent directory exists
@@ -60,8 +78,11 @@ def save_audio(
     
     duration = len(waveform) / sample_rate
     
-    return {
+    result = {
         "path": str(output_path.resolve()),
         "duration_seconds": duration,
         "sample_rate": sample_rate,
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("save_audio output=%s", summarize_payload(result))
+    return result
