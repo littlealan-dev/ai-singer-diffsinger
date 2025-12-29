@@ -436,7 +436,7 @@ Write audio to a file.
 | | `output_path`: File path |
 | | `sample_rate`: Sample rate |
 | | `format`: "wav" or "mp3" (default: "wav") |
-| **Output** | `path`: Saved file path |
+| **Output** | `audio_base64`: Base64-encoded audio bytes |
 | | `duration_seconds`: Audio duration |
 | | `sample_rate`: Sample rate |
 | **Purpose** | Persist the generated audio |
@@ -449,7 +449,7 @@ save_audio([0.001, 0.004, -0.003], "outputs/demo.wav", sample_rate=44100)
 **Output example:**
 ```json
 {
-  "path": "/abs/path/outputs/demo.wav",
+  "audio_base64": "UklGRiQAAABXQVZFZm10IBAAAAABAAEA...",
   "duration_seconds": 0.00007,
   "sample_rate": 44100
 }
