@@ -43,6 +43,12 @@ class TestMcpEndToEnd(unittest.TestCase):
             self.proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        if self.proc.stdout:
+            self.proc.stdout.close()
+        if self.proc.stderr:
+            self.proc.stderr.close()
 
     def _send_request(self, method, params):
         request = {
@@ -103,7 +109,15 @@ class TestMcpEndToEnd(unittest.TestCase):
         )
         synth_result = self._call_tool(
             "synthesize",
-            {"score": score, "voicebank": self.voicebank_id, "voice_id": "soprano"},
+            {
+                "score": score,
+                "voicebank": self.voicebank_id,
+                "voice_id": "soprano",
+                "articulation": 0.0,
+                "airiness": 1.0,
+                "intensity": 1.0,
+                "clarity": 1.0,
+            },
         )
         self.assertIn("waveform", synth_result)
         self.assertIn("sample_rate", synth_result)

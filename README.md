@@ -22,7 +22,7 @@ Initialize:
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.0"}}
 ```
 
-List tools:
+List tools (includes input + output schemas):
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 ```
@@ -36,6 +36,9 @@ Responses follow JSON-RPC 2.0 and return results in `result`. Tool errors return
 ```json
 {"error":{"message":"...","type":"ValueError"}}
 ```
+
+`tools/list` returns both `inputSchema` and `outputSchema` for each tool, so an
+LLM/orchestrator can safely chain outputs into subsequent calls.
 
 ## Example: End-to-End Synthesis
 

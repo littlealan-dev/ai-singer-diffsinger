@@ -11,6 +11,7 @@ class Tool:
     name: str
     description: str
     input_schema: Dict[str, Any]
+    output_schema: Dict[str, Any]
 
 
 TOOLS: List[Tool] = [
@@ -28,6 +29,17 @@ TOOLS: List[Tool] = [
             "required": ["file_path"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": ["string", "null"]},
+                "tempos": {"type": "array"},
+                "parts": {"type": "array"},
+                "structure": {"type": "object"},
+            },
+            "required": ["title", "tempos", "parts", "structure"],
+            "additionalProperties": True,
+        },
     ),
     Tool(
         name="modify_score",
@@ -41,6 +53,10 @@ TOOLS: List[Tool] = [
             "required": ["score", "code"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "additionalProperties": True,
+        },
     ),
     Tool(
         name="phonemize",
@@ -53,6 +69,17 @@ TOOLS: List[Tool] = [
                 "language": {"type": "string"},
             },
             "required": ["lyrics", "voicebank"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "phonemes": {"type": "array", "items": {"type": "string"}},
+                "phoneme_ids": {"type": "array", "items": {"type": "integer"}},
+                "language_ids": {"type": "array", "items": {"type": "integer"}},
+                "word_boundaries": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["phonemes", "phoneme_ids", "language_ids", "word_boundaries"],
             "additionalProperties": False,
         },
     ),
@@ -71,6 +98,31 @@ TOOLS: List[Tool] = [
             "required": ["score", "voicebank"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "phoneme_ids": {"type": "array", "items": {"type": "integer"}},
+                "phonemes": {"type": "array", "items": {"type": "string"}},
+                "language_ids": {"type": "array", "items": {"type": "integer"}},
+                "word_boundaries": {"type": "array", "items": {"type": "integer"}},
+                "word_durations": {"type": "array", "items": {"type": "number"}},
+                "word_pitches": {"type": "array", "items": {"type": "number"}},
+                "note_durations": {"type": "array", "items": {"type": "integer"}},
+                "note_pitches": {"type": "array", "items": {"type": "number"}},
+                "note_rests": {"type": "array", "items": {"type": "boolean"}},
+            },
+            "required": [
+                "phoneme_ids",
+                "language_ids",
+                "word_boundaries",
+                "word_durations",
+                "word_pitches",
+                "note_durations",
+                "note_pitches",
+                "note_rests",
+            ],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="predict_durations",
@@ -86,6 +138,17 @@ TOOLS: List[Tool] = [
                 "language_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
             },
             "required": ["phoneme_ids", "word_boundaries", "word_durations", "word_pitches", "voicebank"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "durations": {"type": "array", "items": {"type": "integer"}},
+                "total_frames": {"type": "integer"},
+                "encoder_out": {},
+                "x_masks": {},
+            },
+            "required": ["durations", "total_frames", "encoder_out", "x_masks"],
             "additionalProperties": False,
         },
     ),
@@ -107,6 +170,15 @@ TOOLS: List[Tool] = [
             "required": ["phoneme_ids", "durations", "note_pitches", "note_durations", "note_rests", "voicebank"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "f0": {"type": "array", "items": {"type": "number"}},
+                "pitch_midi": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": ["f0", "pitch_midi"],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="predict_variance",
@@ -122,6 +194,16 @@ TOOLS: List[Tool] = [
                 "encoder_out": {},
             },
             "required": ["phoneme_ids", "durations", "f0", "voicebank"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "breathiness": {"type": "array", "items": {"type": "number"}},
+                "tension": {"type": "array", "items": {"type": "number"}},
+                "voicing": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": ["breathiness", "tension", "voicing"],
             "additionalProperties": False,
         },
     ),
@@ -144,6 +226,16 @@ TOOLS: List[Tool] = [
             "required": ["phoneme_ids", "durations", "f0", "voicebank"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "waveform": {"type": "array", "items": {"type": "number"}},
+                "sample_rate": {"type": "integer"},
+                "hop_size": {"type": "integer"},
+            },
+            "required": ["waveform", "sample_rate", "hop_size"],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="save_audio",
@@ -159,6 +251,16 @@ TOOLS: List[Tool] = [
             "required": ["waveform", "output_path"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "audio_base64": {"type": "string"},
+                "duration_seconds": {"type": "number"},
+                "sample_rate": {"type": "integer"},
+            },
+            "required": ["audio_base64", "duration_seconds", "sample_rate"],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="synthesize",
@@ -170,8 +272,22 @@ TOOLS: List[Tool] = [
                 "voicebank": {"type": "string"},
                 "part_index": {"type": "integer"},
                 "voice_id": {"type": ["string", "null"]},
+                "articulation": {"type": "number", "minimum": -1.0, "maximum": 1.0},
+                "airiness": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "clarity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
             "required": ["score", "voicebank"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "waveform": {"type": "array", "items": {"type": "number"}},
+                "sample_rate": {"type": "integer"},
+                "duration_seconds": {"type": "number"},
+            },
+            "required": ["waveform", "sample_rate", "duration_seconds"],
             "additionalProperties": False,
         },
     ),
@@ -185,6 +301,19 @@ TOOLS: List[Tool] = [
             },
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["id", "name", "path"],
+                "additionalProperties": False,
+            },
+        },
     ),
     Tool(
         name="get_voicebank_info",
@@ -197,6 +326,32 @@ TOOLS: List[Tool] = [
             "required": ["voicebank"],
             "additionalProperties": False,
         },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "languages": {"type": "array", "items": {"type": "string"}},
+                "has_duration_model": {"type": "boolean"},
+                "has_pitch_model": {"type": "boolean"},
+                "has_variance_model": {"type": "boolean"},
+                "speakers": {"type": "array"},
+                "sample_rate": {"type": "integer"},
+                "hop_size": {"type": "integer"},
+                "use_lang_id": {"type": "boolean"},
+            },
+            "required": [
+                "name",
+                "languages",
+                "has_duration_model",
+                "has_pitch_model",
+                "has_variance_model",
+                "speakers",
+                "sample_rate",
+                "hop_size",
+                "use_lang_id",
+            ],
+            "additionalProperties": False,
+        },
     ),
 ]
 
@@ -207,6 +362,7 @@ def list_tools() -> List[Dict[str, Any]]:
             "name": tool.name,
             "description": tool.description,
             "inputSchema": tool.input_schema,
+            "outputSchema": tool.output_schema,
         }
         for tool in TOOLS
     ]

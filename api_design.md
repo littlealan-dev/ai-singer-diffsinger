@@ -42,6 +42,14 @@ This document defines the public APIs for the Singing Voice Synthesis backend. T
 
 ---
 
+## MCP Tool Schemas
+
+The MCP server returns both input and output schemas for each tool via:
+`tools/list`. These schemas are the authoritative contract for chaining tool
+outputs into subsequent steps.
+
+---
+
 ## Step 1: `parse_score`
 
 Parse a MusicXML file into a JSON structure.
@@ -467,15 +475,33 @@ Run the full pipeline (steps 2–6) in one call.
 | | `voicebank`: Voicebank path or ID |
 | | `part_index`: Part index (default: 0) |
 | | `voice_id`: Voice selection within a part (optional) |
+| | `articulation`: Global legato/staccato (-1.0 to +1.0, default: 0.0) |
+| | `airiness`: Global breathiness (0.0 to 1.0, default: 1.0) |
+| | `intensity`: Global tension (0.0 to 1.0, default: 1.0) |
+| | `clarity`: Global voicing (0.0 to 1.0, default: 1.0) |
 | | `device`: Inference device (default: "cpu") |
 | **Output** | `waveform`: Audio samples |
 | | `sample_rate`: Sample rate |
 | | `duration_seconds`: Audio duration |
 | **Purpose** | Simple end-to-end synthesis |
 
+**Global adjustments:**
+- `articulation`: lower = more staccato (adds short gaps), higher = more legato (fewer gaps)
+- `airiness`: lower = cleaner/less airy, higher = more airy
+- `intensity`: lower = more relaxed, higher = more tense/bright
+- `clarity`: lower = more breathy/less voiced, higher = more voiced/clear
+
 **Input example:**
 ```
-synthesize(score, "Raine_Rena", voice_id="soprano")
+synthesize(
+  score,
+  "Raine_Rena",
+  voice_id="soprano",
+  articulation=0.3,
+  airiness=0.9,
+  intensity=0.8,
+  clarity=0.95,
+)
 ```
 
 **Output example:**

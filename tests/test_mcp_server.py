@@ -198,11 +198,22 @@ class TestMcpServer(unittest.TestCase):
             mock_syn.return_value = {"waveform": [0.0], "sample_rate": 44100}
             result = self._call_tool(
                 "synthesize",
-                {"score": {"parts": []}, "voicebank": self.voicebank_id},
+                {
+                    "score": {"parts": []},
+                    "voicebank": self.voicebank_id,
+                    "articulation": 0.25,
+                    "airiness": 0.9,
+                    "intensity": 0.9,
+                    "clarity": 0.95,
+                },
             )
             self.assertEqual(result, {"waveform": [0.0], "sample_rate": 44100})
             _, kwargs = mock_syn.call_args
             self.assertEqual(kwargs["device"], self.device)
+            self.assertEqual(kwargs["articulation"], 0.25)
+            self.assertEqual(kwargs["airiness"], 0.9)
+            self.assertEqual(kwargs["intensity"], 0.9)
+            self.assertEqual(kwargs["clarity"], 0.95)
 
     def test_list_voicebanks(self):
         with mock.patch("src.mcp.handlers.list_voicebanks") as mock_list:

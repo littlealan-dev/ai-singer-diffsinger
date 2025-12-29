@@ -4,6 +4,7 @@ Convenience synthesize API - runs the full pipeline.
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+import json
 import numpy as np
 
 from src.api.phonemize import phonemize
@@ -140,6 +141,112 @@ def _fill_rest_midi(note_midi: np.ndarray, note_rest: np.ndarray) -> np.ndarray:
     values = note_midi[idx]
     interpolated = np.interp(np.arange(len(note_midi)), idx, values)
     return interpolated.astype(np.float32)
+
+
+def _scale_curve(values: List[float], factor: float) -> List[float]:
+    if values is None:
+        return values
+    if factor == 1.0:
+        return values
+    scaled: List[float] = []
+    for val in values:
+        scaled.append(val * factor)
+    return scaled
+
+
+_PHONEME_MAP_CACHE: Dict[str, Dict[str, int]] = {}
+
+
+def _load_phoneme_map(voicebank_path: Path) -> Dict[str, int]:
+    key = str(voicebank_path.resolve())
+    if key in _PHONEME_MAP_CACHE:
+        return _PHONEME_MAP_CACHE[key]
+    config = load_voicebank_config(voicebank_path)
+    phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
+    data = json.loads(phonemes_path.read_text())
+    _PHONEME_MAP_CACHE[key] = data
+    return data
+
+
+def _get_silence_phoneme_id(voicebank_path: Path) -> int:
+    phoneme_map = _load_phoneme_map(voicebank_path)
+    if "SP" in phoneme_map:
+        return int(phoneme_map["SP"])
+    if "AP" in phoneme_map:
+        return int(phoneme_map["AP"])
+    raise KeyError("Missing SP/AP silence phoneme in phonemes.json.")
+
+
+def _scale_durations(durations: List[int], factor: float) -> List[int]:
+    if not durations:
+        return durations
+    if factor == 1.0:
+        return list(durations)
+    return [max(1, int(round(dur * factor))) for dur in durations]
+
+
+def _adjust_durations_to_total(durations: List[int], target_total: int) -> List[int]:
+    if not durations:
+        return durations
+    total = sum(durations)
+    diff = target_total - total
+    if diff == 0:
+        return durations
+    step = 1 if diff > 0 else -1
+    idx = len(durations) - 1
+    while diff != 0 and idx >= 0:
+        candidate = durations[idx] + step
+        if candidate >= 1:
+            durations[idx] = candidate
+            diff -= step
+        else:
+            idx -= 1
+    return durations
+
+
+def _apply_articulation_gaps(
+    phoneme_ids: List[int],
+    language_ids: List[int],
+    durations: List[int],
+    word_boundaries: List[int],
+    word_durations: List[int],
+    voicebank_path: Path,
+    articulation: float,
+) -> Tuple[List[int], List[int], List[int]]:
+    if articulation >= 0.0:
+        return phoneme_ids, language_ids, durations
+    gap_ratio = min(0.5, max(0.0, -0.5 * articulation))
+    silence_id = _get_silence_phoneme_id(voicebank_path)
+    new_phoneme_ids: List[int] = []
+    new_language_ids: List[int] = []
+    new_durations: List[int] = []
+    offset = 0
+    for word_idx, count in enumerate(word_boundaries):
+        word_dur = word_durations[word_idx]
+        word_ids = phoneme_ids[offset:offset + count]
+        word_lang = language_ids[offset:offset + count]
+        word_dur_list = durations[offset:offset + count]
+        offset += count
+
+        gap = int(round(word_dur * gap_ratio))
+        if gap >= word_dur:
+            gap = max(0, word_dur - 1)
+        target = max(1, word_dur - gap)
+
+        scale = target / max(1, sum(word_dur_list))
+        scaled = _scale_durations(word_dur_list, scale)
+        scaled = _adjust_durations_to_total(scaled, target)
+
+        new_phoneme_ids.extend(word_ids)
+        new_language_ids.extend(word_lang)
+        new_durations.extend(scaled)
+
+        if gap > 0:
+            new_phoneme_ids.append(silence_id)
+            new_language_ids.append(word_lang[-1] if word_lang else 0)
+            new_durations.append(gap)
+
+    return new_phoneme_ids, new_language_ids, new_durations
 
 
 def _select_voice_notes(
@@ -555,6 +662,10 @@ def synthesize(
     *,
     part_index: int = 0,
     voice_id: Optional[str] = None,
+    articulation: float = 0.0,
+    airiness: float = 1.0,
+    intensity: float = 1.0,
+    clarity: float = 1.0,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -568,6 +679,10 @@ def synthesize(
         voicebank: Voicebank path or ID
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
+        articulation: Global legato/staccato adjustment (-1.0 to +1.0)
+        airiness: Global breathiness multiplier (0.0 to 2.0)
+        intensity: Global tension multiplier (0.0 to 2.0)
+        clarity: Global voicing multiplier (0.0 to 2.0)
         device: Device for inference
         
     Returns:
@@ -580,6 +695,16 @@ def synthesize(
     config = load_voicebank_config(voicebank_path)
     
     sample_rate = config.get("sample_rate", 44100)
+
+    if airiness < 0.0 or airiness > 1.0:
+        raise ValueError("airiness must be between 0.0 and 1.0.")
+    if intensity < 0.0 or intensity > 1.0:
+        raise ValueError("intensity must be between 0.0 and 1.0.")
+    if clarity < 0.0 or clarity > 1.0:
+        raise ValueError("clarity must be between 0.0 and 1.0.")
+
+    if articulation < -1.0 or articulation > 1.0:
+        raise ValueError("articulation must be between -1.0 and 1.0.")
 
     alignment = align_phonemes_to_notes(
         score,
@@ -599,41 +724,57 @@ def synthesize(
         language_ids=alignment["language_ids"],
         device=device,
     )
+    phoneme_ids = alignment["phoneme_ids"]
+    language_ids = alignment["language_ids"]
+    durations = dur_result["durations"]
+    if articulation < 0.0:
+        phoneme_ids, language_ids, durations = _apply_articulation_gaps(
+            phoneme_ids,
+            language_ids,
+            durations,
+            alignment["word_boundaries"],
+            alignment["word_durations"],
+            voicebank_path,
+            articulation,
+        )
     
     # Step 4: Predict pitch
     pitch_result = predict_pitch(
-        phoneme_ids=alignment["phoneme_ids"],
-        durations=dur_result["durations"],
+        phoneme_ids=phoneme_ids,
+        durations=durations,
         note_pitches=alignment["note_pitches"],
         note_durations=alignment["note_durations"],
         note_rests=alignment["note_rests"],
         voicebank=voicebank_path,
-        language_ids=alignment["language_ids"],
+        language_ids=language_ids,
         encoder_out=dur_result["encoder_out"],
         device=device,
     )
     
     # Step 5: Predict variance
     var_result = predict_variance(
-        phoneme_ids=alignment["phoneme_ids"],
-        durations=dur_result["durations"],
+        phoneme_ids=phoneme_ids,
+        durations=durations,
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
-        language_ids=alignment["language_ids"],
+        language_ids=language_ids,
         encoder_out=dur_result["encoder_out"],
         device=device,
     )
+    breathiness = _scale_curve(var_result["breathiness"], airiness)
+    tension = _scale_curve(var_result["tension"], intensity)
+    voicing = _scale_curve(var_result["voicing"], clarity)
     
     # Step 6: Synthesize audio
     audio_result = synthesize_audio(
-        phoneme_ids=alignment["phoneme_ids"],
-        durations=dur_result["durations"],
+        phoneme_ids=phoneme_ids,
+        durations=durations,
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
-        breathiness=var_result["breathiness"],
-        tension=var_result["tension"],
-        voicing=var_result["voicing"],
-        language_ids=alignment["language_ids"],
+        breathiness=breathiness,
+        tension=tension,
+        voicing=voicing,
+        language_ids=language_ids,
         device=device,
     )
     

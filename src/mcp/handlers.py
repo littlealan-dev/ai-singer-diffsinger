@@ -142,6 +142,10 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         voicebank_path,
         part_index=params.get("part_index", 0),
         voice_id=params.get("voice_id"),
+        articulation=params.get("articulation", 0.0),
+        airiness=params.get("airiness", 1.0),
+        intensity=params.get("intensity", 1.0),
+        clarity=params.get("clarity", 1.0),
         device=device,
     )
 
