@@ -132,10 +132,6 @@ class TestMcpEndToEnd(unittest.TestCase):
                 "score": score,
                 "voicebank": self.voicebank_id,
                 "voice_id": "soprano",
-                "articulation": 0.0,
-                "airiness": 1.0,
-                "intensity": 1.0,
-                "clarity": 1.0,
             },
         )
         self.assertIn("waveform", synth_result)

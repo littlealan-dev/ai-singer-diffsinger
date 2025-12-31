@@ -8,12 +8,12 @@ This document defines the public APIs for the Singing Voice Synthesis backend. T
 
 1. **LLM as Orchestrator**: The LLM understands musical terminology and decides which APIs to call
 2. **JSON as Universal Format**: Score data is JSON — the LLM can read, reason about, and modify it
-3. **Code Execution for Flexibility**: Complex score modifications are done via Python code, not specialized APIs
-4. **Granular Control**: Each pipeline step is exposed as an API for debugging and customization
+3. **Simplified Public Surface**: MCP only exposes parse/modify/synthesize/save + metadata; detailed steps are internal
+4. **Code Execution for Flexibility**: Complex score modifications are done via Python code, not specialized APIs
 
 ---
 
-## API Overview (6 Pipeline Steps + Utilities)
+## API Overview (Public MCP Tools)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -26,27 +26,22 @@ This document defines the public APIs for the Singing Voice Synthesis backend. T
 ├─────────────────────────────────────────────────────────────────────────┤
 │  STEP 1: parse_score        │  MusicXML → Score JSON                    │
 │  UTILITY: modify_score      │  Execute Python code on Score JSON        │
-│  STEP 2: align_phonemes_to_notes │ Score → Phonemes + note timing       │
-│  STEP 3: predict_durations  │  Phonemes → Duration per phoneme          │
-│  STEP 4: predict_pitch      │  Notes → F0 curve (Hz)                    │
-│  STEP 5: predict_variance   │  → Breathiness, tension, voicing          │
-│  STEP 6: synthesize_audio   │  Mel + vocoder → Audio waveform           │
+│  CONVENIENCE: synthesize    │  Score → Audio (runs steps 2-6 internally)│
 │  OUTPUT: save_audio         │  Waveform → File                          │
-├─────────────────────────────────────────────────────────────────────────┤
-│  UTILITY: phonemize         │  Lyrics → Phonemes + IDs + boundaries     │
-│  CONVENIENCE: synthesize    │  Score → Audio (runs steps 2-6)           │
 │  METADATA: list_voicebanks  │  List available voices                    │
 │  METADATA: get_voicebank_info │  Query voice capabilities               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+Pipeline steps (`phonemize`, `align_phonemes_to_notes`, `predict_durations`, `predict_pitch`,
+`predict_variance`, `synthesize_audio`) remain internal and are not exposed via `tools/list`.
+
 ---
 
 ## MCP Tool Schemas
 
-The MCP server returns both input and output schemas for each tool via:
-`tools/list`. These schemas are the authoritative contract for chaining tool
-outputs into subsequent steps.
+The MCP server returns both input and output schemas for each exposed tool via:
+`tools/list`. These schemas are the authoritative contract for public MCP calls.
 
 ---
 
@@ -138,6 +133,11 @@ for i, note in enumerate(bar_12):
 ```
 
 ---
+
+## Internal Pipeline Steps (not exposed via MCP)
+
+These APIs are implemented for debugging and internal composition. The MCP server does not
+expose them via `tools/list`; `synthesize` uses them under the hood.
 
 ## Utility: `phonemize`
 
@@ -375,9 +375,9 @@ synthesize_audio(
 
 ---
 
-## Internal APIs (advanced / debugging)
+## Additional Internal APIs (advanced / debugging)
 
-These APIs are kept for debugging and advanced workflows, but are not exposed as public MCP endpoints.
+These APIs are kept for debugging and advanced workflows, but are not exposed via `tools/list`.
 
 ### `synthesize_mel`
 
@@ -467,7 +467,7 @@ save_audio([0.001, 0.004, -0.003], "outputs/demo.wav", sample_rate=44100)
 
 ## Convenience: `synthesize`
 
-Run the full pipeline (steps 2–6) in one call.
+Run the full pipeline (internal steps 2–6) in one call.
 
 | Attribute | Description |
 |-----------|-------------|
@@ -515,7 +515,7 @@ synthesize(
 
 `voice_id` accepts a numeric voice (e.g. `"1"`) or labels like `"soprano"`, `"alto"`, `"tenor"`, `"bass"`.
 
-Equivalent to calling:
+Equivalent to calling the internal APIs below (not MCP-exposed):
 ```
 prep = align_phonemes_to_notes(score, voicebank)
 dur = predict_durations(prep['phoneme_ids'], prep['word_boundaries'], prep['word_durations'], prep['word_pitches'], voicebank, language_ids=prep['language_ids'])
@@ -607,7 +607,8 @@ get_voicebank_info("Raine_Rena_2.01")
 3. save_audio(audio, "output.wav")
 ```
 
-### Full Control (using step-by-step APIs)
+### Internal Full Control (not MCP-exposed)
+This workflow uses internal-only APIs for debugging and is not available via `tools/list`.
 ```
 1. score = parse_score("song.xml")
 2. modify_score(score, "...transpose up 12...")
@@ -628,7 +629,8 @@ get_voicebank_info("Raine_Rena_2.01")
 8. save_audio(audio, "output.wav")
 ```
 
-### Debug Phonemes Only
+### Debug Phonemes Only (internal)
+This workflow uses internal-only APIs and is not available via `tools/list`.
 ```
 1. phonemes = phonemize(["hello", "world"], "Raine_Rena")
 2. Return phonemes to user for inspection
@@ -711,19 +713,28 @@ The `modify_score` API executes code in a restricted environment:
 
 ## API Summary
 
+Public MCP tools:
+
 | # | API | Purpose |
 |---|-----|---------|
 | 1 | `parse_score` | MusicXML → JSON |
 | — | `modify_score` | Python code on JSON |
-| 2 | `align_phonemes_to_notes` | Score → Phonemes + note timing |
+| — | `synthesize` | All-in-one (internal steps 2–6) |
+| — | `save_audio` | Audio → File |
+| — | `list_voicebanks` | Discover voices |
+| — | `get_voicebank_info` | Query capabilities |
+
+Internal only (not MCP-exposed):
+
+| # | API | Purpose |
+|---|-----|---------|
 | — | `phonemize` | Lyrics → Phonemes |
+| 2 | `align_phonemes_to_notes` | Score → Phonemes + note timing |
 | 3 | `predict_durations` | Phonemes → Timing |
 | 4 | `predict_pitch` | Notes → F0 curve |
 | 5 | `predict_variance` | → Expressiveness |
 | 6 | `synthesize_audio` | Mel + vocoder → Audio |
-| — | `save_audio` | Audio → File |
-| — | `synthesize` | All-in-one (steps 2-6) |
-| — | `list_voicebanks` | Discover voices |
-| — | `get_voicebank_info` | Query capabilities |
+| — | `synthesize_mel` | Mel only (debug) |
+| — | `vocode` | Vocoder only (debug) |
 
-**Total: 12 APIs** — 6 pipeline steps + 6 utilities
+**Total: 6 public MCP tools + 8 internal APIs**
