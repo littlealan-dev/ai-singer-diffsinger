@@ -6,7 +6,7 @@ import sys
 import traceback
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from src.mcp.tools import call_tool, list_tools
 from src.mcp.logging_utils import summarize_payload
@@ -28,7 +28,20 @@ def _result_response(request_id: Optional[Any], result: Any) -> Dict[str, Any]:
     }
 
 
-def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, Any]]:
+_MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
+    "cpu": {"parse_score", "modify_score", "list_voicebanks", "get_voicebank_info"},
+    "gpu": {"synthesize", "save_audio"},
+    "all": set(),
+}
+
+
+def _get_allowlist(mode: str) -> Optional[Set[str]]:
+    if mode == "all":
+        return None
+    return _MODE_TOOL_ALLOWLIST.get(mode, set())
+
+
+def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional[Dict[str, Any]]:
     method = request.get("method")
     request_id = request.get("id")
     params = request.get("params", {}) or {}
@@ -44,7 +57,7 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
         return _result_response(request_id, result)
 
     if method == "tools/list":
-        result = {"tools": list_tools()}
+        result = {"tools": list_tools(_get_allowlist(mode))}
         logger.debug("MCP response id=%s result=%s", request_id, summarize_payload(result))
         return _result_response(request_id, result)
 
@@ -60,6 +73,12 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
             return _result_response(
                 request_id,
                 {"error": {"message": "arguments must be an object", "type": "ValueError"}},
+            )
+        allowlist = _get_allowlist(mode)
+        if allowlist is not None and name not in allowlist:
+            return _result_response(
+                request_id,
+                {"error": {"message": f"Tool not available in mode: {name}", "type": "ValueError"}},
             )
         try:
             result = call_tool(name, arguments, device)
@@ -77,7 +96,7 @@ def _handle_request(request: Dict[str, Any], device: str) -> Optional[Dict[str, 
     return _error_response(request_id, -32601, f"Unknown method: {method}")
 
 
-def run_server(device: str) -> None:
+def run_server(device: str, mode: str) -> None:
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -91,7 +110,7 @@ def run_server(device: str) -> None:
             continue
 
         try:
-            response = _handle_request(request, device)
+            response = _handle_request(request, device, mode)
         except Exception:
             response = _error_response(request.get("id"), -32000, "Internal error")
             traceback.print_exc(file=sys.stderr)
@@ -104,6 +123,12 @@ def run_server(device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="SVS MCP server (stdio).")
     parser.add_argument("--device", default="cpu", help="Inference device (internal only).")
+    parser.add_argument(
+        "--mode",
+        default="all",
+        choices=["cpu", "gpu", "all"],
+        help="Tool exposure mode.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
     parser.add_argument("--log-dir", default="logs", help="Directory for log files.")
     parser.add_argument(
@@ -125,7 +150,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=handlers,
     )
-    run_server(args.device)
+    run_server(args.device, args.mode)
 
 
 if __name__ == "__main__":

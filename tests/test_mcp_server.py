@@ -21,7 +21,7 @@ class TestMcpServer(unittest.TestCase):
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         }
-        response = _handle_request(request, self.device)
+        response = _handle_request(request, self.device, "all")
         self.assertIn("result", response)
         return response["result"]
 
@@ -32,7 +32,7 @@ class TestMcpServer(unittest.TestCase):
             "method": "initialize",
             "params": {"protocolVersion": "1.0"},
         }
-        response = _handle_request(request, self.device)
+        response = _handle_request(request, self.device, "all")
         self.assertIn("result", response)
         result = response["result"]
         self.assertIn("serverInfo", result)
@@ -40,7 +40,7 @@ class TestMcpServer(unittest.TestCase):
 
     def test_tools_list(self):
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-        response = _handle_request(request, self.device)
+        response = _handle_request(request, self.device, "all")
         self.assertIn("result", response)
         tools = response["result"]["tools"]
         self.assertTrue(any(tool["name"] == "parse_score" for tool in tools))

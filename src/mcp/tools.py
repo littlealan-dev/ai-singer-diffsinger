@@ -179,7 +179,10 @@ TOOLS: List[Tool] = [
 ]
 
 
-def list_tools() -> List[Dict[str, Any]]:
+def list_tools(allowlist: set[str] | None = None) -> List[Dict[str, Any]]:
+    tools = TOOLS
+    if allowlist is not None:
+        tools = [tool for tool in TOOLS if tool.name in allowlist]
     return [
         {
             "name": tool.name,
@@ -187,7 +190,7 @@ def list_tools() -> List[Dict[str, Any]]:
             "inputSchema": tool.input_schema,
             "outputSchema": tool.output_schema,
         }
-        for tool in TOOLS
+        for tool in tools
     ]
 
 
