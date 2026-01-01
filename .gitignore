@@ -36,6 +36,7 @@ venv/
 
 # Artifacts
 outputs/
+tests/output/
 assets/
 logs/
 runs/
