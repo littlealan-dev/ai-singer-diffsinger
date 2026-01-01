@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 
 
 LLM_SCHEMA_VERSION = "v1"
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
+_SYSTEM_PROMPT_TEMPLATE: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -34,37 +37,19 @@ def build_system_prompt(tools: List[Dict[str, Any]], score_available: bool) -> s
 
     score_hint = "available" if score_available else "missing"
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True)
+    template = _load_system_prompt()
     return (
-        "You are the SVS orchestration LLM. Decide which MCP tools to call, "
-        "then provide a final user message.\n"
-        "Capabilities:\n"
-        "- Call ONLY the MCP tools listed below.\n"
-        "- Ask to upload MusicXML if the score is missing.\n"
-        "Non-capabilities:\n"
-        "- No filesystem, network, or external tools access.\n"
-        "- Do not claim you rendered audio unless you called synthesize.\n"
-        "- Do not invent tool names or tool outputs.\n"
-        "\n"
-        f"Score status: {score_hint}.\n"
-        "\n"
-        "Tool list (name, description, input schema):\n"
-        f"{tool_json}\n"
-        "\n"
-        "Response format (JSON only, no markdown):\n"
-        "{\n"
-        '  "tool_calls": [\n'
-        '    {"name": "tool_name", "arguments": {"arg": "value"}}\n'
-        "  ],\n"
-        '  "final_message": "text response to the user",\n'
-        '  "include_score": false\n'
-        "}\n"
-        "\n"
-        "Rules:\n"
-        "- tool_calls may be empty if no tool use is needed.\n"
-        "- include_score is true only if the user requests the score JSON.\n"
-        "- For modify_score, provide code; the backend injects the current score.\n"
-        "- For synthesize, omit score and voicebank to use defaults.\n"
+        template.replace("{score_hint}", score_hint).replace("{tool_json}", tool_json)
     )
+
+
+def _load_system_prompt() -> str:
+    global _SYSTEM_PROMPT_TEMPLATE
+    if _SYSTEM_PROMPT_TEMPLATE is None:
+        if not _SYSTEM_PROMPT_PATH.exists():
+            raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
+        _SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    return _SYSTEM_PROMPT_TEMPLATE
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:

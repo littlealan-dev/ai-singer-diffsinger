@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from src.backend.config import Settings
+from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.session import SessionStore
@@ -28,7 +29,8 @@ def create_app() -> FastAPI:
         max_sessions=settings.max_sessions,
     )
     router = McpRouter(settings)
-    orchestrator = Orchestrator(router, sessions, settings)
+    llm_client = create_llm_client(settings)
+    orchestrator = Orchestrator(router, sessions, settings, llm_client)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -43,6 +45,7 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.router = router
+    app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
 
     @app.post("/sessions")

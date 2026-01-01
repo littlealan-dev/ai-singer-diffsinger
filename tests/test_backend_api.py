@@ -1,4 +1,3 @@
-import json
 import shutil
 import uuid
 from pathlib import Path
@@ -7,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.backend.main import create_app
+from src.backend.llm_client import StaticLlmClient
 from src.mcp.resolve import PROJECT_ROOT
 
 
@@ -52,7 +52,7 @@ def client(monkeypatch):
     data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     app = create_app()
@@ -116,9 +116,11 @@ def test_chat_text_response_with_llm(client):
     test_client, app = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
-    app.state.orchestrator._call_gemini = lambda history, score_available: json.dumps(
-        {"tool_calls": [], "final_message": "All set.", "include_score": False}
+    llm_client = StaticLlmClient(
+        response_text='{"tool_calls": [], "final_message": "All set.", "include_score": false}'
     )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
     response = test_client.post(
         f"/sessions/{session_id}/chat", json={"message": "hello"}
     )
@@ -132,15 +134,14 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     test_client, app = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
-    app.state.orchestrator._call_gemini = lambda history, score_available: json.dumps(
-        {
-            "tool_calls": [
-                {"name": "synthesize", "arguments": {"voicebank": "Dummy"}}
-            ],
-            "final_message": "Rendered.",
-            "include_score": True,
-        }
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
     )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
     response = test_client.post(
         f"/sessions/{session_id}/chat", json={"message": "render audio"}
     )

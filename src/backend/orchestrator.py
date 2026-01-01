@@ -4,11 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import asyncio
 import logging
-import json
-import urllib.error
-import urllib.request
 
 from src.backend.config import Settings
+from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
 from src.backend.session import SessionStore
@@ -16,10 +14,17 @@ from src.mcp.tools import list_tools
 
 
 class Orchestrator:
-    def __init__(self, router: McpRouter, sessions: SessionStore, settings: Settings) -> None:
+    def __init__(
+        self,
+        router: McpRouter,
+        sessions: SessionStore,
+        settings: Settings,
+        llm_client: Optional[LlmClient],
+    ) -> None:
         self._router = router
         self._sessions = sessions
         self._settings = settings
+        self._llm_client = llm_client
         self._logger = logging.getLogger(__name__)
         self._cached_voicebank: Optional[str] = None
         self._llm_tool_allowlist = {"modify_score", "synthesize"}
@@ -131,63 +136,18 @@ class Orchestrator:
     async def _decide_with_llm(
         self, snapshot: Dict[str, Any], score_available: bool
     ) -> Optional[LlmResponse]:
-        if not self._settings.gemini_api_key:
+        if self._llm_client is None:
             return None
         history = snapshot.get("history", [])
         try:
-            text = await asyncio.to_thread(self._call_gemini, history, score_available)
+            system_prompt = build_system_prompt(self._llm_tools, score_available)
+            text = await asyncio.to_thread(
+                self._llm_client.generate, system_prompt, history
+            )
         except RuntimeError as exc:
-            self._logger.warning("gemini_call_failed error=%s", exc)
+            self._logger.warning("llm_call_failed error=%s", exc)
             return None
         return parse_llm_response(text)
-
-    def _call_gemini(self, history: list[Dict[str, str]], score_available: bool) -> str:
-        url = (
-            f"{self._settings.gemini_base_url}/models/"
-            f"{self._settings.gemini_model}:generateContent"
-            f"?key={self._settings.gemini_api_key}"
-        )
-        system_prompt = build_system_prompt(self._llm_tools, score_available)
-        payload = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": self._history_to_contents(history),
-            "generationConfig": {"temperature": 0.2},
-        }
-        data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self._settings.gemini_timeout_seconds
-            ) as response:
-                body = response.read()
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Gemini HTTP error {exc.code}: {details}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Gemini connection error: {exc.reason}") from exc
-
-        parsed = json.loads(body)
-        candidates = parsed.get("candidates", [])
-        if not candidates:
-            raise RuntimeError("Gemini returned no candidates.")
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-        if not parts:
-            raise RuntimeError("Gemini returned empty content parts.")
-        text = parts[0].get("text", "")
-        return text
-
-    def _history_to_contents(self, history: list[Dict[str, str]]) -> list[Dict[str, Any]]:
-        contents: list[Dict[str, Any]] = []
-        for entry in history[-10:]:
-            role = entry.get("role", "user")
-            content_role = "model" if role == "assistant" else "user"
-            contents.append({"role": content_role, "parts": [{"text": entry.get("content", "")}]})
-        return contents
 
     async def _execute_tool_calls(
         self, session_id: str, score: Dict[str, Any], tool_calls: List[ToolCall]

@@ -31,6 +31,7 @@ class Settings:
     max_sessions: int
     default_voicebank: str
     default_voice_id: str | None
+    llm_provider: str
     gemini_api_key: str
     gemini_base_url: str
     gemini_model: str
@@ -55,6 +56,7 @@ class Settings:
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
         default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "")
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
+        llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
         gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         gemini_base_url = os.getenv(
             "GEMINI_BASE_URL",
@@ -77,6 +79,7 @@ class Settings:
             max_sessions=max_sessions,
             default_voicebank=default_voicebank,
             default_voice_id=default_voice_id,
+            llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_base_url=gemini_base_url,
             gemini_model=gemini_model,

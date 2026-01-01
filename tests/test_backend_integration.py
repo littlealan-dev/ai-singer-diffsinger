@@ -1,5 +1,3 @@
-import json
-import shutil
 import uuid
 from pathlib import Path
 
@@ -7,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.backend.main import create_app
+from src.backend.llm_client import StaticLlmClient
 from src.mcp.resolve import PROJECT_ROOT
 
 
@@ -24,29 +23,22 @@ def integration_client(monkeypatch):
     data_dir = Path("tests/output/backend_integration") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("MCP_CPU_DEVICE", "cpu")
     monkeypatch.setenv("MCP_GPU_DEVICE", "cpu")
     app = create_app()
-    app.state.orchestrator._call_gemini = lambda history, score_available: json.dumps(
-        {
-            "tool_calls": [
-                {
-                    "name": "modify_score",
-                    "arguments": {
-                        "code": (
-                            "notes = score['parts'][0]['notes']\n"
-                            "if notes:\n"
-                            "    score['parts'][0]['notes'] = notes[: max(1, len(notes) // 2)]\n"
-                        )
-                    },
-                },
-                {"name": "synthesize", "arguments": {"voicebank": VOICEBANK_ID}},
-            ],
-            "final_message": "Rendered.",
-            "include_score": True,
-        }
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"modify_score","arguments":{"code":'
+            '"notes = score[\'parts\'][0][\'notes\']\\nif notes:\\n'
+            '    score[\'parts\'][0][\'notes\'] = notes[: max(1, len(notes) // 2)]\\n"}},'
+            '{"name":"synthesize","arguments":{"voicebank":"'
+            + VOICEBANK_ID
+            + '"}}],"final_message":"Rendered.","include_score":true}'
+        )
     )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
     with TestClient(app) as test_client:
         yield test_client, app
 
