@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api.score import parse_score
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
-from src.mcp.resolve import PROJECT_ROOT
+from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 
 
 def _make_router_call_tool():
@@ -112,6 +113,42 @@ def test_upload_accepts_mxl_extension(client):
     assert response.status_code == 200
 
 
+def test_upload_parses_zipped_musicxml(client):
+    test_client, app = client
+    mxl_path = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-zipped.mxl"
+    if not mxl_path.exists():
+        pytest.skip(f"Test score not found at {mxl_path}")
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            file_path = resolve_project_path(arguments["file_path"])
+            return parse_score(
+                file_path,
+                part_id=arguments.get("part_id"),
+                part_index=arguments.get("part_index"),
+                expand_repeats=arguments.get("expand_repeats", False),
+            )
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    session_id = _create_session(test_client)
+    files = {
+        "file": (
+            "amazing-grace-satb-zipped.mxl",
+            mxl_path.read_bytes(),
+            "application/vnd.recordare.musicxml",
+        )
+    }
+    response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["parsed"] is True
+    current_score = payload["current_score"]["score"]
+    assert current_score["parts"]
+    score_path = app.state.settings.data_dir / "sessions" / session_id / "score.mxl"
+    assert score_path.exists()
+
+
 def test_chat_text_response_with_llm(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -149,10 +186,10 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     payload = response.json()
     assert payload["type"] == "chat_audio"
     assert payload["message"] == "Rendered."
-    assert payload["audio_url"] == f"/sessions/{session_id}/audio"
+    assert payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
     assert "current_score" in payload
 
-    audio_response = test_client.get(f"/sessions/{session_id}/audio")
+    audio_response = test_client.get(payload["audio_url"])
     assert audio_response.status_code == 200
     assert audio_response.content.startswith(b"RIFF")
 

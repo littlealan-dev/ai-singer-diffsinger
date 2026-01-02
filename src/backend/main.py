@@ -1,23 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, AsyncIterator
+from typing import Any, Dict, AsyncIterator, Optional
 import asyncio
 from contextlib import asynccontextmanager
 import time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import logging
+import zipfile
+from xml.etree import ElementTree
 
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.session import SessionStore
-from src.mcp.logging_utils import get_logger
+from src.mcp.logging_utils import ensure_timestamped_handlers, get_logger
 
 
 class ChatRequest(BaseModel):
@@ -25,6 +27,7 @@ class ChatRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
+    ensure_timestamped_handlers()
     settings = Settings.from_env()
     sessions = SessionStore(
         project_root=settings.project_root,
@@ -148,18 +151,47 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/sessions/{session_id}/audio")
-    async def get_audio(session_id: str, request: Request) -> FileResponse:
+    async def get_audio(
+        session_id: str,
+        request: Request,
+        file: Optional[str] = None,
+    ) -> FileResponse:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        snapshot = await _get_snapshot_or_404(sessions, session_id)
-        current_audio = snapshot.get("current_audio")
-        if not current_audio:
-            raise HTTPException(status_code=404, detail="No audio available for this session.")
-        audio_path = settings.project_root / current_audio["path"]
+        if file:
+            session_dir = sessions.session_dir(session_id)
+            file_name = Path(file).name
+            if file_name != file:
+                raise HTTPException(status_code=400, detail="Invalid audio file name.")
+            audio_path = (session_dir / file_name).resolve()
+            try:
+                audio_path.relative_to(session_dir)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid audio path.") from exc
+        else:
+            snapshot = await _get_snapshot_or_404(sessions, session_id)
+            current_audio = snapshot.get("current_audio")
+            if not current_audio:
+                raise HTTPException(status_code=404, detail="No audio available for this session.")
+            audio_path = settings.project_root / current_audio["path"]
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found.")
         media_type = "audio/wav" if audio_path.suffix.lower() == ".wav" else "application/octet-stream"
         return FileResponse(audio_path, media_type=media_type, filename=audio_path.name)
+
+    @app.get("/sessions/{session_id}/score")
+    async def get_score(session_id: str, request: Request) -> Response:
+        sessions: SessionStore = request.app.state.sessions
+        settings: Settings = request.app.state.settings
+        session = await _get_session_or_404(sessions, session_id)
+        rel_path = session.files.get("musicxml_path")
+        if not rel_path:
+            raise HTTPException(status_code=404, detail="Score not found.")
+        score_path = settings.project_root / rel_path
+        if not score_path.exists():
+            raise HTTPException(status_code=404, detail="Score file not found.")
+        content = _read_musicxml_content(score_path)
+        return Response(content=content, media_type="application/xml")
 
     return app
 
@@ -196,6 +228,43 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
         raise
     finally:
         await file.close()
+
+
+def _read_musicxml_content(path: Path) -> str:
+    if path.suffix.lower() != ".mxl":
+        return path.read_text(encoding="utf-8", errors="replace")
+    with zipfile.ZipFile(path) as archive:
+        xml_name = _find_mxl_xml(archive)
+        xml_bytes = archive.read(xml_name)
+    return xml_bytes.decode("utf-8", errors="replace")
+
+
+def _find_mxl_xml(archive: zipfile.ZipFile) -> str:
+    try:
+        container_bytes = archive.read("META-INF/container.xml")
+    except KeyError:
+        return _first_mxl_xml(archive)
+    try:
+        root = ElementTree.fromstring(container_bytes)
+    except ElementTree.ParseError:
+        return _first_mxl_xml(archive)
+    for elem in root.iter():
+        if elem.tag.endswith("rootfile"):
+            full_path = elem.attrib.get("full-path")
+            if full_path and full_path in archive.namelist():
+                return full_path
+    return _first_mxl_xml(archive)
+
+
+def _first_mxl_xml(archive: zipfile.ZipFile) -> str:
+    candidates = [
+        name
+        for name in archive.namelist()
+        if name.lower().endswith(".xml") and not name.startswith("META-INF/")
+    ]
+    if not candidates:
+        raise HTTPException(status_code=400, detail="No MusicXML file found in archive.")
+    return candidates[0]
 
 
 app = create_app()

@@ -63,9 +63,9 @@ def test_backend_integration_modify_and_synthesize(integration_client):
     chat_payload = chat_response.json()
     assert chat_payload["type"] == "chat_audio"
     assert chat_payload["message"] == "Rendered."
-    assert chat_payload["audio_url"] == f"/sessions/{session_id}/audio"
+    assert chat_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
     assert chat_payload["current_score"]["version"] == 2
 
-    audio_response = test_client.get(f"/sessions/{session_id}/audio")
+    audio_response = test_client.get(chat_payload["audio_url"])
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0

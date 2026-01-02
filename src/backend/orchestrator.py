@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import asyncio
 import logging
 import copy
+import uuid
 
 from src.backend.config import Settings
 from src.backend.llm_client import LlmClient
@@ -113,14 +114,11 @@ class Orchestrator:
         )
         waveform = synth_result["waveform"]
         sample_rate = synth_result["sample_rate"]
-        output_path = self._sessions.session_dir(session_id) / "audio.wav"
+        file_name = f"audio-{uuid.uuid4().hex}.wav"
+        output_path = self._sessions.session_dir(session_id) / file_name
         save_args = {
             "waveform": waveform,
-            "output_path": str(
-                (self._sessions.session_dir(session_id) / "audio.wav").relative_to(
-                    self._settings.project_root
-                )
-            ),
+            "output_path": str(output_path.relative_to(self._settings.project_root)),
             "sample_rate": sample_rate,
         }
         self._logger.info("mcp_call tool=save_audio session=%s", session_id)
@@ -130,7 +128,7 @@ class Orchestrator:
         response = {
             "type": "chat_audio",
             "message": "Here is the rendered audio.",
-            "audio_url": f"/sessions/{session_id}/audio",
+            "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
         }
         return response
 

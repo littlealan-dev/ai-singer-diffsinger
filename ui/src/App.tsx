@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
 import clsx from "clsx";
-import { chat, createSession, uploadScore, type ChatResponse } from "./api";
+import { chat, createSession, fetchScoreXml, uploadScore, type ChatResponse } from "./api";
 
 type Role = "user" | "assistant";
 
@@ -15,7 +15,7 @@ type Message = {
 
 type ScorePayload = {
   name: string;
-  data: string | ArrayBuffer;
+  data: string;
 };
 
 export default function App() {
@@ -74,7 +74,7 @@ export default function App() {
     });
     osmdRef.current = osmd;
     osmd
-      .load(score.data as string | ArrayBuffer)
+      .load(score.data)
       .then(() => {
         osmd.zoom = zoomLevel;
         osmd.render();
@@ -107,10 +107,7 @@ export default function App() {
     setError(null);
     try {
       await uploadScore(sessionId, file);
-      const data =
-        file.name.toLowerCase().endsWith(".mxl")
-          ? await file.arrayBuffer()
-          : await file.text();
+      const data = await fetchScoreXml(sessionId);
       setScore({ name: file.name, data });
     } catch (err: any) {
       setError(err?.message || "Upload failed.");

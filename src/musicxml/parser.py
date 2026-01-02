@@ -99,6 +99,9 @@ def _select_parts(
         return [parts[part_index]]
     if not parts:
         return []
+    for part in parts:
+        if _part_has_lyrics(part):
+            return [part]
     return [_select_top_part(parts)]
 
 
@@ -124,6 +127,16 @@ def _part_average_midi(part: stream.Part) -> float:
     if not midis:
         return float("-inf")
     return sum(midis) / len(midis)
+
+
+def _part_has_lyrics(part: stream.Part) -> bool:
+    for element in part.recurse().notes:
+        if element.isRest:
+            continue
+        lyric_text, _, _ = _extract_lyric_text(element)
+        if lyric_text:
+            return True
+    return False
 
 
 def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:

@@ -40,6 +40,15 @@ export async function uploadScore(sessionId: string, file: File): Promise<unknow
   return response.json();
 }
 
+export async function fetchScoreXml(sessionId: string): Promise<string> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/score`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Failed to load score.");
+  }
+  return response.text();
+}
+
 export async function chat(sessionId: string, message: string): Promise<ChatResponse> {
   const response = await request<ChatResponse>(`/sessions/${sessionId}/chat`, {
     method: "POST",

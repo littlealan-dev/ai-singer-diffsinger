@@ -88,9 +88,9 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
     assert chat_response.status_code == 200
     payload = chat_response.json()
     assert payload.get("type") == "chat_audio", f"Unexpected response: {payload}"
-    assert payload.get("audio_url") == f"/sessions/{session_id}/audio"
+    assert payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
 
-    audio_response = test_client.get(f"/sessions/{session_id}/audio")
+    audio_response = test_client.get(payload["audio_url"])
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0
 
@@ -138,6 +138,6 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
     assert second_response.status_code == 200
     second_payload = second_response.json()
     assert second_payload["type"] == "chat_audio"
-    assert second_payload.get("audio_url") == f"/sessions/{session_id}/audio"
+    assert second_payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
     assert "current_score" in second_payload
     assert second_payload["current_score"]["version"] >= 2

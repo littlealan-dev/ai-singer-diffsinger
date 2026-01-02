@@ -5,16 +5,16 @@
   font-family: "Space Grotesk", system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  --bg-0: #0c0f14;
-  --bg-1: #151a22;
-  --bg-2: #1f2630;
+  --bg-0: #0d0b18;
+  --bg-1: #191327;
+  --bg-2: #241a38;
   --glass: rgba(255, 255, 255, 0.06);
   --glass-border: rgba(255, 255, 255, 0.12);
   --text-strong: #f5f7fa;
   --text-muted: #9aa6b2;
-  --accent: #f6b24a;
-  --accent-strong: #ffcc7a;
-  --accent-cool: #38c9b0;
+  --accent: #b77dff;
+  --accent-strong: #e2c7ff;
+  --accent-cool: #9b86ff;
   --shadow-strong: 0 24px 60px rgba(2, 6, 23, 0.5);
 }
 
@@ -33,9 +33,9 @@ body,
 
 body {
   background:
-    radial-gradient(circle at top left, rgba(56, 201, 176, 0.18), transparent 50%),
-    radial-gradient(circle at 20% 20%, rgba(246, 178, 74, 0.15), transparent 55%),
-    radial-gradient(circle at 80% 10%, rgba(255, 204, 122, 0.1), transparent 45%),
+    radial-gradient(circle at top left, rgba(155, 134, 255, 0.18), transparent 50%),
+    radial-gradient(circle at 20% 20%, rgba(183, 125, 255, 0.15), transparent 55%),
+    radial-gradient(circle at 80% 10%, rgba(226, 199, 255, 0.1), transparent 45%),
     linear-gradient(160deg, var(--bg-0), var(--bg-1) 45%, var(--bg-2));
   color: var(--text-strong);
   min-height: 100vh;
@@ -103,8 +103,8 @@ body::before {
   height: 38px;
   padding: 9px;
   border-radius: 12px;
-  background: radial-gradient(circle, rgba(246, 178, 74, 0.9), rgba(56, 201, 176, 0.6));
-  box-shadow: 0 10px 30px rgba(246, 178, 74, 0.35);
+  background: radial-gradient(circle, rgba(183, 125, 255, 0.9), rgba(155, 134, 255, 0.6));
+  box-shadow: 0 10px 30px rgba(183, 125, 255, 0.35);
 }
 
 .status-pill {
@@ -113,8 +113,8 @@ body::before {
   letter-spacing: 0.03em;
   text-transform: uppercase;
   border-radius: 999px;
-  background: rgba(56, 201, 176, 0.12);
-  border: 1px solid rgba(56, 201, 176, 0.35);
+  background: rgba(155, 134, 255, 0.12);
+  border: 1px solid rgba(155, 134, 255, 0.35);
   color: var(--accent-cool);
 }
 
@@ -204,7 +204,7 @@ body::before {
 
 .zoom-button:not(:disabled):hover {
   transform: translateY(-1px);
-  background: rgba(246, 178, 74, 0.3);
+  background: rgba(183, 125, 255, 0.3);
 }
 
 .zoom-value {
@@ -246,7 +246,7 @@ body::before {
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  border: 1px dashed rgba(246, 178, 74, 0.6);
+  border: 1px dashed rgba(183, 125, 255, 0.6);
   background: rgba(15, 20, 28, 0.88);
   display: grid;
   place-items: center;
@@ -257,8 +257,8 @@ body::before {
 }
 
 .chat-panel.drag-active {
-  border-color: rgba(246, 178, 74, 0.4);
-  box-shadow: 0 24px 50px rgba(246, 178, 74, 0.2);
+  border-color: rgba(183, 125, 255, 0.4);
+  box-shadow: 0 24px 50px rgba(183, 125, 255, 0.2);
 }
 
 .chat-bubble {
@@ -273,14 +273,14 @@ body::before {
 
 .chat-bubble.user {
   align-self: flex-end;
-  background: linear-gradient(140deg, rgba(56, 201, 176, 0.22), rgba(56, 201, 176, 0.08));
-  border-color: rgba(56, 201, 176, 0.35);
+  background: linear-gradient(140deg, rgba(155, 134, 255, 0.22), rgba(155, 134, 255, 0.08));
+  border-color: rgba(155, 134, 255, 0.35);
 }
 
 .chat-bubble.assistant {
   align-self: flex-start;
-  background: linear-gradient(140deg, rgba(246, 178, 74, 0.18), rgba(31, 38, 48, 0.8));
-  border-color: rgba(246, 178, 74, 0.28);
+  background: linear-gradient(140deg, rgba(183, 125, 255, 0.18), rgba(31, 38, 48, 0.8));
+  border-color: rgba(183, 125, 255, 0.28);
 }
 
 .chat-bubble p {
@@ -322,7 +322,7 @@ body::before {
 
 .upload-button:hover {
   transform: translateY(-1px);
-  border-color: rgba(246, 178, 74, 0.4);
+  border-color: rgba(183, 125, 255, 0.4);
 }
 
 .input-row {
@@ -343,8 +343,8 @@ body::before {
 }
 
 .input-row input:focus {
-  border-color: rgba(56, 201, 176, 0.6);
-  box-shadow: 0 0 0 3px rgba(56, 201, 176, 0.2);
+  border-color: rgba(155, 134, 255, 0.6);
+  box-shadow: 0 0 0 3px rgba(155, 134, 255, 0.2);
 }
 
 .send-button {
@@ -368,7 +368,7 @@ body::before {
 
 .send-button:not(:disabled):hover {
   transform: translateY(-1px);
-  box-shadow: 0 10px 24px rgba(56, 201, 176, 0.35);
+  box-shadow: 0 10px 24px rgba(155, 134, 255, 0.35);
 }
 
 .score-panel {
@@ -395,8 +395,8 @@ body::before {
   height: 48px;
   transform: translate(-50%, -50%);
   border-radius: 999px;
-  background: rgba(246, 178, 74, 0.6);
-  box-shadow: 0 0 12px rgba(246, 178, 74, 0.5);
+  background: rgba(183, 125, 255, 0.6);
+  box-shadow: 0 0 12px rgba(183, 125, 255, 0.5);
 }
 
 .score-canvas {
