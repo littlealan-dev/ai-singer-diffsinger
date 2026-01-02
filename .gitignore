@@ -34,6 +34,12 @@ venv/
 .vscode/
 .idea/
 
+# UI
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.env*
+
 # Artifacts
 outputs/
 tests/output/
@@ -43,3 +49,4 @@ runs/
 checkpoints/
 cache/
 tmp/
+data/
