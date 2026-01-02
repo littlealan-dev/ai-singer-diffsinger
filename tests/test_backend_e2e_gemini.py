@@ -93,3 +93,51 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
     audio_response = test_client.get(f"/sessions/{session_id}/audio")
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0
+
+
+def test_backend_e2e_gemini_contextual_flow(gemini_client):
+    test_client, data_dir, startup_id, logger = gemini_client
+    response = test_client.post("/sessions")
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    logger.info(
+        "backend_e2e_context_start startup_id=%s session_id=%s data_dir=%s",
+        startup_id,
+        session_id,
+        data_dir,
+    )
+
+    files = {"file": ("score.xml", SCORE_PATH.read_bytes(), "application/xml")}
+    upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert upload_response.status_code == 200
+
+    first_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={
+            "message": (
+                "Can you read this song first? Don't sing it yet. "
+                "Do you know this song?"
+            )
+        },
+    )
+    assert first_response.status_code == 200
+    first_payload = first_response.json()
+    assert first_payload["type"] == "chat_text"
+
+    audio_missing = test_client.get(f"/sessions/{session_id}/audio")
+    assert audio_missing.status_code == 404
+
+    second_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={
+            "message": (
+                "Then can you sing it, with the tempo a bit slower then written? "
+            )
+        },
+    )
+    assert second_response.status_code == 200
+    second_payload = second_response.json()
+    assert second_payload["type"] == "chat_audio"
+    assert second_payload.get("audio_url") == f"/sessions/{session_id}/audio"
+    assert "current_score" in second_payload
+    assert second_payload["current_score"]["version"] >= 2
