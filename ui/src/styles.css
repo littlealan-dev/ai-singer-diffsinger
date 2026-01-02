@@ -54,14 +54,17 @@ body::before {
 #root {
   display: flex;
   justify-content: center;
-  padding: 28px;
+  align-items: flex-start;
+  padding: 16px;
+  height: 100vh;
 }
 
 .app-shell {
-  width: min(1200px, 100%);
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  height: 100%;
   animation: page-enter 520ms ease-out;
 }
 
@@ -124,10 +127,12 @@ body::before {
 }
 
 .split-grid {
+  --split: 40%;
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(280px, var(--split)) 14px minmax(320px, 1fr);
+  gap: 12px;
   min-height: 0;
+  flex: 1;
 }
 
 .chat-panel,
@@ -163,6 +168,52 @@ body::before {
   letter-spacing: 0.08em;
 }
 
+.score-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.zoom-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-strong);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 200ms ease, background 200ms ease;
+}
+
+.zoom-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.zoom-button:not(:disabled):hover {
+  transform: translateY(-1px);
+  background: rgba(246, 178, 74, 0.3);
+}
+
+.zoom-value {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 42px;
+  text-align: center;
+}
+
 .chat-stream {
   flex: 1;
   overflow-y: auto;
@@ -170,6 +221,7 @@ body::before {
   flex-direction: column;
   gap: 12px;
   padding-right: 6px;
+  position: relative;
 }
 
 .chat-stream::-webkit-scrollbar {
@@ -186,6 +238,27 @@ body::before {
   border-radius: 16px;
   padding: 18px;
   color: var(--text-muted);
+  text-align: center;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  border: 1px dashed rgba(246, 178, 74, 0.6);
+  background: rgba(15, 20, 28, 0.88);
+  display: grid;
+  place-items: center;
+  color: var(--accent-strong);
+  text-align: center;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.chat-panel.drag-active {
+  border-color: rgba(246, 178, 74, 0.4);
+  box-shadow: 0 24px 50px rgba(246, 178, 74, 0.2);
 }
 
 .chat-bubble {
@@ -303,6 +376,29 @@ body::before {
   overflow: hidden;
 }
 
+.split-handle {
+  align-self: stretch;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+}
+
+.split-handle::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 48px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgba(246, 178, 74, 0.6);
+  box-shadow: 0 0 12px rgba(246, 178, 74, 0.5);
+}
+
 .score-canvas {
   flex: 1;
   position: relative;
@@ -359,8 +455,21 @@ body::before {
 }
 
 @media (max-width: 980px) {
+  body {
+    overflow-y: auto;
+  }
+
   #root {
     padding: 18px;
+    height: auto;
+  }
+
+  .app-shell {
+    height: auto;
+  }
+
+  .split-grid {
+    flex: none;
   }
 
   .app-header {
@@ -376,6 +485,10 @@ body::before {
   .score-panel,
   .chat-panel {
     min-height: 300px;
+  }
+
+  .split-handle {
+    display: none;
   }
 }
 

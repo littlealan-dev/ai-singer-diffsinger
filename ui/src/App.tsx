@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
 import clsx from "clsx";
 import { chat, createSession, uploadScore, type ChatResponse } from "./api";
 
@@ -27,9 +27,23 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [splitPct, setSplitPct] = useState(40);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [scoreReady, setScoreReady] = useState(false);
 
+  const splitStyle = useMemo(
+    () => ({ "--split": `${splitPct}%` }) as CSSProperties,
+    [splitPct]
+  );
+
+  const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const dragStateRef = useRef<{
+    containerLeft: number;
+    containerWidth: number;
+  } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -51,6 +65,7 @@ export default function App() {
 
   useEffect(() => {
     if (!scoreRef.current || !score) return;
+    setScoreReady(false);
     const osmd = new OpenSheetMusicDisplay(scoreRef.current, {
       autoResize: true,
       drawTitle: true,
@@ -60,11 +75,21 @@ export default function App() {
     osmdRef.current = osmd;
     osmd
       .load(score.data as string | ArrayBuffer)
-      .then(() => osmd.render())
+      .then(() => {
+        osmd.zoom = zoomLevel;
+        osmd.render();
+        setScoreReady(true);
+      })
       .catch((err) => {
         setError(err?.message || "Failed to render the score.");
       });
   }, [score]);
+
+  useEffect(() => {
+    if (!scoreReady || !osmdRef.current) return;
+    osmdRef.current.zoom = zoomLevel;
+    osmdRef.current.render();
+  }, [zoomLevel, scoreReady]);
 
   const headerSubtitle = useMemo(() => {
     if (!sessionId) return "Initializing session...";
@@ -125,6 +150,52 @@ export default function App() {
     }
   };
 
+  const handleZoom = (delta: number) => {
+    const next = Math.min(2, Math.max(0.6, zoomLevel + delta));
+    setZoomLevel(Math.round(next * 10) / 10);
+  };
+
+  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+    setIsDragging(false);
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    const file = event.dataTransfer.files?.[0];
+    if (file) handleUpload(file);
+  };
+
+  const handleResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!layoutRef.current) return;
+    event.preventDefault();
+    const rect = layoutRef.current.getBoundingClientRect();
+    dragStateRef.current = {
+      containerLeft: rect.left,
+      containerWidth: rect.width,
+    };
+    const handleMove = (moveEvent: PointerEvent) => {
+      if (!dragStateRef.current) return;
+      const delta = moveEvent.clientX - dragStateRef.current.containerLeft;
+      const next = (delta / dragStateRef.current.containerWidth) * 100;
+      const clamped = Math.min(70, Math.max(30, next));
+      setSplitPct(clamped);
+    };
+    const handleUp = () => {
+      dragStateRef.current = null;
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  };
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -140,8 +211,17 @@ export default function App() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <main className="split-grid">
-        <section className="chat-panel">
+      <main
+        className="split-grid"
+        ref={layoutRef}
+        style={splitStyle}
+      >
+        <section
+          className={clsx("chat-panel", isDragging && "drag-active")}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <div className="chat-header">
             <h2>Studio Chat</h2>
             <span className="chat-subtitle">Local history only</span>
@@ -149,7 +229,7 @@ export default function App() {
           <div className="chat-stream">
             {messages.length === 0 && (
               <div className="empty-state">
-                <p>Upload a MusicXML score to begin.</p>
+                <p>Drop a MusicXML file here to begin.</p>
               </div>
             )}
             {messages.map((msg, index) => (
@@ -164,6 +244,11 @@ export default function App() {
                 )}
               </div>
             ))}
+            {isDragging && (
+              <div className="drop-overlay">
+                <p>Release to upload your MusicXML file.</p>
+              </div>
+            )}
           </div>
           <div className="chat-input">
             <label className="upload-button">
@@ -200,12 +285,43 @@ export default function App() {
           </div>
         </section>
 
+        <div
+          className="split-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panels"
+          onPointerDown={handleResizeStart}
+        />
+
         <section className="score-panel">
           <div className="score-header">
             <h2>Score Preview</h2>
-            <span className="chat-subtitle">
-              Latest upload only {audioUrl ? "· Audio ready" : ""}
-            </span>
+            <div className="score-controls">
+              <span className="chat-subtitle">
+                Latest upload only {audioUrl ? "· Audio ready" : ""}
+              </span>
+              <div className="zoom-controls">
+                <button
+                  type="button"
+                  className="zoom-button"
+                  onClick={() => handleZoom(-0.1)}
+                  aria-label="Zoom out"
+                  disabled={!score}
+                >
+                  <Minus size={16} />
+                </button>
+                <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
+                <button
+                  type="button"
+                  className="zoom-button"
+                  onClick={() => handleZoom(0.1)}
+                  aria-label="Zoom in"
+                  disabled={!score}
+                >
+                  <Plus size={16} />
+                </button>
+              </div>
+            </div>
           </div>
           <div className="score-canvas">
             <div ref={scoreRef} className="score-surface" />
