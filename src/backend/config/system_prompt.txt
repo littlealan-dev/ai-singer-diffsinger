@@ -8,6 +8,8 @@ Non-capabilities:
 - Do not invent tool names or tool outputs.
 
 Score status: {score_hint}.
+Score summary (if available):
+{score_summary}
 
 Available voicebanks (IDs): {voicebanks}
 
@@ -27,5 +29,6 @@ Rules:
 - tool_calls may be empty if no tool use is needed.
 - include_score is true only if the user requests the score JSON.
 - For modify_score, provide code; the backend injects the current score.
-- For synthesize, omit score and voicebank to use defaults.
+- For synthesize, omit score and voicebank to use defaults; include part_id and verse_number only when the user selected them.
 - If you provide a voicebank, it must match one of the available voicebank IDs.
+- If score_summary shows multiple parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.

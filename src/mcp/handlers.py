@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from src.api import (
     get_voicebank_info,
@@ -27,6 +27,7 @@ def handle_parse_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         file_path,
         part_id=params.get("part_id"),
         part_index=params.get("part_index"),
+        verse_number=params.get("verse_number"),
         expand_repeats=params.get("expand_repeats", False),
     )
 
@@ -53,10 +54,15 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
 
 def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     voicebank_path = resolve_voicebank_id(params["voicebank"])
+    part_index = _resolve_part_index(
+        params.get("score", {}),
+        part_id=params.get("part_id"),
+        part_index=params.get("part_index"),
+    )
     return synthesize(
         params["score"],
         voicebank_path,
-        part_index=params.get("part_index", 0),
+        part_index=part_index,
         voice_id=params.get("voice_id"),
         articulation=params.get("articulation", 0.0),
         airiness=params.get("airiness", 1.0),
@@ -64,6 +70,29 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         clarity=params.get("clarity", 1.0),
         device=device,
     )
+
+
+def _resolve_part_index(
+    score: Dict[str, Any],
+    *,
+    part_id: Optional[str],
+    part_index: Optional[int],
+) -> int:
+    if part_id is not None and part_index is not None:
+        raise ValueError("Provide part_id or part_index, not both.")
+    parts = score.get("parts") or []
+    if part_id is not None:
+        for idx, part in enumerate(parts):
+            if part.get("part_id") == part_id:
+                return idx
+        raise ValueError(f"part_id not found in score: {part_id}")
+    if part_index is not None:
+        return part_index
+    for idx, part in enumerate(parts):
+        notes = part.get("notes") or []
+        if any(note.get("lyric") for note in notes):
+            return idx
+    return 0
 
 
 def handle_list_voicebanks(params: Dict[str, Any], device: str) -> Any:

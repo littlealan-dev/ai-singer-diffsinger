@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from music21 import chord, converter, note, stream, tempo
 
@@ -47,23 +47,78 @@ def parse_musicxml(
     *,
     part_id: Optional[str] = None,
     part_index: Optional[int] = None,
+    verse_number: Optional[str | int] = None,
     lyrics_only: bool = True,
     keep_rests: bool = False,
 ) -> ScoreData:
     """Parse MusicXML (.xml or .mxl) into a lightweight score structure.
 
-    If no part is specified, the highest-average-pitch part is selected.
+    If no part is specified, the first part with lyrics is selected.
+    verse_number: when provided, select lyrics for the matching verse number.
     lyrics_only: when True, parts with lyrics drop notes without lyric tokens unless
     the lyric is marked as extended.
     keep_rests: when True, rest events are included alongside notes.
     """
     score = converter.parse(str(path))
-    selected_parts = _select_parts(score, part_id=part_id, part_index=part_index)
+    return _parse_score(
+        score,
+        part_id=part_id,
+        part_index=part_index,
+        verse_number=verse_number,
+        lyrics_only=lyrics_only,
+        keep_rests=keep_rests,
+    )
+
+
+def parse_musicxml_with_summary(
+    path: str | Path,
+    *,
+    part_id: Optional[str] = None,
+    part_index: Optional[int] = None,
+    verse_number: Optional[str | int] = None,
+    lyrics_only: bool = True,
+    keep_rests: bool = False,
+) -> tuple[ScoreData, Dict[str, Any]]:
+    score = converter.parse(str(path))
+    summary = _summarize_score(score)
+    normalized_verse = _normalize_verse_number(verse_number)
+    if normalized_verse is None:
+        available_verses = summary.get("available_verses") if isinstance(summary, dict) else None
+        if available_verses:
+            normalized_verse = str(available_verses[0])
+    score_data = _parse_score(
+        score,
+        part_id=part_id,
+        part_index=part_index,
+        verse_number=normalized_verse,
+        lyrics_only=lyrics_only,
+        keep_rests=keep_rests,
+    )
+    return score_data, summary
+
+
+def _parse_score(
+    score: stream.Score,
+    *,
+    part_id: Optional[str],
+    part_index: Optional[int],
+    verse_number: Optional[str | int],
+    lyrics_only: bool,
+    keep_rests: bool,
+) -> ScoreData:
+    selected_parts = _select_parts(
+        score,
+        part_id=part_id,
+        part_index=part_index,
+        verse_number=verse_number,
+    )
+    normalized_verse = _normalize_verse_number(verse_number)
     tempos = _extract_tempos(score)
-    parts = []
+    parts: List[PartData] = []
     for part in selected_parts:
         part_events = _collect_part_events(
             part,
+            verse_number=normalized_verse,
             lyrics_only=lyrics_only,
             keep_rests=keep_rests,
         )
@@ -84,6 +139,7 @@ def _select_parts(
     *,
     part_id: Optional[str],
     part_index: Optional[int],
+    verse_number: Optional[str | int],
 ) -> Sequence[stream.Part]:
     if part_id is not None and part_index is not None:
         raise ValueError("Provide part_id or part_index, not both.")
@@ -100,7 +156,7 @@ def _select_parts(
     if not parts:
         return []
     for part in parts:
-        if _part_has_lyrics(part):
+        if _part_has_lyrics(part, verse_number=verse_number):
             return [part]
     return [_select_top_part(parts)]
 
@@ -129,14 +185,70 @@ def _part_average_midi(part: stream.Part) -> float:
     return sum(midis) / len(midis)
 
 
-def _part_has_lyrics(part: stream.Part) -> bool:
+def _part_has_lyrics(part: stream.Part, *, verse_number: Optional[str | int]) -> bool:
     for element in part.recurse().notes:
         if element.isRest:
             continue
-        lyric_text, _, _ = _extract_lyric_text(element)
+        lyric_text, _, _ = _extract_lyric_text(element, verse_number=verse_number)
         if lyric_text:
             return True
     return False
+
+
+def _summarize_score(score: stream.Score) -> Dict[str, Any]:
+    metadata = score.metadata
+    summary: Dict[str, Any] = {
+        "title": metadata.title if metadata else None,
+        "composer": metadata.composer if metadata else None,
+        "lyricist": getattr(metadata, "lyricist", None) if metadata else None,
+    }
+
+    parts_summary: List[Dict[str, Any]] = []
+    available_verses: set[str] = set()
+    for index, part in enumerate(score.parts):
+        lyric_numbers: set[str] = set()
+        note_count = 0
+
+        for element in part.recurse().notes:
+            if element.isRest:
+                continue
+            note_count += 1
+            for lyric in element.lyrics:
+                text = (lyric.text or "").strip()
+                if not text:
+                    continue
+                number = lyric.number or "1"
+                lyric_numbers.add(str(number))
+
+        if lyric_numbers:
+            available_verses.update(lyric_numbers)
+
+        parts_summary.append(
+            {
+                "part_index": index,
+                "part_id": str(part.id) if part.id is not None else "",
+                "part_name": part.partName,
+                "has_lyrics": bool(lyric_numbers),
+                "note_count": note_count,
+            }
+        )
+
+    summary["parts"] = parts_summary
+    summary["available_verses"] = sorted(available_verses, key=_lyric_sort_key)
+    return summary
+
+
+def _lyric_sort_key(value: str) -> tuple[int, object]:
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
+
+
+def _normalize_verse_number(verse_number: Optional[str | int]) -> Optional[str]:
+    if verse_number is None:
+        return None
+    return str(verse_number)
 
 
 def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:
@@ -170,6 +282,7 @@ def _metronome_bpm(mark: tempo.MetronomeMark) -> Optional[float]:
 def _collect_part_events(
     part: stream.Part,
     *,
+    verse_number: Optional[str],
     lyrics_only: bool,
     keep_rests: bool,
 ) -> Sequence[NoteEvent]:
@@ -181,7 +294,7 @@ def _collect_part_events(
         )
     )
     has_lyric_text = any(
-        _extract_lyric_text(element)[0] is not None
+        _extract_lyric_text(element, verse_number=verse_number)[0] is not None
         for element in elements
         if not element.isRest
     )
@@ -197,7 +310,7 @@ def _collect_part_events(
                 events.append(_make_rest_event(element, offset_beats=offset))
             active_extend = False
             continue
-        lyric_text, syllabic, is_extended = _extract_lyric_text(element)
+        lyric_text, syllabic, is_extended = _extract_lyric_text(element, verse_number=verse_number)
         tie_type = element.tie.type if element.tie is not None else None
         include = True
         lyric_value = lyric_text
@@ -232,10 +345,25 @@ def _collect_part_events(
     return events
 
 
-def _extract_lyric_text(element: note.NotRest) -> tuple[Optional[str], Optional[str], bool]:
+def _extract_lyric_text(
+    element: note.NotRest,
+    *,
+    verse_number: Optional[str | int],
+) -> tuple[Optional[str], Optional[str], bool]:
     if not element.lyrics:
         return None, None, False
-    lyric = element.lyrics[0]
+    lyric = None
+    if verse_number is None:
+        lyric = element.lyrics[0]
+    else:
+        normalized = _normalize_verse_number(verse_number)
+        for candidate in element.lyrics:
+            candidate_number = _normalize_verse_number(candidate.number) or "1"
+            if candidate_number == normalized:
+                lyric = candidate
+                break
+    if lyric is None:
+        return None, None, False
     text = lyric.text if lyric.text is not None else ""
     text = text.strip()
     if not text:

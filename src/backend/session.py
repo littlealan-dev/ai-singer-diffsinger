@@ -22,6 +22,7 @@ class SessionState:
     files: Dict[str, str] = field(default_factory=dict)
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
+    score_summary: Optional[Dict[str, Any]] = None
     current_audio: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
@@ -32,6 +33,7 @@ class SessionState:
             "history": list(self.history),
             "files": dict(self.files),
             "current_score": self._score_snapshot(),
+            "score_summary": dict(self.score_summary) if self.score_summary else None,
             "current_audio": dict(self.current_audio) if self.current_audio else None,
         }
 
@@ -129,6 +131,14 @@ class SessionStore:
             state.current_score_version += 1
             state.last_active_at = _utcnow()
             return state.current_score_version
+
+    async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.score_summary = summary
+            state.last_active_at = _utcnow()
 
     async def set_audio(self, session_id: str, path: Path, duration_s: float) -> None:
         async with self._lock:

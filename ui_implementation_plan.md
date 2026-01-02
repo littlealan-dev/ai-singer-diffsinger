@@ -28,7 +28,7 @@ Create a modern, premium web interface for the AI Singer.
 ## Implementation Steps (Coding Agent)
 
 1. **Initialize UI**: Create Vite project in `ui/` (React + TypeScript).
-2. **Build API Client**: Connect to `POST /sessions`, `POST /sessions/{id}/upload`, `POST /sessions/{id}/chat`, `GET /sessions/{id}/audio`.
+2. **Build API Client**: Connect to `POST /sessions`, `POST /sessions/{id}/upload` (returns `score_summary`), `POST /sessions/{id}/chat`, `GET /sessions/{id}/audio`.
 3. **Develop Split Layout**: Responsive flex/grid container.
 4. **Score Viewer**: Integrate `OpenSheetMusicDisplay` for static rendering of the latest score.
 

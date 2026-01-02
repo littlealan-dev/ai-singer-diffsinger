@@ -131,11 +131,17 @@ def create_app() -> FastAPI:
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+        score_summary = score.get("score_summary") if isinstance(score, dict) else None
+        if isinstance(score, dict):
+            score = dict(score)
+            score.pop("score_summary", None)
+        await sessions.set_score_summary(session_id, score_summary)
         version = await sessions.set_score(session_id, score)
         return {
             "session_id": session_id,
             "parsed": True,
             "current_score": {"score": score, "version": version},
+            "score_summary": score_summary,
         }
 
     @app.post("/sessions/{session_id}/chat")

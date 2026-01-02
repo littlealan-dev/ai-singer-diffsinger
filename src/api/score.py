@@ -22,7 +22,7 @@ except ImportError:
     HAS_RESTRICTED_PYTHON = False
     logger.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
 
-from src.musicxml.parser import parse_musicxml, ScoreData
+from src.musicxml.parser import parse_musicxml_with_summary
 
 
 def parse_score(
@@ -30,6 +30,7 @@ def parse_score(
     *,
     part_id: Optional[str] = None,
     part_index: Optional[int] = None,
+    verse_number: Optional[str | int] = None,
     expand_repeats: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -39,6 +40,7 @@ def parse_score(
         file_path: Path to MusicXML file (.xml or .mxl)
         part_id: Specific part ID to extract (optional)
         part_index: Specific part index to extract (optional)
+        verse_number: Lyric verse number to select (optional)
         expand_repeats: If True, expand repeat signs into linear sequence
         
     Returns:
@@ -46,7 +48,8 @@ def parse_score(
         {
             "title": str | None,
             "tempos": [...],
-            "parts": [{"part_id": ..., "part_name": ..., "notes": [...]}]
+            "parts": [{"part_id": ..., "part_name": ..., "notes": [...]}],
+            "score_summary": {...}
         }
     """
     if logger.isEnabledFor(logging.DEBUG):
@@ -57,14 +60,16 @@ def parse_score(
                     "file_path": str(file_path),
                     "part_id": part_id,
                     "part_index": part_index,
+                    "verse_number": verse_number,
                     "expand_repeats": expand_repeats,
                 }
             ),
         )
-    score_data = parse_musicxml(
+    score_data, score_summary = parse_musicxml_with_summary(
         file_path,
         part_id=part_id,
         part_index=part_index,
+        verse_number=verse_number,
         keep_rests=True,
     )
     
@@ -77,6 +82,7 @@ def parse_score(
         "endings": [],
         "jumps": [],
     }
+    score_dict["score_summary"] = score_summary
     
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(score_dict))
@@ -207,4 +213,3 @@ def modify_score(score: Dict[str, Any], code: str) -> Dict[str, Any]:
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("modify_score output=%s", summarize_payload(score))
     return score
-

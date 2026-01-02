@@ -28,6 +28,7 @@ def build_system_prompt(
     tools: List[Dict[str, Any]],
     score_available: bool,
     voicebank_ids: Optional[List[str]] = None,
+    score_summary: Optional[Dict[str, Any]] = None,
 ) -> str:
     tool_specs = []
     for tool in tools:
@@ -44,11 +45,15 @@ def build_system_prompt(
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
+    score_summary_text = "none"
+    if score_summary:
+        score_summary_text = json.dumps(score_summary, indent=2, sort_keys=True)
     template = _load_system_prompt()
     return (
         template.replace("{score_hint}", score_hint)
         .replace("{tool_json}", tool_json)
         .replace("{voicebanks}", voicebanks_text)
+        .replace("{score_summary}", score_summary_text)
     )
 
 

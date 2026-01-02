@@ -102,6 +102,22 @@ class Orchestrator:
         self, session_id: str, score: Dict[str, Any], arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         synth_args = dict(arguments)
+        part_id = synth_args.get("part_id")
+        part_index = synth_args.get("part_index")
+        verse_number = synth_args.get("verse_number")
+        if self._selection_requested(part_id, part_index, verse_number):
+            if not self._selection_matches_current(score, part_id, part_index, verse_number):
+                updated_score = await self._reparse_score(
+                    session_id,
+                    part_id=part_id,
+                    part_index=part_index,
+                    verse_number=verse_number,
+                )
+                if updated_score is not None:
+                    score = updated_score
+                    synth_args.pop("part_id", None)
+                    synth_args.pop("part_index", None)
+                    synth_args.pop("verse_number", None)
         synth_args["score"] = score
         if "voicebank" not in synth_args:
             synth_args["voicebank"] = await self._resolve_voicebank()
@@ -132,6 +148,62 @@ class Orchestrator:
         }
         return response
 
+    def _selection_requested(
+        self,
+        part_id: Optional[str],
+        part_index: Optional[int],
+        verse_number: Optional[object],
+    ) -> bool:
+        return part_id is not None or part_index is not None or verse_number is not None
+
+    def _selection_matches_current(
+        self,
+        score: Dict[str, Any],
+        part_id: Optional[str],
+        part_index: Optional[int],
+        verse_number: Optional[object],
+    ) -> bool:
+        if verse_number is not None:
+            return False
+        parts = score.get("parts") or []
+        if part_id is not None:
+            if not parts:
+                return False
+            if len(parts) == 1:
+                return parts[0].get("part_id") == part_id
+            return any(part.get("part_id") == part_id for part in parts)
+        if part_index is not None:
+            return 0 <= part_index < len(parts)
+        return True
+
+    async def _reparse_score(
+        self,
+        session_id: str,
+        *,
+        part_id: Optional[str],
+        part_index: Optional[int],
+        verse_number: Optional[object],
+    ) -> Optional[Dict[str, Any]]:
+        snapshot = await self._sessions.get_snapshot(session_id)
+        files = snapshot.get("files") or {}
+        file_path = files.get("musicxml_path")
+        if not isinstance(file_path, str) or not file_path:
+            return None
+        parse_args: Dict[str, Any] = {"file_path": file_path, "expand_repeats": False}
+        if part_id is not None:
+            parse_args["part_id"] = part_id
+        elif part_index is not None:
+            parse_args["part_index"] = part_index
+        if verse_number is not None:
+            parse_args["verse_number"] = verse_number
+        result = await asyncio.to_thread(self._router.call_tool, "parse_score", parse_args)
+        if not isinstance(result, dict):
+            return None
+        score = dict(result)
+        score.pop("score_summary", None)
+        await self._sessions.set_score(session_id, score)
+        return score
+
     async def _resolve_voicebank(self) -> str:
         if self._settings.default_voicebank:
             return self._settings.default_voicebank
@@ -157,7 +229,12 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
-            system_prompt = build_system_prompt(llm_tools, score_available, voicebank_ids)
+            system_prompt = build_system_prompt(
+                llm_tools,
+                score_available,
+                voicebank_ids,
+                score_summary=snapshot.get("score_summary"),
+            )
             text = await asyncio.to_thread(
                 self._llm_client.generate, system_prompt, history
             )

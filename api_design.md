@@ -52,7 +52,10 @@ Parse a MusicXML file into a JSON structure.
 | Attribute | Description |
 |-----------|-------------|
 | **Input** | `file_path`: Path to MusicXML file |
-| **Output** | Score as JSON dict (see schema below) |
+| | `part_id`: Part ID to extract (optional) |
+| | `part_index`: Part index to extract (optional) |
+| | `verse_number`: Verse number to select (optional) |
+| **Output** | Score as JSON dict (see schema below), including `score_summary` |
 | **Purpose** | Convert music notation to LLM-readable format |
 
 **Input example:**
@@ -84,7 +87,19 @@ parse_score("assets/test_data/amazing-grace-satb-verse1.xml")
       ]
     }
   ],
-  "structure": {"repeats": [], "endings": [], "jumps": []}
+  "structure": {"repeats": [], "endings": [], "jumps": []},
+  "score_summary": {
+    "title": "Amazing Grace",
+    "composer": "John Newton",
+    "parts": [
+      {
+        "part_id": "P1",
+        "part_name": "Soprano",
+        "has_lyrics": true
+      }
+    ],
+    "available_verses": ["1"]
+  }
 }
 ```
 
@@ -178,7 +193,9 @@ logic used by `synthesize(...)` so an LLM does not re-implement beat → frame c
 |-----------|-------------|
 | **Input** | `score`: Score JSON dict |
 | | `voicebank`: Voicebank path or ID |
-| | `part_index`: Part index (default: 0) |
+| | `part_id`: Part ID (preferred over `part_index`, optional) |
+| | `part_index`: Part index (optional; defaults to first part with lyrics) |
+| | `verse_number`: Verse number to select (optional, defaults to first available) |
 | | `voice_id`: Voice selection within a part (optional) |
 | | `include_phonemes`: Include phoneme strings in output (default: false) |
 | **Output** | `phoneme_ids`: Token IDs |

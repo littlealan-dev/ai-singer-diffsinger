@@ -13,6 +13,7 @@ from src.mcp.resolve import PROJECT_ROOT
 
 VOICEBANK_ID = "Raine_Rena_2.01"
 SCORE_PATH = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-verse1.xml"
+MULTI_VERSE_SCORE_PATH = PROJECT_ROOT / "assets/test_data/o-holy-night.xml"
 
 
 @pytest.fixture
@@ -141,3 +142,35 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
     assert second_payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
     assert "current_score" in second_payload
     assert second_payload["current_score"]["version"] >= 2
+
+
+def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
+    test_client, data_dir, startup_id, logger = gemini_client
+    if not MULTI_VERSE_SCORE_PATH.exists():
+        pytest.skip(f"Test score not found at {MULTI_VERSE_SCORE_PATH}")
+    response = test_client.post("/sessions")
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    logger.info(
+        "backend_e2e_multiverse_start startup_id=%s session_id=%s data_dir=%s",
+        startup_id,
+        session_id,
+        data_dir,
+    )
+
+    files = {
+        "file": ("o-holy-night.xml", MULTI_VERSE_SCORE_PATH.read_bytes(), "application/xml")
+    }
+    upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert upload_response.status_code == 200
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Please sing this song."},
+    )
+    assert chat_response.status_code == 200
+    payload = chat_response.json()
+    assert payload.get("type") == "chat_text", f"Unexpected response: {payload}"
+    assert "audio_url" not in payload
+    message = (payload.get("message") or "").lower()
+    assert "verse" in message

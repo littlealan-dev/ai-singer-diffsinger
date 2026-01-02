@@ -18,6 +18,7 @@ This document expands on `backend_architecture.md` with concrete backend behavio
     "musicxml_path": "data/sessions/<uuid>/score.xml"
   },
   "current_score": { "score": "json", "version": 3 },
+  "score_summary": { "title": "..." },
   "current_audio": {
     "path": "data/sessions/<uuid>/audio.wav",
     "duration_s": 12.3
@@ -74,7 +75,19 @@ Return parse summary to confirm success:
 {
   "session_id": "uuid",
   "parsed": true,
-  "current_score": { "score": "json", "version": 1 }
+  "current_score": { "score": "json", "version": 1 },
+  "score_summary": {
+    "title": "Amazing Grace",
+    "composer": "John Newton",
+    "parts": [
+      {
+        "part_id": "P1",
+        "part_name": "Soprano",
+        "has_lyrics": true
+      }
+    ],
+    "available_verses": ["1", "2"]
+  }
 }
 ```
 
