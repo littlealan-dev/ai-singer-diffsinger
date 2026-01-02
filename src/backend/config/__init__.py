@@ -62,7 +62,7 @@ class Settings:
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta",
         )
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")

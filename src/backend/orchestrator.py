@@ -10,6 +10,7 @@ from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
 from src.backend.session import SessionStore
+from src.mcp.logging_utils import summarize_payload
 from src.mcp.tools import list_tools
 
 
@@ -31,6 +32,7 @@ class Orchestrator:
         self._llm_tools = list_tools(self._llm_tool_allowlist)
 
     async def handle_chat(self, session_id: str, message: str) -> Dict[str, Any]:
+        self._logger.debug("chat_user session=%s message=%s", session_id, message)
         await self._sessions.append_history(session_id, "user", message)
         snapshot = await self._sessions.get_snapshot(session_id)
         current_score = snapshot.get("current_score")
@@ -42,7 +44,27 @@ class Orchestrator:
             await self._sessions.append_history(session_id, "assistant", response_message)
             return {"type": "chat_text", "message": response_message}
 
-        llm_response = await self._decide_with_llm(snapshot, score_available=True)
+        llm_response, llm_error = await self._decide_with_llm(snapshot, score_available=True)
+        if llm_error:
+            response_message = llm_error
+            await self._sessions.append_history(session_id, "assistant", response_message)
+            return {"type": "chat_text", "message": response_message}
+        if llm_response is not None:
+            self._logger.debug(
+                "chat_llm session=%s response=%s",
+                session_id,
+                {
+                    "tool_calls": [
+                        {
+                            "name": call.name,
+                            "arguments": summarize_payload(call.arguments),
+                        }
+                        for call in llm_response.tool_calls
+                    ],
+                    "final_message": llm_response.final_message,
+                    "include_score": llm_response.include_score,
+                },
+            )
         if llm_response is not None:
             include_score = llm_response.include_score
             tool_result = await self._execute_tool_calls(
@@ -57,10 +79,6 @@ class Orchestrator:
                 updated_score = updated_snapshot.get("current_score")
                 if updated_score is not None:
                     response["current_score"] = updated_score
-            await self._sessions.append_history(session_id, "assistant", response["message"])
-            return response
-        if self._should_synthesize(message):
-            response = await self._synthesize(session_id, current_score["score"], {})
             await self._sessions.append_history(session_id, "assistant", response["message"])
             return response
 
@@ -125,19 +143,15 @@ class Orchestrator:
         self._cached_voicebank = voicebanks[0]["id"]
         return self._cached_voicebank
 
-    def _should_synthesize(self, message: str) -> bool:
-        lowered = message.lower()
-        return any(keyword in lowered for keyword in ("synthesize", "render", "audio", "sing", "playback"))
-
     def _should_include_score(self, message: str) -> bool:
         lowered = message.lower()
         return any(keyword in lowered for keyword in ("score", "json", "notes"))
 
     async def _decide_with_llm(
         self, snapshot: Dict[str, Any], score_available: bool
-    ) -> Optional[LlmResponse]:
+    ) -> tuple[Optional[LlmResponse], Optional[str]]:
         if self._llm_client is None:
-            return None
+            return None, "LLM is not configured. Please try again later."
         history = snapshot.get("history", [])
         try:
             system_prompt = build_system_prompt(self._llm_tools, score_available)
@@ -146,8 +160,11 @@ class Orchestrator:
             )
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
-            return None
-        return parse_llm_response(text)
+            return None, "LLM request failed. Please try again."
+        response = parse_llm_response(text)
+        if response is None:
+            return None, "LLM returned an invalid response. Please try again."
+        return response, None
 
     async def _execute_tool_calls(
         self, session_id: str, score: Dict[str, Any], tool_calls: List[ToolCall]
@@ -155,6 +172,12 @@ class Orchestrator:
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
         for call in tool_calls:
+            self._logger.debug(
+                "mcp_call_args session=%s tool=%s arguments=%s",
+                session_id,
+                call.name,
+                summarize_payload(call.arguments),
+            )
             if call.name not in self._llm_tool_allowlist:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue

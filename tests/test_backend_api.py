@@ -157,6 +157,33 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert audio_response.content.startswith(b"RIFF")
 
 
+def test_chat_returns_error_when_llm_fails(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    class FailingClient:
+        def generate(self, system_prompt, history):
+            raise RuntimeError("rate limit")
+
+    failing_client = FailingClient()
+    app.state.llm_client = failing_client
+    app.state.orchestrator._llm_client = failing_client
+
+    def call_tool(name, arguments):
+        raise AssertionError(f"Tool should not be called when LLM fails: {name}")
+
+    app.state.router.call_tool = call_tool
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_text"
+    assert payload["message"] == "LLM request failed. Please try again."
+
+
 def test_get_audio_returns_404_without_audio(client):
     test_client, _ = client
     session_id = _create_session(test_client)

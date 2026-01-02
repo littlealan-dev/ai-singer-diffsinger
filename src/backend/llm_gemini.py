@@ -16,16 +16,19 @@ class GeminiRestClient:
         self._timeout = settings.gemini_timeout_seconds
 
     def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
-        url = f"{self._base_url}/models/{self._model}:generateContent?key={self._api_key}"
+        url = f"{self._base_url}/models/{self._model}:generateContent"
         payload = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": self._history_to_contents(history),
         }
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self._api_key,
+            },
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:

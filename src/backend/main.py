@@ -4,10 +4,12 @@ from pathlib import Path
 from typing import Any, Dict, AsyncIterator
 import asyncio
 from contextlib import asynccontextmanager
+import time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import logging
 
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
@@ -42,11 +44,34 @@ def create_app() -> FastAPI:
             router.stop()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
+    logger = logging.getLogger("backend.api")
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.router = router
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        start = time.monotonic()
+        session_id = request.path_params.get("session_id") if request.path_params else None
+        logger.debug(
+            "http_request_start method=%s path=%s session_id=%s",
+            request.method,
+            request.url.path,
+            session_id,
+        )
+        response = await call_next(request)
+        duration_ms = (time.monotonic() - start) * 1000.0
+        logger.debug(
+            "http_request method=%s path=%s status=%s duration_ms=%.2f session_id=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+            session_id,
+        )
+        return response
 
     @app.post("/sessions")
     async def create_session(request: Request) -> Dict[str, str]:
