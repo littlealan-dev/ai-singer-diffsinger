@@ -54,7 +54,7 @@ class Settings:
         max_upload_bytes = max_upload_mb * 1024 * 1024
         session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
-        default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "")
+        default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "Raine_Rena_2.01")
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
         llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
         gemini_api_key = os.getenv("GEMINI_API_KEY", "")

@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import asyncio
 import logging
+import copy
 
 from src.backend.config import Settings
 from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
 from src.backend.session import SessionStore
-from src.mcp.logging_utils import summarize_payload
+from src.mcp.logging_utils import get_logger, summarize_payload
 from src.mcp.tools import list_tools
 
 
@@ -26,8 +27,10 @@ class Orchestrator:
         self._sessions = sessions
         self._settings = settings
         self._llm_client = llm_client
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_logger(__name__)
+        self._logger.setLevel(logging.DEBUG)
         self._cached_voicebank: Optional[str] = None
+        self._cached_voicebank_ids: Optional[List[str]] = None
         self._llm_tool_allowlist = {"modify_score", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
 
@@ -154,7 +157,9 @@ class Orchestrator:
             return None, "LLM is not configured. Please try again later."
         history = snapshot.get("history", [])
         try:
-            system_prompt = build_system_prompt(self._llm_tools, score_available)
+            voicebank_ids = await self._get_voicebank_ids()
+            llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            system_prompt = build_system_prompt(llm_tools, score_available, voicebank_ids)
             text = await asyncio.to_thread(
                 self._llm_client.generate, system_prompt, history
             )
@@ -165,6 +170,50 @@ class Orchestrator:
         if response is None:
             return None, "LLM returned an invalid response. Please try again."
         return response, None
+
+    async def _get_voicebank_ids(self) -> List[str]:
+        if self._cached_voicebank_ids is not None:
+            return self._cached_voicebank_ids
+        try:
+            voicebanks = await asyncio.to_thread(self._router.call_tool, "list_voicebanks", {})
+        except Exception as exc:
+            self._logger.warning("voicebank_list_failed error=%s", exc)
+            return []
+        ids = []
+        if isinstance(voicebanks, list):
+            for entry in voicebanks:
+                if isinstance(entry, dict):
+                    voicebank_id = entry.get("id")
+                    if isinstance(voicebank_id, str) and voicebank_id:
+                        ids.append(voicebank_id)
+        ids = sorted(set(ids))
+        self._cached_voicebank_ids = ids
+        return ids
+
+    def _with_voicebank_enum(
+        self, tools: List[Dict[str, Any]], voicebank_ids: List[str]
+    ) -> List[Dict[str, Any]]:
+        if not voicebank_ids:
+            return tools
+        updated: List[Dict[str, Any]] = []
+        for tool in tools:
+            if tool.get("name") != "synthesize":
+                updated.append(tool)
+                continue
+            tool_copy = copy.deepcopy(tool)
+            schema = tool_copy.get("inputSchema")
+            if isinstance(schema, dict):
+                props = schema.get("properties")
+                if isinstance(props, dict) and isinstance(props.get("voicebank"), dict):
+                    voicebank_schema = dict(props["voicebank"])
+                    voicebank_schema["enum"] = voicebank_ids
+                    props = dict(props)
+                    props["voicebank"] = voicebank_schema
+                    schema = dict(schema)
+                    schema["properties"] = props
+                    tool_copy["inputSchema"] = schema
+            updated.append(tool_copy)
+        return updated
 
     async def _execute_tool_calls(
         self, session_id: str, score: Dict[str, Any], tool_calls: List[ToolCall]

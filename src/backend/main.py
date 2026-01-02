@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import logging
@@ -16,6 +17,7 @@ from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.session import SessionStore
+from src.mcp.logging_utils import get_logger
 
 
 class ChatRequest(BaseModel):
@@ -44,12 +46,26 @@ def create_app() -> FastAPI:
             router.stop()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
-    logger = logging.getLogger("backend.api")
+    logger = get_logger("backend.api")
+    logger.setLevel(logging.DEBUG)
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.router = router
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):

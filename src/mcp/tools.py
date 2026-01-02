@@ -100,7 +100,7 @@ TOOLS: List[Tool] = [
                 "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "clarity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
-            "required": ["score", "voicebank"],
+            "required": ["score"],
             "additionalProperties": False,
         },
         output_schema={

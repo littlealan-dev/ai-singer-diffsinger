@@ -24,7 +24,11 @@ class LlmResponse:
     include_score: bool
 
 
-def build_system_prompt(tools: List[Dict[str, Any]], score_available: bool) -> str:
+def build_system_prompt(
+    tools: List[Dict[str, Any]],
+    score_available: bool,
+    voicebank_ids: Optional[List[str]] = None,
+) -> str:
     tool_specs = []
     for tool in tools:
         tool_specs.append(
@@ -37,9 +41,14 @@ def build_system_prompt(tools: List[Dict[str, Any]], score_available: bool) -> s
 
     score_hint = "available" if score_available else "missing"
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True)
+    voicebanks_text = "none"
+    if voicebank_ids:
+        voicebanks_text = ", ".join(voicebank_ids)
     template = _load_system_prompt()
     return (
-        template.replace("{score_hint}", score_hint).replace("{tool_json}", tool_json)
+        template.replace("{score_hint}", score_hint)
+        .replace("{tool_json}", tool_json)
+        .replace("{voicebanks}", voicebanks_text)
     )
 
 

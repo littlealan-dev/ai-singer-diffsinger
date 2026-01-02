@@ -9,6 +9,8 @@ Non-capabilities:
 
 Score status: {score_hint}.
 
+Available voicebanks (IDs): {voicebanks}
+
 Tool list (name, description, input schema):
 {tool_json}
 
@@ -26,3 +28,4 @@ Rules:
 - include_score is true only if the user requests the score JSON.
 - For modify_score, provide code; the backend injects the current score.
 - For synthesize, omit score and voicebank to use defaults.
+- If you provide a voicebank, it must match one of the available voicebank IDs.
