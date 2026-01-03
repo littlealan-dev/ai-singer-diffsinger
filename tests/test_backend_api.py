@@ -37,6 +37,9 @@ def _make_router_call_tool():
             abs_path = PROJECT_ROOT / rel_path
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_bytes(b"RIFFTESTDATA")
+            if arguments.get("format") == "mp3" and arguments.get("keep_wav"):
+                wav_path = abs_path.with_suffix(".wav")
+                wav_path.write_bytes(b"RIFFTESTDATA")
             return {
                 "audio_base64": "",
                 "duration_seconds": 0.01,
@@ -69,6 +72,26 @@ def client(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    app = create_app()
+    app.state.router.call_tool = _make_router_call_tool()
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        yield test_client, app
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def client_with_env(monkeypatch, request):
+    data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
+    data_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
+    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    overrides = getattr(request, "param", {}) or {}
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
     keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
@@ -273,3 +296,63 @@ def test_get_audio_returns_404_without_audio(client):
     _upload_score(test_client, session_id)
     response = test_client.get(f"/sessions/{session_id}/audio")
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_AUDIO_FORMAT": "mp3", "BACKEND_DEBUG": "0"}],
+    indirect=True,
+)
+def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    audio_url = payload.get("audio_url", "")
+    file_name = audio_url.split("file=")[-1]
+    audio_path = app.state.settings.sessions_dir / session_id / file_name
+    assert audio_path.suffix == ".mp3"
+    assert audio_path.exists()
+    assert not audio_path.with_suffix(".wav").exists()
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_AUDIO_FORMAT": "mp3", "BACKEND_DEBUG": "1"}],
+    indirect=True,
+)
+def test_chat_audio_outputs_wav_when_debug(client_with_env):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    audio_url = payload.get("audio_url", "")
+    file_name = audio_url.split("file=")[-1]
+    audio_path = app.state.settings.sessions_dir / session_id / file_name
+    assert audio_path.suffix == ".mp3"
+    assert audio_path.exists()
+    assert audio_path.with_suffix(".wav").exists()

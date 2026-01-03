@@ -131,13 +131,21 @@ class Orchestrator:
         )
         waveform = synth_result["waveform"]
         sample_rate = synth_result["sample_rate"]
-        file_name = f"audio-{uuid.uuid4().hex}.wav"
+        audio_format = (self._settings.audio_format or "wav").lower()
+        if audio_format != "mp3":
+            audio_format = "wav"
+        extension = "mp3" if audio_format == "mp3" else "wav"
+        file_name = f"audio-{uuid.uuid4().hex}.{extension}"
         output_path = self._sessions.session_dir(session_id) / file_name
         save_args = {
             "waveform": waveform,
             "output_path": str(output_path.relative_to(self._settings.project_root)),
             "sample_rate": sample_rate,
+            "format": audio_format,
         }
+        if audio_format == "mp3":
+            save_args["mp3_bitrate"] = self._settings.audio_mp3_bitrate
+            save_args["keep_wav"] = bool(self._settings.backend_debug)
         self._logger.info("mcp_call tool=save_audio session=%s", session_id)
         save_result = await asyncio.to_thread(self._router.call_tool, "save_audio", save_args)
         duration = save_result.get("duration_seconds", 0.0)

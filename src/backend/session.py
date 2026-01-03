@@ -155,6 +155,26 @@ class SessionStore:
         async with self._lock:
             self._evict_expired_locked()
 
+    async def cleanup_expired_on_disk(self) -> int:
+        removed = 0
+        ttl_seconds = int(self._ttl.total_seconds())
+        now_ts = _utcnow().timestamp()
+        if not self._sessions_dir.exists():
+            return removed
+        for entry in self._sessions_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            latest_mtime = self._latest_mtime(entry)
+            if latest_mtime is None:
+                continue
+            age_seconds = now_ts - latest_mtime
+            if age_seconds <= ttl_seconds:
+                continue
+            async with self._lock:
+                self._remove_session_locked(entry.name)
+            removed += 1
+        return removed
+
     def _is_expired(self, state: SessionState) -> bool:
         return _utcnow() - state.last_active_at > self._ttl
 
@@ -173,9 +193,21 @@ class SessionStore:
             self._remove_session_locked(ordered.pop(0).id)
 
     def _remove_session_locked(self, session_id: str) -> None:
-        state = self._sessions.pop(session_id, None)
-        if state is None:
-            return
+        self._sessions.pop(session_id, None)
         session_dir = self.session_dir(session_id)
         if session_dir.exists():
             shutil.rmtree(session_dir, ignore_errors=True)
+
+    def _latest_mtime(self, session_dir: Path) -> Optional[float]:
+        try:
+            latest = session_dir.stat().st_mtime
+        except FileNotFoundError:
+            return None
+        for path in session_dir.rglob("*"):
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if mtime > latest:
+                latest = mtime
+        return latest

@@ -72,6 +72,8 @@ TOOLS: List[Tool] = [
                 "output_path": {"type": "string"},
                 "sample_rate": {"type": "integer"},
                 "format": {"type": "string"},
+                "mp3_bitrate": {"type": "string"},
+                "keep_wav": {"type": "boolean"},
             },
             "required": ["waveform", "output_path"],
             "additionalProperties": False,

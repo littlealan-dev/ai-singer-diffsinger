@@ -31,6 +31,9 @@ class Settings:
     max_sessions: int
     default_voicebank: str
     default_voice_id: str | None
+    audio_format: str
+    audio_mp3_bitrate: str
+    backend_debug: bool
     llm_provider: str
     gemini_api_key: str
     gemini_base_url: str
@@ -52,10 +55,13 @@ class Settings:
         sessions_dir = data_dir / "sessions"
         max_upload_mb = _env_int("BACKEND_MAX_UPLOAD_MB", 20)
         max_upload_bytes = max_upload_mb * 1024 * 1024
-        session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 24 * 60 * 60)
+        session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 5 * 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
         default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "Raine_Rena_2.01")
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
+        audio_format = os.getenv("BACKEND_AUDIO_FORMAT", "mp3").strip().lower()
+        audio_mp3_bitrate = os.getenv("BACKEND_AUDIO_MP3_BITRATE", "256k").strip()
+        backend_debug = os.getenv("BACKEND_DEBUG", "").lower() in {"1", "true", "yes"}
         llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
         gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         gemini_base_url = os.getenv(
@@ -79,6 +85,9 @@ class Settings:
             max_sessions=max_sessions,
             default_voicebank=default_voicebank,
             default_voice_id=default_voice_id,
+            audio_format=audio_format,
+            audio_mp3_bitrate=audio_mp3_bitrate,
+            backend_debug=backend_debug,
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_base_url=gemini_base_url,

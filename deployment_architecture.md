@@ -53,11 +53,20 @@ graph TD
 ### 3. Inference Engine: GCP Compute Engine (GCE)
 - **Instance Type**: `n1-standard-4` (4 vCPU, 15GB RAM).
 - **GPU**: 1x NVIDIA Tesla T4 (using **Spot/Preemptible** for ~70% savings).
+- **Connectivity & HTTPS**:
+    - **Issue**: Firebase Hosting cannot rewrite traffic to arbitrary GCE IPs.
+    - **Solution**: The Frontend will query the Backend directly via `https://api.yourdomain.com`.
+    - **HTTPS Implementation**: Run **Caddy Server** on the GCE instance.
+        - Caddy automatically provisioned Let's Encrypt SSL certificates.
+        - It acts as a reverse proxy, forwarding `:443` (HTTPS) to `:8000` (FastAPI).
+        - **Why?**: Browsers block Mixed Content (HTTP requests from HTTPS frontend) and require Secure Contexts for audio APIs.
 - **Backend Stack**:
     - **FastAPI**: Exposes REST/WebSocket endpoints.
     - **Uvicorn**: ASGI server.
     - **DiffSinger**: The core AI model.
-- **Port Exposure**: Expose `8000` (FastAPI) and secure it via a Cloud Firewall (restricting access to specific origins if necessary).
+- **Disk Hygiene**:
+    - **Cron Job**: Runs nightly to delete files in `BACKEND_DATA_DIR` older than 24 hours to prevent disk saturation.
+- **Port Exposure**: Expose `80`, `443` (Caddy) and secure via Cloud Firewall.
 
 ### 4. Intelligence Layer: Gemini LLM
 - **Provider**: Google AI (Gemini 1.5 Pro/Flash).
@@ -65,6 +74,9 @@ graph TD
     - Analyzes user natural language instructions (e.g., "Transpose this to C major").
     - Interacts with the **Music21 MCP Server** logic to perform structured score modifications.
     - Formulates synthesis parameters for DiffSinger.
+- **Secrets Management**:
+    - **API Keys**: Store `GEMINI_API_KEY` in **GCP Secret Manager**.
+    - **Injection**: Use a startup script to fetch the secret and inject it into the Docker container's environment variables.
 
 ## Data Flow (Synthesis Sequence)
 

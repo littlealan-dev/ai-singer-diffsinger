@@ -46,6 +46,10 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            removed = await sessions.cleanup_expired_on_disk()
+            if removed:
+                logger = get_logger("backend.api")
+                logger.info("session_cleanup_removed count=%s", removed)
             router.stop()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
@@ -182,7 +186,13 @@ def create_app() -> FastAPI:
             audio_path = settings.project_root / current_audio["path"]
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found.")
-        media_type = "audio/wav" if audio_path.suffix.lower() == ".wav" else "application/octet-stream"
+        suffix = audio_path.suffix.lower()
+        if suffix == ".wav":
+            media_type = "audio/wav"
+        elif suffix == ".mp3":
+            media_type = "audio/mpeg"
+        else:
+            media_type = "application/octet-stream"
         return FileResponse(audio_path, media_type=media_type, filename=audio_path.name)
 
     @app.get("/sessions/{session_id}/score")

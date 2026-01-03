@@ -43,6 +43,8 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         output_path,
         sample_rate=params.get("sample_rate", 44100),
         format=params.get("format", "wav"),
+        mp3_bitrate=params.get("mp3_bitrate", "256k"),
+        keep_wav=bool(params.get("keep_wav", False)),
     )
     audio_bytes = Path(result["path"]).read_bytes()
     return {
