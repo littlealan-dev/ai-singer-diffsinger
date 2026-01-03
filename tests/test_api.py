@@ -220,6 +220,12 @@ class TestVoicebankAPIs(unittest.TestCase):
         self.assertIn("has_pitch_model", info)
         self.assertIn("has_variance_model", info)
         self.assertIn("sample_rate", info)
+        self.assertIn("voice_colors", info)
+        self.assertIn("default_voice_color", info)
+        voice_colors = info.get("voice_colors") or []
+        if voice_colors:
+            color_names = [entry.get("name") for entry in voice_colors]
+            self.assertIn(info.get("default_voice_color"), color_names)
 
 
 class TestSaveAudio(unittest.TestCase):

@@ -32,6 +32,7 @@ class Orchestrator:
         self._logger.setLevel(logging.DEBUG)
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
+        self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
         self._llm_tool_allowlist = {"modify_score", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
 
@@ -228,12 +229,14 @@ class Orchestrator:
         history = snapshot.get("history", [])
         try:
             voicebank_ids = await self._get_voicebank_ids()
+            voicebank_details = await self._get_voicebank_details()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
             system_prompt = build_system_prompt(
                 llm_tools,
                 score_available,
                 voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
+                voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(
                 self._llm_client.generate, system_prompt, history
@@ -264,6 +267,43 @@ class Orchestrator:
         ids = sorted(set(ids))
         self._cached_voicebank_ids = ids
         return ids
+
+    async def _get_voicebank_details(self) -> List[Dict[str, Any]]:
+        if self._cached_voicebank_details is not None:
+            return self._cached_voicebank_details
+        details: List[Dict[str, Any]] = []
+        try:
+            voicebanks = await asyncio.to_thread(self._router.call_tool, "list_voicebanks", {})
+        except Exception as exc:
+            self._logger.warning("voicebank_list_failed error=%s", exc)
+            self._cached_voicebank_details = details
+            return details
+        if isinstance(voicebanks, list):
+            for entry in voicebanks:
+                if not isinstance(entry, dict):
+                    continue
+                voicebank_id = entry.get("id")
+                if not isinstance(voicebank_id, str) or not voicebank_id:
+                    continue
+                try:
+                    info = await asyncio.to_thread(
+                        self._router.call_tool, "get_voicebank_info", {"voicebank": voicebank_id}
+                    )
+                except Exception as exc:
+                    self._logger.warning("voicebank_info_failed id=%s error=%s", voicebank_id, exc)
+                    continue
+                if not isinstance(info, dict):
+                    continue
+                details.append(
+                    {
+                        "id": voicebank_id,
+                        "name": info.get("name") or entry.get("name") or voicebank_id,
+                        "voice_colors": info.get("voice_colors", []),
+                        "default_voice_color": info.get("default_voice_color"),
+                    }
+                )
+        self._cached_voicebank_details = details
+        return details
 
     def _with_voicebank_enum(
         self, tools: List[Dict[str, Any]], voicebank_ids: List[str]

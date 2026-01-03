@@ -64,6 +64,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         voicebank_path,
         part_index=part_index,
         voice_id=params.get("voice_id"),
+        voice_color=params.get("voice_color"),
         articulation=params.get("articulation", 0.0),
         airiness=params.get("airiness", 1.0),
         intensity=params.get("intensity", 1.0),

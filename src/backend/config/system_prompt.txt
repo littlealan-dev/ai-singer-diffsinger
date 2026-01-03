@@ -12,6 +12,8 @@ Score summary (if available):
 {score_summary}
 
 Available voicebanks (IDs): {voicebanks}
+Voicebank color options (if any):
+{voicebank_details}
 
 Tool list (name, description, input schema):
 {tool_json}
@@ -31,6 +33,10 @@ Rules:
 - For modify_score, provide code; the backend injects the current score.
 - For synthesize, omit score and voicebank to use defaults; include part_id and verse_number only when the user selected them.
 - If you provide a voicebank, it must match one of the available voicebank IDs.
+- If the chosen voicebank has no voice colors, do not include voice_color.
+- If the chosen voicebank has voice colors and the user does not request a style, you must choose a suitable voice_color based on the song context and include it.
+- If the user requests a style, map it to the closest valid voice_color for the chosen voicebank and include it.
+- voice_color must match exactly one of the voicebank's voice color IDs.
 - If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
 - If there is only one lyric part, do not ask the user to pick a part.
 - If there is only one verse, do not ask the user to pick a verse.

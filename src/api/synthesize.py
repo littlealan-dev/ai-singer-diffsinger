@@ -15,7 +15,11 @@ from src.api.inference import (
     predict_variance,
     synthesize_audio,
 )
-from src.api.voicebank import load_voicebank_config
+from src.api.voicebank import (
+    load_voicebank_config,
+    resolve_default_voice_color,
+    resolve_voice_color_speaker,
+)
 from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
 
@@ -693,6 +697,7 @@ def synthesize(
     *,
     part_index: int = 0,
     voice_id: Optional[str] = None,
+    voice_color: Optional[str] = None,
     articulation: float = 0.0,
     airiness: float = 1.0,
     intensity: float = 1.0,
@@ -710,6 +715,7 @@ def synthesize(
         voicebank: Voicebank path or ID
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
+        voice_color: Voice color name (subbank color ID)
         articulation: Global legato/staccato adjustment (-1.0 to +1.0)
         airiness: Global breathiness multiplier (0.0 to 2.0)
         intensity: Global tension multiplier (0.0 to 2.0)
@@ -731,6 +737,7 @@ def synthesize(
                     "voicebank": str(voicebank),
                     "part_index": part_index,
                     "voice_id": voice_id,
+                    "voice_color": voice_color,
                     "articulation": articulation,
                     "airiness": airiness,
                     "intensity": intensity,
@@ -743,6 +750,11 @@ def synthesize(
     config = load_voicebank_config(voicebank_path)
     
     sample_rate = config.get("sample_rate", 44100)
+    default_voice_color = resolve_default_voice_color(voicebank_path)
+    selected_voice_color = voice_color or default_voice_color
+    speaker_name = resolve_voice_color_speaker(voicebank_path, selected_voice_color)
+    if speaker_name is None and voice_color is not None:
+        speaker_name = resolve_voice_color_speaker(voicebank_path, default_voice_color)
 
     if airiness < 0.0 or airiness > 1.0:
         raise ValueError("airiness must be between 0.0 and 1.0.")
@@ -770,6 +782,7 @@ def synthesize(
         word_pitches=alignment["word_pitches"],
         voicebank=voicebank_path,
         language_ids=alignment["language_ids"],
+        speaker_name=speaker_name,
         device=device,
     )
     phoneme_ids = alignment["phoneme_ids"]
@@ -796,6 +809,7 @@ def synthesize(
         voicebank=voicebank_path,
         language_ids=language_ids,
         encoder_out=dur_result["encoder_out"],
+        speaker_name=speaker_name,
         device=device,
     )
     
@@ -807,6 +821,7 @@ def synthesize(
         voicebank=voicebank_path,
         language_ids=language_ids,
         encoder_out=dur_result["encoder_out"],
+        speaker_name=speaker_name,
         device=device,
     )
     breathiness = _scale_curve(var_result["breathiness"], airiness)
@@ -823,6 +838,7 @@ def synthesize(
         tension=tension,
         voicing=voicing,
         language_ids=language_ids,
+        speaker_name=speaker_name,
         device=device,
     )
     

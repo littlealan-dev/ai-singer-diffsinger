@@ -128,6 +128,7 @@ def predict_durations(
     voicebank: Union[str, Path],
     *,
     language_ids: Optional[List[int]] = None,
+    speaker_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -140,6 +141,7 @@ def predict_durations(
         word_pitches: MIDI pitch of each word group
         voicebank: Voicebank path
         language_ids: Language ID per phoneme (optional)
+        speaker_name: Optional speaker embedding name/suffix
         device: Device to run inference on
         
     Returns:
@@ -158,6 +160,7 @@ def predict_durations(
                     "word_pitches": word_pitches,
                     "voicebank": str(voicebank),
                     "language_ids": language_ids,
+                    "speaker_name": speaker_name,
                     "device": device,
                 }
             ),
@@ -168,7 +171,7 @@ def predict_durations(
     # Load models
     linguistic = _load_linguistic_model(voicebank_path, device)
     duration = _load_duration_model(voicebank_path, device)
-    spk_embed = load_speaker_embed(voicebank_path)
+    spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
     
     # Prepare tensors
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
@@ -272,6 +275,7 @@ def predict_pitch(
     *,
     language_ids: Optional[List[int]] = None,
     encoder_out: Optional[np.ndarray] = None,
+    speaker_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -286,6 +290,7 @@ def predict_pitch(
         voicebank: Voicebank path
         language_ids: Language ID per phoneme (optional)
         encoder_out: Encoder output from predict_durations (optional)
+        speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
         
     Returns:
@@ -306,6 +311,7 @@ def predict_pitch(
                     "voicebank": str(voicebank),
                     "language_ids": language_ids,
                     "encoder_out": encoder_out,
+                    "speaker_name": speaker_name,
                     "device": device,
                 }
             ),
@@ -330,7 +336,7 @@ def predict_pitch(
         return result
     
     pitch_linguistic = _load_pitch_linguistic_model(voicebank_path, device)
-    spk_embed = load_speaker_embed(voicebank_path)
+    spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     durations_tensor = np.array(durations, dtype=np.int64)[None, :]
@@ -422,6 +428,7 @@ def predict_variance(
     *,
     language_ids: Optional[List[int]] = None,
     encoder_out: Optional[np.ndarray] = None,
+    speaker_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -434,6 +441,7 @@ def predict_variance(
         voicebank: Voicebank path
         language_ids: Language ID per phoneme (optional)
         encoder_out: Encoder output from predict_durations (optional)
+        speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
         
     Returns:
@@ -453,6 +461,7 @@ def predict_variance(
                     "voicebank": str(voicebank),
                     "language_ids": language_ids,
                     "encoder_out": encoder_out,
+                    "speaker_name": speaker_name,
                     "device": device,
                 }
             ),
@@ -477,7 +486,7 @@ def predict_variance(
     config = load_voicebank_config(voicebank_path)
     variance_conf = _load_variance_config(voicebank_path)
     variance_linguistic = _load_variance_linguistic_model(voicebank_path, device)
-    spk_embed = load_speaker_embed(voicebank_path)
+    spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     durations_tensor = np.array(durations, dtype=np.int64)[None, :]
@@ -576,6 +585,7 @@ def synthesize_mel(
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
+    speaker_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -588,6 +598,7 @@ def synthesize_mel(
         voicebank: Voicebank path
         breathiness, tension, voicing: Variance curves (optional)
         language_ids: Language ID per phoneme (optional)
+        speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
         
     Returns:
@@ -609,6 +620,7 @@ def synthesize_mel(
                     "tension": tension,
                     "voicing": voicing,
                     "language_ids": language_ids,
+                    "speaker_name": speaker_name,
                     "device": device,
                 }
             ),
@@ -617,7 +629,7 @@ def synthesize_mel(
     config = load_voicebank_config(voicebank_path)
     
     acoustic = _load_acoustic_model(voicebank_path, device)
-    spk_embed = load_speaker_embed(voicebank_path)
+    spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
     
     n_frames = len(f0)
     
@@ -679,6 +691,7 @@ def synthesize_audio(
     voicing: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
     vocoder_path: Optional[Union[str, Path]] = None,
+    speaker_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -692,6 +705,7 @@ def synthesize_audio(
         breathiness, tension, voicing: Variance curves (optional)
         language_ids: Language ID per phoneme (optional)
         vocoder_path: Optional explicit vocoder path
+        speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
         
     Returns:
@@ -714,6 +728,7 @@ def synthesize_audio(
                     "voicing": voicing,
                     "language_ids": language_ids,
                     "vocoder_path": str(vocoder_path) if vocoder_path else None,
+                    "speaker_name": speaker_name,
                     "device": device,
                 }
             ),
@@ -727,6 +742,7 @@ def synthesize_audio(
         tension=tension,
         voicing=voicing,
         language_ids=language_ids,
+        speaker_name=speaker_name,
         device=device,
     )
     audio_result = vocode(

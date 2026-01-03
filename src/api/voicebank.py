@@ -12,6 +12,81 @@ from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
 
+
+def _load_character_data(path: Path) -> Dict[str, Any]:
+    char_file = path / "character.yaml"
+    if not char_file.exists():
+        return {}
+    try:
+        data = yaml.safe_load(char_file.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _extract_voice_colors(path: Path) -> List[Dict[str, str]]:
+    data = _load_character_data(path)
+    subbanks = data.get("subbanks")
+    voice_colors: List[Dict[str, str]] = []
+    if isinstance(subbanks, list):
+        for entry in subbanks:
+            if not isinstance(entry, dict):
+                continue
+            color = entry.get("color")
+            if not color:
+                continue
+            suffix = entry.get("suffix") or ""
+            voice_colors.append({"name": str(color), "suffix": str(suffix)})
+    return voice_colors
+
+
+def _resolve_default_voice_color(voice_colors: List[Dict[str, str]]) -> Optional[str]:
+    if not voice_colors:
+        return None
+    preferred = ("normal", "standard", "default")
+    for keyword in preferred:
+        for entry in voice_colors:
+            name = entry.get("name", "")
+            if keyword in name.lower():
+                return name
+    return voice_colors[0].get("name")
+
+
+def resolve_default_voice_color(voicebank: Union[str, Path]) -> Optional[str]:
+    path = Path(voicebank)
+    voice_colors = _extract_voice_colors(path)
+    return _resolve_default_voice_color(voice_colors)
+
+
+def resolve_voice_color_suffix(
+    voicebank: Union[str, Path],
+    voice_color: Optional[str],
+) -> Optional[str]:
+    if not voice_color:
+        return None
+    path = Path(voicebank)
+    for entry in _extract_voice_colors(path):
+        if entry.get("name") == voice_color:
+            suffix = entry.get("suffix")
+            return suffix or None
+    return None
+
+
+def resolve_voice_color_speaker(
+    voicebank: Union[str, Path],
+    voice_color: Optional[str],
+) -> Optional[str]:
+    suffix = resolve_voice_color_suffix(voicebank, voice_color)
+    if not suffix:
+        return None
+    path = Path(voicebank)
+    config = load_voicebank_config(path)
+    speakers = config.get("speakers", [])
+    for entry in speakers:
+        if suffix in str(entry):
+            return suffix
+    return None
+
 def load_voicebank_config(voicebank_path: Union[str, Path]) -> Dict[str, Any]:
     """
     Load the dsconfig.yaml from a voicebank.
@@ -114,6 +189,8 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         - has_pitch_model: Whether pitch prediction is available
         - has_variance_model: Whether variance prediction is available
         - speakers: List of speaker names/embeddings
+        - voice_colors: Available subbank colors (if any)
+        - default_voice_color: Default color name (or None)
         - sample_rate: Audio sample rate
     """
     if logger.isEnabledFor(logging.DEBUG):
@@ -150,6 +227,9 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
             name = char_data.get("name", path.name)
         except Exception:
             pass
+
+    voice_colors = _extract_voice_colors(path)
+    default_voice_color = _resolve_default_voice_color(voice_colors)
     
     result = {
         "name": name,
@@ -159,6 +239,8 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "has_pitch_model": has_pitch,
         "has_variance_model": has_variance,
         "speakers": speakers,
+        "voice_colors": voice_colors,
+        "default_voice_color": default_voice_color,
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),

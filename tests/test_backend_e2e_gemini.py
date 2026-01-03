@@ -84,7 +84,7 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
 
     chat_response = test_client.post(
         f"/sessions/{session_id}/chat",
-        json={"message": "Please can you sing this score?"},
+        json={"message": "Please can you sing this song?"},
     )
     assert chat_response.status_code == 200
     payload = chat_response.json()

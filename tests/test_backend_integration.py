@@ -69,3 +69,32 @@ def test_backend_integration_modify_and_synthesize(integration_client):
     audio_response = test_client.get(chat_payload["audio_url"])
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0
+
+
+def test_backend_integration_synthesize_soft_color(integration_client):
+    test_client, app = integration_client
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"'
+            + VOICEBANK_ID
+            + '","voice_color":"02: soft"}}],"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post("/sessions")
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+
+    files = {"file": ("score.xml", SCORE_PATH.read_bytes(), "application/xml")}
+    upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert upload_response.status_code == 200
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "Render with soft color"}
+    )
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.json()
+    assert chat_payload["type"] == "chat_audio"
+    assert chat_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")

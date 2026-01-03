@@ -492,6 +492,7 @@ Run the full pipeline (internal steps 2–6) in one call.
 | | `voicebank`: Voicebank path or ID |
 | | `part_index`: Part index (default: 0) |
 | | `voice_id`: Voice selection within a part (optional) |
+| | `voice_color`: Voice color ID (optional) |
 | | `articulation`: Global legato/staccato (-1.0 to +1.0, default: 0.0) |
 | | `airiness`: Global breathiness (0.0 to 1.0, default: 1.0) |
 | | `intensity`: Global tension (0.0 to 1.0, default: 1.0) |
@@ -514,6 +515,7 @@ synthesize(
   score,
   "Raine_Rena",
   voice_id="soprano",
+  voice_color="02: soft",
   articulation=0.3,
   airiness=0.9,
   intensity=0.8,
@@ -608,7 +610,13 @@ get_voicebank_info("Raine_Rena_2.01")
   "languages": ["en", "ja"],
   "has_pitch_model": true,
   "has_variance_model": true,
-  "speakers": ["normal", "soft", "strong"],
+  "speakers": ["embeds/normal", "embeds/soft", "embeds/strong"],
+  "voice_colors": [
+    {"name": "01: normal", "suffix": "embeds/normal"},
+    {"name": "02: soft", "suffix": "embeds/soft"},
+    {"name": "03: strong", "suffix": "embeds/strong"}
+  ],
+  "default_voice_color": "01: normal",
   "sample_rate": 44100
 }
 ```
