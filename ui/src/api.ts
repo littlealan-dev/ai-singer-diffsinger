@@ -1,3 +1,25 @@
+export type ScoreSummaryPart = {
+  part_id?: string;
+  part_index?: number;
+  part_name?: string;
+  has_lyrics?: boolean;
+};
+
+export type ScoreSummary = {
+  title?: string | null;
+  composer?: string | null;
+  lyricist?: string | null;
+  parts?: ScoreSummaryPart[];
+  available_verses?: Array<string | number>;
+};
+
+export type UploadResponse = {
+  session_id: string;
+  parsed: boolean;
+  current_score?: unknown;
+  score_summary?: ScoreSummary | null;
+};
+
 export type ChatResponse =
   | { type: "chat_text"; message: string; current_score?: unknown }
   | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown };
@@ -26,7 +48,7 @@ export async function createSession(): Promise<{ session_id: string }> {
   return request("/sessions", { method: "POST" });
 }
 
-export async function uploadScore(sessionId: string, file: File): Promise<unknown> {
+export async function uploadScore(sessionId: string, file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/upload`, {

@@ -8,7 +8,6 @@ import json
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
-_SYSTEM_PROMPT_TEMPLATE: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -58,12 +57,9 @@ def build_system_prompt(
 
 
 def _load_system_prompt() -> str:
-    global _SYSTEM_PROMPT_TEMPLATE
-    if _SYSTEM_PROMPT_TEMPLATE is None:
-        if not _SYSTEM_PROMPT_PATH.exists():
-            raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
-        _SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-    return _SYSTEM_PROMPT_TEMPLATE
+    if not _SYSTEM_PROMPT_PATH.exists():
+        raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:

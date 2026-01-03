@@ -31,4 +31,7 @@ Rules:
 - For modify_score, provide code; the backend injects the current score.
 - For synthesize, omit score and voicebank to use defaults; include part_id and verse_number only when the user selected them.
 - If you provide a voicebank, it must match one of the available voicebank IDs.
-- If score_summary shows multiple parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
+- If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
+- If there is only one lyric part, do not ask the user to pick a part.
+- If there is only one verse, do not ask the user to pick a verse.
+- If there is no choice (single lyric part + single verse), proceed to synthesize with defaults.

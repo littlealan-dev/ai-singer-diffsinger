@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
 import clsx from "clsx";
-import { chat, createSession, fetchScoreXml, uploadScore, type ChatResponse } from "./api";
+import {
+  chat,
+  createSession,
+  fetchScoreXml,
+  uploadScore,
+  type ChatResponse,
+  type ScoreSummary,
+} from "./api";
 
 type Role = "user" | "assistant";
 
@@ -11,11 +18,58 @@ type Message = {
   role: Role;
   content: string;
   audioUrl?: string;
+  showSelector?: boolean;
 };
 
 type ScorePayload = {
   name: string;
   data: string;
+};
+
+type PartOption = {
+  key: string;
+  label: string;
+  part_id?: string;
+  part_name?: string;
+  part_index: number;
+  has_lyrics?: boolean;
+};
+
+const buildPartOptions = (summary: ScoreSummary | null): PartOption[] => {
+  if (!summary?.parts?.length) return [];
+  const options = summary.parts.map((part, index) => {
+    const partId = (part.part_id ?? "").trim();
+    const partIndex = Number.isInteger(part.part_index) ? part.part_index : index;
+    const key = partId ? `id:${partId}` : `index:${partIndex}`;
+    const labelBase =
+      (part.part_name ?? "").trim() || (partId ? `Part ${partId}` : `Part ${partIndex + 1}`);
+    const label = part.has_lyrics === false ? `${labelBase} (no lyrics)` : labelBase;
+    return {
+      key,
+      label,
+      part_id: partId || undefined,
+      part_name: (part.part_name ?? "").trim() || undefined,
+      part_index: partIndex,
+      has_lyrics: part.has_lyrics,
+    };
+  });
+  const lyricOptions = options.filter((option) => option.has_lyrics !== false);
+  return lyricOptions.length ? lyricOptions : options;
+};
+
+const buildVerseOptions = (summary: ScoreSummary | null): string[] => {
+  if (!summary) return [];
+  const verses =
+    summary.available_verses && summary.available_verses.length > 0
+      ? summary.available_verses
+      : ["1"];
+  return verses.map((value) => String(value));
+};
+
+const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
+  const parts = buildPartOptions(summary);
+  const verses = buildVerseOptions(summary);
+  return (parts.length > 1 || verses.length > 1) && parts.length > 0 && verses.length > 0;
 };
 
 export default function App() {
@@ -24,6 +78,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [score, setScore] = useState<ScorePayload | null>(null);
+  const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +86,10 @@ export default function App() {
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scoreReady, setScoreReady] = useState(false);
+  const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
+  const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
+  const [pendingSelection, setPendingSelection] = useState(false);
+  const [selectorShown, setSelectorShown] = useState(false);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -97,6 +156,9 @@ export default function App() {
     return `Session ${sessionId.slice(0, 6)} · Upload a score to begin`;
   }, [sessionId, score]);
 
+  const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
+  const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
+
   const appendMessage = (message: Message) => {
     setMessages((prev) => [...prev, message]);
   };
@@ -106,7 +168,15 @@ export default function App() {
     setUploading(true);
     setError(null);
     try {
-      await uploadScore(sessionId, file);
+      const uploadResponse = await uploadScore(sessionId, file);
+      const summary = uploadResponse.score_summary ?? null;
+      setScoreSummary(summary);
+      setPendingSelection(shouldPromptSelection(summary));
+      setSelectorShown(false);
+      const nextPartOptions = buildPartOptions(summary);
+      const nextVerseOptions = buildVerseOptions(summary);
+      setSelectedPartKey(nextPartOptions[0]?.key ?? null);
+      setSelectedVerse(nextVerseOptions[0] ?? null);
       const data = await fetchScoreXml(sessionId);
       setScore({ name: file.name, data });
     } catch (err: any) {
@@ -116,10 +186,8 @@ export default function App() {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || !sessionId) return;
-    const content = input.trim();
-    setInput("");
+  const sendMessage = async (content: string) => {
+    if (!content.trim() || !sessionId) return;
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -135,9 +203,16 @@ export default function App() {
         role: "assistant",
         content: response.message,
       };
+      if (response.type === "chat_text" && pendingSelection && !selectorShown) {
+        assistantMessage.showSelector = true;
+        setSelectorShown(true);
+      }
       if (response.type === "chat_audio") {
         assistantMessage.audioUrl = response.audio_url;
         setAudioUrl(response.audio_url);
+        if (pendingSelection) {
+          setPendingSelection(false);
+        }
       }
       appendMessage(assistantMessage);
     } catch (err: any) {
@@ -146,6 +221,30 @@ export default function App() {
       setStatus(null);
     }
   };
+
+  const handleSend = async () => {
+    if (!input.trim() || !sessionId) return;
+    const content = input.trim();
+    setInput("");
+    await sendMessage(content);
+  };
+
+  const handleSelectionSend = async () => {
+    if (!selectedPartKey || !selectedVerse) return;
+    const selected = partOptions.find((option) => option.key === selectedPartKey);
+    if (!selected) return;
+    const partDescriptor = selected.part_name
+      ? `the ${selected.part_name} part`
+      : selected.part_id
+        ? `part ${selected.part_id}`
+        : `part ${selected.part_index + 1}`;
+    const message = `Please sing ${partDescriptor}, verse ${selectedVerse}.`;
+    setPendingSelection(false);
+    await sendMessage(message);
+  };
+
+  const canShowSelector =
+    pendingSelection && partOptions.length > 0 && verseOptions.length > 0;
 
   const handleZoom = (delta: number) => {
     const next = Math.min(2, Math.max(0.6, zoomLevel + delta));
@@ -236,11 +335,65 @@ export default function App() {
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 <p>{msg.content}</p>
+                {msg.showSelector && canShowSelector && (
+                  <div className="selection-panel">
+                    <div className="selection-grid">
+                      <label className="selection-field">
+                        <span className="selection-label">Part</span>
+                        <select
+                          className="selection-select"
+                          value={selectedPartKey ?? ""}
+                          onChange={(event) => setSelectedPartKey(event.target.value)}
+                        >
+                          {partOptions.map((option) => (
+                            <option key={option.key} value={option.key}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="selection-field">
+                        <span className="selection-label">Verse</span>
+                        <select
+                          className="selection-select"
+                          value={selectedVerse ?? ""}
+                          onChange={(event) => setSelectedVerse(event.target.value)}
+                        >
+                          {verseOptions.map((verse) => (
+                            <option key={verse} value={verse}>
+                              Verse {verse}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="selection-actions">
+                      <button
+                        type="button"
+                        className="selection-send"
+                        onClick={handleSelectionSend}
+                        disabled={!selectedPartKey || !selectedVerse}
+                      >
+                        Use selection
+                      </button>
+                      <span className="selection-hint">Or type your request below.</span>
+                    </div>
+                  </div>
+                )}
                 {msg.audioUrl && (
                   <audio className="audio-player" controls src={msg.audioUrl} />
                 )}
               </div>
             ))}
+            {status && (
+              <div className={clsx("chat-bubble", "assistant", "thinking-bubble")}>
+                <div className="thinking-dots" aria-label="Processing">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            )}
             {isDragging && (
               <div className="drop-overlay">
                 <p>Release to upload your MusicXML file.</p>
