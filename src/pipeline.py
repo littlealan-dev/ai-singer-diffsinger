@@ -560,7 +560,13 @@ class Pipeline:
                 )
                 continue
 
-            is_continuation = note.lyric_is_extended or note.tie_type in ("stop", "continue")
+            lyric_value = note.lyric or ""
+            is_slur = lyric_value.startswith("+")
+            is_continuation = (
+                note.lyric_is_extended
+                or note.tie_type in ("stop", "continue")
+                or is_slur
+            )
             if current_group is None or not is_continuation:
                 current_group = {
                     "notes": [note],
@@ -811,7 +817,13 @@ class Pipeline:
         computed_note_rest: List[bool] = []
         prev_rest = True
         for idx, note in enumerate(notes):
-            is_extension = note.lyric_is_extended or note.tie_type in ("stop", "continue")
+            lyric_value = note.lyric or ""
+            is_slur = lyric_value.startswith("+")
+            is_extension = (
+                note.lyric_is_extended
+                or note.tie_type in ("stop", "continue")
+                or is_slur
+            )
             if is_extension and idx > 0:
                 computed_note_rest.append(prev_rest)
                 continue

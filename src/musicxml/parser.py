@@ -298,17 +298,40 @@ def _collect_part_events(
         for element in elements
         if not element.isRest
     )
-    active_lyric: Optional[str] = None
-    active_syllabic: Optional[str] = None
-    active_extend = False
+    voice_state: Dict[str, Dict[str, object]] = {}
+
+    def _voice_key(element: note.GeneralNote) -> str:
+        voice_ctx = element.getContextByClass(stream.Voice)
+        if voice_ctx is not None:
+            return str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+        return "_default"
+
+    def _state_for(key: str) -> Dict[str, object]:
+        state = voice_state.get(key)
+        if state is None:
+            state = {
+                "lyric": None,
+                "syllabic": None,
+                "extend": False,
+                "end_offset": None,
+            }
+            voice_state[key] = state
+        return state
     events: list[NoteEvent] = []
     for element in elements:
         is_rest = element.isRest
         offset = float(element.getOffsetInHierarchy(part))
+        duration = float(element.duration.quarterLength)
+        end_offset = offset + duration
+        voice_key = _voice_key(element)
+        state = _state_for(voice_key)
         if is_rest:
             if keep_rests:
                 events.append(_make_rest_event(element, offset_beats=offset))
-            active_extend = False
+            state["lyric"] = None
+            state["syllabic"] = None
+            state["extend"] = False
+            state["end_offset"] = end_offset
             continue
         lyric_text, syllabic, is_extended = _extract_lyric_text(element, verse_number=verse_number)
         tie_type = element.tie.type if element.tie is not None else None
@@ -316,14 +339,19 @@ def _collect_part_events(
         lyric_value = lyric_text
         syllabic_value = syllabic
         lyric_extended = False
+        contiguous = state["end_offset"] is not None and abs(float(state["end_offset"]) - offset) < 1e-6
+        has_active_lyric = state["lyric"] is not None
+        should_extend = (
+            has_active_lyric
+            and (bool(state["extend"]) or tie_type in ("start", "continue", "stop") or contiguous)
+        )
+        if lyric_text is None and should_extend:
+            lyric_value = "+"
+            syllabic_value = None
+            lyric_extended = True
         if lyrics_only and has_lyric_text:
-            if lyric_text is None:
-                if (active_extend or tie_type in ("start", "continue", "stop")) and active_lyric is not None:
-                    lyric_value = active_lyric
-                    syllabic_value = active_syllabic
-                    lyric_extended = True
-                else:
-                    include = False
+            if lyric_text is None and not lyric_extended:
+                include = False
         if include:
             events.append(
                 _make_note_event(
@@ -335,13 +363,16 @@ def _collect_part_events(
                 )
             )
         if lyric_text is not None:
-            active_lyric = lyric_text
-            active_syllabic = syllabic
-            active_extend = is_extended
-        elif tie_type in ("start", "continue"):
-            active_extend = True
-        elif tie_type == "stop" and not active_extend:
-            active_extend = False
+            state["lyric"] = lyric_text
+            state["syllabic"] = syllabic
+            state["extend"] = is_extended
+        elif lyric_extended or tie_type in ("start", "continue"):
+            state["extend"] = True
+        elif tie_type == "stop":
+            state["extend"] = False
+        elif not lyric_extended:
+            state["extend"] = False
+        state["end_offset"] = end_offset
     return events
 
 

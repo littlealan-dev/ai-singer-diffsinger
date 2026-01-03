@@ -1,3 +1,4 @@
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -70,9 +71,11 @@ def client(monkeypatch):
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
     with TestClient(app) as test_client:
         yield test_client, app
-    shutil.rmtree(data_dir, ignore_errors=True)
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def _create_session(test_client):

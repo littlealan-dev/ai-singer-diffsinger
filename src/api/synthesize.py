@@ -349,7 +349,13 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
             continue
 
-        is_continuation = bool(note.get("lyric_is_extended")) or note.get("tie_type") in ("stop", "continue")
+        lyric_value = note.get("lyric")
+        is_slur = isinstance(lyric_value, str) and lyric_value.startswith("+")
+        is_continuation = (
+            bool(note.get("lyric_is_extended"))
+            or note.get("tie_type") in ("stop", "continue")
+            or is_slur
+        )
         if current_group is None or not is_continuation:
             current_group = {
                 "notes": [note],
@@ -646,7 +652,13 @@ def align_phonemes_to_notes(
     computed_note_rests: List[bool] = []
     prev_rest = True
     for idx, note in enumerate(notes):
-        is_extension = bool(note.get("lyric_is_extended")) or note.get("tie_type") in ("stop", "continue")
+        lyric_value = note.get("lyric")
+        is_slur = isinstance(lyric_value, str) and lyric_value.startswith("+")
+        is_extension = (
+            bool(note.get("lyric_is_extended"))
+            or note.get("tie_type") in ("stop", "continue")
+            or is_slur
+        )
         if is_extension and idx > 0:
             computed_note_rests.append(prev_rest)
             continue

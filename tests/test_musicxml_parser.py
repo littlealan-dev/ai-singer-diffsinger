@@ -37,6 +37,28 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(part.notes[0].lyric, "1.A")
         self.assertTrue(all(event.lyric is not None for event in part.notes))
 
+    def test_slur_notes_use_plus_marker(self) -> None:
+        score = parse_musicxml(TEST_XML, lyrics_only=True)
+        part = score.parts[0]
+        slur_notes = [event for event in part.notes if event.lyric == "+"]
+        self.assertTrue(slur_notes)
+        for event in slur_notes:
+            self.assertTrue(event.lyric_is_extended)
+        ing_notes = [
+            event for event in part.notes
+            if event.lyric and event.lyric.lower() == "ing"
+        ]
+        self.assertTrue(ing_notes)
+        ing_note = ing_notes[0]
+        ing_end = ing_note.offset_beats + ing_note.duration_beats
+        matches = [
+            event for event in part.notes
+            if event.lyric == "+"
+            and event.voice == ing_note.voice
+            and abs(event.offset_beats - ing_end) < 1e-6
+        ]
+        self.assertTrue(matches)
+
     def test_lyrics_only_keeps_non_lyric_parts(self) -> None:
         score = parse_musicxml(TEST_XML, lyrics_only=True, part_index=1)
         part = score.parts[0]
