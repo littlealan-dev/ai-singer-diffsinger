@@ -12,6 +12,7 @@ from src.api import (
     save_audio,
     synthesize,
 )
+from src.backend.progress import write_progress
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
@@ -61,6 +62,25 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         part_id=params.get("part_id"),
         part_index=params.get("part_index"),
     )
+    progress_path = params.get("progress_path")
+    progress_job_id = params.get("progress_job_id")
+    progress_callback = None
+    if progress_path:
+        resolved_progress = resolve_project_path(progress_path)
+
+        def progress_callback(step: str, message: str, progress: float) -> None:
+            write_progress(
+                resolved_progress,
+                {
+                    "status": "running",
+                    "step": step,
+                    "message": message,
+                    "progress": progress,
+                    "job_id": progress_job_id,
+                },
+                expected_job_id=progress_job_id,
+            )
+
     return synthesize(
         params["score"],
         voicebank_path,
@@ -72,6 +92,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         intensity=params.get("intensity", 1.0),
         clarity=params.get("clarity", 1.0),
         device=device,
+        progress_callback=progress_callback,
     )
 
 

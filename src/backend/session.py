@@ -61,6 +61,9 @@ class SessionStore:
     def session_dir(self, session_id: str) -> Path:
         return (self._sessions_dir / session_id).resolve()
 
+    def progress_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "progress.json"
+
     def _relative_path(self, path: Path) -> str:
         return str(path.relative_to(self._project_root))
 

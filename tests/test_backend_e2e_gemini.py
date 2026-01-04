@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -88,10 +89,11 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
     )
     assert chat_response.status_code == 200
     payload = chat_response.json()
-    assert payload.get("type") == "chat_audio", f"Unexpected response: {payload}"
-    assert payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
+    assert payload.get("type") == "chat_progress", f"Unexpected response: {payload}"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
 
-    audio_response = test_client.get(payload["audio_url"])
+    audio_response = test_client.get(progress_payload["audio_url"])
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0
 
@@ -138,8 +140,9 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
     )
     assert second_response.status_code == 200
     second_payload = second_response.json()
-    assert second_payload["type"] == "chat_audio"
-    assert second_payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
+    assert second_payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, second_payload["progress_url"])
+    assert progress_payload.get("audio_url", "").startswith(f"/sessions/{session_id}/audio")
     assert "current_score" in second_payload
     assert second_payload["current_score"]["version"] >= 2
 
@@ -174,3 +177,17 @@ def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
     assert "audio_url" not in payload
     message = (payload.get("message") or "").lower()
     assert "verse" in message
+
+
+def _wait_for_progress(test_client, progress_url, timeout_seconds=120.0):
+    deadline = time.time() + timeout_seconds
+    last_payload = None
+    while time.time() < deadline:
+        response = test_client.get(progress_url)
+        assert response.status_code == 200
+        payload = response.json()
+        last_payload = payload
+        if payload.get("status") in ("done", "error"):
+            return payload
+        time.sleep(0.5)
+    raise AssertionError(f"Timed out waiting for progress: {last_payload}")

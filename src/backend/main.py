@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, AsyncIterator, Optional
+from typing import Any, Dict, AsyncIterator, Iterator, Optional
 import asyncio
 from contextlib import asynccontextmanager
 import time
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 import logging
 import zipfile
@@ -18,6 +18,7 @@ from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
+from src.backend.progress import read_progress
 from src.backend.session import SessionStore
 from src.mcp.logging_utils import ensure_timestamped_handlers, get_logger
 
@@ -165,7 +166,8 @@ def create_app() -> FastAPI:
         session_id: str,
         request: Request,
         file: Optional[str] = None,
-    ) -> FileResponse:
+        stream: bool = False,
+    ) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         if file:
@@ -193,7 +195,24 @@ def create_app() -> FastAPI:
             media_type = "audio/mpeg"
         else:
             media_type = "application/octet-stream"
+        if stream:
+            headers = {"Content-Length": str(audio_path.stat().st_size)}
+            return StreamingResponse(
+                _iter_file(audio_path),
+                media_type=media_type,
+                headers=headers,
+            )
         return FileResponse(audio_path, media_type=media_type, filename=audio_path.name)
+
+    @app.get("/sessions/{session_id}/progress")
+    async def get_progress(session_id: str, request: Request) -> Dict[str, Any]:
+        sessions: SessionStore = request.app.state.sessions
+        await _get_session_or_404(sessions, session_id)
+        progress_path = sessions.progress_path(session_id)
+        payload = read_progress(progress_path)
+        if payload is None:
+            return {"status": "idle"}
+        return payload
 
     @app.get("/sessions/{session_id}/score")
     async def get_score(session_id: str, request: Request) -> Response:
@@ -253,6 +272,15 @@ def _read_musicxml_content(path: Path) -> str:
         xml_name = _find_mxl_xml(archive)
         xml_bytes = archive.read(xml_name)
     return xml_bytes.decode("utf-8", errors="replace")
+
+
+def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
 
 def _find_mxl_xml(archive: zipfile.ZipFile) -> str:

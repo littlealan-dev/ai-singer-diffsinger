@@ -4,7 +4,7 @@ Convenience synthesize API - runs the full pipeline.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import json
 import numpy as np
 
@@ -703,6 +703,7 @@ def synthesize(
     intensity: float = 1.0,
     clarity: float = 1.0,
     device: str = "cpu",
+    progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> Dict[str, Any]:
     """
     Run the full synthesis pipeline (steps 2-6) in one call.
@@ -721,6 +722,7 @@ def synthesize(
         intensity: Global tension multiplier (0.0 to 2.0)
         clarity: Global voicing multiplier (0.0 to 2.0)
         device: Device for inference
+        progress_callback: Optional callback for step updates
         
     Returns:
         Dict with:
@@ -728,6 +730,14 @@ def synthesize(
         - sample_rate: Sample rate
         - duration_seconds: Audio duration
     """
+    def _notify(step: str, message: str, progress: float) -> None:
+        if not progress_callback:
+            return
+        try:
+            progress_callback(step, message, progress)
+        except Exception:
+            logger.debug("progress_callback_failed step=%s", step, exc_info=True)
+
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "synthesize input=%s",
@@ -766,6 +776,7 @@ def synthesize(
     if articulation < -1.0 or articulation > 1.0:
         raise ValueError("articulation must be between -1.0 and 1.0.")
 
+    _notify("align", "Reading the lyrics and score...", 0.1)
     alignment = align_phonemes_to_notes(
         score,
         voicebank_path,
@@ -775,6 +786,7 @@ def synthesize(
     )
     
     # Step 3: Predict durations
+    _notify("durations", "Locking in the tempo...", 0.3)
     dur_result = predict_durations(
         phoneme_ids=alignment["phoneme_ids"],
         word_boundaries=alignment["word_boundaries"],
@@ -800,6 +812,7 @@ def synthesize(
         )
     
     # Step 4: Predict pitch
+    _notify("pitch", "Finding the melody line...", 0.5)
     pitch_result = predict_pitch(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -814,6 +827,7 @@ def synthesize(
     )
     
     # Step 5: Predict variance
+    _notify("variance", "Planning the phrasing...", 0.65)
     var_result = predict_variance(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -829,6 +843,7 @@ def synthesize(
     voicing = _scale_curve(var_result["voicing"], clarity)
     
     # Step 6: Synthesize audio
+    _notify("synthesize", "Taking a breath for the take...", 0.8)
     audio_result = synthesize_audio(
         phoneme_ids=phoneme_ids,
         durations=durations,

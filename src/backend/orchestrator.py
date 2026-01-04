@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import asyncio
 import logging
@@ -8,6 +9,7 @@ import copy
 import uuid
 
 from src.backend.config import Settings
+from src.backend.progress import write_progress
 from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
@@ -35,6 +37,7 @@ class Orchestrator:
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
         self._llm_tool_allowlist = {"modify_score", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
+        self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
     async def handle_chat(self, session_id: str, message: str) -> Dict[str, Any]:
         self._logger.debug("chat_user session=%s message=%s", session_id, message)
@@ -100,7 +103,13 @@ class Orchestrator:
         return response
 
     async def _synthesize(
-        self, session_id: str, score: Dict[str, Any], arguments: Dict[str, Any]
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        *,
+        progress_path: Optional[Path] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         synth_args = dict(arguments)
         part_id = synth_args.get("part_id")
@@ -124,6 +133,11 @@ class Orchestrator:
             synth_args["voicebank"] = await self._resolve_voicebank()
         if "voice_id" not in synth_args and self._settings.default_voice_id:
             synth_args["voice_id"] = self._settings.default_voice_id
+        if progress_path is not None:
+            synth_args["progress_path"] = str(
+                progress_path.relative_to(self._settings.project_root)
+            )
+            synth_args["progress_job_id"] = job_id
 
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
         synth_result = await asyncio.to_thread(
@@ -146,6 +160,18 @@ class Orchestrator:
         if audio_format == "mp3":
             save_args["mp3_bitrate"] = self._settings.audio_mp3_bitrate
             save_args["keep_wav"] = bool(self._settings.backend_debug)
+        if progress_path is not None:
+            write_progress(
+                progress_path,
+                {
+                    "status": "running",
+                    "step": "encode",
+                    "message": "Capturing the take...",
+                    "progress": 0.9,
+                    "job_id": job_id,
+                },
+                expected_job_id=job_id,
+            )
         self._logger.info("mcp_call tool=save_audio session=%s", session_id)
         save_result = await asyncio.to_thread(self._router.call_tool, "save_audio", save_args)
         duration = save_result.get("duration_seconds", 0.0)
@@ -156,6 +182,113 @@ class Orchestrator:
             "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
         }
         return response
+
+    def _progress_path(self, session_id: str) -> Path:
+        return self._sessions.progress_path(session_id)
+
+    async def _start_synthesis_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        existing = self._synthesis_tasks.get(session_id)
+        if existing and not existing.done():
+            existing.cancel()
+        job_id = uuid.uuid4().hex
+        progress_path = self._progress_path(session_id)
+        write_progress(
+            progress_path,
+            {
+                "status": "queued",
+                "step": "queued",
+                "message": "Got it, getting ready to sing...",
+                "progress": 0.0,
+                "job_id": job_id,
+            },
+        )
+        task = asyncio.create_task(
+            self._run_synthesis_job(session_id, copy.deepcopy(score), arguments, job_id, progress_path)
+        )
+        self._synthesis_tasks[session_id] = task
+
+        def _cleanup(_: asyncio.Task) -> None:
+            self._synthesis_tasks.pop(session_id, None)
+
+        task.add_done_callback(_cleanup)
+        return {
+            "type": "chat_progress",
+            "message": "Give me a moment to prepare the take...",
+            "progress_url": f"/sessions/{session_id}/progress",
+            "job_id": job_id,
+        }
+
+    async def _run_synthesis_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        job_id: str,
+        progress_path: Path,
+    ) -> None:
+        try:
+            write_progress(
+                progress_path,
+                {
+                    "status": "running",
+                    "step": "prepare",
+                    "message": "Warming up the voice...",
+                    "progress": 0.05,
+                    "job_id": job_id,
+                },
+                expected_job_id=job_id,
+            )
+            response = await self._synthesize(
+                session_id,
+                score,
+                arguments,
+                progress_path=progress_path,
+                job_id=job_id,
+            )
+            write_progress(
+                progress_path,
+                {
+                    "status": "done",
+                    "step": "done",
+                    "message": "Your take is ready.",
+                    "progress": 1.0,
+                    "audio_url": response.get("audio_url"),
+                    "job_id": job_id,
+                },
+                expected_job_id=job_id,
+            )
+        except asyncio.CancelledError:
+            write_progress(
+                progress_path,
+                {
+                    "status": "error",
+                    "step": "cancelled",
+                    "message": "That take was cancelled.",
+                    "progress": 1.0,
+                    "job_id": job_id,
+                },
+                expected_job_id=job_id,
+            )
+            raise
+        except Exception as exc:
+            self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
+            write_progress(
+                progress_path,
+                {
+                    "status": "error",
+                    "step": "error",
+                    "message": "Couldn't finish the take.",
+                    "error": str(exc),
+                    "progress": 1.0,
+                    "job_id": job_id,
+                },
+                expected_job_id=job_id,
+            )
 
     def _selection_requested(
         self,
@@ -370,7 +503,9 @@ class Orchestrator:
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
-                audio_response = await self._synthesize(session_id, current_score, synth_args)
+                audio_response = await self._start_synthesis_job(
+                    session_id, current_score, synth_args
+                )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
 

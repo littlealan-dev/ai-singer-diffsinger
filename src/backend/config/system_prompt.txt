@@ -32,6 +32,7 @@ Rules:
 - include_score is true only if the user requests the score JSON.
 - For modify_score, provide code; the backend injects the current score.
 - For synthesize, omit score and voicebank to use defaults; include part_id and verse_number only when the user selected them.
+- When you call synthesize, set final_message to a short "synthesis in progress" confirmation and do not claim the audio is already ready.
 - If you provide a voicebank, it must match one of the available voicebank IDs.
 - If the chosen voicebank has no voice colors, do not include voice_color.
 - If the chosen voicebank has voice colors and the user does not request a style, you must choose a suitable voice_color based on the song context and include it.

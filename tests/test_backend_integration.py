@@ -1,3 +1,4 @@
+import time
 import uuid
 from pathlib import Path
 
@@ -61,12 +62,17 @@ def test_backend_integration_modify_and_synthesize(integration_client):
     )
     assert chat_response.status_code == 200
     chat_payload = chat_response.json()
-    assert chat_payload["type"] == "chat_audio"
+    assert chat_payload["type"] == "chat_progress"
     assert chat_payload["message"] == "Rendered."
-    assert chat_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
+    assert chat_payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
     assert chat_payload["current_score"]["version"] == 2
 
-    audio_response = test_client.get(chat_payload["audio_url"])
+    progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    audio_url = progress_payload["audio_url"]
+    assert audio_url.startswith(f"/sessions/{session_id}/audio")
+
+    audio_response = test_client.get(audio_url)
     assert audio_response.status_code == 200
     assert len(audio_response.content) > 0
 
@@ -96,5 +102,20 @@ def test_backend_integration_synthesize_soft_color(integration_client):
     )
     assert chat_response.status_code == 200
     chat_payload = chat_response.json()
-    assert chat_payload["type"] == "chat_audio"
-    assert chat_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
+    assert chat_payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
+    assert progress_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
+
+
+def _wait_for_progress(test_client, progress_url, timeout_seconds=30.0):
+    deadline = time.time() + timeout_seconds
+    last_payload = None
+    while time.time() < deadline:
+        response = test_client.get(progress_url)
+        assert response.status_code == 200
+        payload = response.json()
+        last_payload = payload
+        if payload.get("status") in ("done", "error"):
+            return payload
+        time.sleep(0.1)
+    raise AssertionError(f"Timed out waiting for progress: {last_payload}")

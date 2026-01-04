@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -113,6 +114,20 @@ def _upload_score(test_client, session_id, filename="score.xml"):
     xml = b"<score-partwise version='3.1'></score-partwise>"
     files = {"file": (filename, xml, "application/xml")}
     return test_client.post(f"/sessions/{session_id}/upload", files=files)
+
+
+def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
+    deadline = time.time() + timeout_seconds
+    last_payload = None
+    while time.time() < deadline:
+        response = test_client.get(progress_url)
+        assert response.status_code == 200
+        payload = response.json()
+        last_payload = payload
+        if payload.get("status") in ("done", "error"):
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for progress: {last_payload}")
 
 
 def test_create_session_returns_id(client):
@@ -253,12 +268,17 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["type"] == "chat_audio"
+    assert payload["type"] == "chat_progress"
     assert payload["message"] == "Rendered."
-    assert payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
+    assert payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
     assert "current_score" in payload
 
-    audio_response = test_client.get(payload["audio_url"])
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    audio_url = progress_payload["audio_url"]
+    assert audio_url.startswith(f"/sessions/{session_id}/audio")
+
+    audio_response = test_client.get(audio_url)
     assert audio_response.status_code == 200
     assert audio_response.content.startswith(b"RIFF")
 
@@ -320,7 +340,9 @@ def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
     )
     assert response.status_code == 200
     payload = response.json()
-    audio_url = payload.get("audio_url", "")
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    audio_url = progress_payload.get("audio_url", "")
     file_name = audio_url.split("file=")[-1]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
@@ -350,7 +372,9 @@ def test_chat_audio_outputs_wav_when_debug(client_with_env):
     )
     assert response.status_code == 200
     payload = response.json()
-    audio_url = payload.get("audio_url", "")
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    audio_url = progress_payload.get("audio_url", "")
     file_name = audio_url.split("file=")[-1]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"

@@ -22,7 +22,24 @@ export type UploadResponse = {
 
 export type ChatResponse =
   | { type: "chat_text"; message: string; current_score?: unknown }
-  | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown };
+  | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown }
+  | {
+      type: "chat_progress";
+      message: string;
+      progress_url: string;
+      job_id?: string;
+      current_score?: unknown;
+    };
+
+export type ProgressResponse = {
+  status: "idle" | "queued" | "running" | "done" | "error";
+  message?: string;
+  step?: string;
+  progress?: number;
+  audio_url?: string;
+  job_id?: string;
+  error?: string;
+};
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -33,6 +50,12 @@ function withApiBase(url: string): string {
   }
   if (!API_BASE) return url;
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+function withStream(url: string): string {
+  if (!url) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}stream=1`;
 }
 
 async function request<T>(path: string, options: RequestInit): Promise<T> {
@@ -80,8 +103,27 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
   if (response.type === "chat_audio") {
     return {
       ...response,
-      audio_url: withApiBase(response.audio_url),
+      audio_url: withStream(withApiBase(response.audio_url)),
+    };
+  }
+  if (response.type === "chat_progress") {
+    return {
+      ...response,
+      progress_url: withApiBase(response.progress_url),
     };
   }
   return response;
+}
+
+export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
+  const response = await fetch(withApiBase(progressUrl));
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  const payload = (await response.json()) as ProgressResponse;
+  if (payload.audio_url) {
+    payload.audio_url = withStream(withApiBase(payload.audio_url));
+  }
+  return payload;
 }
