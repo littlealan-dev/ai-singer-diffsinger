@@ -39,6 +39,7 @@ ui/node_modules/
 ui/dist/
 ui/.vite/
 ui/.env*
+ui/*.log
 
 # Artifacts
 outputs/
