@@ -304,6 +304,11 @@ body.landing-active #root {
   border-color: rgba(183, 125, 255, 0.28);
 }
 
+.chat-bubble.progress-bubble,
+.chat-bubble.audio-bubble {
+  min-width: min(320px, 100%);
+}
+
 .chat-bubble p {
   margin: 0;
   white-space: pre-wrap;

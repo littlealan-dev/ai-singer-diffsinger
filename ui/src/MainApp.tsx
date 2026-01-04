@@ -6,8 +6,9 @@ import {
   chat,
   createSession,
   fetchScoreXml,
+  fetchProgress,
   uploadScore,
-  type ChatResponse,
+  type ProgressResponse,
   type ScoreSummary,
 } from "./api";
 
@@ -19,6 +20,9 @@ type Message = {
   content: string;
   audioUrl?: string;
   showSelector?: boolean;
+  progressUrl?: string;
+  isProgress?: boolean;
+  progressValue?: number;
 };
 
 type ScorePayload = {
@@ -90,6 +94,10 @@ export default function MainApp() {
   const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState(false);
   const [selectorShown, setSelectorShown] = useState(false);
+  const [activeProgress, setActiveProgress] = useState<{
+    messageId: string;
+    url: string;
+  } | null>(null);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -149,6 +157,72 @@ export default function MainApp() {
     osmdRef.current.zoom = zoomLevel;
     osmdRef.current.render();
   }, [zoomLevel, scoreReady]);
+
+  useEffect(() => {
+    if (!activeProgress) return;
+    let cancelled = false;
+
+    const appendProgressMessage = (current: string, incoming?: string | null): string => {
+      if (!incoming) return current;
+      const trimmedIncoming = incoming.trim();
+      if (!trimmedIncoming) return current;
+      if (!current) return trimmedIncoming;
+      const trimmedCurrent = current.trimEnd();
+      const lastLine = trimmedCurrent.split("\n").pop() ?? "";
+      if (lastLine.trim() === trimmedIncoming) {
+        return current;
+      }
+      return `${trimmedCurrent}\n${trimmedIncoming}`;
+    };
+
+    const applyProgress = (payload: ProgressResponse) => {
+      const nextMessage = payload.message;
+      const nextProgress = payload.progress;
+      const nextAudioUrl = payload.audio_url;
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== activeProgress.messageId) return msg;
+          return {
+            ...msg,
+            content: appendProgressMessage(msg.content, nextMessage),
+            progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
+            audioUrl: nextAudioUrl || msg.audioUrl,
+            isProgress: payload.status !== "done" && payload.status !== "error",
+          };
+        })
+      );
+      if (nextAudioUrl) {
+        setAudioUrl(nextAudioUrl);
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const payload = await fetchProgress(activeProgress.url);
+        if (cancelled) return;
+        applyProgress(payload);
+        if (payload.status === "done") {
+          setActiveProgress(null);
+        }
+        if (payload.status === "error") {
+          setActiveProgress(null);
+          setError(payload.error || payload.message || "Synthesis failed.");
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err?.message || "Failed to fetch synthesis progress.");
+          setActiveProgress(null);
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeProgress]);
 
   const headerSubtitle = useMemo(() => {
     if (!sessionId) return "Initializing session...";
@@ -214,7 +288,17 @@ export default function MainApp() {
           setPendingSelection(false);
         }
       }
+      if (response.type === "chat_progress") {
+        assistantMessage.progressUrl = response.progress_url;
+        assistantMessage.isProgress = true;
+        if (pendingSelection) {
+          setPendingSelection(false);
+        }
+      }
       appendMessage(assistantMessage);
+      if (response.type === "chat_progress") {
+        setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to send message.");
     } finally {
@@ -331,10 +415,23 @@ export default function MainApp() {
             {messages.map((msg, index) => (
               <div
                 key={msg.id}
-                className={clsx("chat-bubble", msg.role, "reveal")}
+                className={clsx(
+                  "chat-bubble",
+                  msg.role,
+                  msg.isProgress && "progress-bubble",
+                  msg.audioUrl && "audio-bubble",
+                  "reveal"
+                )}
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 <p>{msg.content}</p>
+                {msg.isProgress && !msg.audioUrl && (
+                  <div className="thinking-dots" aria-label="Processing">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                )}
                 {msg.showSelector && canShowSelector && (
                   <div className="selection-panel">
                     <div className="selection-grid">
