@@ -9,8 +9,8 @@ from src.backend.config import Settings
 
 
 class GeminiRestClient:
-    def __init__(self, settings: Settings) -> None:
-        self._api_key = settings.gemini_api_key
+    def __init__(self, settings: Settings, *, api_key: str | None = None) -> None:
+        self._api_key = api_key or settings.gemini_api_key
         self._base_url = settings.gemini_base_url
         self._model = settings.gemini_model
         self._timeout = settings.gemini_timeout_seconds

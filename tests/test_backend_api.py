@@ -75,6 +75,7 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
+    monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
@@ -154,6 +155,23 @@ def test_missing_auth_header_returns_401(monkeypatch):
         assert response.status_code == 401
     if not keep_outputs:
         shutil.rmtree(data_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"LLM_MAX_MESSAGE_CHARS": "5"}],
+    indirect=True,
+)
+def test_rejects_too_long_message(client_with_env):
+    test_client, _ = client_with_env
+    response = test_client.post("/sessions")
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    _upload_score(test_client, session_id)
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "too long"}
+    )
+    assert response.status_code == 400
 
 
 def test_upload_musicxml_parses_and_saves(client):

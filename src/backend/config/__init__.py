@@ -36,6 +36,10 @@ def _project_id() -> str | None:
     return None
 
 
+def _app_env() -> str:
+    return os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -51,9 +55,14 @@ class Settings:
     backend_debug: bool
     llm_provider: str
     gemini_api_key: str
+    gemini_api_key_secret: str
+    gemini_api_key_secret_version: str
     gemini_base_url: str
     gemini_model: str
     gemini_timeout_seconds: float
+    llm_max_message_chars: int
+    llm_max_tool_code_chars: int
+    llm_max_history_items: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -63,6 +72,9 @@ class Settings:
     backend_auth_disabled: bool
     backend_use_storage: bool
     storage_bucket: str
+    app_env: str
+    project_id: str | None
+    backend_require_app_check: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -82,12 +94,17 @@ class Settings:
         backend_debug = os.getenv("BACKEND_DEBUG", "").lower() in {"1", "true", "yes"}
         llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
         gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+        gemini_api_key_secret = os.getenv("GEMINI_API_KEY_SECRET", "GEMINI_API_KEY")
+        gemini_api_key_secret_version = os.getenv("GEMINI_API_KEY_SECRET_VERSION", "latest")
         gemini_base_url = os.getenv(
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta",
         )
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
+        llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
+        llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
+        llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
@@ -99,6 +116,10 @@ class Settings:
         project_id = _project_id()
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
         storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
+        app_env = _app_env()
+        backend_require_app_check = _env_bool(
+            "BACKEND_REQUIRE_APP_CHECK", app_env.lower() not in {"dev", "development", "local", "test"}
+        )
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -113,9 +134,14 @@ class Settings:
             backend_debug=backend_debug,
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
+            gemini_api_key_secret=gemini_api_key_secret,
+            gemini_api_key_secret_version=gemini_api_key_secret_version,
             gemini_base_url=gemini_base_url,
             gemini_model=gemini_model,
             gemini_timeout_seconds=gemini_timeout_seconds,
+            llm_max_message_chars=llm_max_message_chars,
+            llm_max_tool_code_chars=llm_max_tool_code_chars,
+            llm_max_history_items=llm_max_history_items,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,
@@ -125,4 +151,7 @@ class Settings:
             backend_auth_disabled=backend_auth_disabled,
             backend_use_storage=backend_use_storage,
             storage_bucket=storage_bucket,
+            app_env=app_env,
+            project_id=project_id,
+            backend_require_app_check=backend_require_app_check,
         )

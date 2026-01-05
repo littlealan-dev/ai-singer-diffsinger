@@ -43,6 +43,14 @@ class Orchestrator:
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
     async def handle_chat(self, session_id: str, message: str, *, user_id: str) -> Dict[str, Any]:
+        if len(message) > self._settings.llm_max_message_chars:
+            return {
+                "type": "chat_text",
+                "message": (
+                    "Message too long. Please keep instructions under "
+                    f"{self._settings.llm_max_message_chars} characters."
+                ),
+            }
         self._logger.debug("chat_user session=%s message=%s", session_id, message)
         await self._sessions.append_history(session_id, "user", message)
         snapshot = await self._sessions.get_snapshot(session_id, user_id)

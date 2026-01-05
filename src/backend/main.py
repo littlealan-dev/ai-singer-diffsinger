@@ -28,6 +28,7 @@ from src.mcp.logging_utils import (
     get_logger,
     set_log_context,
 )
+from firebase_admin import app_check
 
 
 class ChatRequest(BaseModel):
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
             session_id,
         )
         try:
+            await _require_app_check(request)
             response = await call_next(request)
         finally:
             duration_ms = (time.monotonic() - start) * 1000.0
@@ -177,6 +179,8 @@ def create_app() -> FastAPI:
         orchestrator: Orchestrator = request.app.state.orchestrator
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
+        if len(payload.message) > request.app.state.settings.llm_max_message_chars:
+            raise HTTPException(status_code=400, detail="Message too long.")
         try:
             return await orchestrator.handle_chat(session_id, payload.message, user_id=user_id)
         except McpError as exc:
@@ -313,6 +317,19 @@ async def _get_user_id_or_401(request: Request) -> str:
         raise
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
+
+
+async def _require_app_check(request: Request) -> None:
+    settings: Settings = request.app.state.settings
+    if not settings.backend_require_app_check:
+        return
+    token = request.headers.get("X-Firebase-AppCheck")
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing App Check token.")
+    try:
+        await asyncio.to_thread(app_check.verify_token, token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid App Check token.") from exc
 
 
 async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:

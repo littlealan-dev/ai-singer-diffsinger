@@ -109,6 +109,9 @@ graph TD
   - `api-sa`: Firestore user, Storage object creator, Pub/Sub publisher.
   - `worker-sa`: Firestore user, Storage object admin, Pub/Sub subscriber.
 - Storage rules ensure users can only access their own uploads and outputs.
+- Store `GEMINI_API_KEY` in Secret Manager for production. In dev, use `GEMINI_API_KEY` from env.
+- Configure secret name/version with `GEMINI_API_KEY_SECRET` and `GEMINI_API_KEY_SECRET_VERSION` (default: `GEMINI_API_KEY:latest`).
+- Enable Firebase App Check and verify `X-Firebase-AppCheck` tokens on the API in non-dev environments.
 
 ## Cost Controls
 
@@ -152,6 +155,9 @@ graph TD
 7. CI/CD and deployments
    - Use Cloud Build to build and deploy Cloud Run images.
    - Use Firebase CLI to deploy Hosting and rules.
+   - Inject `GEMINI_API_KEY` from Secret Manager in Cloud Run:
+     - `gcloud run deploy api --set-secrets GEMINI_API_KEY=projects/PROJECT_ID/secrets/GEMINI_API_KEY:latest`
+   - Require App Check in non-dev with `BACKEND_REQUIRE_APP_CHECK=true` (default when `APP_ENV=prod`).
 
 8. Monitoring and alerts
    - Set up log-based alerts for failures and retries.
