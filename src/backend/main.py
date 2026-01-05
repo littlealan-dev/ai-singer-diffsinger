@@ -20,6 +20,7 @@ from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.progress import read_progress
 from src.backend.session import SessionStore
+from src.backend.firebase_app import verify_id_token
 from src.mcp.logging_utils import ensure_timestamped_handlers, get_logger
 
 
@@ -99,7 +100,8 @@ def create_app() -> FastAPI:
 
     @app.post("/sessions")
     async def create_session(request: Request) -> Dict[str, str]:
-        session = await request.app.state.sessions.create_session()
+        user_id = await _get_user_id_or_401(request)
+        session = await request.app.state.sessions.create_session(user_id=user_id)
         return {"session_id": session.id}
 
     @app.post("/sessions/{session_id}/upload")
@@ -110,7 +112,8 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        await _get_session_or_404(sessions, session_id)
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
 
         original_name = Path(file.filename or "").name
         suffix = Path(original_name).suffix.lower()
@@ -153,9 +156,10 @@ def create_app() -> FastAPI:
     async def chat(session_id: str, request: Request, payload: ChatRequest) -> Dict[str, Any]:
         sessions: SessionStore = request.app.state.sessions
         orchestrator: Orchestrator = request.app.state.orchestrator
-        await _get_session_or_404(sessions, session_id)
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
         try:
-            return await orchestrator.handle_chat(session_id, payload.message)
+            return await orchestrator.handle_chat(session_id, payload.message, user_id=user_id)
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -170,6 +174,8 @@ def create_app() -> FastAPI:
     ) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
         if file:
             session_dir = sessions.session_dir(session_id)
             file_name = Path(file).name
@@ -181,7 +187,7 @@ def create_app() -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid audio path.") from exc
         else:
-            snapshot = await _get_snapshot_or_404(sessions, session_id)
+            snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
             current_audio = snapshot.get("current_audio")
             if not current_audio:
                 raise HTTPException(status_code=404, detail="No audio available for this session.")
@@ -207,7 +213,8 @@ def create_app() -> FastAPI:
     @app.get("/sessions/{session_id}/progress")
     async def get_progress(session_id: str, request: Request) -> Dict[str, Any]:
         sessions: SessionStore = request.app.state.sessions
-        await _get_session_or_404(sessions, session_id)
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
         progress_path = sessions.progress_path(session_id)
         payload = read_progress(progress_path)
         if payload is None:
@@ -218,7 +225,8 @@ def create_app() -> FastAPI:
     async def get_score(session_id: str, request: Request) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        session = await _get_session_or_404(sessions, session_id)
+        user_id = await _get_user_id_or_401(request)
+        session = await _get_session_or_404(sessions, session_id, user_id)
         rel_path = session.files.get("musicxml_path")
         if not rel_path:
             raise HTTPException(status_code=404, detail="Score not found.")
@@ -231,18 +239,46 @@ def create_app() -> FastAPI:
     return app
 
 
-async def _get_session_or_404(sessions: SessionStore, session_id: str) -> Any:
+async def _get_session_or_404(
+    sessions: SessionStore, session_id: str, user_id: Optional[str]
+) -> Any:
     try:
-        return await sessions.get_session(session_id)
+        return await sessions.get_session(session_id, user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Not authorized for this session.") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found.") from exc
 
 
-async def _get_snapshot_or_404(sessions: SessionStore, session_id: str) -> Dict[str, Any]:
+async def _get_snapshot_or_404(
+    sessions: SessionStore, session_id: str, user_id: Optional[str]
+) -> Dict[str, Any]:
     try:
-        return await sessions.get_snapshot(session_id)
+        return await sessions.get_snapshot(session_id, user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Not authorized for this session.") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found.") from exc
+
+
+def _extract_bearer_token(request: Request) -> str:
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header.")
+    return parts[1]
+
+
+async def _get_user_id_or_401(request: Request) -> str:
+    token = _extract_bearer_token(request)
+    try:
+        return await asyncio.to_thread(verify_id_token, token)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
 
 
 async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:

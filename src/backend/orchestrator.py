@@ -13,6 +13,7 @@ from src.backend.progress import write_progress
 from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
+from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.mcp.logging_utils import get_logger, summarize_payload
 from src.mcp.tools import list_tools
@@ -30,6 +31,7 @@ class Orchestrator:
         self._sessions = sessions
         self._settings = settings
         self._llm_client = llm_client
+        self._job_store = JobStore()
         self._logger = get_logger(__name__)
         self._logger.setLevel(logging.DEBUG)
         self._cached_voicebank: Optional[str] = None
@@ -39,10 +41,10 @@ class Orchestrator:
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
-    async def handle_chat(self, session_id: str, message: str) -> Dict[str, Any]:
+    async def handle_chat(self, session_id: str, message: str, *, user_id: str) -> Dict[str, Any]:
         self._logger.debug("chat_user session=%s message=%s", session_id, message)
         await self._sessions.append_history(session_id, "user", message)
-        snapshot = await self._sessions.get_snapshot(session_id)
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
         current_score = snapshot.get("current_score")
         response_message = "Acknowledged."
         include_score = self._should_include_score(message)
@@ -76,14 +78,14 @@ class Orchestrator:
         if llm_response is not None:
             include_score = llm_response.include_score
             tool_result = await self._execute_tool_calls(
-                session_id, current_score["score"], llm_response.tool_calls
+                session_id, current_score["score"], llm_response.tool_calls, user_id=user_id
             )
             response_message = llm_response.final_message or response_message
             response = tool_result.audio_response or {"type": "chat_text", "message": response_message}
             if response_message:
                 response["message"] = response_message
             if include_score:
-                updated_snapshot = await self._sessions.get_snapshot(session_id)
+                updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
                 updated_score = updated_snapshot.get("current_score")
                 if updated_score is not None:
                     response["current_score"] = updated_score
@@ -110,6 +112,7 @@ class Orchestrator:
         *,
         progress_path: Optional[Path] = None,
         job_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         synth_args = dict(arguments)
         part_id = synth_args.get("part_id")
@@ -122,6 +125,7 @@ class Orchestrator:
                     part_id=part_id,
                     part_index=part_index,
                     verse_number=verse_number,
+                    user_id=user_id,
                 )
                 if updated_score is not None:
                     score = updated_score
@@ -180,6 +184,7 @@ class Orchestrator:
             "type": "chat_audio",
             "message": "Here is the rendered audio.",
             "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
+            "output_path": str(output_path.relative_to(self._settings.project_root)),
         }
         return response
 
@@ -191,11 +196,26 @@ class Orchestrator:
         session_id: str,
         score: Dict[str, Any],
         arguments: Dict[str, Any],
+        *,
+        user_id: str,
     ) -> Dict[str, Any]:
         existing = self._synthesis_tasks.get(session_id)
         if existing and not existing.done():
             existing.cancel()
         job_id = uuid.uuid4().hex
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        files = snapshot.get("files") or {}
+        input_path = files.get("musicxml_path")
+        render_type = arguments.get("render_type")
+        await asyncio.to_thread(
+            self._job_store.create_job,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+            status="queued",
+            input_path=input_path,
+            render_type=render_type if isinstance(render_type, str) else None,
+        )
         progress_path = self._progress_path(session_id)
         write_progress(
             progress_path,
@@ -208,7 +228,14 @@ class Orchestrator:
             },
         )
         task = asyncio.create_task(
-            self._run_synthesis_job(session_id, copy.deepcopy(score), arguments, job_id, progress_path)
+            self._run_synthesis_job(
+                session_id,
+                copy.deepcopy(score),
+                arguments,
+                job_id,
+                progress_path,
+                user_id,
+            )
         )
         self._synthesis_tasks[session_id] = task
 
@@ -230,8 +257,10 @@ class Orchestrator:
         arguments: Dict[str, Any],
         job_id: str,
         progress_path: Path,
+        user_id: str,
     ) -> None:
         try:
+            await asyncio.to_thread(self._job_store.update_job, job_id, status="running")
             write_progress(
                 progress_path,
                 {
@@ -249,6 +278,7 @@ class Orchestrator:
                 arguments,
                 progress_path=progress_path,
                 job_id=job_id,
+                user_id=user_id,
             )
             write_progress(
                 progress_path,
@@ -262,6 +292,13 @@ class Orchestrator:
                 },
                 expected_job_id=job_id,
             )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="completed",
+                outputPath=response.get("output_path"),
+                audioUrl=response.get("audio_url"),
+            )
         except asyncio.CancelledError:
             write_progress(
                 progress_path,
@@ -273,6 +310,11 @@ class Orchestrator:
                     "job_id": job_id,
                 },
                 expected_job_id=job_id,
+            )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="cancelled",
             )
             raise
         except Exception as exc:
@@ -288,6 +330,12 @@ class Orchestrator:
                     "job_id": job_id,
                 },
                 expected_job_id=job_id,
+            )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="failed",
+                errorMessage=str(exc),
             )
 
     def _selection_requested(
@@ -325,8 +373,9 @@ class Orchestrator:
         part_id: Optional[str],
         part_index: Optional[int],
         verse_number: Optional[object],
+        user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        snapshot = await self._sessions.get_snapshot(session_id)
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
         file_path = files.get("musicxml_path")
         if not isinstance(file_path, str) or not file_path:
@@ -472,7 +521,12 @@ class Orchestrator:
         return updated
 
     async def _execute_tool_calls(
-        self, session_id: str, score: Dict[str, Any], tool_calls: List[ToolCall]
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        tool_calls: List[ToolCall],
+        *,
+        user_id: str,
     ) -> "ToolExecutionResult":
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
@@ -504,7 +558,7 @@ class Orchestrator:
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
                 audio_response = await self._start_synthesis_job(
-                    session_id, current_score, synth_args
+                    session_id, current_score, synth_args, user_id=user_id
                 )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 

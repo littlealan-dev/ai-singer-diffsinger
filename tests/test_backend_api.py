@@ -65,18 +65,34 @@ def _make_router_call_tool():
     return _call_tool
 
 
-@pytest.fixture
-def client(monkeypatch):
+def _auth_headers(token="test-token"):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _prepare_app(monkeypatch, overrides=None):
     data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
+    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
+    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
+    if overrides:
+        for key, value in overrides.items():
+            monkeypatch.setenv(key, value)
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
+    return app, data_dir
+
+
+@pytest.fixture
+def client(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch)
     keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
     with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
         yield test_client, app
     if not keep_outputs:
         shutil.rmtree(data_dir, ignore_errors=True)
@@ -84,19 +100,11 @@ def client(monkeypatch):
 
 @pytest.fixture
 def client_with_env(monkeypatch, request):
-    data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
-    data_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("LLM_PROVIDER", "none")
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     overrides = getattr(request, "param", {}) or {}
-    for key, value in overrides.items():
-        monkeypatch.setenv(key, value)
-    app = create_app()
-    app.state.router.call_tool = _make_router_call_tool()
+    app, data_dir = _prepare_app(monkeypatch, overrides=overrides)
     keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
     with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
         yield test_client, app
     if not keep_outputs:
         shutil.rmtree(data_dir, ignore_errors=True)
@@ -135,6 +143,16 @@ def test_create_session_returns_id(client):
     session_id = _create_session(test_client)
     assert isinstance(session_id, str)
     assert len(session_id) > 0
+
+
+def test_missing_auth_header_returns_401(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        response = test_client.post("/sessions")
+        assert response.status_code == 401
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def test_upload_musicxml_parses_and_saves(client):

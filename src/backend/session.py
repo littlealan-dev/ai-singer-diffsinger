@@ -16,6 +16,7 @@ def _utcnow() -> datetime:
 @dataclass
 class SessionState:
     id: str
+    user_id: Optional[str]
     created_at: datetime
     last_active_at: datetime
     history: List[Dict[str, str]] = field(default_factory=list)
@@ -28,6 +29,7 @@ class SessionState:
     def snapshot(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "created_at": self.created_at.isoformat(),
             "last_active_at": self.last_active_at.isoformat(),
             "history": list(self.history),
@@ -67,34 +69,43 @@ class SessionStore:
     def _relative_path(self, path: Path) -> str:
         return str(path.relative_to(self._project_root))
 
-    async def create_session(self) -> SessionState:
+    async def create_session(self, user_id: Optional[str]) -> SessionState:
         async with self._lock:
             self._evict_expired_locked()
             self._evict_overflow_locked()
             session_id = uuid.uuid4().hex
             now = _utcnow()
-            state = SessionState(id=session_id, created_at=now, last_active_at=now)
+            state = SessionState(
+                id=session_id,
+                user_id=user_id,
+                created_at=now,
+                last_active_at=now,
+            )
             self._sessions[session_id] = state
             session_dir = self.session_dir(session_id)
             session_dir.mkdir(parents=True, exist_ok=True)
             return state
 
-    async def get_session(self, session_id: str) -> SessionState:
+    async def get_session(self, session_id: str, user_id: Optional[str]) -> SessionState:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
+            if user_id and state.user_id and state.user_id != user_id:
+                raise PermissionError(session_id)
             if self._is_expired(state):
                 self._remove_session_locked(session_id)
                 raise KeyError(session_id)
             state.last_active_at = _utcnow()
             return state
 
-    async def get_snapshot(self, session_id: str) -> Dict[str, Any]:
+    async def get_snapshot(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
+            if user_id and state.user_id and state.user_id != user_id:
+                raise PermissionError(session_id)
             if self._is_expired(state):
                 self._remove_session_locked(session_id)
                 raise KeyError(session_id)

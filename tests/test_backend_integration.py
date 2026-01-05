@@ -14,6 +14,10 @@ VOICEBANK_ID = "Raine_Rena_2.01"
 SCORE_PATH = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-verse1.xml"
 
 
+def _auth_headers(token="test-token"):
+    return {"Authorization": f"Bearer {token}"}
+
+
 @pytest.fixture
 def integration_client(monkeypatch):
     if not SCORE_PATH.exists():
@@ -27,6 +31,9 @@ def integration_client(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("MCP_CPU_DEVICE", "cpu")
     monkeypatch.setenv("MCP_GPU_DEVICE", "cpu")
+    monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
+    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
+    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
     app = create_app()
     llm_client = StaticLlmClient(
         response_text=(
@@ -41,6 +48,7 @@ def integration_client(monkeypatch):
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
     with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
         yield test_client, app
 
 
