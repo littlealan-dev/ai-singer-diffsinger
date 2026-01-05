@@ -16,7 +16,7 @@ from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
-from src.mcp.logging_utils import get_logger, summarize_payload
+from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
 
@@ -297,6 +297,7 @@ class Orchestrator:
         output_storage_path: Optional[str],
     ) -> None:
         try:
+            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
             if self._settings.backend_use_storage and job_input_storage_path:
                 await asyncio.to_thread(
                     _ensure_job_input_storage,
@@ -384,6 +385,8 @@ class Orchestrator:
                 status="failed",
                 errorMessage=str(exc),
             )
+        finally:
+            clear_log_context()
 
     def _selection_requested(
         self,

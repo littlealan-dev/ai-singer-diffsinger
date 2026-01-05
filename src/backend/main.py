@@ -22,7 +22,12 @@ from src.backend.progress import read_progress
 from src.backend.session import SessionStore
 from src.backend.firebase_app import verify_id_token
 from src.backend.storage_client import download_bytes, upload_file
-from src.mcp.logging_utils import ensure_timestamped_handlers, get_logger
+from src.mcp.logging_utils import (
+    clear_log_context,
+    ensure_timestamped_handlers,
+    get_logger,
+    set_log_context,
+)
 
 
 class ChatRequest(BaseModel):
@@ -81,22 +86,26 @@ def create_app() -> FastAPI:
     async def log_requests(request: Request, call_next):
         start = time.monotonic()
         session_id = request.path_params.get("session_id") if request.path_params else None
+        set_log_context(session_id=session_id)
         logger.debug(
             "http_request_start method=%s path=%s session_id=%s",
             request.method,
             request.url.path,
             session_id,
         )
-        response = await call_next(request)
-        duration_ms = (time.monotonic() - start) * 1000.0
-        logger.debug(
-            "http_request method=%s path=%s status=%s duration_ms=%.2f session_id=%s",
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration_ms,
-            session_id,
-        )
+        try:
+            response = await call_next(request)
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000.0
+            logger.debug(
+                "http_request method=%s path=%s status=%s duration_ms=%.2f session_id=%s",
+                request.method,
+                request.url.path,
+                getattr(locals().get("response"), "status_code", "error"),
+                duration_ms,
+                session_id,
+            )
+            clear_log_context()
         return response
 
     @app.post("/sessions")
@@ -292,10 +301,14 @@ def _extract_bearer_token(request: Request) -> str:
 
 async def _get_user_id_or_401(request: Request) -> str:
     if request.app.state.settings.backend_auth_disabled:
-        return "dev-user"
+        user_id = "dev-user"
+        set_log_context(user_id=user_id)
+        return user_id
     token = _extract_bearer_token(request)
     try:
-        return await asyncio.to_thread(verify_id_token, token)
+        user_id = await asyncio.to_thread(verify_id_token, token)
+        set_log_context(user_id=user_id)
+        return user_id
     except HTTPException:
         raise
     except Exception as exc:

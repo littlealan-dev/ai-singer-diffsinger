@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 from src.mcp.tools import call_tool, list_tools
-from src.mcp.logging_utils import build_formatter, is_dev_env, summarize_payload
+from src.mcp.logging_utils import attach_context_filter, build_formatter, is_dev_env, summarize_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
@@ -147,6 +147,7 @@ def main() -> None:
     formatter = build_formatter()
     for handler in handlers:
         handler.setFormatter(formatter)
+        attach_context_filter(handler)
     logging.basicConfig(
         level=level,
         handlers=handlers,
