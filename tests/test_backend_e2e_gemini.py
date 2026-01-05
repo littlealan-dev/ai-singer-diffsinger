@@ -63,6 +63,9 @@ def _start_emulators(project_id: str, auth_host: str, firestore_host: str, stora
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "firebase_emulator.log"
     log_handle = log_path.open("ab")
+    firestore_log_dir = PROJECT_ROOT / "logs"
+    firestore_log_dir.mkdir(parents=True, exist_ok=True)
+    firestore_log_path = firestore_log_dir / "firestore-debug.log"
     cmd = [
         "firebase",
         "emulators:start",
@@ -71,12 +74,14 @@ def _start_emulators(project_id: str, auth_host: str, firestore_host: str, stora
         "--project",
         project_id,
     ]
+    env = os.environ.copy()
+    env["FIRESTORE_EMULATOR_LOG"] = str(firestore_log_path)
     process = subprocess.Popen(
         cmd,
         cwd=str(PROJECT_ROOT),
         stdout=log_handle,
         stderr=log_handle,
-        env=os.environ.copy(),
+        env=env,
     )
     deadline = time.time() + 20.0
     while time.time() < deadline:
