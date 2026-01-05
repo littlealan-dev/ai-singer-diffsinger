@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 from src.mcp.tools import call_tool, list_tools
-from src.mcp.logging_utils import summarize_payload
+from src.mcp.logging_utils import build_formatter, is_dev_env, summarize_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
@@ -141,13 +141,14 @@ def main() -> None:
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{args.service_name}.log"
-    handlers = [
-        logging.StreamHandler(sys.stderr),
-        logging.FileHandler(log_path, encoding="utf-8"),
-    ]
+    handlers = [logging.StreamHandler(sys.stderr)]
+    if is_dev_env():
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    formatter = build_formatter()
+    for handler in handlers:
+        handler.setFormatter(formatter)
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=handlers,
     )
     run_server(args.device, args.mode)
