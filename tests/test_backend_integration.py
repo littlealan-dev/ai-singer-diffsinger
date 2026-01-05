@@ -31,6 +31,7 @@ def integration_client(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("MCP_CPU_DEVICE", "cpu")
     monkeypatch.setenv("MCP_GPU_DEVICE", "cpu")
+    monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)

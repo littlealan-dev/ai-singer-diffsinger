@@ -21,6 +21,7 @@ from src.backend.orchestrator import Orchestrator
 from src.backend.progress import read_progress
 from src.backend.session import SessionStore
 from src.backend.firebase_app import verify_id_token
+from src.backend.storage_client import download_bytes, upload_file
 from src.mcp.logging_utils import ensure_timestamped_handlers, get_logger
 
 
@@ -128,6 +129,15 @@ def create_app() -> FastAPI:
         await sessions.set_file(session_id, "musicxml_path", target_path)
         if original_name:
             await sessions.set_metadata(session_id, "musicxml_name", original_name)
+        if settings.backend_use_storage:
+            storage_path = _session_input_storage_path(
+                user_id, session_id, target_path.suffix
+            )
+            content_type = file.content_type or "application/octet-stream"
+            await asyncio.to_thread(
+                upload_file, settings.storage_bucket, target_path, storage_path, content_type
+            )
+            await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
 
         rel_path = str(target_path.relative_to(settings.project_root))
         try:
@@ -176,7 +186,13 @@ def create_app() -> FastAPI:
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
+        snapshot = None
         if file:
+            snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+            current_audio = snapshot.get("current_audio") if snapshot else None
+            storage_path = current_audio.get("storage_path") if current_audio else None
+            if settings.backend_use_storage and storage_path:
+                return await _stream_storage_audio(settings, storage_path)
             session_dir = sessions.session_dir(session_id)
             file_name = Path(file).name
             if file_name != file:
@@ -191,6 +207,9 @@ def create_app() -> FastAPI:
             current_audio = snapshot.get("current_audio")
             if not current_audio:
                 raise HTTPException(status_code=404, detail="No audio available for this session.")
+            storage_path = current_audio.get("storage_path")
+            if settings.backend_use_storage and storage_path:
+                return await _stream_storage_audio(settings, storage_path)
             audio_path = settings.project_root / current_audio["path"]
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found.")
@@ -272,6 +291,8 @@ def _extract_bearer_token(request: Request) -> str:
 
 
 async def _get_user_id_or_401(request: Request) -> str:
+    if request.app.state.settings.backend_auth_disabled:
+        return "dev-user"
     token = _extract_bearer_token(request)
     try:
         return await asyncio.to_thread(verify_id_token, token)
@@ -299,6 +320,23 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
         raise
     finally:
         await file.close()
+
+
+def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"sessions/{user_id}/{session_id}/input{safe_suffix}"
+
+
+async def _stream_storage_audio(settings: Settings, storage_path: str) -> Response:
+    suffix = Path(storage_path).suffix.lower()
+    if suffix == ".wav":
+        media_type = "audio/wav"
+    elif suffix == ".mp3":
+        media_type = "audio/mpeg"
+    else:
+        media_type = "application/octet-stream"
+    data = await asyncio.to_thread(download_bytes, settings.storage_bucket, storage_path)
+    return Response(content=data, media_type=media_type)
 
 
 def _read_musicxml_content(path: Path) -> str:

@@ -15,6 +15,7 @@ from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, p
 from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
+from src.backend.storage_client import copy_blob, upload_file
 from src.mcp.logging_utils import get_logger, summarize_payload
 from src.mcp.tools import list_tools
 
@@ -113,6 +114,7 @@ class Orchestrator:
         progress_path: Optional[Path] = None,
         job_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        output_storage_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         synth_args = dict(arguments)
         part_id = synth_args.get("part_id")
@@ -179,12 +181,25 @@ class Orchestrator:
         self._logger.info("mcp_call tool=save_audio session=%s", session_id)
         save_result = await asyncio.to_thread(self._router.call_tool, "save_audio", save_args)
         duration = save_result.get("duration_seconds", 0.0)
-        await self._sessions.set_audio(session_id, output_path, duration)
+        if self._settings.backend_use_storage and output_storage_path:
+            await asyncio.to_thread(
+                upload_file,
+                self._settings.storage_bucket,
+                output_path,
+                output_storage_path,
+                "audio/mpeg" if extension == "mp3" else "audio/wav",
+            )
+            await self._sessions.set_audio(
+                session_id, output_path, duration, storage_path=output_storage_path
+            )
+        else:
+            await self._sessions.set_audio(session_id, output_path, duration)
         response = {
             "type": "chat_audio",
             "message": "Here is the rendered audio.",
             "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
             "output_path": str(output_path.relative_to(self._settings.project_root)),
+            "output_storage_path": output_storage_path,
         }
         return response
 
@@ -206,14 +221,27 @@ class Orchestrator:
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
         input_path = files.get("musicxml_path")
+        storage_input_path = files.get("musicxml_storage_path")
         render_type = arguments.get("render_type")
+        output_storage_path = None
+        job_input_storage_path = None
+        if self._settings.backend_use_storage:
+            suffix = ".musicxml"
+            if isinstance(input_path, str) and input_path:
+                suffix = Path(input_path).suffix or suffix
+            job_input_storage_path = _job_storage_input_path(
+                user_id, session_id, job_id, suffix
+            )
+            output_storage_path = _job_storage_output_path(
+                user_id, session_id, job_id, self._settings.audio_format
+            )
         await asyncio.to_thread(
             self._job_store.create_job,
             job_id=job_id,
             user_id=user_id,
             session_id=session_id,
             status="queued",
-            input_path=input_path,
+            input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
         )
         progress_path = self._progress_path(session_id)
@@ -235,6 +263,10 @@ class Orchestrator:
                 job_id,
                 progress_path,
                 user_id,
+                input_path=input_path,
+                storage_input_path=storage_input_path,
+                job_input_storage_path=job_input_storage_path,
+                output_storage_path=output_storage_path,
             )
         )
         self._synthesis_tasks[session_id] = task
@@ -258,8 +290,22 @@ class Orchestrator:
         job_id: str,
         progress_path: Path,
         user_id: str,
+        *,
+        input_path: Optional[str],
+        storage_input_path: Optional[str],
+        job_input_storage_path: Optional[str],
+        output_storage_path: Optional[str],
     ) -> None:
         try:
+            if self._settings.backend_use_storage and job_input_storage_path:
+                await asyncio.to_thread(
+                    _ensure_job_input_storage,
+                    self._settings.storage_bucket,
+                    input_path,
+                    storage_input_path,
+                    job_input_storage_path,
+                    self._settings.project_root,
+                )
             await asyncio.to_thread(self._job_store.update_job, job_id, status="running")
             write_progress(
                 progress_path,
@@ -279,6 +325,7 @@ class Orchestrator:
                 progress_path=progress_path,
                 job_id=job_id,
                 user_id=user_id,
+                output_storage_path=output_storage_path,
             )
             write_progress(
                 progress_path,
@@ -296,7 +343,7 @@ class Orchestrator:
                 self._job_store.update_job,
                 job_id,
                 status="completed",
-                outputPath=response.get("output_path"),
+                outputPath=response.get("output_storage_path") or response.get("output_path"),
                 audioUrl=response.get("audio_url"),
             )
         except asyncio.CancelledError:
@@ -567,3 +614,33 @@ class Orchestrator:
 class ToolExecutionResult:
     score: Dict[str, Any]
     audio_response: Optional[Dict[str, Any]]
+
+
+def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"sessions/{user_id}/{session_id}/jobs/{job_id}/input{safe_suffix}"
+
+
+def _job_storage_output_path(
+    user_id: str, session_id: str, job_id: str, audio_format: str
+) -> str:
+    extension = "mp3" if audio_format.lower() == "mp3" else "wav"
+    return f"sessions/{user_id}/{session_id}/jobs/{job_id}/output.{extension}"
+
+
+def _ensure_job_input_storage(
+    bucket_name: str,
+    input_path: Optional[str],
+    storage_input_path: Optional[str],
+    job_input_storage_path: str,
+    project_root: Path,
+) -> None:
+    if storage_input_path:
+        copy_blob(bucket_name, storage_input_path, job_input_storage_path)
+        return
+    if not input_path:
+        raise RuntimeError("Missing input path for job storage copy.")
+    local_path = (project_root / input_path).resolve()
+    if not local_path.exists():
+        raise RuntimeError("Local input file not found for storage copy.")
+    upload_file(bucket_name, local_path, job_input_storage_path, "application/xml")

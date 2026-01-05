@@ -21,6 +21,21 @@ def _env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.lower() in {"1", "true", "yes"}
+
+
+def _project_id() -> str | None:
+    for key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "PROJECT_ID"):
+        value = os.getenv(key)
+        if value:
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -45,6 +60,9 @@ class Settings:
     mcp_gpu_timeout_seconds: float
     mcp_startup_timeout_seconds: float
     mcp_debug: bool
+    backend_auth_disabled: bool
+    backend_use_storage: bool
+    storage_bucket: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,7 +93,12 @@ class Settings:
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 10.0)
-        mcp_debug = os.getenv("MCP_DEBUG", "false").lower() in {"1", "true", "yes"}
+        mcp_debug = _env_bool("MCP_DEBUG", False)
+        backend_auth_disabled = _env_bool("BACKEND_AUTH_DISABLED", False)
+        backend_use_storage = _env_bool("BACKEND_USE_STORAGE", False)
+        project_id = _project_id()
+        default_bucket = f"{project_id}.appspot.com" if project_id else ""
+        storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -99,4 +122,7 @@ class Settings:
             mcp_gpu_timeout_seconds=mcp_gpu_timeout_seconds,
             mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
             mcp_debug=mcp_debug,
+            backend_auth_disabled=backend_auth_disabled,
+            backend_use_storage=backend_use_storage,
+            storage_bucket=storage_bucket,
         )

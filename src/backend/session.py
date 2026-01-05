@@ -154,7 +154,13 @@ class SessionStore:
             state.score_summary = summary
             state.last_active_at = _utcnow()
 
-    async def set_audio(self, session_id: str, path: Path, duration_s: float) -> None:
+    async def set_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+    ) -> None:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -163,6 +169,8 @@ class SessionStore:
                 "path": self._relative_path(path),
                 "duration_s": duration_s,
             }
+            if storage_path:
+                state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
 
     async def evict_expired(self) -> None:

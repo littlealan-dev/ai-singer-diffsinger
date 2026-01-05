@@ -74,6 +74,7 @@ def _prepare_app(monkeypatch, overrides=None):
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")

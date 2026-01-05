@@ -14,6 +14,7 @@ import firebase_admin
 from src.backend.main import create_app
 from src.backend.firebase_app import get_firestore_client
 from src.backend.llm_client import StaticLlmClient
+from src.backend.storage_client import blob_exists
 from src.mcp.resolve import PROJECT_ROOT
 
 
@@ -134,6 +135,7 @@ def gemini_client(monkeypatch):
     monkeypatch.setenv("MCP_CPU_DEVICE", os.getenv("MCP_CPU_DEVICE", "cpu"))
     monkeypatch.setenv("MCP_GPU_DEVICE", os.getenv("MCP_GPU_DEVICE", "cpu"))
     monkeypatch.setenv("MCP_DEBUG", "true")
+    monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
@@ -184,10 +186,13 @@ def emulator_client(monkeypatch):
     monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", firestore_host)
     monkeypatch.setenv("FIREBASE_STORAGE_EMULATOR_HOST", storage_host)
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", project_id)
+    monkeypatch.setenv("STORAGE_BUCKET", f"{project_id}.appspot.com")
     monkeypatch.setenv("BACKEND_DATA_DIR", str(Path("tests/output/backend_emulator") / uuid.uuid4().hex))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("MCP_CPU_DEVICE", "cpu")
     monkeypatch.setenv("MCP_GPU_DEVICE", "cpu")
+    monkeypatch.setenv("BACKEND_USE_STORAGE", "true")
+    monkeypatch.setenv("STORAGE_EMULATOR_HOST", f"http://{storage_host}")
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
 
@@ -281,11 +286,14 @@ def emulator_gemini_client(monkeypatch):
     monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", firestore_host)
     monkeypatch.setenv("FIREBASE_STORAGE_EMULATOR_HOST", storage_host)
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", project_id)
+    monkeypatch.setenv("STORAGE_BUCKET", f"{project_id}.appspot.com")
     monkeypatch.setenv("BACKEND_DATA_DIR", str(Path("tests/output/backend_emulator") / uuid.uuid4().hex))
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("MCP_CPU_DEVICE", os.getenv("MCP_CPU_DEVICE", "cpu"))
     monkeypatch.setenv("MCP_GPU_DEVICE", os.getenv("MCP_GPU_DEVICE", "cpu"))
     monkeypatch.setenv("MCP_DEBUG", "true")
+    monkeypatch.setenv("BACKEND_USE_STORAGE", "true")
+    monkeypatch.setenv("STORAGE_EMULATOR_HOST", f"http://{storage_host}")
 
     _reset_firebase_admin()
     app = create_app()
@@ -430,7 +438,7 @@ def test_backend_e2e_emulator_synthesize(emulator_gemini_client):
     assert upload_response.status_code == 200
 
     chat_response = test_client.post(
-        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+        f"/sessions/{session_id}/chat", json={"message": "please sing this song"}
     )
     assert chat_response.status_code == 200
     payload = chat_response.json()
@@ -450,7 +458,9 @@ def test_backend_e2e_emulator_synthesize(emulator_gemini_client):
     assert job_doc.exists
     job_data = job_doc.to_dict()
     assert job_data.get("status") == "completed"
-    assert job_data.get("outputPath")
+    output_path = job_data.get("outputPath")
+    assert output_path
+    assert blob_exists(os.getenv("STORAGE_BUCKET", "sightsinger-app.appspot.com"), output_path)
 
 
 def _wait_for_progress(test_client, progress_url, timeout_seconds=120.0):
