@@ -117,8 +117,10 @@ class Settings:
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
         storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
         app_env = _app_env()
+        app_env_lower = app_env.lower()
         backend_require_app_check = _env_bool(
-            "BACKEND_REQUIRE_APP_CHECK", app_env.lower() not in {"dev", "development", "local", "test"}
+            "BACKEND_REQUIRE_APP_CHECK",
+            app_env_lower not in {"dev", "development", "local", "test"},
         )
         return cls(
             project_root=PROJECT_ROOT,

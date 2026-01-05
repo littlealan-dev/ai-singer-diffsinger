@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "clsx": "^2.1.1",
+    "firebase": "^10.14.1",
     "lucide-react": "^0.469.0",
     "opensheetmusicdisplay": "^1.9.3",
     "react": "^18.3.1",

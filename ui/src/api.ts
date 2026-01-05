@@ -1,3 +1,5 @@
+import { getAppCheckToken } from "./firebase";
+
 export type ScoreSummaryPart = {
   part_id?: string;
   part_index?: number;
@@ -58,8 +60,30 @@ function withStream(url: string): string {
   return `${url}${separator}stream=1`;
 }
 
+async function withAppCheckParam(url: string): Promise<string> {
+  if (!url) return url;
+  const token = await getAppCheckToken();
+  if (!token) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}app_check=${encodeURIComponent(token)}`;
+}
+
+async function withAppCheckHeaders(
+  headers?: HeadersInit
+): Promise<HeadersInit | undefined> {
+  const token = await getAppCheckToken();
+  if (!token) {
+    return headers;
+  }
+  return {
+    ...(headers ?? {}),
+    "X-Firebase-AppCheck": token,
+  };
+}
+
 async function request<T>(path: string, options: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const headers = await withAppCheckHeaders(options.headers);
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
@@ -74,9 +98,11 @@ export async function createSession(): Promise<{ session_id: string }> {
 export async function uploadScore(sessionId: string, file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
+  const headers = await withAppCheckHeaders();
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/upload`, {
     method: "POST",
     body: form,
+    headers,
   });
   if (!response.ok) {
     const text = await response.text();
@@ -86,7 +112,8 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
 }
 
 export async function fetchScoreXml(sessionId: string): Promise<string> {
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}/score`);
+  const headers = await withAppCheckHeaders();
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/score`, { headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || "Failed to load score.");
@@ -103,7 +130,7 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
   if (response.type === "chat_audio") {
     return {
       ...response,
-      audio_url: withStream(withApiBase(response.audio_url)),
+      audio_url: await withAppCheckParam(withStream(withApiBase(response.audio_url))),
     };
   }
   if (response.type === "chat_progress") {
@@ -116,14 +143,15 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
 }
 
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
-  const response = await fetch(withApiBase(progressUrl));
+  const headers = await withAppCheckHeaders();
+  const response = await fetch(withApiBase(progressUrl), { headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
   }
   const payload = (await response.json()) as ProgressResponse;
   if (payload.audio_url) {
-    payload.audio_url = withStream(withApiBase(payload.audio_url));
+    payload.audio_url = await withAppCheckParam(withStream(withApiBase(payload.audio_url)));
   }
   return payload;
 }

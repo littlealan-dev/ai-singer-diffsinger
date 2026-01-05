@@ -325,6 +325,8 @@ async def _require_app_check(request: Request) -> None:
         return
     token = request.headers.get("X-Firebase-AppCheck")
     if not token:
+        token = request.query_params.get("app_check")
+    if not token:
         raise HTTPException(status_code=401, detail="Missing App Check token.")
     try:
         await asyncio.to_thread(app_check.verify_token, token)
