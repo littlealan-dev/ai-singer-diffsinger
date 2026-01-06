@@ -1,0 +1,54 @@
+# Ignore Python cache/venv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# MacOS
+.DS_Store
+
+# Media & Models (keep assets folder, but ignore large standalone files elsewhere)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.aif
+*.aiff
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.tar
+*.tar.gz
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# UI
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.env*
+ui/*.log
+
+# Artifacts
+outputs/
+tests/output/
+logs/
+runs/
+checkpoints/
+cache/
+tmp/
+
+# Git
+.git/
