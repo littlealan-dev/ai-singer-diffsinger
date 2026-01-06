@@ -224,11 +224,11 @@ export default function MainApp() {
     };
   }, [activeProgress]);
 
-  const headerSubtitle = useMemo(() => {
-    if (!sessionId) return "Initializing session...";
-    if (score) return `Session ${sessionId.slice(0, 6)} · ${score.name}`;
-    return `Session ${sessionId.slice(0, 6)} · Upload a score to begin`;
-  }, [sessionId, score]);
+  const headerSubtitle = useMemo(
+    () =>
+      "Zero-shot sight-singing from MusicXML. Tell the singer how to perform.",
+    []
+  );
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
@@ -382,7 +382,7 @@ export default function MainApp() {
         <div className="brand">
           <Sparkles className="brand-icon" />
           <div>
-            <h1>AI Singer</h1>
+            <h1>SightSinger.AI</h1>
             <p>{headerSubtitle}</p>
           </div>
         </div>
@@ -404,7 +404,7 @@ export default function MainApp() {
         >
           <div className="chat-header">
             <h2>Studio Chat</h2>
-            <span className="chat-subtitle">Local history only</span>
+            <span className="chat-subtitle">Natural language takes, no DAW edits</span>
           </div>
           <div className="chat-stream">
             {messages.length === 0 && (

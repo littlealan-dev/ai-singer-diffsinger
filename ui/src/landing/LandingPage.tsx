@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Sparkles } from "lucide-react";
 import "./LandingPage.css";
@@ -6,33 +6,61 @@ import "./LandingPage.css";
 // Temporary placeholder for HeroSection until fully implemented
 const HeroSection = () => {
     const navigate = useNavigate();
+    const heroRef = useRef<HTMLElement | null>(null);
+
+    useEffect(() => {
+        const heroEl = heroRef.current;
+        if (!heroEl) return;
+        const scrollContainer = heroEl.closest(".landing-page") as HTMLElement | null;
+
+        const update = () => {
+            const scrollTop = scrollContainer ? scrollContainer.scrollTop : window.scrollY;
+            const heroTop = scrollContainer ? heroEl.offsetTop : heroEl.getBoundingClientRect().top + scrollTop;
+            const local = Math.max(0, Math.min(scrollTop - heroTop, heroEl.offsetHeight));
+            heroEl.style.setProperty("--parallax-bg", `${local * 0.14}px`);
+            heroEl.style.setProperty("--parallax-fg", `${local * 0.28}px`);
+        };
+
+        update();
+
+        const onScroll = () => update();
+        if (scrollContainer) scrollContainer.addEventListener("scroll", onScroll, { passive: true });
+        else window.addEventListener("scroll", onScroll, { passive: true });
+        window.addEventListener("resize", onScroll);
+        return () => {
+            if (scrollContainer) scrollContainer.removeEventListener("scroll", onScroll);
+            else window.removeEventListener("scroll", onScroll);
+            window.removeEventListener("resize", onScroll);
+        };
+    }, []);
     return (
-        <section className="landing-hero">
-            <div className="hero-content">
-                <h1 className="hero-title">
-                    Singing Voices, <span className="text-gradient">Reimagined</span>.
-                </h1>
-                <p className="hero-subtitle">
-                    Transform scores with Gemini intelligence. Perform them with DiffSinger precision.
-                </p>
+        <section className="landing-hero" ref={heroRef}>
+            <div className="hero-bg" aria-hidden="true" />
+            <div className="hero-center">
+                <div className="hero-headline">
+                    <h1 className="hero-title">
+                        “Drop me the score. Say a few words. I’ll sing it for you.”
+                    </h1>
+                    <p className="hero-subtitle hero-subtitle-wide">
+                        AI sight-singing from MusicXML, via chat. No DAW required.
+                    </p>
+                </div>
+            </div>
+            <div className="hero-footer">
                 <div className="hero-actions">
                     <button className="btn-primary" onClick={() => navigate("/app")}>
-                        Try the Demo <ArrowRight size={20} />
+                        Try SightSinger <ArrowRight size={20} />
                     </button>
                     <button
                         className="btn-secondary"
                         onClick={() => {
-                            const el = document.getElementById('showcase-section');
-                            el?.scrollIntoView({ behavior: 'smooth' });
+                            const el = document.getElementById("showcase-section");
+                            el?.scrollIntoView({ behavior: "smooth" });
                         }}
                     >
-                        Watch how it works
+                        See it in action
                     </button>
                 </div>
-            </div>
-            <div className="hero-visual">
-                {/* Placeholder for 3D animation */}
-                <div className="visual-placeholder"></div>
             </div>
         </section>
     );
@@ -53,44 +81,44 @@ export default function LandingPage() {
             <nav className="landing-nav">
                 <div className="brand">
                     <Sparkles className="brand-icon" />
-                    <span>AI Singer</span>
+                    <span>SightSinger.AI</span>
                 </div>
                 <div className="nav-links">
-                    <button className="btn-ghost" onClick={() => navigate("/app")}>Login</button>
+                    <button className="btn-ghost" onClick={() => navigate("/app")}>Open Studio</button>
                 </div>
             </nav>
 
             <HeroSection />
 
             <section className="landing-section">
-                <h2 className="section-title">Who is this for?</h2>
+                <h2 className="section-title">Built for real rehearsal flow</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
-                        <h3>Individual Producers</h3>
-                        <p>"The 5-Minute Demo"</p>
-                        <p className="description">Create high-quality vocal previews for your songs before hiring professional singers.</p>
+                        <h3>Indie Producers</h3>
+                        <p>"Fast vocal proof"</p>
+                        <p className="description">Hear the melody and lyrics instantly without building a DAW mockup.</p>
                     </div>
                     <div className="use-case-card">
                         <h3>Choir Leaders</h3>
-                        <p>"Effortless Rehearsal"</p>
-                        <p className="description">Send accurate SATB singing demos to your choir in minutes. No pianist required.</p>
+                        <p>"Sight-reading made simple"</p>
+                        <p className="description">Send clear SATB takes in minutes. No pianist or rehearsal recordings needed.</p>
                     </div>
                     <div className="use-case-card">
                         <h3>Composers</h3>
-                        <p>"Harmonic Sandbox"</p>
-                        <p className="description">Hear your complex SATB harmonies instantly. Verify vocal flow before publishing.</p>
+                        <p>"Harmony check"</p>
+                        <p className="description">Listen to your choral writing fast and catch spacing issues early.</p>
                     </div>
                     <div className="use-case-card">
-                        <h3>Lyricists</h3>
-                        <p>"Flow Check"</p>
-                        <p className="description">Check prosody and rhythm naturally without needing to sing it yourself.</p>
+                        <h3>Arrangers</h3>
+                        <p>"Phrase shaping"</p>
+                        <p className="description">Try alternative phrasings and dynamics with plain English prompts.</p>
                     </div>
                 </div>
             </section>
 
             <section id="showcase-section" className="landing-section alt-bg">
-                <h2 className="section-title">Experience the Magic</h2>
-                <p className="section-subtitle">Real-time collaboration with Gemini.</p>
+                <h2 className="section-title">Hear the score, not the piano roll</h2>
+                <p className="section-subtitle">Natural language direction, instant takes.</p>
 
                 <div className="showcase-mockup">
                     <div className="mockup-left">
@@ -114,11 +142,11 @@ export default function LandingPage() {
 
                     <div className="mockup-right">
                         <div className="mockup-chat-bubble user">
-                            Make the soprano part more airy and soft, like a whisper.
+                            Make the soprano lighter and breathy, like a soft entry.
                         </div>
                         <div className="mockup-chat-bubble assistant">
                             <Sparkles size={16} className="inline-icon" />
-                            I've adjusted the breathiness parameter for the Soprano part. Here is a preview.
+                            Got it. Here's a breathier soprano take from the same score.
                             <div className="mockup-audio">
                                 <div className="play-btn">▶</div>
                                 <div className="waveform">||||||||||||</div>
@@ -129,7 +157,7 @@ export default function LandingPage() {
             </section>
 
             <section className="landing-section alt-bg">
-                <h2 className="section-title">Premium Voicebanks</h2>
+                <h2 className="section-title">Voices built for sight-singing</h2>
                 <div className="voice-gallery">
                     <div className="voice-card">
                         <div className="voice-avatar" style={{ background: 'linear-gradient(45deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%)' }}></div>
@@ -153,15 +181,15 @@ export default function LandingPage() {
             </section>
 
             <section className="landing-section">
-                <h2 className="section-title">Why AI Singer?</h2>
-                <p className="section-subtitle">Speak Music, Not MIDI.</p>
+                <h2 className="section-title">Why SightSinger.AI?</h2>
+                <p className="section-subtitle">Speak music, not MIDI.</p>
 
                 <div className="comparison-container">
                     <table className="comparison-table">
                         <thead>
                             <tr>
                                 <th>Feature</th>
-                                <th className="highlight">The AI Singer</th>
+                                <th className="highlight">SightSinger.AI</th>
                                 <th>Traditional Tools</th>
                             </tr>
                         </thead>
@@ -169,49 +197,49 @@ export default function LandingPage() {
                             <tr>
                                 <td>Interface</td>
                                 <td className="highlight">Natural Language (Chat)</td>
-                                <td>Complicated MIDI Editor</td>
+                                <td>Piano roll editing</td>
                             </tr>
                             <tr>
                                 <td>Learning Curve</td>
-                                <td className="highlight">Zero (Talk to Gemini)</td>
-                                <td>Steep (Weeks of practice)</td>
+                                <td className="highlight">Zero setup</td>
+                                <td>Steep learning curve</td>
                             </tr>
                             <tr>
                                 <td>Focus</td>
-                                <td className="highlight">Speed & Flow</td>
-                                <td>Surgical Note Control</td>
+                                <td className="highlight">Sight-reading speed</td>
+                                <td>Micromanaged note edits</td>
                             </tr>
                             <tr>
                                 <td>Score Edits</td>
-                                <td className="highlight">Automatic (via Gemini)</td>
-                                <td>Manual Point & Click</td>
+                                <td className="highlight">Zero-shot from score</td>
+                                <td>Manual reprogramming</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </section>
             <section className="landing-section">
-                <h2 className="section-title">How it Works</h2>
+                <h2 className="section-title">How it works</h2>
                 <div className="workflow-steps">
                     <div className="step-card">
                         <div className="step-number">01</div>
-                        <h3>Compose / Import</h3>
-                        <p>Upload any MusicXML file from MuseScore, finale, or Sibelius.</p>
+                        <h3>Upload your score</h3>
+                        <p>Drop in MusicXML from MuseScore, Finale, or Sibelius.</p>
                     </div>
                     <div className="step-card">
                         <div className="step-number">02</div>
-                        <h3>Instruct</h3>
-                        <p>Tell Gemini how you want the performance to feel (e.g., "Make the soprano airy").</p>
+                        <h3>Direct the singer</h3>
+                        <p>Use plain English to shape phrasing, tone, and expression.</p>
                     </div>
                     <div className="step-card">
                         <div className="step-number">03</div>
-                        <h3>Synthesize</h3>
-                        <p>One-click high-fidelity synthesis via DiffSinger.</p>
+                        <h3>Generate a take</h3>
+                        <p>Get a clean preview without building a DAW mockup.</p>
                     </div>
                     <div className="step-card">
                         <div className="step-number">04</div>
-                        <h3>Refine</h3>
-                        <p>Tweak intensity and clarity in real-time until it's perfect.</p>
+                        <h3>Refine and share</h3>
+                        <p>Iterate fast and send it to your singers.</p>
                     </div>
                 </div>
             </section>
@@ -220,7 +248,7 @@ export default function LandingPage() {
                 <div className="footer-content">
                     <div className="footer-brand">
                         <Sparkles size={24} />
-                        <span>AI Singer</span>
+                        <span>SightSinger.AI</span>
                     </div>
                     <div className="footer-links">
                         <a href="#">GitHub</a>
@@ -228,7 +256,7 @@ export default function LandingPage() {
                         <a href="#">About Us</a>
                     </div>
                 </div>
-                <p className="copyright">© 2026 AI Singer Project. Powered by Gemini & DiffSinger.</p>
+                <p className="copyright">© 2026 SightSinger.AI. Powered by Gemini & DiffSinger.</p>
             </footer>
         </div>
     );
