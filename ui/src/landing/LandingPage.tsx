@@ -246,6 +246,58 @@ export default function LandingPage() {
                 </div>
             </section>
 
+            <section className="landing-section">
+                <h2 className="section-title">AI Voices</h2>
+                <p className="section-subtitle voicebanks-subtitle">
+                    All AI voices in SightSinger.ai are <span className="highlight-text">royalty-free</span>. More AI voices are coming soon.
+                </p>
+                <div className="voicebanks-grid">
+                    <div className="voicebank-card">
+                        <img
+                            src="/voicebanks/reizo_icon.png"
+                            alt="Raine Reizo icon"
+                            className="voicebank-icon"
+                            loading="lazy"
+                        />
+                        <div className="voicebank-body">
+                            <h3>Raine Reizo</h3>
+                            <p className="voicebank-profile">
+                                Version 2.0 · by suyu (UtauReizo) · 3 tone colors (normal/soft/strong)
+                            </p>
+                        </div>
+                    </div>
+                    <div className="voicebank-card">
+                        <img
+                            src="/voicebanks/rena_icon.png"
+                            alt="Raine Rena icon"
+                            className="voicebank-icon"
+                            loading="lazy"
+                        />
+                        <div className="voicebank-body">
+                            <h3>Raine Rena</h3>
+                            <p className="voicebank-profile">
+                                Version 2.0 · by suyu (UtauReizo) · 3 tone colors (normal/soft/strong)
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div className="voicebank-credits">
+                    <div className="voicebank-credits-title">CREDITS</div>
+                    <div>Website: <a href="https://rainerr.weebly.com/" target="_blank" rel="noreferrer">https://rainerr.weebly.com/</a></div>
+                    <div>Voiced, labelled &amp; trained by suyu (UtauReizo)</div>
+                    <div className="voicebank-credits-subtitle">Datasets used for parallel training:</div>
+                    <ul>
+                        <li>Raine Rena</li>
+                        <li>Fromage</li>
+                        <li>PJS (relabel by UtaUtaUtau)</li>
+                        <li>CSD (relabel by heta-tan)</li>
+                        <li>opencpop (relabel by komisteng)</li>
+                        <li>m4singer (relabel by nobodyP)</li>
+                        <li>TGM</li>
+                    </ul>
+                </div>
+            </section>
+
             <section className="landing-section alt-bg">
                 <h2 className="section-title">FAQ</h2>
                 <div className="faq-list">
@@ -276,9 +328,9 @@ export default function LandingPage() {
                             ),
                         },
                         {
-                            key: "satb",
-                            q: "Can I generate SATB parts separately?",
-                            a: "Yes. Select the part and verse, then render each voice as needed.",
+                            key: "royalty",
+                            q: "Are the AI voices in SightSinger.ai royalty-free for music production?",
+                            a: "Yes, all the AI voices in SightSinger.ai are royalty-free for commercial projects. You can publish, distribute, or monetize your music without paying extra fees.",
                         },
                     ].map((item, index) => {
                         const isOpen = openFaqIndex === index;

@@ -291,6 +291,90 @@
   font-size: 1rem;
 }
 
+.voicebanks-grid {
+  width: 100%;
+  max-width: 900px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem;
+}
+
+.voicebanks-subtitle {
+  margin-top: -2rem;
+  margin-bottom: 2.5rem;
+}
+
+.voicebank-card {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 1.4rem 1.6rem;
+}
+
+.voicebank-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.voicebank-body h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.2rem;
+}
+
+.voicebank-profile {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.6;
+  font-size: 0.95rem;
+}
+
+.voicebank-credits {
+  margin-top: 1.5rem;
+  font-size: 0.82rem;
+  color: #94a3b8;
+  text-align: left;
+  max-width: 900px;
+}
+
+.voicebank-credits-title {
+  font-size: 0.78rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #cbd5f5;
+  margin-bottom: 0.5rem;
+}
+
+.voicebank-credits-subtitle {
+  margin-top: 0.6rem;
+}
+
+.voicebank-credits ul {
+  margin: 0.5rem 0 0 1.25rem;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.voicebank-credits a {
+  color: #c4b5fd;
+  text-decoration: none;
+}
+
+.voicebank-credits a:hover {
+  text-decoration: underline;
+}
+
+.highlight-text {
+  color: #c4b5fd;
+  font-weight: 600;
+}
+
 /* Use Cases Grid */
 .use-cases-grid {
   display: grid;
