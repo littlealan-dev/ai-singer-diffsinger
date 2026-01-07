@@ -4,6 +4,8 @@
   overflow-y: auto;
   scroll-snap-type: y mandatory;
   scroll-behavior: smooth;
+  scroll-padding-top: 4rem;
+  /* Account for sticky navbar on scroll snap */
   background:
     radial-gradient(circle at 20% 20%, rgba(124, 58, 237, 0.18), transparent 55%),
     radial-gradient(circle at 80% 10%, rgba(168, 85, 247, 0.16), transparent 60%),
@@ -48,7 +50,7 @@
   min-height: 100vh;
   position: relative;
   overflow: hidden;
-  scroll-snap-align: center;
+  scroll-snap-align: start;
   scroll-snap-stop: always;
 }
 
@@ -210,13 +212,15 @@
 
 .landing-section {
   padding: 6rem 3rem;
+  padding-top: 5rem;
+  /* Account for navbar on scroll snap */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   /* Center content vertically too */
   min-height: 100vh;
-  scroll-snap-align: center;
+  scroll-snap-align: start;
   scroll-snap-stop: always;
 }
 
