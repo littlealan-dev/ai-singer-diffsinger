@@ -5,6 +5,12 @@ import {
   getToken,
   type AppCheck,
 } from "firebase/app-check";
+import {
+  getAuth,
+  signInAnonymously,
+  type Auth,
+  type User,
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string,
@@ -22,9 +28,11 @@ let appCheckEnabled = false;
 
 let app;
 let appCheck: AppCheck | null = null;
+let auth: Auth | null = null;
 try {
   if (requiredConfigKeys.length === 0) {
     app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
   } else {
     console.warn(
       "Firebase config is missing values; App Check disabled.",
@@ -43,7 +51,7 @@ if (app && appCheckSiteKey) {
   const debugToken = import.meta.env.VITE_FIREBASE_APP_CHECK_DEBUG_TOKEN as
     | string
     | undefined;
-  if (debugToken) {
+  if (debugToken && debugToken !== "false") {
     (self as unknown as { FIREBASE_APPCHECK_DEBUG_TOKEN?: string }).FIREBASE_APPCHECK_DEBUG_TOKEN =
       debugToken === "true" ? true : debugToken;
   }
@@ -64,4 +72,16 @@ export async function getAppCheckToken(): Promise<string | null> {
   }
   const token = await getToken(appCheck, false);
   return token.token || null;
+}
+
+export async function getIdToken(): Promise<string | null> {
+  if (!auth) {
+    return null;
+  }
+  let user: User | null = auth.currentUser;
+  if (!user) {
+    const credential = await signInAnonymously(auth);
+    user = credential.user;
+  }
+  return user.getIdToken();
 }

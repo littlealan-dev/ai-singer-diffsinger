@@ -18,8 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+RUN python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')"
+
 COPY src /app/src
 COPY assets /app/assets
-COPY data /app/data
 
 CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug", "--access-log"]

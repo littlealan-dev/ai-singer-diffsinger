@@ -19,7 +19,6 @@ venv/
 *.aac
 *.aif
 *.aiff
-*.onnx
 *.pth
 *.pt
 *.ckpt
@@ -29,6 +28,7 @@ venv/
 *.tar
 *.tar.gz
 *.zip
+
 
 # IDE
 .vscode/

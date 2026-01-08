@@ -5,6 +5,7 @@ from typing import Any, Dict, AsyncIterator, Iterator, Optional
 import asyncio
 from contextlib import asynccontextmanager
 import time
+import os
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +21,7 @@ from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.progress import read_progress
 from src.backend.session import SessionStore
-from src.backend.firebase_app import verify_id_token
+from src.backend.firebase_app import initialize_firebase_app, verify_id_token
 from src.backend.storage_client import download_bytes, upload_file
 from src.mcp.logging_utils import (
     clear_log_context,
@@ -70,14 +71,20 @@ def create_app() -> FastAPI:
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
+    cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if cors_env:
+        cors_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+    else:
+        cors_origins = [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174",
-        ],
+        ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -95,7 +102,8 @@ def create_app() -> FastAPI:
             session_id,
         )
         try:
-            await _require_app_check(request)
+            if request.method != "OPTIONS":
+                await _require_app_check(request)
             response = await call_next(request)
         finally:
             duration_ms = (time.monotonic() - start) * 1000.0
@@ -296,6 +304,9 @@ async def _get_snapshot_or_404(
 def _extract_bearer_token(request: Request) -> str:
     auth_header = request.headers.get("authorization")
     if not auth_header:
+        token = request.query_params.get("id_token") or request.query_params.get("auth")
+        if token:
+            return token
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
     parts = auth_header.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -323,6 +334,7 @@ async def _require_app_check(request: Request) -> None:
     settings: Settings = request.app.state.settings
     if not settings.backend_require_app_check:
         return
+    initialize_firebase_app()
     token = request.headers.get("X-Firebase-AppCheck")
     if not token:
         token = request.query_params.get("app_check")
