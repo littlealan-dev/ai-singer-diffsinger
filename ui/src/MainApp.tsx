@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
   chat,
@@ -77,6 +78,7 @@ const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
 };
 
 export default function MainApp() {
+  const navigate = useNavigate();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -98,6 +100,7 @@ export default function MainApp() {
     messageId: string;
     url: string;
   } | null>(null);
+  const chatStreamRef = useRef<HTMLDivElement | null>(null);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -223,6 +226,12 @@ export default function MainApp() {
       window.clearInterval(interval);
     };
   }, [activeProgress]);
+
+  useEffect(() => {
+    const container = chatStreamRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [messages, status]);
 
   const headerSubtitle = useMemo(
     () =>
@@ -379,10 +388,10 @@ export default function MainApp() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div className="brand">
+        <div className="brand" onClick={() => navigate("/")} style={{ cursor: 'pointer' }}>
           <Sparkles className="brand-icon" />
           <div>
-            <h1>SightSinger.AI</h1>
+            <h1>SightSinger.ai</h1>
             <p>{headerSubtitle}</p>
           </div>
         </div>
@@ -406,7 +415,7 @@ export default function MainApp() {
             <h2>Studio Chat</h2>
             <span className="chat-subtitle">Natural language takes, no DAW edits</span>
           </div>
-          <div className="chat-stream">
+          <div className="chat-stream" ref={chatStreamRef}>
             {messages.length === 0 && (
               <div className="empty-state">
                 <p>Drop a MusicXML file here to begin.</p>

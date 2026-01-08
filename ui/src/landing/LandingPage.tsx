@@ -77,10 +77,17 @@ export default function LandingPage() {
         };
     }, []);
 
+    const scrollToTop = () => {
+        const container = document.querySelector(".landing-page");
+        if (container) {
+            container.scrollTo({ top: 0, behavior: "smooth" });
+        }
+    };
+
     return (
         <div className="landing-page">
             <nav className="landing-nav">
-                <div className="brand">
+                <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
                     <Sparkles className="brand-icon" />
                     <span>SightSinger.ai</span>
                 </div>
@@ -219,21 +226,21 @@ export default function LandingPage() {
                         <div className="timeline-step">01</div>
                         <div className="timeline-content">
                             <h3>Upload your score</h3>
-                            <p>Drop in MusicXML from MuseScore, Logic Pro, Finale, or Sibelius. <br/>SightSinger.ai parses tempo, parts, and lyrics.</p>
+                            <p>Drop in MusicXML from MuseScore, Logic Pro, Finale, or Sibelius. <br />SightSinger.ai parses tempo, parts, and lyrics.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
                         <div className="timeline-step">02</div>
                         <div className="timeline-content">
                             <h3>Tell the singer</h3>
-                            <p>Use natural language to pick parts/verses and shape phrasing, tone, and expression. <br/>The AI translates your intent into performance instructions.</p>
+                            <p>Use natural language to pick parts/verses and shape phrasing, tone, and expression. <br />The AI translates your intent into performance instructions.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
                         <div className="timeline-step">03</div>
                         <div className="timeline-content">
                             <h3>Generate the singing voice</h3>
-                            <p>SightSinger.ai uses DiffSinger, an open-source singing voice synthesis model, to generate a realistic vocal demo directly from the score. <br/>Voicebanks are OpenUtau-compatible ONNX format, a widely supported format that allows easy voice bank expansion.</p>
+                            <p>SightSinger.ai uses DiffSinger, an open-source singing voice synthesis model, to generate a realistic vocal demo directly from the score. <br />Voicebanks are OpenUtau-compatible ONNX format, a widely supported format that allows easy voice bank expansion.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
@@ -353,6 +360,30 @@ export default function LandingPage() {
                 </div>
             </section>
 
+            <section id="about-section" className="landing-section">
+                <h2 className="section-title">About Me</h2>
+                <div className="about-content">
+                    <div className="bio-list">
+                        <div className="bio-item">
+                            <span className="bio-label">By Day</span>
+                            <span className="bio-value">Software Engineer passionate about solving problems with code.</span>
+                        </div>
+                        <div className="bio-item">
+                            <span className="bio-label">By Heart</span>
+                            <span className="bio-value">Church pianist, choir member, and community band percussionist.</span>
+                        </div>
+                        <div className="bio-item">
+                            <span className="bio-label">The Origin</span>
+                            <span className="bio-value">I built SightSinger.ai to bridge the gap between my IT world and my music life—using AI to help me hear the scores I write without the technical hurdles.</span>
+                        </div>
+                        <div className="bio-item">
+                            <span className="bio-label">The Goal</span>
+                            <span className="bio-value">Helping fellow musicians focus on the music, not the tools.</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <footer className="landing-footer">
                 <div className="footer-content">
                     <div className="footer-brand">
@@ -362,7 +393,7 @@ export default function LandingPage() {
                     <div className="footer-links">
                         <a href="#">GitHub</a>
                         <a href="#">API Docs</a>
-                        <a href="#">About Us</a>
+                        <a href="#about-section">About Me</a>
                     </div>
                 </div>
                 <p className="copyright">© 2026 SightSinger.ai. Powered by Gemini & DiffSinger.</p>

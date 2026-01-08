@@ -755,6 +755,47 @@
   }
 }
 
+.about-content {
+  max-width: 800px;
+  width: 100%;
+}
+
+.bio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  text-align: left;
+}
+
+.bio-item {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.bio-label {
+  font-weight: 700;
+  color: #a855f7;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.9rem;
+  padding-top: 0.2rem;
+}
+
+.bio-value {
+  font-size: 1.1rem;
+  line-height: 1.6;
+  color: #cbd5e1;
+}
+
+@media (max-width: 640px) {
+  .bio-item {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+}
+
 .landing-footer {
   padding: 3rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);

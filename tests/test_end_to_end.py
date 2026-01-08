@@ -64,7 +64,7 @@ class TestEndToEndAPI(unittest.TestCase):
         
         # Step 2: Synthesize
         print("Step 2: Synthesizing audio...")
-        result = synthesize(score, self.voicebank_path, voice_id="soprano")
+        result = synthesize(score, self.voicebank_path)
         print(f"  Generated {result['duration_seconds']:.2f}s of audio")
         
         # Step 3: Save
@@ -110,6 +110,37 @@ class TestEndToEndAPI(unittest.TestCase):
         print(f"  Saved to: {save_result['path']}")
 
         # Verify
+        self.assertTrue(Path(save_result["path"]).exists())
+        self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
+        print("  ✓ Test passed!")
+
+    def test_full_synthesis_christmas_song(self):
+        """Test full synthesis with the Christmas Song score."""
+        christmas_score = self.root_dir / "assets/test_data/the-christmas-song.xml"
+        if not christmas_score.exists():
+            self.skipTest(f"Test score not found at {christmas_score}")
+        output_wav = self.output_dir / "api_output_christmas.wav"
+
+        print(f"\n=== Full Synthesis Test (Christmas Song) ===")
+        print(f"Voicebank: {self.voicebank_path.name}")
+        print(f"Score: {christmas_score.name}")
+
+        print("Step 1: Parsing score...")
+        score = parse_score(christmas_score)
+        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
+
+        print("Step 2: Synthesizing audio...")
+        result = synthesize(score, self.voicebank_path)
+        print(f"  Generated {result['duration_seconds']:.2f}s of audio")
+
+        print("Step 3: Saving audio...")
+        save_result = save_audio(
+            result["waveform"],
+            output_wav,
+            sample_rate=result["sample_rate"],
+        )
+        print(f"  Saved to: {save_result['path']}")
+
         self.assertTrue(Path(save_result["path"]).exists())
         self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
         print("  ✓ Test passed!")

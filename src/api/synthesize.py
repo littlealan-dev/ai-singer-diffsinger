@@ -3,6 +3,7 @@ Convenience synthesize API - runs the full pipeline.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import json
@@ -24,6 +25,8 @@ from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
+
+_REDUCED_VOWELS = {"ax", "ah", "uh", "ih", "er", "ix", "axr"}
 
 
 class TimeAxis:
@@ -160,6 +163,103 @@ def _scale_curve(values: List[float], factor: float) -> List[float]:
     for val in values:
         scaled.append(val * factor)
     return scaled
+
+
+def _pad_curve_to_length(values: List[float], target_len: int) -> List[float]:
+    if target_len <= 0:
+        return []
+    if not values:
+        return [0.0] * target_len
+    current_len = len(values)
+    if current_len == target_len:
+        return values
+    if current_len > target_len:
+        return values[:target_len]
+    pad_value = values[-1]
+    return values + [pad_value] * (target_len - current_len)
+
+
+def _phoneme_base(phoneme: str) -> str:
+    return re.sub(r"\d+$", "", phoneme).lower()
+
+
+def _phoneme_stress(phoneme: str) -> int:
+    match = re.search(r"(\d)$", phoneme)
+    return int(match.group(1)) if match else 0
+
+
+def _trim_single_note_multisyllable(
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+    phonemizer: Phonemizer,
+    *,
+    lyric: str,
+    note_idx: int,
+) -> Tuple[List[str], List[int], List[int]]:
+    vowel_indices = [idx for idx, ph in enumerate(phonemes) if phonemizer.is_vowel(ph)]
+    if len(vowel_indices) <= 1:
+        return phonemes, ids, lang_ids
+
+    stress_candidates = [
+        idx for idx in vowel_indices if _phoneme_stress(phonemes[idx]) > 0
+    ]
+    if stress_candidates:
+        chosen = max(stress_candidates, key=lambda idx: _phoneme_stress(phonemes[idx]))
+    else:
+        non_reduced = [
+            idx for idx in vowel_indices if _phoneme_base(phonemes[idx]) not in _REDUCED_VOWELS
+        ]
+        chosen = non_reduced[0] if non_reduced else vowel_indices[0]
+
+    prev_vowel = max([v for v in vowel_indices if v < chosen], default=-1)
+    next_vowel = next((v for v in vowel_indices if v > chosen), len(phonemes))
+    start = prev_vowel + 1
+    end = next_vowel
+    trimmed_ph = phonemes[start:end]
+    trimmed_ids = ids[start:end]
+    trimmed_lang = lang_ids[start:end]
+    if not trimmed_ph:
+        trimmed_ph = [phonemes[chosen]]
+        trimmed_ids = [ids[chosen]]
+        trimmed_lang = [lang_ids[chosen]]
+
+    logger.warning(
+        "trim_multisyllable_single_note lyric=%s note_idx=%s original=%s trimmed=%s",
+        lyric,
+        note_idx,
+        phonemes,
+        trimmed_ph,
+    )
+    return trimmed_ph, trimmed_ids, trimmed_lang
+
+
+def _align_frame_curves(
+    expected_frames: int,
+    *,
+    f0: List[float],
+    breathiness: Optional[List[float]],
+    tension: Optional[List[float]],
+    voicing: Optional[List[float]],
+) -> tuple[List[float], Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
+    def _maybe_pad(name: str, values: Optional[List[float]]) -> Optional[List[float]]:
+        if values is None:
+            return None
+        if len(values) != expected_frames:
+            logger.warning(
+                "frame_curve_mismatch name=%s expected=%s got=%s",
+                name,
+                expected_frames,
+                len(values),
+            )
+            return _pad_curve_to_length(values, expected_frames)
+        return values
+
+    f0 = _maybe_pad("f0", f0) or []
+    breathiness = _maybe_pad("breathiness", breathiness)
+    tension = _maybe_pad("tension", tension)
+    voicing = _maybe_pad("voicing", voicing)
+    return f0, breathiness, tension, voicing
 
 
 _PHONEME_MAP_CACHE: Dict[str, Dict[str, int]] = {}
@@ -436,6 +536,21 @@ def _build_phoneme_groups(
         phonemes = list(word_data.get("phonemes", [])) or ["SP"]
         ids = list(word_data.get("ids", [])) if word_data.get("phonemes") else [sp_id]
         lang_ids = list(word_data.get("lang_ids", [])) if word_data.get("phonemes") else [0]
+        if (
+            len(group["notes"]) == 1
+            and len(phonemes) > 1
+            and any(phonemizer.is_vowel(ph) for ph in phonemes)
+        ):
+            note_idx = note_indices[0]
+            lyric = group["notes"][0].get("lyric", "") or ""
+            phonemes, ids, lang_ids = _trim_single_note_multisyllable(
+                phonemes,
+                ids,
+                lang_ids,
+                phonemizer,
+                lyric=lyric,
+                note_idx=note_idx,
+            )
 
         is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
         is_glide = [phonemizer.is_glide(p) for p in phonemes]
@@ -623,7 +738,22 @@ def align_phonemes_to_notes(
         tempos,
         frame_ms,
     )
-    pitch_note_durations = _compute_pitch_note_durations(start_frames, end_frames)
+    pitch_indices = [
+        idx for idx, note in enumerate(notes)
+        if float(note.get("duration_beats") or 0.0) > 0.0
+    ]
+    if len(pitch_indices) != len(notes) and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "pitch_skip_zero_duration count=%s",
+            len(notes) - len(pitch_indices),
+        )
+    pitch_start_frames = [start_frames[idx] for idx in pitch_indices]
+    pitch_end_frames = [end_frames[idx] for idx in pitch_indices]
+    pitch_note_pitches = [note_pitches[idx] for idx in pitch_indices]
+    pitch_note_durations = _compute_pitch_note_durations(
+        pitch_start_frames,
+        pitch_end_frames,
+    )
 
     word_groups = _group_notes(notes)
     lyrics: List[str] = []
@@ -674,6 +804,7 @@ def align_phonemes_to_notes(
         computed_note_rests.append(is_rest)
         prev_rest = is_rest
 
+    pitch_note_rests = [computed_note_rests[idx] for idx in pitch_indices]
     result = {
         "phoneme_ids": ph_result["phoneme_ids"],
         "language_ids": ph_result["language_ids"],
@@ -681,8 +812,8 @@ def align_phonemes_to_notes(
         "word_durations": ph_result["word_durations"],
         "word_pitches": ph_result["word_pitches"],
         "note_durations": pitch_note_durations,
-        "note_pitches": note_pitches,
-        "note_rests": computed_note_rests,
+        "note_pitches": pitch_note_pitches,
+        "note_rests": pitch_note_rests,
     }
     if include_phonemes:
         result["phonemes"] = ph_result["phonemes"]
@@ -825,6 +956,25 @@ def synthesize(
         speaker_name=speaker_name,
         device=device,
     )
+    expected_frames = int(sum(durations))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "frame_lengths_before_variance expected=%s f0=%s durations=%s",
+            expected_frames,
+            len(pitch_result["f0"]),
+            len(durations),
+        )
+    if expected_frames > 0 and len(pitch_result["f0"]) != expected_frames:
+        logger.warning(
+            "pitch_length_mismatch expected=%s got=%s",
+            expected_frames,
+            len(pitch_result["f0"]),
+        )
+        pitch_result["f0"] = _pad_curve_to_length(pitch_result["f0"], expected_frames)
+        if "pitch_midi" in pitch_result:
+            pitch_result["pitch_midi"] = _pad_curve_to_length(
+                pitch_result["pitch_midi"], expected_frames
+            )
     
     # Step 5: Predict variance
     _notify("variance", "Planning the phrasing...", 0.65)
@@ -841,6 +991,22 @@ def synthesize(
     breathiness = _scale_curve(var_result["breathiness"], airiness)
     tension = _scale_curve(var_result["tension"], intensity)
     voicing = _scale_curve(var_result["voicing"], clarity)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "frame_lengths_variance expected=%s breathiness=%s tension=%s voicing=%s",
+            expected_frames,
+            len(breathiness) if breathiness else 0,
+            len(tension) if tension else 0,
+            len(voicing) if voicing else 0,
+        )
+    if expected_frames > 0:
+        pitch_result["f0"], breathiness, tension, voicing = _align_frame_curves(
+            expected_frames,
+            f0=pitch_result["f0"],
+            breathiness=breathiness,
+            tension=tension,
+            voicing=voicing,
+        )
     
     # Step 6: Synthesize audio
     _notify("synthesize", "Taking a breath for the take...", 0.8)
