@@ -5,11 +5,12 @@ import json
 import sys
 import traceback
 import logging
-from pathlib import Path
+import os
+import time
 from typing import Any, Dict, Optional, Set
 
 from src.mcp.tools import call_tool, list_tools
-from src.mcp.logging_utils import attach_context_filter, build_formatter, is_dev_env, summarize_payload
+from src.mcp.logging_utils import configure_logging, summarize_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
@@ -137,22 +138,36 @@ def main() -> None:
         help="Service name used for the log filename.",
     )
     args = parser.parse_args()
-    level = logging.DEBUG if args.debug else logging.INFO
-    log_dir = Path(args.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{args.service_name}.log"
-    handlers = [logging.StreamHandler(sys.stderr)]
-    if is_dev_env():
-        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
-    formatter = build_formatter()
-    for handler in handlers:
-        handler.setFormatter(formatter)
-        attach_context_filter(handler)
-    logging.basicConfig(
-        level=level,
-        handlers=handlers,
-    )
+    startup_start = time.monotonic()
+    if args.debug:
+        os.environ.setdefault("BACKEND_LOG_LEVEL", "debug")
+    mcp_config = "config/logging.mcp.prod.json"
+    if os.getenv("APP_ENV", "dev").lower() in {"dev", "development", "local", "test"}:
+        mcp_config = "config/logging.mcp.dev.json"
+    os.environ.setdefault("LOG_CONFIG", mcp_config)
+    configure_logging()
+    logger = logging.getLogger(__name__)
+    logger.info("mcp_startup_begin service=%s device=%s mode=%s", args.service_name, args.device, args.mode)
+    nltk_start = time.monotonic()
+    try:
+        import nltk
+
+        nltk.data.find("taggers/averaged_perceptron_tagger_eng")
+        nltk_status = "cached"
+    except Exception:
+        try:
+            import nltk
+
+            nltk.download("averaged_perceptron_tagger_eng")
+            nltk_status = "downloaded"
+        except Exception as exc:  # pragma: no cover - defensive log
+            logger.warning("nltk_download_failed error=%s", exc, exc_info=True)
+            nltk_status = "failed"
+    nltk_ms = (time.monotonic() - nltk_start) * 1000.0
+    logger.info("nltk_ready status=%s elapsed_ms=%.2f", nltk_status, nltk_ms)
     run_server(args.device, args.mode)
+    startup_ms = (time.monotonic() - startup_start) * 1000.0
+    logger.info("mcp_startup_ready elapsed_ms=%.2f", startup_ms)
 
 
 if __name__ == "__main__":

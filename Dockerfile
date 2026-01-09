@@ -19,6 +19,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 RUN python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')"
+ENV NLTK_DATA=/root/nltk_data
 
 COPY src /app/src
 

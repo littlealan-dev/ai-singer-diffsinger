@@ -32,12 +32,14 @@ class McpProcess:
         cwd: Path,
         timeout_seconds: float,
         startup_timeout_seconds: float,
+        pipe_stderr: bool,
     ) -> None:
         self._name = name
         self._args = list(args)
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._startup_timeout_seconds = startup_timeout_seconds
+        self._pipe_stderr = pipe_stderr
         self._proc: Optional[subprocess.Popen[str]] = None
         self._lock = threading.Lock()
         self._next_id = 1
@@ -54,15 +56,16 @@ class McpProcess:
             cwd=self._cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.PIPE if self._pipe_stderr else None,
             text=True,
         )
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr,
-            name="mcp-stderr",
-            daemon=True,
-        )
-        self._stderr_thread.start()
+        if self._pipe_stderr:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                name="mcp-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
         tools_start = time.monotonic()
         self.list_tools(timeout_seconds=self._startup_timeout_seconds)
         tools_ms = (time.monotonic() - tools_start) * 1000.0
@@ -168,6 +171,7 @@ class McpProcess:
 class McpRouter:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        pipe_stderr = settings.app_env.lower() in {"dev", "development", "local", "test"}
         python_exe = sys.executable
         self._cpu = McpProcess(
             name="mcp_cpu",
@@ -186,6 +190,7 @@ class McpRouter:
             cwd=settings.project_root,
             timeout_seconds=settings.mcp_timeout_seconds,
             startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
+            pipe_stderr=pipe_stderr,
         )
         self._gpu = McpProcess(
             name="mcp_gpu",
@@ -204,6 +209,7 @@ class McpRouter:
             cwd=settings.project_root,
             timeout_seconds=settings.mcp_gpu_timeout_seconds,
             startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
+            pipe_stderr=pipe_stderr,
         )
         self._tool_to_worker = {
             "parse_score": "cpu",

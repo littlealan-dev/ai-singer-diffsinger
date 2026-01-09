@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "filters": {
+    "context": {
+      "()": "src.mcp.logging_utils.LoggingContextFilter"
+    },
+    "max_info": {
+      "()": "src.mcp.logging_utils.MaxLevelFilter",
+      "max_level": "INFO"
+    },
+    "min_warning": {
+      "()": "src.mcp.logging_utils.MinLevelFilter",
+      "min_level": "WARNING"
+    }
+  },
+  "formatters": {
+    "default": {
+      "format": "%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d:%(funcName)s session_id=%(session_id)s job_id=%(job_id)s user_id=%(user_id)s %(message)s"
+    },
+    "json": {
+      "()": "src.mcp.logging_utils.JsonFormatter"
+    }
+  },
+  "handlers": {
+    "stdout": {
+      "class": "logging.StreamHandler",
+      "level": "DEBUG",
+      "formatter": "default",
+      "filters": [
+        "context",
+        "max_info"
+      ],
+      "stream": "ext://sys.stdout"
+    },
+    "stderr": {
+      "class": "logging.StreamHandler",
+      "level": "DEBUG",
+      "formatter": "default",
+      "filters": [
+        "context",
+        "min_warning"
+      ],
+      "stream": "ext://sys.stderr"
+    }
+  },
+  "root": {
+    "level": "DEBUG",
+    "handlers": [
+      "stdout",
+      "stderr"
+    ]
+  }
+}

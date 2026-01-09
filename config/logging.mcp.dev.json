@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "filters": {
+    "context": {
+      "()": "src.mcp.logging_utils.LoggingContextFilter"
+    }
+  },
+  "formatters": {
+    "default": {
+      "format": "%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d:%(funcName)s session_id=%(session_id)s job_id=%(job_id)s user_id=%(user_id)s %(message)s"
+    },
+    "json": {
+      "()": "src.mcp.logging_utils.JsonFormatter"
+    }
+  },
+  "handlers": {
+    "stderr": {
+      "class": "logging.StreamHandler",
+      "level": "DEBUG",
+      "formatter": "default",
+      "filters": [
+        "context"
+      ],
+      "stream": "ext://sys.stderr"
+    }
+  },
+  "root": {
+    "level": "DEBUG",
+    "handlers": [
+      "stderr"
+    ]
+  }
+}

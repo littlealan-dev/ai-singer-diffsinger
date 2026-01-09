@@ -1,5 +1,7 @@
 import onnxruntime as ort
 import numpy as np
+import logging
+import os
 from pathlib import Path
 from typing import Dict, Any
 
@@ -26,7 +28,21 @@ class Vocoder:
         elif self.device == "coreml":
             providers.insert(0, "CoreMLExecutionProvider")
             
-        return ort.InferenceSession(str(self.model_path), providers=providers)
+        opts = ort.SessionOptions()
+        intra_threads = os.getenv("ORT_INTRA_OP_NUM_THREADS")
+        inter_threads = os.getenv("ORT_INTER_OP_NUM_THREADS")
+        if intra_threads:
+            opts.intra_op_num_threads = int(intra_threads)
+        if inter_threads:
+            opts.inter_op_num_threads = int(inter_threads)
+        logging.info(
+            "ort_session_config model=%s providers=%s intra_threads=%s inter_threads=%s",
+            self.model_path.name,
+            providers,
+            opts.intra_op_num_threads,
+            opts.inter_op_num_threads,
+        )
+        return ort.InferenceSession(str(self.model_path), providers=providers, sess_options=opts)
 
     def forward(self, mel: np.ndarray, f0: np.ndarray) -> np.ndarray:
         """

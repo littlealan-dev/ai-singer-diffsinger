@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Optional
 from pathlib import Path
 import logging
+import logging.config
 import json
 from datetime import datetime, timezone
 import os
@@ -99,6 +100,38 @@ class LoggingContextFilter(logging.Filter):
         return True
 
 
+class _LevelFilter(logging.Filter):
+    def __init__(self, *, min_level: int | str | None = None, max_level: int | str | None = None) -> None:
+        super().__init__()
+        self._min_level = self._normalize_level(min_level)
+        self._max_level = self._normalize_level(max_level)
+
+    @staticmethod
+    def _normalize_level(level: int | str | None) -> int | None:
+        if level is None:
+            return None
+        if isinstance(level, int):
+            return level
+        return logging.getLevelName(level.upper())
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._min_level is not None and record.levelno < self._min_level:
+            return False
+        if self._max_level is not None and record.levelno > self._max_level:
+            return False
+        return True
+
+
+class MaxLevelFilter(_LevelFilter):
+    def __init__(self, max_level: int | str) -> None:
+        super().__init__(max_level=max_level)
+
+
+class MinLevelFilter(_LevelFilter):
+    def __init__(self, min_level: int | str) -> None:
+        super().__init__(min_level=min_level)
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(
@@ -106,6 +139,7 @@ class JsonFormatter(logging.Formatter):
         )
         payload = {
             "timestamp": timestamp,
+            "severity": record.levelname,
             "level": record.levelname,
             "logger": record.name,
             "file": record.filename,
@@ -162,6 +196,32 @@ def ensure_timestamped_handlers(logger_names: Iterable[str] | None = None) -> No
         for handler in logger.handlers:
             handler.setFormatter(formatter)
             attach_context_filter(handler)
+
+
+def configure_logging() -> None:
+    app_env = _app_env().lower()
+    root_dir = Path(__file__).resolve().parents[2]
+    config_name = "logging.prod.json" if app_env in {"prod", "production"} else "logging.dev.json"
+    config_path = root_dir / "config" / config_name
+    override_path = os.getenv("LOG_CONFIG")
+    if override_path:
+        override_candidate = Path(override_path)
+        if not override_candidate.is_absolute():
+            override_candidate = root_dir / override_candidate
+        config_path = override_candidate
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        if _use_json_logs() and "formatters" in config and "json" in config["formatters"]:
+            for handler in config.get("handlers", {}).values():
+                handler["formatter"] = "json"
+        logging.config.dictConfig(config)
+    else:
+        logging.basicConfig(level=logging.INFO)
+    level_override = os.getenv("BACKEND_LOG_LEVEL")
+    if level_override:
+        logging.getLogger().setLevel(level_override.upper())
+    ensure_timestamped_handlers()
 
 
 def get_logger(module_name: str) -> logging.Logger:

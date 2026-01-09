@@ -25,7 +25,7 @@ from src.backend.firebase_app import initialize_firebase_app, verify_id_token
 from src.backend.storage_client import download_bytes, upload_file
 from src.mcp.logging_utils import (
     clear_log_context,
-    ensure_timestamped_handlers,
+    configure_logging,
     get_logger,
     set_log_context,
 )
@@ -37,7 +37,7 @@ class ChatRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
-    ensure_timestamped_handlers()
+    configure_logging()
     settings = Settings.from_env()
     sessions = SessionStore(
         project_root=settings.project_root,

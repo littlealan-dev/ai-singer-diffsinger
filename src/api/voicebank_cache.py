@@ -5,6 +5,7 @@ from typing import Iterable, List, Optional, Set
 import os
 import shutil
 import tarfile
+import time
 
 from src.backend.storage_client import list_blobs
 from src.mcp.logging_utils import get_logger
@@ -107,8 +108,10 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
     target_dir = cache_root / voicebank_id
     config_path = target_dir / "dsconfig.yaml"
     if config_path.exists():
+        logger.info("voicebank_cache_hit voicebank=%s path=%s", voicebank_id, target_dir)
         return target_dir
 
+    start_total = time.monotonic()
     bucket = _voicebank_bucket()
     if not bucket:
         raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
@@ -128,8 +131,19 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     archive_path = tmp_dir / archive_name
+    download_start = time.monotonic()
     blob.download_to_filename(str(archive_path))
+    download_ms = (time.monotonic() - download_start) * 1000.0
+    logger.info(
+        "voicebank_downloaded voicebank=%s bytes=%s elapsed_ms=%.2f",
+        voicebank_id,
+        archive_path.stat().st_size if archive_path.exists() else "-",
+        download_ms,
+    )
+    extract_start = time.monotonic()
     _extract_tarball(archive_path, tmp_dir)
+    extract_ms = (time.monotonic() - extract_start) * 1000.0
+    logger.info("voicebank_extracted voicebank=%s elapsed_ms=%.2f", voicebank_id, extract_ms)
 
     config_path = tmp_dir / "dsconfig.yaml"
     if not config_path.exists():
@@ -140,6 +154,8 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
         shutil.rmtree(target_dir)
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir.replace(target_dir)
+    total_ms = (time.monotonic() - start_total) * 1000.0
+    logger.info("voicebank_cached voicebank=%s elapsed_ms=%.2f", voicebank_id, total_ms)
     return target_dir
 
 
