@@ -16,12 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
-ARG ORT_PACKAGE=onnxruntime
 RUN pip install --no-cache-dir -r /app/requirements.txt && \
-    if [ "$ORT_PACKAGE" = "onnxruntime-gpu" ]; then \
-      pip uninstall -y onnxruntime && \
-      pip install --no-cache-dir onnxruntime-gpu; \
-    fi
+    pip uninstall -y onnxruntime && \
+    pip install --no-cache-dir onnxruntime-gpu
 
 RUN python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')"
 ENV NLTK_DATA=/root/nltk_data

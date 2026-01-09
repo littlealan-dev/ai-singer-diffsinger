@@ -446,6 +446,9 @@ class Orchestrator:
             )
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
+            message = str(exc)
+            if "HTTP error 429" in message or "RESOURCE_EXHAUSTED" in message:
+                return None, "Gemini API usage limit exceeded. Please try again tomorrow."
             return None, "LLM request failed. Please try again."
         response = parse_llm_response(text)
         if response is None:
