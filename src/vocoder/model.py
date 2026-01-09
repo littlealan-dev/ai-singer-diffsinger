@@ -22,11 +22,26 @@ class Vocoder:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found at {self.model_path}")
         
+        available = ort.get_available_providers()
         providers = ["CPUExecutionProvider"]
         if self.device == "cuda":
-            providers.insert(0, "CUDAExecutionProvider")
+            if "CUDAExecutionProvider" in available:
+                providers.insert(0, "CUDAExecutionProvider")
+            else:
+                logging.warning(
+                    "cuda_provider_unavailable model=%s available=%s",
+                    self.model_path.name,
+                    available,
+                )
         elif self.device == "coreml":
-            providers.insert(0, "CoreMLExecutionProvider")
+            if "CoreMLExecutionProvider" in available:
+                providers.insert(0, "CoreMLExecutionProvider")
+            else:
+                logging.warning(
+                    "coreml_provider_unavailable model=%s available=%s",
+                    self.model_path.name,
+                    available,
+                )
             
         opts = ort.SessionOptions()
         intra_threads = os.getenv("ORT_INTRA_OP_NUM_THREADS")

@@ -13,6 +13,8 @@ from src.api import (
     synthesize,
 )
 from src.backend.progress import write_progress
+from src.backend.job_store import JobStore
+from src.backend.firebase_app import initialize_firebase_app
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
@@ -64,6 +66,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     )
     progress_path = params.get("progress_path")
     progress_job_id = params.get("progress_job_id")
+    progress_user_id = params.get("progress_user_id")
     progress_callback = None
     if progress_path:
         resolved_progress = resolve_project_path(progress_path)
@@ -79,6 +82,19 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
                     "job_id": progress_job_id,
                 },
                 expected_job_id=progress_job_id,
+            )
+    elif progress_job_id:
+        initialize_firebase_app()
+        job_store = JobStore()
+
+        def progress_callback(step: str, message: str, progress: float) -> None:
+            job_store.update_job(
+                progress_job_id,
+                status="running",
+                step=step,
+                message=message,
+                progress=progress,
+                userId=progress_user_id,
             )
 
     return synthesize(

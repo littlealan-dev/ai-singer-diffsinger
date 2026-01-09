@@ -146,6 +146,9 @@ class Orchestrator:
             synth_args["voicebank"] = await self._resolve_voicebank()
         if "voice_id" not in synth_args and self._settings.default_voice_id:
             synth_args["voice_id"] = self._settings.default_voice_id
+        if job_id is not None:
+            synth_args["progress_job_id"] = job_id
+            synth_args["progress_user_id"] = user_id
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
         synth_result = await asyncio.to_thread(
             self._router.call_tool, "synthesize", synth_args
