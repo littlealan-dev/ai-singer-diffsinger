@@ -29,6 +29,9 @@ venv/
 *.tar.gz
 *.zip
 
+# Assets moved to GCS (exclude from build context)
+assets/
+
 
 # IDE
 .vscode/

@@ -27,11 +27,13 @@ class McpRequest:
 class McpProcess:
     def __init__(
         self,
+        name: str,
         args: Iterable[str],
         cwd: Path,
         timeout_seconds: float,
         startup_timeout_seconds: float,
     ) -> None:
+        self._name = name
         self._args = list(args)
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
@@ -45,6 +47,8 @@ class McpProcess:
     def start(self) -> None:
         if self._proc is not None:
             return
+        start_time = time.monotonic()
+        self._logger.info("mcp_start_begin name=%s", self._name)
         self._proc = subprocess.Popen(
             self._args,
             cwd=self._cwd,
@@ -59,7 +63,16 @@ class McpProcess:
             daemon=True,
         )
         self._stderr_thread.start()
+        tools_start = time.monotonic()
         self.list_tools(timeout_seconds=self._startup_timeout_seconds)
+        tools_ms = (time.monotonic() - tools_start) * 1000.0
+        elapsed_ms = (time.monotonic() - start_time) * 1000.0
+        self._logger.info(
+            "mcp_start_ready name=%s elapsed_ms=%.2f tools_list_ms=%.2f",
+            self._name,
+            elapsed_ms,
+            tools_ms,
+        )
 
     def stop(self) -> None:
         if self._proc is None:
@@ -157,6 +170,7 @@ class McpRouter:
         self._settings = settings
         python_exe = sys.executable
         self._cpu = McpProcess(
+            name="mcp_cpu",
             args=[
                 python_exe,
                 "-m",
@@ -174,6 +188,7 @@ class McpRouter:
             startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
         )
         self._gpu = McpProcess(
+            name="mcp_gpu",
             args=[
                 python_exe,
                 "-m",
@@ -214,7 +229,16 @@ class McpRouter:
     def _call_with_retry(self, worker: str, name: str, arguments: Dict[str, Any]) -> Any:
         process = self._gpu if worker == "gpu" else self._cpu
         try:
-            return process.call_tool(name, arguments)
+            start = time.monotonic()
+            result = process.call_tool(name, arguments)
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            logging.getLogger(__name__).info(
+                "mcp_tool_call tool=%s worker=%s elapsed_ms=%.2f",
+                name,
+                worker,
+                elapsed_ms,
+            )
+            return result
         except McpError as exc:
             logging.getLogger(__name__).warning(
                 "MCP call failed tool=%s worker=%s error=%s; restarting",
@@ -224,4 +248,13 @@ class McpRouter:
             )
             process.stop()
             process.start()
-            return process.call_tool(name, arguments)
+            start = time.monotonic()
+            result = process.call_tool(name, arguments)
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            logging.getLogger(__name__).info(
+                "mcp_tool_call tool=%s worker=%s elapsed_ms=%.2f",
+                name,
+                worker,
+                elapsed_ms,
+            )
+            return result

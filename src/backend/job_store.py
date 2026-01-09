@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
@@ -46,3 +46,40 @@ class JobStore:
         payload["updatedAt"] = firestore.SERVER_TIMESTAMP
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload, merge=True)
+
+    def get_latest_job_by_session(
+        self, *, user_id: str, session_id: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        self._ensure_client()
+        query = (
+            self._client.collection(self.collection)
+            .where("userId", "==", user_id)
+            .where("sessionId", "==", session_id)
+            .order_by("updatedAt", direction=firestore.Query.DESCENDING)
+            .limit(1)
+        )
+        docs = list(query.stream())
+        if not docs:
+            return None
+        doc = docs[0]
+        data = doc.to_dict() or {}
+        return doc.id, data
+
+
+def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    status = data.get("status", "idle")
+    if status == "completed":
+        status = "done"
+    elif status in {"failed", "cancelled"}:
+        status = "error"
+    payload: Dict[str, Any] = {
+        "status": status,
+        "step": data.get("step"),
+        "message": data.get("message"),
+        "progress": data.get("progress"),
+        "audio_url": data.get("audioUrl"),
+        "error": data.get("errorMessage"),
+        "job_id": job_id,
+        "updated_at": data.get("updatedAt"),
+    }
+    return {key: value for key, value in payload.items() if value is not None}

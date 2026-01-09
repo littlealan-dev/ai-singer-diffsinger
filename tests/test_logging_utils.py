@@ -70,3 +70,15 @@ def test_json_format_includes_context_fields(monkeypatch):
     assert '"session_id"' in formatted
     assert '"job_id"' in formatted
     assert '"user_id"' in formatted
+
+
+def test_prod_env_logs_propagate_to_stdout(caplog, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    logger_name = f"test_logger_prod_emit_{uuid.uuid4().hex}"
+    logger = get_logger(logger_name)
+    assert not _has_file_handler(logger)
+    assert logger.propagate is True
+
+    caplog.set_level(logging.INFO)
+    logger.info("prod_log_test")
+    assert any(record.message == "prod_log_test" for record in caplog.records)

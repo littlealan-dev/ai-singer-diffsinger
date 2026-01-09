@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import json
+import time
 import numpy as np
 
 from src.api.phonemize import phonemize
@@ -869,6 +870,10 @@ def synthesize(
         except Exception:
             logger.debug("progress_callback_failed step=%s", step, exc_info=True)
 
+    def _log_step(step: str, start_time: float) -> None:
+        elapsed_ms = (time.monotonic() - start_time) * 1000.0
+        logger.info("synthesize_step step=%s elapsed_ms=%.2f", step, elapsed_ms)
+
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "synthesize input=%s",
@@ -907,7 +912,10 @@ def synthesize(
     if articulation < -1.0 or articulation > 1.0:
         raise ValueError("articulation must be between -1.0 and 1.0.")
 
+    start_total = time.monotonic()
+
     _notify("align", "Reading the lyrics and score...", 0.1)
+    start = time.monotonic()
     alignment = align_phonemes_to_notes(
         score,
         voicebank_path,
@@ -915,9 +923,11 @@ def synthesize(
         voice_id=voice_id,
         include_phonemes=False,
     )
+    _log_step("align", start)
     
     # Step 3: Predict durations
     _notify("durations", "Locking in the tempo...", 0.3)
+    start = time.monotonic()
     dur_result = predict_durations(
         phoneme_ids=alignment["phoneme_ids"],
         word_boundaries=alignment["word_boundaries"],
@@ -928,6 +938,7 @@ def synthesize(
         speaker_name=speaker_name,
         device=device,
     )
+    _log_step("durations", start)
     phoneme_ids = alignment["phoneme_ids"]
     language_ids = alignment["language_ids"]
     durations = dur_result["durations"]
@@ -944,6 +955,7 @@ def synthesize(
     
     # Step 4: Predict pitch
     _notify("pitch", "Finding the melody line...", 0.5)
+    start = time.monotonic()
     pitch_result = predict_pitch(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -956,6 +968,7 @@ def synthesize(
         speaker_name=speaker_name,
         device=device,
     )
+    _log_step("pitch", start)
     expected_frames = int(sum(durations))
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -978,6 +991,7 @@ def synthesize(
     
     # Step 5: Predict variance
     _notify("variance", "Planning the phrasing...", 0.65)
+    start = time.monotonic()
     var_result = predict_variance(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -988,6 +1002,7 @@ def synthesize(
         speaker_name=speaker_name,
         device=device,
     )
+    _log_step("variance", start)
     breathiness = _scale_curve(var_result["breathiness"], airiness)
     tension = _scale_curve(var_result["tension"], intensity)
     voicing = _scale_curve(var_result["voicing"], clarity)
@@ -1010,6 +1025,7 @@ def synthesize(
     
     # Step 6: Synthesize audio
     _notify("synthesize", "Taking a breath for the take...", 0.8)
+    start = time.monotonic()
     audio_result = synthesize_audio(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -1022,6 +1038,7 @@ def synthesize(
         speaker_name=speaker_name,
         device=device,
     )
+    _log_step("synthesize", start)
     
     # Calculate duration
     waveform = audio_result["waveform"]
@@ -1032,6 +1049,12 @@ def synthesize(
         "sample_rate": sample_rate,
         "duration_seconds": duration,
     }
+    total_ms = (time.monotonic() - start_total) * 1000.0
+    logger.info(
+        "synthesize_total elapsed_ms=%.2f duration_seconds=%.2f",
+        total_ms,
+        duration,
+    )
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("synthesize output=%s", summarize_payload(result))
     return result

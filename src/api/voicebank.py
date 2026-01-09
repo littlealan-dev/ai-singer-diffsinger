@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from src.api.voicebank_cache import is_prod_env, list_voicebank_ids, resolve_voicebank_path
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -131,10 +132,17 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
             summarize_payload({"search_path": str(search_path) if search_path else None}),
         )
     root_dir = Path(__file__).parent.parent.parent
+    if search_path is None and is_prod_env():
+        ids = list_voicebank_ids()
+        voicebanks = [{"id": voicebank_id, "name": voicebank_id, "path": voicebank_id} for voicebank_id in ids]
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("list_voicebanks output=%s", summarize_payload(voicebanks))
+        return voicebanks
+
     if search_path is None:
         # Default to assets/voicebanks relative to project root
         search_path = root_dir / "assets" / "voicebanks"
-    
+
     search_path = Path(search_path)
     if not search_path.exists():
         return []
@@ -145,7 +153,7 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
         rel_base = resolved_root
     else:
         rel_base = resolved_search
-    
+
     voicebanks = []
     for item in search_path.iterdir():
         if item.is_dir() and (item / "dsconfig.yaml").exists():
@@ -199,6 +207,8 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
             summarize_payload({"voicebank": str(voicebank)}),
         )
     path = Path(voicebank)
+    if isinstance(voicebank, str) and not path.exists() and "/" not in voicebank and "\\" not in voicebank:
+        path = resolve_voicebank_path(voicebank)
     config = load_voicebank_config(path)
     
     # Check for sub-models

@@ -9,7 +9,7 @@ import copy
 import uuid
 
 from src.backend.config import Settings
-from src.backend.progress import write_progress
+from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
 from src.backend.mcp_client import McpRouter
@@ -119,7 +119,6 @@ class Orchestrator:
         score: Dict[str, Any],
         arguments: Dict[str, Any],
         *,
-        progress_path: Optional[Path] = None,
         job_id: Optional[str] = None,
         user_id: Optional[str] = None,
         output_storage_path: Optional[str] = None,
@@ -147,12 +146,6 @@ class Orchestrator:
             synth_args["voicebank"] = await self._resolve_voicebank()
         if "voice_id" not in synth_args and self._settings.default_voice_id:
             synth_args["voice_id"] = self._settings.default_voice_id
-        if progress_path is not None:
-            synth_args["progress_path"] = str(
-                progress_path.relative_to(self._settings.project_root)
-            )
-            synth_args["progress_job_id"] = job_id
-
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
         synth_result = await asyncio.to_thread(
             self._router.call_tool, "synthesize", synth_args
@@ -174,17 +167,14 @@ class Orchestrator:
         if audio_format == "mp3":
             save_args["mp3_bitrate"] = self._settings.audio_mp3_bitrate
             save_args["keep_wav"] = bool(self._settings.backend_debug)
-        if progress_path is not None:
-            write_progress(
-                progress_path,
-                {
-                    "status": "running",
-                    "step": "encode",
-                    "message": "Capturing the take...",
-                    "progress": 0.9,
-                    "job_id": job_id,
-                },
-                expected_job_id=job_id,
+        if job_id is not None:
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="encode",
+                message="Capturing the take...",
+                progress=0.9,
             )
         self._logger.info("mcp_call tool=save_audio session=%s", session_id)
         save_result = await asyncio.to_thread(self._router.call_tool, "save_audio", save_args)
@@ -210,9 +200,6 @@ class Orchestrator:
             "output_storage_path": output_storage_path,
         }
         return response
-
-    def _progress_path(self, session_id: str) -> Path:
-        return self._sessions.progress_path(session_id)
 
     async def _start_synthesis_job(
         self,
@@ -252,16 +239,13 @@ class Orchestrator:
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
         )
-        progress_path = self._progress_path(session_id)
-        write_progress(
-            progress_path,
-            {
-                "status": "queued",
-                "step": "queued",
-                "message": "Got it, getting ready to sing...",
-                "progress": 0.0,
-                "job_id": job_id,
-            },
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            status="queued",
+            step="queued",
+            message="Got it, getting ready to sing...",
+            progress=0.0,
         )
         task = asyncio.create_task(
             self._run_synthesis_job(
@@ -269,7 +253,6 @@ class Orchestrator:
                 copy.deepcopy(score),
                 arguments,
                 job_id,
-                progress_path,
                 user_id,
                 input_path=input_path,
                 storage_input_path=storage_input_path,
@@ -296,7 +279,6 @@ class Orchestrator:
         score: Dict[str, Any],
         arguments: Dict[str, Any],
         job_id: str,
-        progress_path: Path,
         user_id: str,
         *,
         input_path: Optional[str],
@@ -316,81 +298,51 @@ class Orchestrator:
                     self._settings.project_root,
                 )
             await asyncio.to_thread(self._job_store.update_job, job_id, status="running")
-            write_progress(
-                progress_path,
-                {
-                    "status": "running",
-                    "step": "prepare",
-                    "message": "Warming up the voice...",
-                    "progress": 0.05,
-                    "job_id": job_id,
-                },
-                expected_job_id=job_id,
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="prepare",
+                message="Warming up the voice...",
+                progress=0.05,
             )
             response = await self._synthesize(
                 session_id,
                 score,
                 arguments,
-                progress_path=progress_path,
                 job_id=job_id,
                 user_id=user_id,
                 output_storage_path=output_storage_path,
-            )
-            write_progress(
-                progress_path,
-                {
-                    "status": "done",
-                    "step": "done",
-                    "message": "Your take is ready.",
-                    "progress": 1.0,
-                    "audio_url": response.get("audio_url"),
-                    "job_id": job_id,
-                },
-                expected_job_id=job_id,
             )
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
                 status="completed",
+                step="done",
+                message="Your take is ready.",
+                progress=1.0,
                 outputPath=response.get("output_storage_path") or response.get("output_path"),
                 audioUrl=response.get("audio_url"),
             )
         except asyncio.CancelledError:
-            write_progress(
-                progress_path,
-                {
-                    "status": "error",
-                    "step": "cancelled",
-                    "message": "That take was cancelled.",
-                    "progress": 1.0,
-                    "job_id": job_id,
-                },
-                expected_job_id=job_id,
-            )
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
                 status="cancelled",
+                step="cancelled",
+                message="That take was cancelled.",
+                progress=1.0,
             )
             raise
         except Exception as exc:
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
-            write_progress(
-                progress_path,
-                {
-                    "status": "error",
-                    "step": "error",
-                    "message": "Couldn't finish the take.",
-                    "error": str(exc),
-                    "progress": 1.0,
-                    "job_id": job_id,
-                },
-                expected_job_id=job_id,
-            )
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
                 status="failed",
+                step="error",
+                message="Couldn't finish the take.",
+                progress=1.0,
                 errorMessage=str(exc),
             )
         finally:

@@ -19,7 +19,7 @@ from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
-from src.backend.progress import read_progress
+from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore
 from src.backend.firebase_app import initialize_firebase_app, verify_id_token
 from src.backend.storage_client import download_bytes, upload_file
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
         ttl_seconds=settings.session_ttl_seconds,
         max_sessions=settings.max_sessions,
     )
+    job_store = JobStore()
     router = McpRouter(settings)
     llm_client = create_llm_client(settings)
     orchestrator = Orchestrator(router, sessions, settings, llm_client)
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     logger.setLevel(logging.DEBUG)
     app.state.settings = settings
     app.state.sessions = sessions
+    app.state.job_store = job_store
     app.state.router = router
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
@@ -252,14 +254,17 @@ def create_app() -> FastAPI:
 
     @app.get("/sessions/{session_id}/progress")
     async def get_progress(session_id: str, request: Request) -> Dict[str, Any]:
-        sessions: SessionStore = request.app.state.sessions
+        job_store: JobStore = request.app.state.job_store
         user_id = await _get_user_id_or_401(request)
-        await _get_session_or_404(sessions, session_id, user_id)
-        progress_path = sessions.progress_path(session_id)
-        payload = read_progress(progress_path)
-        if payload is None:
+        latest = await asyncio.to_thread(
+            job_store.get_latest_job_by_session,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if latest is None:
             return {"status": "idle"}
-        return payload
+        job_id, data = latest
+        return build_progress_payload(job_id, data)
 
     @app.get("/sessions/{session_id}/score")
     async def get_score(session_id: str, request: Request) -> Response:

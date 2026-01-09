@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+.env
+.DS_Store
+
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.env*
+ui/*.log
+
+logs/
+tests/output/
+outputs/
+runs/
+checkpoints/
+cache/
+tmp/
+
+# Exclude assets from image build
+assets/

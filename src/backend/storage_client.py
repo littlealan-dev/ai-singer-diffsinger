@@ -70,6 +70,10 @@ def download_bytes(bucket_name: str, object_path: str) -> bytes:
     blob = bucket.blob(object_path)
     return blob.download_as_bytes()
 
+def list_blobs(bucket_name: str, prefix: str) -> list[storage.Blob]:
+    bucket = get_bucket(bucket_name)
+    return list(bucket.list_blobs(prefix=prefix))
+
 
 def copy_blob(bucket_name: str, source_path: str, dest_path: str) -> None:
     bucket = get_bucket(bucket_name)
