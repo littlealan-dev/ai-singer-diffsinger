@@ -105,7 +105,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         voice_color=params.get("voice_color"),
         articulation=params.get("articulation", 0.0),
         airiness=params.get("airiness", 1.0),
-        intensity=params.get("intensity", 1.0),
+        intensity=params.get("intensity", 0.5),
         clarity=params.get("clarity", 1.0),
         device=device,
         progress_callback=progress_callback,

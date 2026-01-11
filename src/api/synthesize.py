@@ -832,7 +832,7 @@ def synthesize(
     voice_color: Optional[str] = None,
     articulation: float = 0.0,
     airiness: float = 1.0,
-    intensity: float = 1.0,
+    intensity: float = 0.5,
     clarity: float = 1.0,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
@@ -850,9 +850,9 @@ def synthesize(
         voice_id: Which voice to synthesize within a part (default: soprano)
         voice_color: Voice color name (subbank color ID)
         articulation: Global legato/staccato adjustment (-1.0 to +1.0)
-        airiness: Global breathiness multiplier (0.0 to 2.0)
-        intensity: Global tension multiplier (0.0 to 2.0)
-        clarity: Global voicing multiplier (0.0 to 2.0)
+        airiness: Global breathiness multiplier (0.0 to 1.0)
+        intensity: Global tension multiplier (0.0 to 1.0)
+        clarity: Global voicing multiplier (0.0 to 1.0)
         device: Device for inference
         progress_callback: Optional callback for step updates
         
