@@ -104,7 +104,7 @@ TOOLS: List[Tool] = [
                 "voice_color": {"type": ["string", "null"]},
                 "articulation": {"type": "number", "minimum": -1.0, "maximum": 1.0},
                 "airiness": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5},
                 "clarity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             },
             "required": ["score"],
