@@ -8,6 +8,9 @@ import asyncio
 import shutil
 import uuid
 
+from firebase_admin import firestore
+
+from src.backend.firebase_app import get_firestore_client
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -233,3 +236,171 @@ class SessionStore:
             if mtime > latest:
                 latest = mtime
         return latest
+
+
+class FirestoreSessionStore:
+    def __init__(
+        self,
+        project_root: Path,
+        sessions_dir: Path,
+        ttl_seconds: int,
+        max_sessions: int,
+    ) -> None:
+        self._project_root = project_root
+        self._sessions_dir = sessions_dir
+        self._ttl = timedelta(seconds=ttl_seconds)
+        self._max_sessions = max_sessions
+        self._collection = "sessions"
+        self._client = get_firestore_client()
+        self._lock = asyncio.Lock()
+
+    def session_dir(self, session_id: str) -> Path:
+        return (self._sessions_dir / session_id).resolve()
+
+    def progress_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "progress.json"
+
+    def _relative_path(self, path: Path) -> str:
+        return str(path.relative_to(self._project_root))
+
+    def _doc_ref(self, session_id: str):
+        return self._client.collection(self._collection).document(session_id)
+
+    def _state_from_doc(self, session_id: str, data: Dict[str, Any]) -> SessionState:
+        created_at = data.get("createdAt")
+        if not isinstance(created_at, datetime):
+            created_at = _utcnow()
+        last_active = data.get("lastActiveAt")
+        if not isinstance(last_active, datetime):
+            last_active = created_at
+        return SessionState(
+            id=session_id,
+            user_id=data.get("userId"),
+            created_at=created_at,
+            last_active_at=last_active,
+            history=list(data.get("history") or []),
+            files=dict(data.get("files") or {}),
+            current_score=data.get("currentScore"),
+            current_score_version=int(data.get("currentScoreVersion") or 0),
+            score_summary=data.get("scoreSummary"),
+            current_audio=data.get("currentAudio"),
+        )
+
+    async def create_session(self, user_id: Optional[str]) -> SessionState:
+        async with self._lock:
+            session_id = uuid.uuid4().hex
+            now = _utcnow()
+            payload = {
+                "userId": user_id,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                "history": [],
+                "files": {},
+                "currentScore": None,
+                "currentScoreVersion": 0,
+                "scoreSummary": None,
+                "currentAudio": None,
+            }
+            self._doc_ref(session_id).set(payload)
+            session_dir = self.session_dir(session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            return SessionState(
+                id=session_id,
+                user_id=user_id,
+                created_at=now,
+                last_active_at=now,
+            )
+
+    async def get_session(self, session_id: str, user_id: Optional[str]) -> SessionState:
+        async with self._lock:
+            doc = self._doc_ref(session_id).get()
+            if not doc.exists:
+                raise KeyError(session_id)
+            data = doc.to_dict() or {}
+            if user_id and data.get("userId") and data.get("userId") != user_id:
+                raise PermissionError(session_id)
+            self._doc_ref(session_id).update({"lastActiveAt": firestore.SERVER_TIMESTAMP})
+            return self._state_from_doc(session_id, data)
+
+    async def get_snapshot(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
+        async with self._lock:
+            doc = self._doc_ref(session_id).get()
+            if not doc.exists:
+                raise KeyError(session_id)
+            data = doc.to_dict() or {}
+            if user_id and data.get("userId") and data.get("userId") != user_id:
+                raise PermissionError(session_id)
+            self._doc_ref(session_id).update({"lastActiveAt": firestore.SERVER_TIMESTAMP})
+            return self._state_from_doc(session_id, data).snapshot()
+
+    async def append_history(self, session_id: str, role: str, content: str) -> None:
+        async with self._lock:
+            entry = {"role": role, "content": content}
+            self._doc_ref(session_id).update(
+                {
+                    "history": firestore.ArrayUnion([entry]),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_file(self, session_id: str, key: str, path: Path) -> None:
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    f"files.{key}": self._relative_path(path),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_metadata(self, session_id: str, key: str, value: str) -> None:
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {f"files.{key}": value, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
+    async def set_score(self, session_id: str, score: Dict[str, Any]) -> int:
+        async with self._lock:
+            doc_ref = self._doc_ref(session_id)
+            doc = doc_ref.get()
+            if not doc.exists:
+                raise KeyError(session_id)
+            data = doc.to_dict() or {}
+            version = int(data.get("currentScoreVersion") or 0) + 1
+            doc_ref.update(
+                {
+                    "currentScore": score,
+                    "currentScoreVersion": version,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+            return version
+
+    async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {"scoreSummary": summary, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
+    async def set_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+    ) -> None:
+        async with self._lock:
+            payload = {
+                "path": self._relative_path(path),
+                "duration_s": duration_s,
+            }
+            if storage_path:
+                payload["storage_path"] = storage_path
+            self._doc_ref(session_id).update(
+                {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
+    async def evict_expired(self) -> None:
+        return
+
+    async def cleanup_expired_on_disk(self) -> int:
+        return 0

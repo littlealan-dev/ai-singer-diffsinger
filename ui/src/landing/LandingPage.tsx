@@ -48,23 +48,18 @@ const HeroSection = () => {
             </div>
             <div className="hero-footer">
                 <div className="hero-actions">
-                    <button className="btn-primary" onClick={() => navigate("/app")}>
-                        Try SightSinger.ai <ArrowRight size={20} />
-                    </button>
                     <button
-                        className="btn-secondary"
-                        onClick={() => {
-                            const el = document.getElementById("showcase-section");
-                            el?.scrollIntoView({ behavior: "smooth" });
-                        }}
+                        className="btn-primary"
+                        onClick={() => navigate("/demo")}
                     >
-                        See it in action
+                        Try Interactive Demo <ArrowRight size={20} />
                     </button>
                 </div>
             </div>
         </section>
     );
 };
+
 
 export default function LandingPage() {
     const navigate = useNavigate();
@@ -92,51 +87,11 @@ export default function LandingPage() {
                     <span>SightSinger.ai</span>
                 </div>
                 <div className="nav-links">
-                    <button className="btn-ghost" onClick={() => navigate("/app")}>Open Studio</button>
+                    <button className="btn-primary" onClick={() => navigate("/demo")}>Try the Demo</button>
                 </div>
             </nav>
 
             <HeroSection />
-
-            <section id="showcase-section" className="landing-section alt-bg">
-                <h2 className="section-title">Hear the score, not the piano roll</h2>
-                <p className="section-subtitle">Natural language direction, instant takes.</p>
-
-                <div className="showcase-mockup">
-                    <div className="mockup-left">
-                        <div className="mockup-score-header">
-                            <span>Amazing Grace.xml</span>
-                            <span className="badge">Soprano</span>
-                        </div>
-                        <div className="mockup-score-body">
-                            <div className="staff-line"></div>
-                            <div className="staff-line"></div>
-                            <div className="staff-line"></div>
-                            <div className="staff-line"></div>
-                            <div className="staff-line"></div>
-                            <div className="note-group">
-                                <div className="note" style={{ left: '10%', top: '20px' }}></div>
-                                <div className="note" style={{ left: '25%', top: '10px' }}></div>
-                                <div className="note" style={{ left: '40%', top: '30px' }}></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="mockup-right">
-                        <div className="mockup-chat-bubble user">
-                            Make the soprano lighter and breathy, like a soft entry.
-                        </div>
-                        <div className="mockup-chat-bubble assistant">
-                            <Sparkles size={16} className="inline-icon" />
-                            Got it. Here's a breathier soprano take from the same score.
-                            <div className="mockup-audio">
-                                <div className="play-btn">▶</div>
-                                <div className="waveform">||||||||||||</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
 
             <section className="landing-section">
                 <h2 className="section-title">Who is SightSinger.ai for?</h2>

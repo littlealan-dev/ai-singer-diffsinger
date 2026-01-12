@@ -114,6 +114,48 @@ class TestEndToEndAPI(unittest.TestCase):
         self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
         print("  ✓ Test passed!")
 
+    def test_full_synthesis_tenor_male_amazing_grace(self):
+        """Test tenor verse 1 with a male voicebank."""
+        if not self.voicebank_reizo_path.exists():
+            self.skipTest(f"Voicebank not found at {self.voicebank_reizo_path}")
+
+        print(f"\n=== Full Synthesis Test (Tenor, Male) ===")
+        print(f"Voicebank: {self.voicebank_reizo_path.name}")
+        print(f"Score: {self.score_path.name}")
+
+        print("Step 1: Parsing score summary...")
+        summary_score = parse_score(self.score_path)
+        parts = summary_score.get("score_summary", {}).get("parts", [])
+        tenor_part = next(
+            (part for part in parts if (part.get("part_name") or "").lower().find("tenor") != -1),
+            None,
+        )
+        if tenor_part is None:
+            self.skipTest("Tenor part not found in score summary.")
+
+        tenor_index = tenor_part["part_index"]
+
+        print("Step 2: Parsing tenor verse 1...")
+        score = parse_score(self.score_path, part_index=tenor_index, verse_number="1")
+        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
+
+        print("Step 3: Synthesizing audio...")
+        result = synthesize(score, self.voicebank_reizo_path)
+        print(f"  Generated {result['duration_seconds']:.2f}s of audio")
+
+        print("Step 4: Saving audio...")
+        output_wav = self.output_dir / "api_output_tenor_male.wav"
+        save_result = save_audio(
+            result["waveform"],
+            output_wav,
+            sample_rate=result["sample_rate"],
+        )
+        print(f"  Saved to: {save_result['path']}")
+
+        self.assertTrue(Path(save_result["path"]).exists())
+        self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
+        print("  ✓ Test passed!")
+
     def test_full_synthesis_christmas_song(self):
         """Test full synthesis with the Christmas Song score."""
         christmas_score = self.root_dir / "assets/test_data/the-christmas-song.xml"

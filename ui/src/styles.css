@@ -263,6 +263,20 @@ body.landing-active #root {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.demo-empty-action {
+  width: 100%;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: border-color 200ms ease, color 200ms ease;
+}
+
+.demo-empty-action:hover {
+  color: var(--text-strong);
+  border-color: rgba(183, 125, 255, 0.4);
+}
+
 .drop-overlay {
   position: absolute;
   inset: 0;
@@ -433,6 +447,83 @@ body.landing-active #root {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.demo-chat-input {
+  gap: 10px;
+}
+
+.demo-prompts-row {
+  display: grid;
+  gap: 8px;
+}
+
+.demo-prompt-button {
+  text-align: left;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-strong);
+  padding: 10px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 200ms ease, border-color 200ms ease;
+}
+
+.demo-prompt-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.demo-prompt-button:not(:disabled):hover {
+  transform: translateY(-1px);
+  border-color: rgba(183, 125, 255, 0.4);
+}
+
+.demo-options {
+  display: grid;
+  gap: 12px;
+}
+
+.demo-option-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.demo-option-button {
+  text-align: left;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-strong);
+  padding: 10px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 200ms ease, border-color 200ms ease;
+}
+
+.demo-option-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(183, 125, 255, 0.4);
+}
+
+.demo-reset-button {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  padding: 10px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.demo-reset-button:hover {
+  color: var(--text-strong);
+  border-color: rgba(183, 125, 255, 0.4);
+}
+
+.demo-app .chat-panel {
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .upload-button {

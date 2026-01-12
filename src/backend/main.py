@@ -20,7 +20,7 @@ from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
-from src.backend.session import SessionStore
+from src.backend.session import SessionStore, FirestoreSessionStore
 from src.backend.firebase_app import initialize_firebase_app, verify_id_token
 from src.backend.storage_client import download_bytes, upload_file
 from src.mcp.logging_utils import (
@@ -39,12 +39,20 @@ class ChatRequest(BaseModel):
 def create_app() -> FastAPI:
     configure_logging()
     settings = Settings.from_env()
-    sessions = SessionStore(
-        project_root=settings.project_root,
-        sessions_dir=settings.sessions_dir,
-        ttl_seconds=settings.session_ttl_seconds,
-        max_sessions=settings.max_sessions,
-    )
+    if settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        sessions = SessionStore(
+            project_root=settings.project_root,
+            sessions_dir=settings.sessions_dir,
+            ttl_seconds=settings.session_ttl_seconds,
+            max_sessions=settings.max_sessions,
+        )
+    else:
+        sessions = FirestoreSessionStore(
+            project_root=settings.project_root,
+            sessions_dir=settings.sessions_dir,
+            ttl_seconds=settings.session_ttl_seconds,
+            max_sessions=settings.max_sessions,
+        )
     job_store = JobStore()
     router = McpRouter(settings)
     llm_client = create_llm_client(settings)
