@@ -1,89 +1,114 @@
-# ai-singer-diffsinger
+# SightSinger.ai
 
-AI LLM sight-read singer that reads MusicXML and synthesizes singing voice via a DiffSinger pipeline.
+AI sight-singing from MusicXML, via AI chat. No DAW required.
+
+## What it’s for
+
+- **Indie Songwriters**: instant vocal demos without a session singer or DAW mockup.
+- **Choir & Worship Leaders**: quick SATB or melody practice tracks.
+- **Cover Singers**: score-accurate guide vocals for learning melody, rhythm, and lyrics.
+
+## How it works
+
+1. Upload MusicXML
+2. Tell the AI how would you like to sing
+3. AI interprets your request and calls the API through MCP server to synthesize the audio
+4. Chat to iterate quickly, render new takes, and share the demo with others
+
+## SightSinger.ai is NOT
+
+- A DAW replacement
+- A human vocalist
+- A song generator (text-to-music)
+- A voice converter
+
+## What’s in this repo
+
+```
+ui/                      # React/Vite frontend
+src/backend/             # FastAPI backend + orchestration
+src/api/                 # DiffSinger pipeline (parse/synthesize)
+src/mcp_server.py        # MCP server (stdio JSON-RPC)
+assets/voicebanks/       # Local voicebanks for dev
+tests/                   # End-to-end and unit tests
+```
+
+## Local development
+
+Backend:
+```bash
+scripts/start_backend_dev.sh
+```
+
+Frontend:
+```bash
+scripts/start_frontend_dev.sh
+```
+
+URLs:
+- Landing: `http://localhost:5173/`
+- Demo: `http://localhost:5173/demo`
+- Backend: `http://localhost:8000`
+
+## Demo assets (public)
+
+Scripted demo uses local assets:
+```
+ui/public/landing/demo/scores/amazing-grace.mxl
+ui/public/landing/demo/audio/amazing-grace-soprano.mp3
+ui/public/landing/demo/audio/amazing-grace-tenor.mp3
+```
+
+## Credits
+
+Voicebank credits live in `CREDITS.md`.
+
+## Voicebanks
+
+Dev (local):
+- Place voicebanks under `assets/voicebanks/<VoicebankId>/dsconfig.yaml`
+
+Prod (Cloud Run):
+- Voicebanks live in GCS as tarballs:
+  `gs://<bucket>/assets/voicebanks/<VoicebankId>.tar.gz`
+- On startup, Cloud Run downloads and caches to `/tmp/voicebanks`.
+
+Relevant env:
+```
+VOICEBANK_BUCKET
+VOICEBANK_PREFIX=assets/voicebanks
+VOICEBANK_CACHE_DIR=/tmp/voicebanks
+```
 
 ## MCP Server (stdio JSON-RPC)
 
-The MCP server exposes the backend APIs as JSON-RPC methods over stdio.
-
-### Start the server
+Start:
 ```bash
 .venv/bin/python -m src.mcp_server --device cpu
 ```
 
 Notes:
-- `--device` is a server startup option and is not exposed to MCP tools.
-- Voicebank inputs are **IDs only** (directory names under `assets/voicebanks`).
-- Use `--debug` to enable MCP request/response logging to stderr.
-- Logs are also written to `logs/<service-name>.log` (default: `logs/mcp_server.log`).
-- Override with `--log-dir` and `--service-name` to keep separate files per service.
+- Voicebank inputs are **IDs only**.
+- Logs go to stderr in MCP mode.
 
-### Request/response basics
-
-Initialize:
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.0"}}
-```
-
-List tools (includes input + output schemas):
-```json
-{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-```
-
-Call a tool:
-```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_voicebanks","arguments":{}}}
-```
-
-Responses follow JSON-RPC 2.0 and return results in `result`. Tool errors return:
-```json
-{"error":{"message":"...","type":"ValueError"}}
-```
-
-`tools/list` returns both `inputSchema` and `outputSchema` for each tool, so an
-LLM/orchestrator can safely chain outputs into subsequent calls.
-
-## Example: End-to-End Synthesis
-
-1) `parse_score`:
+Example call sequence:
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_score","arguments":{"file_path":"assets/test_data/amazing-grace-satb-verse1.xml"}}}
 ```
 
-2) `synthesize` (voicebank ID only):
-```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"synthesize","arguments":{"score":{"...":"..."},"voicebank":"Raine_Rena_2.01","voice_id":"soprano"}}}
-```
+## Tests
 
-3) `save_audio` (returns base64 WAV/MP3 bytes):
-```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"save_audio","arguments":{"waveform":[0.0,0.1,-0.1],"output_path":"tests/output/mcp_out.wav","sample_rate":44100}}}
-```
-
-## Tool Summary
-
-Pipeline + utilities exposed via MCP:
-- `parse_score`
-- `modify_score`
-- `phonemize`
-- `align_phonemes_to_notes`
-- `predict_durations`
-- `predict_pitch`
-- `predict_variance`
-- `synthesize_audio`
-- `save_audio` (returns `audio_base64`)
-- `synthesize`
-- `list_voicebanks` (returns IDs + names)
-- `get_voicebank_info` (voicebank ID only)
-
-## Development
-
-Run MCP unit tests:
+End-to-end synthesis:
 ```bash
-.venv/bin/python -m unittest tests.test_mcp_server
+.venv/bin/python -m pytest tests/test_end_to_end.py -k test_full_synthesis -vv
 ```
 
-Run MCP end-to-end test:
+Tenor (male) test:
 ```bash
-.venv/bin/python -m unittest tests.test_mcp_end_to_end
+.venv/bin/python -m pytest tests/test_end_to_end.py -k test_full_synthesis_tenor_male_amazing_grace -vv
 ```
+
+## Docs
+
+- `architecture.md` – current system architecture
+- `deployment_architecture.md` – deployment design and ops notes
