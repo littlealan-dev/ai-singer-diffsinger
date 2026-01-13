@@ -319,21 +319,18 @@ export default function LandingPage() {
                 <h2 className="section-title">About Me</h2>
                 <div className="about-content">
                     <div className="bio-list">
+                        <p className="bio-paragraph">
+                            I'm Alan, a software engineer and volunteer musician. I love building things that solve real problems. I'm passionate about using AI to solve my own problem in music, and hopefully it can help you too.
+                        </p>
                         <div className="bio-item">
-                            <span className="bio-label">By Day</span>
-                            <span className="bio-value">Software Engineer passionate about solving problems with code.</span>
-                        </div>
-                        <div className="bio-item">
-                            <span className="bio-label">By Heart</span>
-                            <span className="bio-value">Church pianist, choir member, and community band percussionist.</span>
-                        </div>
-                        <div className="bio-item">
-                            <span className="bio-label">The Origin</span>
-                            <span className="bio-value">I built SightSinger.ai to bridge the gap between my IT world and my music life—using AI to help me hear the scores I write without the technical hurdles.</span>
-                        </div>
-                        <div className="bio-item">
-                            <span className="bio-label">The Goal</span>
-                            <span className="bio-value">Helping fellow musicians focus on the music, not the tools.</span>
+                            <span className="bio-label">Background</span>
+                            <span className="bio-value">
+                                <span>Software engineering: 20+ years (full-stack)</span>
+                                <span>Music Instruments: Piano, drums, ukulele</span>
+                                <span>Active in a church choir and community concert band</span>
+                                <span>Music tech: Logic Pro</span>
+                                <span>AI singing / vocal synthesis: OpenUtau, DiffSinger</span>
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -346,12 +343,11 @@ export default function LandingPage() {
                         <span>SightSinger.ai</span>
                     </div>
                     <div className="footer-links">
-                        <a href="#">GitHub</a>
-                        <a href="#">API Docs</a>
+                        <a href="https://github.com/littlealan-dev/ai-singer-diffsinger" target="_blank" rel="noreferrer">GitHub</a>
                         <a href="#about-section">About Me</a>
                     </div>
                 </div>
-                <p className="copyright">© 2026 SightSinger.ai. Powered by Gemini & DiffSinger.</p>
+                <p className="copyright">© 2026 SightSinger.ai.</p>
             </footer>
         </div>
     );

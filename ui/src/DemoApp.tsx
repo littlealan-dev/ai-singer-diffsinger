@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Sparkles, UploadCloud, Minus, Plus } from "lucide-react";
+import { Sparkles, UploadCloud, Minus, Plus, Info } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 
@@ -46,12 +46,17 @@ export default function DemoApp() {
   const [pendingSelection, setPendingSelection] = useState(false);
   const [showPromptOptions, setShowPromptOptions] = useState(false);
   const [progressMessageId, setProgressMessageId] = useState<string | null>(null);
-  const [splitPct] = useState(40);
+  const [splitPct, setSplitPct] = useState(40);
   const timersRef = useRef<number[]>([]);
 
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+  const dragStateRef = useRef<{
+    containerLeft: number;
+    containerWidth: number;
+  } | null>(null);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -200,6 +205,29 @@ export default function DemoApp() {
     setZoomLevel((prev) => Math.max(0.5, Math.min(1.5, prev + delta)));
   };
 
+  const handleResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!layoutRef.current) return;
+    const rect = layoutRef.current.getBoundingClientRect();
+    dragStateRef.current = {
+      containerLeft: rect.left,
+      containerWidth: rect.width,
+    };
+    const handleMove = (moveEvent: PointerEvent) => {
+      if (!dragStateRef.current) return;
+      const { containerLeft, containerWidth } = dragStateRef.current;
+      const offset = moveEvent.clientX - containerLeft;
+      const nextPct = Math.max(20, Math.min(70, (offset / containerWidth) * 100));
+      setSplitPct(nextPct);
+    };
+    const handleUp = () => {
+      dragStateRef.current = null;
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  };
+
   return (
     <div className="app-shell demo-app">
       <header className="app-header">
@@ -207,13 +235,17 @@ export default function DemoApp() {
           <Sparkles className="brand-icon" />
           <div>
             <h1>SightSinger.ai</h1>
-            <p>Scripted demo — no backend calls</p>
+            <p>Interactive Demo</p>
           </div>
         </div>
         <div className="status-pill">{status}</div>
       </header>
+      <div className="message-box info">
+        <Info size={16} />
+        Chat is scripted. Audio is pre-rendered using the actual in-app engine.
+      </div>
 
-      <main className="split-grid" style={splitStyle}>
+      <main className="split-grid" style={splitStyle} ref={layoutRef}>
         <section className={clsx("chat-panel", "demo-panel")}>
           <div className="chat-header">
             <h2>Studio Chat</h2>
@@ -330,7 +362,13 @@ export default function DemoApp() {
           </div>
         </section>
 
-        <div className="split-handle" aria-hidden="true" />
+        <div
+          className="split-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panels"
+          onPointerDown={handleResizeStart}
+        />
 
         <section className="score-panel">
           <div className="score-header">
@@ -366,7 +404,7 @@ export default function DemoApp() {
             <div ref={scoreRef} className="score-surface" />
             {!scoreLoaded && (
               <div className="score-placeholder">
-                <p>Click “Use demo score” to render Amazing Grace.</p>
+                <p>Select the demo score to render Amazing Grace.</p>
               </div>
             )}
           </div>

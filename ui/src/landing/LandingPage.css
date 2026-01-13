@@ -964,6 +964,15 @@
   font-size: 1.1rem;
   line-height: 1.6;
   color: #cbd5e1;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.bio-paragraph {
+  margin: 0;
+  font-size: 1.1rem;
+  line-height: 1.7;
+  color: #e2e8f0;
 }
 
 @media (max-width: 640px) {
@@ -1086,6 +1095,12 @@
 @media (max-width: 640px) {
   .landing-nav {
     padding: 1rem 1.25rem;
+  }
+
+  .landing-nav .btn-primary {
+    font-size: 0.9rem;
+    padding: 0.6rem 1rem;
+    border-radius: 999px;
   }
 
   .landing-hero {
