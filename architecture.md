@@ -72,11 +72,6 @@ Optional pitch/variance models fall back gracefully when absent.
 Dev:
 - Voicebanks live in `assets/voicebanks/<id>`.
 
-Prod:
-- Voicebanks stored as tarballs in GCS:
-  `gs://<bucket>/assets/voicebanks/<id>.tar.gz`
-- Cached to `/tmp/voicebanks` on first use.
-
 ---
 
 ## Storage + State
@@ -95,5 +90,6 @@ Prod:
 | Backend | Python, FastAPI, Firebase Admin SDK |
 | Synthesis | DiffSinger ONNX models |
 | Runtime | ONNX Runtime (CPU/GPU) |
+| Hosting | Firebase Hosting |
 | Storage | Firebase Storage (GCS) |
 | DB | Firestore |
