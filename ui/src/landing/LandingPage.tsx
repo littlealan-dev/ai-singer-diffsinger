@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, Instagram, Mail, MessageCircle, MessageSquare, Sparkles } from "lucide-react";
 import "./LandingPage.css";
 
 // Temporary placeholder for HeroSection until fully implemented
@@ -104,12 +104,17 @@ export default function LandingPage() {
                     <div className="use-case-card">
                         <h3>Choir &amp; Worship Leaders</h3>
                         <p>"Parts in minutes"</p>
-                        <p className="description">Generate SATB (or melody) practice tracks in minutes—save pianist hours and rehearsal recordings.</p>
+                        <p className="description">Generate SATB (or melody) practice tracks in minutes—save pianist hours of practice and recording time.</p>
                     </div>
                     <div className="use-case-card">
-                        <h3>Cover Singers</h3>
-                        <p>"Learn it note-perfect"</p>
-                        <p className="description">Practice with a score-accurate guide vocal for melody, rhythm, and lyrics.</p>
+                        <h3>Beginner Singers</h3>
+                        <p>"Stepping stone"</p>
+                        <p className="description">Try singing with a score-accurate guide before investing in expensive lessons.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>Quick Song Learners</h3>
+                        <p>"Learn it fast"</p>
+                        <p className="description">Pick up a few songs quickly for occasions without diving into theory or breath training.</p>
                     </div>
                 </div>
             </section>
@@ -331,6 +336,42 @@ export default function LandingPage() {
                                 <span>Music tech: Logic Pro</span>
                                 <span>AI singing / vocal synthesis: OpenUtau, DiffSinger</span>
                             </span>
+                        </div>
+                        <div className="bio-socials" aria-label="Social links">
+                            <a
+                                className="bio-social"
+                                href="https://www.instagram.com/twittlealan/"
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label="Instagram"
+                            >
+                                <Instagram size={18} />
+                            </a>
+                            <a
+                                className="bio-social"
+                                href="https://discord.com/users/littlealan1915"
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label="Discord"
+                            >
+                                <MessageCircle size={18} />
+                            </a>
+                            <a
+                                className="bio-social"
+                                href="https://www.reddit.com/user/littleAlanYT/"
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label="Reddit"
+                            >
+                                <MessageSquare size={18} />
+                            </a>
+                            <a
+                                className="bio-social"
+                                href="mailto:littlealan@gmail.com"
+                                aria-label="Email"
+                            >
+                                <Mail size={18} />
+                            </a>
                         </div>
                     </div>
                 </div>

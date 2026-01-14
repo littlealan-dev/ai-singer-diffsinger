@@ -4,9 +4,10 @@ AI sight-singing from MusicXML, via AI chat. No DAW required.
 
 ## What it’s for
 
-- **Indie Songwriters**: instant vocal demos without a session singer or DAW mockup.
-- **Choir & Worship Leaders**: quick SATB or melody practice tracks.
-- **Cover Singers**: score-accurate guide vocals for learning melody, rhythm, and lyrics.
+- **Indie Songwriters**: instant vocal demos without a session singer or professional DAW mockup.
+- **Choir & Worship Leaders**: quick SATB parts or melody practice tracks.
+- **Beginner Singers**: try singing with a score-accurate guide before investing in lessons.
+- **Quick Song Learners**: learn a few songs fast without diving into theory or breath training.
 
 ## How it works
 
@@ -66,12 +67,7 @@ Voicebank credits live in `CREDITS.md`.
 ## Voicebanks
 
 Dev (local):
-- Place voicebanks under `assets/voicebanks/<VoicebankId>/dsconfig.yaml`
-
-Prod (Cloud Run):
-- Voicebanks live in GCS as tarballs:
-  `gs://<bucket>/assets/voicebanks/<VoicebankId>.tar.gz`
-- On startup, Cloud Run downloads and caches to `/tmp/voicebanks`.
+- Place voicebanks under `assets/voicebanks/`
 
 Relevant env:
 ```
@@ -103,12 +99,13 @@ End-to-end synthesis:
 .venv/bin/python -m pytest tests/test_end_to_end.py -k test_full_synthesis -vv
 ```
 
-Tenor (male) test:
-```bash
-.venv/bin/python -m pytest tests/test_end_to_end.py -k test_full_synthesis_tenor_male_amazing_grace -vv
-```
 
 ## Docs
 
 - `architecture.md` – current system architecture
 - `deployment_architecture.md` – deployment design and ops notes
+- `api_design.md` – API design spec
+
+## License
+
+MIT. See `LICENSE`.
