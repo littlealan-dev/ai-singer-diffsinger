@@ -242,7 +242,7 @@ export default function DemoApp() {
       </header>
       <div className="message-box info">
         <Info size={16} />
-        Chat is scripted. Audio is pre-rendered using the actual in-app engine.
+        Chat is scripted for demo purposes. Audio is pre-rendered using the actual in-app synthesis engine.
       </div>
 
       <main className="split-grid" style={splitStyle} ref={layoutRef}>
@@ -259,7 +259,7 @@ export default function DemoApp() {
                 onClick={handleUseDemo}
               >
                 <UploadCloud size={20} />
-                <p>Select the demo score to begin.</p>
+                <span className="demo-empty-title">Upload Demo Score to Start</span>
               </button>
             )}
             {showPromptOptions && (

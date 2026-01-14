@@ -309,6 +309,12 @@ body.landing-active #root {
   transition: border-color 200ms ease, color 200ms ease;
 }
 
+.demo-empty-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
 .demo-empty-action:hover {
   color: var(--text-strong);
   border-color: rgba(183, 125, 255, 0.4);
