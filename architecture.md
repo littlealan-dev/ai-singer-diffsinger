@@ -87,6 +87,7 @@ Dev:
 | Layer | Tech |
 |------|------|
 | Frontend | React, Vite, OpenSheetMusicDisplay |
+| AI Chat API | Gemini 3 Flash API |
 | Backend | Python, FastAPI, Firebase Admin SDK |
 | Synthesis | DiffSinger ONNX models |
 | Runtime | ONNX Runtime (CPU/GPU) |
