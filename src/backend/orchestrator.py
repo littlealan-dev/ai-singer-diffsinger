@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Chat orchestration layer that bridges LLM decisions and MCP tools."""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,6 +23,7 @@ from src.mcp.tools import list_tools
 
 
 class Orchestrator:
+    """Coordinate sessions, LLM decisions, and synthesis tool calls."""
     def __init__(
         self,
         router: McpRouter,
@@ -43,6 +46,7 @@ class Orchestrator:
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
     async def handle_chat(self, session_id: str, message: str, *, user_id: str) -> Dict[str, Any]:
+        """Handle a chat message and return a response payload."""
         if len(message) > self._settings.llm_max_message_chars:
             return {
                 "type": "chat_text",
@@ -59,6 +63,7 @@ class Orchestrator:
         include_score = self._should_include_score(message)
 
         if current_score is None:
+            # Require a score before any synthesis steps.
             response_message = "Please upload a MusicXML file first."
             await self._sessions.append_history(session_id, "assistant", response_message)
             return {"type": "chat_text", "message": response_message}
@@ -85,6 +90,7 @@ class Orchestrator:
                 },
             )
         if llm_response is not None:
+            # Execute tool calls and package response.
             include_score = llm_response.include_score
             tool_result = await self._execute_tool_calls(
                 session_id, current_score["score"], llm_response.tool_calls, user_id=user_id
@@ -123,12 +129,14 @@ class Orchestrator:
         user_id: Optional[str] = None,
         output_storage_path: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Run the synthesize + save_audio flow for a session."""
         synth_args = dict(arguments)
         part_id = synth_args.get("part_id")
         part_index = synth_args.get("part_index")
         verse_number = synth_args.get("verse_number")
         if self._selection_requested(part_id, part_index, verse_number):
             if not self._selection_matches_current(score, part_id, part_index, verse_number):
+                # Re-parse the score to honor updated selection parameters.
                 updated_score = await self._reparse_score(
                     session_id,
                     part_id=part_id,
@@ -150,6 +158,7 @@ class Orchestrator:
             synth_args["progress_job_id"] = job_id
             synth_args["progress_user_id"] = user_id
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
+        # Run synthesis on the MCP worker.
         synth_result = await asyncio.to_thread(
             self._router.call_tool, "synthesize", synth_args
         )
@@ -212,6 +221,7 @@ class Orchestrator:
         *,
         user_id: str,
     ) -> Dict[str, Any]:
+        """Create a Firestore job and kick off synthesis in the background."""
         existing = self._synthesis_tasks.get(session_id)
         if existing and not existing.done():
             existing.cancel()
@@ -289,9 +299,11 @@ class Orchestrator:
         job_input_storage_path: Optional[str],
         output_storage_path: Optional[str],
     ) -> None:
+        """Execute a synthesis job and update status in Firestore."""
         try:
             set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
             if self._settings.backend_use_storage and job_input_storage_path:
+                # Ensure job input is copied into storage when required.
                 await asyncio.to_thread(
                     _ensure_job_input_storage,
                     self._settings.storage_bucket,
@@ -357,6 +369,7 @@ class Orchestrator:
         part_index: Optional[int],
         verse_number: Optional[object],
     ) -> bool:
+        """Return True if any selection parameters were provided."""
         return part_id is not None or part_index is not None or verse_number is not None
 
     def _selection_matches_current(
@@ -366,6 +379,7 @@ class Orchestrator:
         part_index: Optional[int],
         verse_number: Optional[object],
     ) -> bool:
+        """Return True if the current score already matches the selection."""
         if verse_number is not None:
             return False
         parts = score.get("parts") or []
@@ -388,6 +402,7 @@ class Orchestrator:
         verse_number: Optional[object],
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
+        """Re-parse the current MusicXML file with new selection filters."""
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
         file_path = files.get("musicxml_path")
@@ -409,6 +424,7 @@ class Orchestrator:
         return score
 
     async def _resolve_voicebank(self) -> str:
+        """Resolve a default voicebank ID, using cached data when possible."""
         if self._settings.default_voicebank:
             return self._settings.default_voicebank
         if self._cached_voicebank:
@@ -421,12 +437,14 @@ class Orchestrator:
         return self._cached_voicebank
 
     def _should_include_score(self, message: str) -> bool:
+        """Return True if the user asked to see score data."""
         lowered = message.lower()
         return any(keyword in lowered for keyword in ("score", "json", "notes"))
 
     async def _decide_with_llm(
         self, snapshot: Dict[str, Any], score_available: bool
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
+        """Query the LLM to determine tool calls and response text."""
         if self._llm_client is None:
             return None, "LLM is not configured. Please try again later."
         history = snapshot.get("history", [])
@@ -456,6 +474,7 @@ class Orchestrator:
         return response, None
 
     async def _get_voicebank_ids(self) -> List[str]:
+        """Return cached voicebank IDs or fetch them from the MCP server."""
         if self._cached_voicebank_ids is not None:
             return self._cached_voicebank_ids
         try:
@@ -475,6 +494,7 @@ class Orchestrator:
         return ids
 
     async def _get_voicebank_details(self) -> List[Dict[str, Any]]:
+        """Return cached voicebank metadata for LLM prompts."""
         if self._cached_voicebank_details is not None:
             return self._cached_voicebank_details
         details: List[Dict[str, Any]] = []
@@ -514,6 +534,7 @@ class Orchestrator:
     def _with_voicebank_enum(
         self, tools: List[Dict[str, Any]], voicebank_ids: List[str]
     ) -> List[Dict[str, Any]]:
+        """Inject a voicebank enum into the synthesize tool schema."""
         if not voicebank_ids:
             return tools
         updated: List[Dict[str, Any]] = []
@@ -544,6 +565,7 @@ class Orchestrator:
         *,
         user_id: str,
     ) -> "ToolExecutionResult":
+        """Execute allowed tool calls and update session state."""
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
         for call in tool_calls:
@@ -557,6 +579,7 @@ class Orchestrator:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
             if call.name == "modify_score":
+                # Apply score edits and persist updated score.
                 code = call.arguments.get("code")
                 if not isinstance(code, str) or not code.strip():
                     self._logger.warning("modify_score_missing_code")
@@ -571,6 +594,7 @@ class Orchestrator:
                     await self._sessions.set_score(session_id, current_score)
                 continue
             if call.name == "synthesize":
+                # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
                 audio_response = await self._start_synthesis_job(
@@ -581,11 +605,13 @@ class Orchestrator:
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
+    """Return value for tool execution: optional audio plus score."""
     score: Dict[str, Any]
     audio_response: Optional[Dict[str, Any]]
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:
+    """Build the storage path for job input files."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/input{safe_suffix}"
 
@@ -593,6 +619,7 @@ def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: 
 def _job_storage_output_path(
     user_id: str, session_id: str, job_id: str, audio_format: str
 ) -> str:
+    """Build the storage path for job output audio."""
     extension = "mp3" if audio_format.lower() == "mp3" else "wav"
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/output.{extension}"
 
@@ -604,6 +631,7 @@ def _ensure_job_input_storage(
     job_input_storage_path: str,
     project_root: Path,
 ) -> None:
+    """Ensure the job input file exists in storage, copying or uploading."""
     if storage_input_path:
         copy_blob(bucket_name, storage_input_path, job_input_storage_path)
         return

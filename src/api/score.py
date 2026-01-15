@@ -53,6 +53,7 @@ def parse_score(
         }
     """
     if logger.isEnabledFor(logging.DEBUG):
+        # Avoid heavy payload logs unless debug is enabled.
         logger.debug(
             "parse_score input=%s",
             summarize_payload(
@@ -65,6 +66,7 @@ def parse_score(
                 }
             ),
         )
+    # Delegate parsing to the MusicXML adapter, keeping rests for alignment.
     score_data, score_summary = parse_musicxml_with_summary(
         file_path,
         part_id=part_id,
@@ -73,10 +75,10 @@ def parse_score(
         keep_rests=True,
     )
     
-    # Convert dataclass to dict
+    # Convert dataclass to dict for JSON serialization.
     score_dict = dataclasses.asdict(score_data)
     
-    # Add structure placeholder (to be populated when parser supports it)
+    # Add structure placeholder (to be populated when parser supports it).
     score_dict["structure"] = {
         "repeats": [],
         "endings": [],
@@ -147,7 +149,7 @@ def _create_restricted_namespace(score):
         "_getitem_": _default_getitem,
         "_getiter_": _default_getiter,
         "_iter_unpack_sequence_": lambda *args: args,
-        "_write_": lambda x: x,  # Allow writing to objects
+        "_write_": lambda x: x,  # Allow writing to objects.
     }
     return namespace
 
@@ -185,12 +187,13 @@ def modify_score(score: Dict[str, Any], code: str) -> Dict[str, Any]:
         ''')
     """
     if logger.isEnabledFor(logging.DEBUG):
+        # Log inputs sparsely to avoid leaking large scores or code.
         logger.debug(
             "modify_score input=%s",
             summarize_payload({"score": score, "code": code}),
         )
     if HAS_RESTRICTED_PYTHON:
-        # Use restricted execution
+        # Use restricted execution with explicit guards.
         try:
             byte_code = compile_restricted(code, "<modify_score>", "exec")
         except SyntaxError as e:
@@ -202,7 +205,7 @@ def modify_score(score: Dict[str, Any], code: str) -> Dict[str, Any]:
         namespace = _create_restricted_namespace(score)
         exec(byte_code, namespace)
     else:
-        # Fallback: unrestricted execution (not recommended for production)
+        # Fallback: unrestricted execution (not recommended for production).
         namespace = {
             "__builtins__": SAFE_BUILTINS,
             "score": score,

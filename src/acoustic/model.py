@@ -1,3 +1,5 @@
+"""ONNX model wrappers for DiffSinger acoustic components."""
+
 import onnxruntime as ort
 import numpy as np
 import logging
@@ -8,6 +10,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 class DiffSingerModel:
     """Base class for DiffSinger ONNX models."""
     def __init__(self, model_path: Path, device: str = "cpu"):
+        """Load the ONNX model and prepare input/output names."""
         self.model_path = model_path
         self.device = device
         self.session = self._load_session()
@@ -15,12 +18,14 @@ class DiffSingerModel:
         self.output_names = [node.name for node in self.session.get_outputs()]
 
     def _load_session(self) -> ort.InferenceSession:
+        """Create an ONNX Runtime session with the preferred provider."""
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found at {self.model_path}")
         
         available = ort.get_available_providers()
         providers = ["CPUExecutionProvider"]
         if self.device == "cuda":
+            # Prefer CUDA when available.
             if "CUDAExecutionProvider" in available:
                 providers.insert(0, "CUDAExecutionProvider")
             else:
@@ -30,6 +35,7 @@ class DiffSingerModel:
                     available,
                 )
         elif self.device == "coreml":
+            # Prefer CoreML when available.
             if "CoreMLExecutionProvider" in available:
                 providers.insert(0, "CoreMLExecutionProvider")
             else:
@@ -40,6 +46,7 @@ class DiffSingerModel:
                 )
             
         opts = ort.SessionOptions()
+        # Allow thread overrides via environment variables.
         intra_threads = os.getenv("ORT_INTRA_OP_NUM_THREADS")
         inter_threads = os.getenv("ORT_INTER_OP_NUM_THREADS")
         if intra_threads:
@@ -56,12 +63,14 @@ class DiffSingerModel:
         return ort.InferenceSession(str(self.model_path), providers=providers, sess_options=opts)
 
     def run(self, inputs: Dict[str, Any]) -> List[Any]:
-        # Filter inputs that are not expected by the model
+        """Run inference with only the inputs expected by the model."""
+        # Filter inputs that are not expected by the model.
         filtered_inputs = {k: v for k, v in inputs.items() if k in self.input_names}
-        # Check for missing required inputs? (ONNX runtime will handle this, but we can warn)
+        # Check for missing required inputs? (ONNX runtime will handle this, but we can warn.)
         return self.session.run(self.output_names, filtered_inputs)
 
     def verify_input_names(self, inputs: Dict[str, Any]):
+        """Log missing input names for debugging."""
         missing = [name for name in self.input_names if name not in inputs]
         # Some inputs might be optional, difficult to know from ONNX signature alone without metadata
         # But generally we should provide everything we can.
@@ -83,6 +92,7 @@ class DurationModel(DiffSingerModel):
     Outputs: duration
     """
     def forward(self, encoder_out: np.ndarray, x_masks: np.ndarray, ph_midi: np.ndarray, spk_embed: Optional[np.ndarray] = None) -> np.ndarray:
+        """Run the duration predictor and return phoneme frame counts."""
         inputs = {
             "encoder_out": encoder_out,
             "x_masks": x_masks,

@@ -55,17 +55,19 @@ def phonemize(
             ),
         )
     voicebank_path = Path(voicebank)
+    # Load voicebank config to locate phoneme and language assets.
     config = load_voicebank_config(voicebank_path)
     
-    # Resolve paths from config
+    # Resolve paths from config.
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
     languages_path = None
     if "languages" in config:
         languages_path = (voicebank_path / config["languages"]).resolve()
     
-    # Find dictionary
+    # Find dictionary for token-to-phoneme lookup.
     dictionary_path = _find_dictionary(voicebank_path)
     
+    # Build phonemizer with fallback G2P enabled.
     phonemizer = Phonemizer(
         phonemes_path=phonemes_path,
         dictionary_path=dictionary_path,
@@ -80,6 +82,7 @@ def phonemize(
     word_boundaries: List[int] = []
     
     for lyric in lyrics:
+        # Phonemize each lyric in isolation to preserve word boundaries.
         result = phonemizer.phonemize_tokens([lyric])
         all_phonemes.extend(result.phonemes)
         all_ids.extend(result.ids)

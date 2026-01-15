@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Tool definitions and dispatch for the MCP server."""
+
 from dataclasses import dataclass
 from typing import Any, Dict, List
 import logging
@@ -10,6 +12,7 @@ from src.mcp.logging_utils import summarize_payload
 
 @dataclass(frozen=True)
 class Tool:
+    """Tool metadata describing schemas and documentation."""
     name: str
     description: str
     input_schema: Dict[str, Any]
@@ -202,6 +205,7 @@ TOOLS: List[Tool] = [
 
 
 def list_tools(allowlist: set[str] | None = None) -> List[Dict[str, Any]]:
+    """Return tool metadata, optionally filtered by allowlist."""
     tools = TOOLS
     if allowlist is not None:
         tools = [tool for tool in TOOLS if tool.name in allowlist]
@@ -217,6 +221,7 @@ def list_tools(allowlist: set[str] | None = None) -> List[Dict[str, Any]]:
 
 
 def call_tool(name: str, arguments: Dict[str, Any], device: str) -> Any:
+    """Invoke a tool handler and log its input/output."""
     if name not in HANDLERS:
         raise ValueError(f"Unknown tool: {name}")
     handler = HANDLERS[name]

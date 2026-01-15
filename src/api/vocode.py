@@ -24,10 +24,10 @@ def _load_vocoder(voicebank_path: Path, device: str = "cpu") -> Vocoder:
     cache_key = f"vocoder:{voicebank_path}:{device}"
     if cache_key in _vocoder_cache:
         return _vocoder_cache[cache_key]
-    
+
     conf = load_voicebank_config(voicebank_path)
-    
-    # Try vocoder path from config
+
+    # Try vocoder path from config.
     if "vocoder" in conf:
         vocoder_path = (voicebank_path / conf["vocoder"]).resolve()
         if vocoder_path.is_dir():
@@ -43,7 +43,7 @@ def _load_vocoder(voicebank_path: Path, device: str = "cpu") -> Vocoder:
         _vocoder_cache[cache_key] = voc
         return voc
     
-    # Try dsvocoder directory
+    # Try dsvocoder directory.
     dsvocoder = voicebank_path / "dsvocoder"
     if dsvocoder.exists():
         vocoder_yaml = dsvocoder / "vocoder.yaml"
@@ -99,24 +99,24 @@ def vocode(
         )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
-    
-    # Load vocoder
+
+    # Load vocoder.
     if vocoder_path:
         vocoder = Vocoder(Path(vocoder_path), device)
     else:
         vocoder = _load_vocoder(voicebank_path, device)
-    
-    # Convert to numpy
+
+    # Convert to numpy.
     mel_np = np.array(mel, dtype=np.float32)
     f0_np = np.array(f0, dtype=np.float32)
-    
-    # Ensure correct shapes
+
+    # Ensure correct shapes.
     if mel_np.ndim == 2:
         mel_np = mel_np[None, :]  # Add batch dim
     if f0_np.ndim == 1:
         f0_np = f0_np[None, :]  # Add batch dim
     
-    # Run vocoder
+    # Run vocoder.
     waveform = vocoder.forward(mel_np, f0_np)
     
     result = {

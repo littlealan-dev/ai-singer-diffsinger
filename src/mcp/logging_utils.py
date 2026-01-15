@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Logging helpers for structured payloads and contextual metadata."""
+
 from typing import Any, Dict, Iterable, Optional
 from pathlib import Path
 import logging
@@ -17,6 +19,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 def summarize_payload(value: Any, *, max_list: int = 20, max_str: int = 200, depth: int = 3) -> Any:
+    """Return a safe, size-limited summary of a payload for logging."""
     if depth <= 0:
         return f"<{type(value).__name__}>"
     if np is not None and isinstance(value, np.ndarray):
@@ -71,6 +74,7 @@ _user_id = contextvars.ContextVar("log_user_id", default="-")
 
 
 def _hash_user_id(value: str) -> str:
+    """Hash user IDs for privacy-aware logging."""
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return digest[:12]
 
@@ -78,6 +82,7 @@ def _hash_user_id(value: str) -> str:
 def set_log_context(
     *, session_id: Optional[str] = None, job_id: Optional[str] = None, user_id: Optional[str] = None
 ) -> None:
+    """Set context variables for log enrichment."""
     if session_id is not None:
         _session_id.set(session_id)
     if job_id is not None:
@@ -87,13 +92,16 @@ def set_log_context(
 
 
 def clear_log_context() -> None:
+    """Reset log context variables to their default values."""
     _session_id.set("-")
     _job_id.set("-")
     _user_id.set("-")
 
 
 class LoggingContextFilter(logging.Filter):
+    """Inject session/job/user IDs into each log record."""
     def filter(self, record: logging.LogRecord) -> bool:
+        # Attach context vars to the record for formatters.
         record.session_id = _session_id.get()
         record.job_id = _job_id.get()
         record.user_id = _user_id.get()
@@ -101,6 +109,7 @@ class LoggingContextFilter(logging.Filter):
 
 
 class _LevelFilter(logging.Filter):
+    """Base filter for minimum/maximum log level bounds."""
     def __init__(self, *, min_level: int | str | None = None, max_level: int | str | None = None) -> None:
         super().__init__()
         self._min_level = self._normalize_level(min_level)
@@ -108,6 +117,7 @@ class _LevelFilter(logging.Filter):
 
     @staticmethod
     def _normalize_level(level: int | str | None) -> int | None:
+        """Normalize a level name/number to a numeric level."""
         if level is None:
             return None
         if isinstance(level, int):
@@ -115,6 +125,7 @@ class _LevelFilter(logging.Filter):
         return logging.getLevelName(level.upper())
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Return True if the record passes min/max constraints."""
         if self._min_level is not None and record.levelno < self._min_level:
             return False
         if self._max_level is not None and record.levelno > self._max_level:
@@ -123,16 +134,19 @@ class _LevelFilter(logging.Filter):
 
 
 class MaxLevelFilter(_LevelFilter):
+    """Filter records at or below a maximum level."""
     def __init__(self, max_level: int | str) -> None:
         super().__init__(max_level=max_level)
 
 
 class MinLevelFilter(_LevelFilter):
+    """Filter records at or above a minimum level."""
     def __init__(self, min_level: int | str) -> None:
         super().__init__(min_level=min_level)
 
 
 class JsonFormatter(logging.Formatter):
+    """Format log records as JSON for structured logging sinks."""
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(
             timespec="milliseconds"
@@ -163,31 +177,37 @@ class JsonFormatter(logging.Formatter):
 
 
 def _use_json_logs() -> bool:
+    """Return True when environment config requests JSON logs."""
     return os.getenv("LOG_FORMAT", "").lower() == "json" or os.getenv(
         "LOG_JSON", ""
     ).lower() in {"1", "true", "yes"}
 
 
 def _app_env() -> str:
+    """Return the current application environment name."""
     return os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
 
 
 def is_dev_env() -> bool:
+    """Return True when running in development-like environments."""
     return _app_env().lower() in {"dev", "development", "local", "test"}
 
 
 def build_formatter() -> logging.Formatter:
+    """Build the active log formatter based on environment settings."""
     if _use_json_logs():
         return JsonFormatter()
     return logging.Formatter(DEFAULT_LOG_FORMAT)
 
 
 def attach_context_filter(handler: logging.Handler) -> None:
+    """Ensure a handler includes the logging context filter."""
     if not any(isinstance(f, LoggingContextFilter) for f in handler.filters):
         handler.addFilter(LoggingContextFilter())
 
 
 def ensure_timestamped_handlers(logger_names: Iterable[str] | None = None) -> None:
+    """Apply consistent formatting/context to known logger handlers."""
     formatter = build_formatter()
     if logger_names is None:
         logger_names = ("", "uvicorn", "uvicorn.error", "uvicorn.access")
@@ -199,12 +219,14 @@ def ensure_timestamped_handlers(logger_names: Iterable[str] | None = None) -> No
 
 
 def configure_logging() -> None:
+    """Load logging configuration and apply environment overrides."""
     app_env = _app_env().lower()
     root_dir = Path(__file__).resolve().parents[2]
     config_name = "logging.prod.json" if app_env in {"prod", "production"} else "logging.dev.json"
     config_path = root_dir / "config" / config_name
     override_path = os.getenv("LOG_CONFIG")
     if override_path:
+        # Allow overrides via LOG_CONFIG.
         override_candidate = Path(override_path)
         if not override_candidate.is_absolute():
             override_candidate = root_dir / override_candidate
@@ -225,6 +247,7 @@ def configure_logging() -> None:
 
 
 def get_logger(module_name: str) -> logging.Logger:
+    """Return a logger and attach a per-module file handler in dev."""
     logger = logging.getLogger(module_name)
     if getattr(logger, "_file_handler_attached", False):
         return logger

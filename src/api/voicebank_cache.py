@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Helpers for resolving and caching voicebanks locally or from storage."""
+
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 import os
@@ -14,35 +16,43 @@ logger = get_logger(__name__)
 
 
 def _app_env() -> str:
+    """Return the current environment name for prod/dev branching."""
     return os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
 
 
 def is_prod_env() -> bool:
+    """Return True when running in a production-like environment."""
     return _app_env().lower() not in {"dev", "development", "local", "test"}
 
 
 def _project_root() -> Path:
+    """Return project root based on this file location."""
     return Path(__file__).resolve().parents[2]
 
 
 def _local_voicebanks_root() -> Path:
+    """Return the local assets voicebank root path."""
     return _project_root() / "assets" / "voicebanks"
 
 
 def _voicebank_bucket() -> str:
+    """Return the configured storage bucket for voicebanks."""
     return os.getenv("VOICEBANK_BUCKET") or os.getenv("STORAGE_BUCKET") or ""
 
 
 def _voicebank_prefix() -> str:
+    """Return the object prefix for voicebank archives in storage."""
     prefix = os.getenv("VOICEBANK_PREFIX", "assets/voicebanks")
     return prefix.strip().strip("/")
 
 
 def _cache_root() -> Path:
+    """Return the cache directory for downloaded voicebanks."""
     return Path(os.getenv("VOICEBANK_CACHE_DIR", "/tmp/voicebanks"))
 
 
 def resolve_voicebank_path(voicebank_id: str) -> Path:
+    """Resolve a voicebank ID to a local path, caching in prod if needed."""
     if not voicebank_id:
         raise ValueError("voicebank is required.")
     if "/" in voicebank_id or "\\" in voicebank_id:
@@ -53,12 +63,14 @@ def resolve_voicebank_path(voicebank_id: str) -> Path:
 
 
 def list_voicebank_ids() -> List[str]:
+    """List available voicebank IDs for the current environment."""
     if is_prod_env():
         return _list_voicebank_ids_gcs()
     return _list_voicebank_ids_local()
 
 
 def _resolve_local_voicebank(voicebank_id: str) -> Path:
+    """Resolve a voicebank ID from the local assets directory."""
     root = _local_voicebanks_root()
     candidate = (root / voicebank_id).resolve()
     if root not in candidate.parents:
@@ -70,6 +82,7 @@ def _resolve_local_voicebank(voicebank_id: str) -> Path:
 
 
 def _list_voicebank_ids_local() -> List[str]:
+    """Return voicebank IDs from the local assets directory."""
     root = _local_voicebanks_root()
     if not root.exists():
         return []
@@ -81,6 +94,7 @@ def _list_voicebank_ids_local() -> List[str]:
 
 
 def _list_voicebank_ids_gcs() -> List[str]:
+    """Return voicebank IDs by scanning storage for tarball archives."""
     bucket = _voicebank_bucket()
     if not bucket:
         raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
@@ -104,6 +118,7 @@ def _list_voicebank_ids_gcs() -> List[str]:
 
 
 def _ensure_cached_voicebank(voicebank_id: str) -> Path:
+    """Download and extract a voicebank archive into the local cache."""
     cache_root = _cache_root()
     target_dir = cache_root / voicebank_id
     config_path = target_dir / "dsconfig.yaml"
@@ -128,6 +143,7 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
 
     tmp_dir = cache_root / f".{voicebank_id}.tmp"
     if tmp_dir.exists():
+        # Clean up any previous partial download.
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     archive_path = tmp_dir / archive_name
@@ -160,6 +176,7 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
 
 
 def _extract_tarball(archive_path: Path, dest_dir: Path) -> None:
+    """Extract a tar.gz archive with a basic path traversal guard."""
     base_dir = dest_dir.resolve()
     with tarfile.open(archive_path, "r:gz") as tar:
         members = tar.getmembers()

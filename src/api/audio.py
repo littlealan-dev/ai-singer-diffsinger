@@ -56,18 +56,18 @@ def save_audio(
             ),
         )
     output_path = Path(output_path)
-    
-    # Ensure parent directory exists
+
+    # Ensure parent directory exists.
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Convert to numpy if needed
+
+    # Convert to numpy if needed.
     if isinstance(waveform, list):
         waveform = np.array(waveform, dtype=np.float32)
-    
-    # Flatten if needed
+
+    # Flatten if needed.
     waveform = waveform.flatten()
-    
-    # Normalize if out of range
+
+    # Normalize if out of range.
     max_val = np.abs(waveform).max()
     if max_val > 1.0:
         waveform = waveform / max_val
@@ -103,9 +103,11 @@ def _encode_mp3(
     output_path: Path,
     bitrate: str,
 ) -> None:
+    """Encode a mono float32 waveform to MP3 using ffmpeg."""
     if waveform.dtype != np.float32:
         waveform = waveform.astype(np.float32)
     try:
+        # Stream raw PCM samples to ffmpeg for MP3 encoding.
         process = (
             ffmpeg
             .input("pipe:0", format="f32le", ac=1, ar=sample_rate)

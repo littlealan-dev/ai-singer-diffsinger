@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Phonemization utilities for mapping lyrics to voicebank phonemes."""
+
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -58,12 +60,14 @@ ARPABET_TO_VOICEBANK = {
 
 @dataclass(frozen=True)
 class PhonemeResult:
+    """Phonemization result with IDs and language IDs."""
     phonemes: Sequence[str]
     ids: Sequence[int]
     language_ids: Sequence[int]
 
 
 class Phonemizer:
+    """Phonemizer that uses dictionary lookup with optional G2P fallback."""
     def __init__(
         self,
         *,
@@ -73,6 +77,7 @@ class Phonemizer:
         language: str = "en",
         allow_g2p: bool = True,
     ) -> None:
+        """Initialize phoneme inventory, dictionary, and optional G2P."""
         if language != "en":
             raise NotImplementedError(
                 f"Only English is supported for now (language='{language}')."
@@ -90,13 +95,14 @@ class Phonemizer:
         self._g2p: Optional[G2p] = None
 
     def phonemize_tokens(self, tokens: Sequence[str]) -> PhonemeResult:
+        """Convert a list of tokens into phonemes and IDs."""
         phonemes: List[str] = []
         for token in tokens:
             phonemes.extend(self._phonemize_token(token))
         ids = [self._phoneme_to_id[p] for p in phonemes]
-        
-        # Resolve language ID for each phoneme
-        # Assumes format "lang/phoneme" or fallback to 0
+
+        # Resolve language ID for each phoneme.
+        # Assumes format "lang/phoneme" or fallback to 0.
         lang_ids = []
         for p in phonemes:
             lang_code = p.split("/")[0] if "/" in p else ""
@@ -106,12 +112,15 @@ class Phonemizer:
         return PhonemeResult(phonemes=phonemes, ids=ids, language_ids=lang_ids)
 
     def is_vowel(self, phoneme: str) -> bool:
+        """Return True if the phoneme is a vowel."""
         return phoneme in self._vowel_symbols
 
     def is_glide(self, phoneme: str) -> bool:
+        """Return True if the phoneme is a glide/semivowel."""
         return phoneme in self._glide_symbols
 
     def _phonemize_token(self, token: str) -> List[str]:
+        """Phonemize a single token using dictionary or G2P."""
         raw = token.strip()
         if not raw:
             return []
@@ -141,6 +150,7 @@ class Phonemizer:
         return self._validate_phonemes(mapped, raw)
 
     def _validate_phonemes(self, phonemes: Sequence[str], token: str) -> List[str]:
+        """Ensure phonemes are present in the voicebank inventory."""
         validated = []
         for phoneme in phonemes:
             if phoneme not in self._phoneme_to_id:
@@ -153,29 +163,34 @@ class Phonemizer:
 
     @staticmethod
     def _normalize_grapheme(value: str) -> str:
+        """Normalize a grapheme for dictionary lookup."""
         cleaned = re.sub(r"[^A-Za-z']+", "", value).lower()
         return cleaned or value.strip()
 
     @staticmethod
     def _normalize_word_for_g2p(value: str) -> str:
+        """Normalize a word for G2P processing."""
         cleaned = re.sub(r"[^A-Za-z']+", "", value).lower()
         return cleaned
 
     @staticmethod
     def _is_arpabet(value: str) -> bool:
+        """Return True if the token looks like an ARPABET symbol."""
         return bool(re.search(r"[A-Za-z]", value))
 
     def _map_arpabet(self, phone: str) -> str:
+        """Map ARPABET symbol to the voicebank phoneme set."""
         base = re.sub(r"[0-9]", "", phone).upper()
         if base not in ARPABET_TO_VOICEBANK:
             raise KeyError(
                 f"Unsupported ARPABET symbol '{phone}' in G2P output."
             )
-        # Prefix with language code (e.g. en/hh)
-        # This aligns with OpenUtau's behavior when use_lang_id is true
+        # Prefix with language code (e.g. en/hh).
+        # This aligns with OpenUtau's behavior when use_lang_id is true.
         return f"{self.language}/{ARPABET_TO_VOICEBANK[base]}"
 
     def _get_g2p(self) -> G2p:
+        """Lazily construct the G2P engine."""
         if self._g2p is None:
             try:
                 self._g2p = G2p()
@@ -188,6 +203,7 @@ class Phonemizer:
 
     @staticmethod
     def _load_phoneme_inventory(path: Path) -> Dict[str, int]:
+        """Load phoneme inventory from phonemes.json."""
         if not path.exists():
             raise FileNotFoundError(
                 f"Phoneme inventory not found at {path}. "
@@ -200,6 +216,7 @@ class Phonemizer:
     
     @staticmethod
     def _load_language_map(path: Path) -> Dict[str, int]:
+        """Load language ID map from languages.json."""
         if not path.exists():
             raise FileNotFoundError(
                 f"Languages map not found at {path}. "
@@ -211,6 +228,7 @@ class Phonemizer:
         return {str(k): int(v) for k, v in data.items()}
 
     def _load_dictionary(self, path: Path) -> Dict[str, List[str]]:
+        """Load grapheme-to-phoneme entries from dsdict.yaml."""
         if not path.exists():
             raise FileNotFoundError(
                 f"Phoneme dictionary not found at {path}. "
@@ -234,6 +252,7 @@ class Phonemizer:
         return dictionary
 
     def _load_symbol_types(self, path: Path) -> tuple[set[str], set[str]]:
+        """Load vowel/glide symbol sets from dsdict.yaml."""
         if not path.exists():
             return set(), set()
         data = yaml.safe_load(path.read_text(encoding="utf8"))
@@ -254,6 +273,7 @@ class Phonemizer:
         return vowels, glides
 
     def _phonemes_match_language(self, phonemes: Iterable[str]) -> bool:
+        """Return True if phonemes match the current language prefix."""
         for phoneme in phonemes:
             if "/" not in str(phoneme):
                 continue

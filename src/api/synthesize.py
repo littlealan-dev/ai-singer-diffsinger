@@ -39,12 +39,13 @@ class TimeAxis:
         Args:
             tempos: List of {"offset_beats": float, "bpm": float}
         """
+        # Keep tempo events ordered by beat offset.
         self.tempos = sorted(tempos, key=lambda t: t["offset_beats"])
         if not self.tempos:
             # Default 120 BPM
             self.tempos = [{"offset_beats": 0.0, "bpm": 120.0}]
         
-        # Precompute ms offsets for each tempo change
+        # Precompute ms offsets for each tempo change.
         self.ms_offsets = [0.0]
         current_ms = 0.0
         for i in range(len(self.tempos) - 1):
@@ -55,6 +56,7 @@ class TimeAxis:
     
     def get_ms_at_beat(self, beat: float) -> float:
         """Convert beat position to elapsed milliseconds."""
+        # Find the last tempo event at or before this beat.
         idx = 0
         for i, t in enumerate(self.tempos):
             if beat >= t["offset_beats"]:
@@ -87,6 +89,7 @@ def _compute_note_timing(
         note_pitches: List of MIDI pitches
         note_rests: List of is_rest flags
     """
+    # Convert beats to frame positions using the tempo map.
     time_axis = TimeAxis(tempos)
     
     start_frames: List[int] = []
@@ -106,7 +109,7 @@ def _compute_note_timing(
         start_frame = int(round(start_ms / frame_ms))
         end_frame = int(round(end_ms / frame_ms))
         
-        # Ensure at least 1 frame
+        # Ensure at least 1 frame.
         if end_frame <= start_frame:
             end_frame = start_frame + 1
 
@@ -135,6 +138,7 @@ def _compute_pitch_note_durations(
     start_frames: List[int],
     end_frames: List[int],
 ) -> List[int]:
+    """Derive per-note durations for pitch curves from note frame positions."""
     if not start_frames:
         return []
     note_dur: List[int] = []
@@ -145,6 +149,7 @@ def _compute_pitch_note_durations(
 
 
 def _fill_rest_midi(note_midi: np.ndarray, note_rest: np.ndarray) -> np.ndarray:
+    """Fill rest MIDI values by interpolating nearby non-rest pitches."""
     if note_midi.size == 0:
         return note_midi
     if note_rest.all():
@@ -156,6 +161,7 @@ def _fill_rest_midi(note_midi: np.ndarray, note_rest: np.ndarray) -> np.ndarray:
 
 
 def _scale_curve(values: List[float], factor: float) -> List[float]:
+    """Scale a curve by a constant factor."""
     if values is None:
         return values
     if factor == 1.0:
@@ -167,6 +173,7 @@ def _scale_curve(values: List[float], factor: float) -> List[float]:
 
 
 def _pad_curve_to_length(values: List[float], target_len: int) -> List[float]:
+    """Pad or trim a curve to the target length."""
     if target_len <= 0:
         return []
     if not values:
@@ -181,10 +188,12 @@ def _pad_curve_to_length(values: List[float], target_len: int) -> List[float]:
 
 
 def _phoneme_base(phoneme: str) -> str:
+    """Normalize phoneme by stripping stress markers."""
     return re.sub(r"\d+$", "", phoneme).lower()
 
 
 def _phoneme_stress(phoneme: str) -> int:
+    """Return numeric stress marker from the phoneme string."""
     match = re.search(r"(\d)$", phoneme)
     return int(match.group(1)) if match else 0
 
@@ -198,6 +207,7 @@ def _trim_single_note_multisyllable(
     lyric: str,
     note_idx: int,
 ) -> Tuple[List[str], List[int], List[int]]:
+    """Reduce multi-syllable phonemes to a single note-friendly slice."""
     vowel_indices = [idx for idx, ph in enumerate(phonemes) if phonemizer.is_vowel(ph)]
     if len(vowel_indices) <= 1:
         return phonemes, ids, lang_ids
@@ -206,6 +216,7 @@ def _trim_single_note_multisyllable(
         idx for idx in vowel_indices if _phoneme_stress(phonemes[idx]) > 0
     ]
     if stress_candidates:
+        # Prefer the most stressed vowel if any are present.
         chosen = max(stress_candidates, key=lambda idx: _phoneme_stress(phonemes[idx]))
     else:
         non_reduced = [
@@ -213,6 +224,7 @@ def _trim_single_note_multisyllable(
         ]
         chosen = non_reduced[0] if non_reduced else vowel_indices[0]
 
+    # Trim between surrounding vowels to reduce to one syllable.
     prev_vowel = max([v for v in vowel_indices if v < chosen], default=-1)
     next_vowel = next((v for v in vowel_indices if v > chosen), len(phonemes))
     start = prev_vowel + 1
@@ -243,6 +255,7 @@ def _align_frame_curves(
     tension: Optional[List[float]],
     voicing: Optional[List[float]],
 ) -> tuple[List[float], Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
+    """Ensure all frame-aligned curves match the expected length."""
     def _maybe_pad(name: str, values: Optional[List[float]]) -> Optional[List[float]]:
         if values is None:
             return None
@@ -267,6 +280,7 @@ _PHONEME_MAP_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _load_phoneme_map(voicebank_path: Path) -> Dict[str, int]:
+    """Load and cache the phoneme-to-id map for a voicebank."""
     key = str(voicebank_path.resolve())
     if key in _PHONEME_MAP_CACHE:
         return _PHONEME_MAP_CACHE[key]
@@ -278,6 +292,7 @@ def _load_phoneme_map(voicebank_path: Path) -> Dict[str, int]:
 
 
 def _get_silence_phoneme_id(voicebank_path: Path) -> int:
+    """Resolve the silence phoneme ID (SP/AP)."""
     phoneme_map = _load_phoneme_map(voicebank_path)
     if "SP" in phoneme_map:
         return int(phoneme_map["SP"])
@@ -287,6 +302,7 @@ def _get_silence_phoneme_id(voicebank_path: Path) -> int:
 
 
 def _scale_durations(durations: List[int], factor: float) -> List[int]:
+    """Scale duration list by a factor, keeping minimum of 1 frame."""
     if not durations:
         return durations
     if factor == 1.0:
@@ -295,6 +311,7 @@ def _scale_durations(durations: List[int], factor: float) -> List[int]:
 
 
 def _adjust_durations_to_total(durations: List[int], target_total: int) -> List[int]:
+    """Adjust durations to match a target total by nudging from the end."""
     if not durations:
         return durations
     total = sum(durations)
@@ -322,6 +339,7 @@ def _apply_articulation_gaps(
     voicebank_path: Path,
     articulation: float,
 ) -> Tuple[List[int], List[int], List[int]]:
+    """Insert silence gaps between words for negative articulation values."""
     if articulation >= 0.0:
         return phoneme_ids, language_ids, durations
     gap_ratio = min(0.5, max(0.0, -0.5 * articulation))
@@ -342,6 +360,7 @@ def _apply_articulation_gaps(
             gap = max(0, word_dur - 1)
         target = max(1, word_dur - gap)
 
+        # Compress word durations to make room for the gap.
         scale = target / max(1, sum(word_dur_list))
         scaled = _scale_durations(word_dur_list, scale)
         scaled = _adjust_durations_to_total(scaled, target)
@@ -362,6 +381,7 @@ def _select_voice_notes(
     notes: List[Dict[str, Any]],
     voice_id: Optional[str],
 ) -> List[Dict[str, Any]]:
+    """Choose notes for a specific voice or infer a default voice selection."""
     voice_pitches: Dict[str, List[float]] = {}
     for note in notes:
         voice = note.get("voice")
@@ -372,6 +392,7 @@ def _select_voice_notes(
 
     selected_voice: Optional[str] = None
     if voice_id is not None:
+        # Honor explicit voice selection where possible.
         voice_key = str(voice_id)
         if voice_key in voice_pitches:
             selected_voice = voice_key
@@ -408,6 +429,7 @@ def _select_voice_notes(
 
 
 def _find_dictionary(voicebank_path: Path) -> Path:
+    """Locate a phoneme dictionary within a voicebank."""
     candidates = [
         voicebank_path / "dsvariance" / "dsdict.yaml",
         voicebank_path / "dsdur" / "dsdict.yaml",
@@ -423,6 +445,7 @@ def _find_dictionary(voicebank_path: Path) -> Path:
 
 
 def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
+    """Create a phonemizer configured for a voicebank."""
     config = load_voicebank_config(voicebank_path)
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
     languages_path = None
@@ -439,11 +462,13 @@ def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
 
 
 def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group notes into lyric-based word units with continuation handling."""
     word_groups: List[Dict[str, Any]] = []
     current_group: Optional[Dict[str, Any]] = None
 
     for idx, note in enumerate(notes):
         if note.get("is_rest", False):
+            # Rests break word grouping.
             current_group = None
             word_groups.append(
                 {
@@ -476,6 +501,7 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Split a flat phonemizer result into per-word phoneme bundles."""
     phonemes = phoneme_result.get("phonemes", [])
     ids = phoneme_result.get("phoneme_ids", [])
     lang_ids = phoneme_result.get("language_ids", [])
@@ -507,6 +533,7 @@ def _build_phoneme_groups(
     phonemizer: Phonemizer,
     word_phonemes: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """Construct aligned phoneme groups for duration/pitch prediction."""
     sp_id = phonemizer._phoneme_to_id["SP"]
 
     phrase_groups: List[Dict[str, Any]] = []
@@ -516,6 +543,7 @@ def _build_phoneme_groups(
         notes_in_group = group["notes"]
         note_indices = group["note_indices"]
         if group["is_rest"]:
+            # Rests become explicit silence phoneme groups.
             note_idx = note_indices[0]
             phrase_groups.append(
                 {
@@ -542,6 +570,7 @@ def _build_phoneme_groups(
             and len(phonemes) > 1
             and any(phonemizer.is_vowel(ph) for ph in phonemes)
         ):
+            # Trim multi-syllable words when a single note must carry them.
             note_idx = note_indices[0]
             lyric = group["notes"][0].get("lyric", "") or ""
             phonemes, ids, lang_ids = _trim_single_note_multisyllable(
@@ -553,6 +582,7 @@ def _build_phoneme_groups(
                 note_idx=note_idx,
             )
 
+        # Determine syllable starts for aligning phonemes to notes.
         is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
         is_glide = [phonemizer.is_glide(p) for p in phonemes]
         is_start = [False] * len(phonemes)
@@ -594,6 +624,7 @@ def _build_phoneme_groups(
             word_entries[-1]["lang_ids"].append(lang_ids[idx])
 
         if word_entries[0]["phonemes"]:
+            # If we have a prefix cluster, attach to previous word when possible.
             if phrase_groups:
                 prev_note_idx = phrase_groups[-1].get("note_idx")
                 phrase_groups[-1].setdefault("phonemes", []).extend(word_entries[0]["phonemes"])
@@ -718,6 +749,7 @@ def align_phonemes_to_notes(
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
 
+    # Compute frame duration from voicebank settings.
     sample_rate = config.get("sample_rate", 44100)
     hop_size = config.get("hop_size", 512)
     frame_ms = hop_size / sample_rate * 1000.0
@@ -739,6 +771,7 @@ def align_phonemes_to_notes(
         tempos,
         frame_ms,
     )
+    # Exclude zero-duration notes from pitch curves.
     pitch_indices = [
         idx for idx, note in enumerate(notes)
         if float(note.get("duration_beats") or 0.0) > 0.0
@@ -766,6 +799,7 @@ def align_phonemes_to_notes(
 
     word_phonemes: List[Dict[str, Any]] = []
     if lyrics:
+        # Run phonemizer once per lyric word group.
         phoneme_result = phonemize(lyrics, voicebank_path)
         word_phonemes = _split_phonemize_result(phoneme_result)
         if len(word_phonemes) != len(lyrics):
@@ -784,6 +818,7 @@ def align_phonemes_to_notes(
     if not ph_result["phoneme_ids"]:
         raise ValueError("No phonemes found after processing the selected notes.")
 
+    # Determine rest flags based on resolved phoneme content.
     computed_note_rests: List[bool] = []
     prev_rest = True
     for idx, note in enumerate(notes):
@@ -863,6 +898,7 @@ def synthesize(
         - duration_seconds: Audio duration
     """
     def _notify(step: str, message: str, progress: float) -> None:
+        # Best-effort progress callbacks.
         if not progress_callback:
             return
         try:
@@ -871,6 +907,7 @@ def synthesize(
             logger.debug("progress_callback_failed step=%s", step, exc_info=True)
 
     def _log_step(step: str, start_time: float) -> None:
+        # Emit timing metrics for each pipeline step.
         elapsed_ms = (time.monotonic() - start_time) * 1000.0
         logger.info("synthesize_step step=%s elapsed_ms=%.2f", step, elapsed_ms)
 
@@ -895,6 +932,7 @@ def synthesize(
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     
+    # Resolve voice color to an optional speaker embedding.
     sample_rate = config.get("sample_rate", 44100)
     default_voice_color = resolve_default_voice_color(voicebank_path)
     selected_voice_color = voice_color or default_voice_color
@@ -925,7 +963,7 @@ def synthesize(
     )
     _log_step("align", start)
     
-    # Step 3: Predict durations
+    # Step 3: Predict durations.
     _notify("durations", "Locking in the tempo...", 0.3)
     start = time.monotonic()
     dur_result = predict_durations(
@@ -943,6 +981,7 @@ def synthesize(
     language_ids = alignment["language_ids"]
     durations = dur_result["durations"]
     if articulation < 0.0:
+        # Insert short gaps to increase articulation.
         phoneme_ids, language_ids, durations = _apply_articulation_gaps(
             phoneme_ids,
             language_ids,
@@ -953,7 +992,7 @@ def synthesize(
             articulation,
         )
     
-    # Step 4: Predict pitch
+    # Step 4: Predict pitch.
     _notify("pitch", "Finding the melody line...", 0.5)
     start = time.monotonic()
     pitch_result = predict_pitch(
@@ -989,7 +1028,7 @@ def synthesize(
                 pitch_result["pitch_midi"], expected_frames
             )
     
-    # Step 5: Predict variance
+    # Step 5: Predict variance.
     _notify("variance", "Planning the phrasing...", 0.65)
     start = time.monotonic()
     var_result = predict_variance(
@@ -1015,6 +1054,7 @@ def synthesize(
             len(voicing) if voicing else 0,
         )
     if expected_frames > 0:
+        # Ensure all frame-aligned curves match the expected frame count.
         pitch_result["f0"], breathiness, tension, voicing = _align_frame_curves(
             expected_frames,
             f0=pitch_result["f0"],
@@ -1023,7 +1063,7 @@ def synthesize(
             voicing=voicing,
         )
     
-    # Step 6: Synthesize audio
+    # Step 6: Synthesize audio.
     _notify("synthesize", "Taking a breath for the take...", 0.8)
     start = time.monotonic()
     audio_result = synthesize_audio(
@@ -1040,7 +1080,7 @@ def synthesize(
     )
     _log_step("synthesize", start)
     
-    # Calculate duration
+    # Calculate duration.
     waveform = audio_result["waveform"]
     duration = len(waveform) / sample_rate
     

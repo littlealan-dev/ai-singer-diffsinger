@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MCP stdio server entrypoint that routes JSON-RPC tool calls."""
+
 import argparse
 import json
 import sys
@@ -14,6 +16,7 @@ from src.mcp.logging_utils import configure_logging, summarize_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
+    """Build a JSON-RPC error response envelope."""
     return {
         "jsonrpc": "2.0",
         "id": request_id,
@@ -22,6 +25,7 @@ def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[
 
 
 def _result_response(request_id: Optional[Any], result: Any) -> Dict[str, Any]:
+    """Build a JSON-RPC success response envelope."""
     return {
         "jsonrpc": "2.0",
         "id": request_id,
@@ -37,12 +41,14 @@ _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
 
 
 def _get_allowlist(mode: str) -> Optional[Set[str]]:
+    """Return the tool allowlist for a given mode, or None for unrestricted."""
     if mode == "all":
         return None
     return _MODE_TOOL_ALLOWLIST.get(mode, set())
 
 
 def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional[Dict[str, Any]]:
+    """Handle one JSON-RPC request payload and return a response (or None)."""
     method = request.get("method")
     request_id = request.get("id")
     params = request.get("params", {}) or {}
@@ -50,6 +56,7 @@ def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional
     logger.debug("MCP request method=%s params=%s", method, summarize_payload(params))
 
     if method == "initialize":
+        # Handshake request: advertise server info and tool capability surface.
         result = {
             "protocolVersion": params.get("protocolVersion", "1.0"),
             "serverInfo": {"name": "ai-singer-diffsinger-mcp", "version": "0.1.0"},
@@ -58,11 +65,13 @@ def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional
         return _result_response(request_id, result)
 
     if method == "tools/list":
+        # Return tools optionally filtered by mode.
         result = {"tools": list_tools(_get_allowlist(mode))}
         logger.debug("MCP response id=%s result=%s", request_id, summarize_payload(result))
         return _result_response(request_id, result)
 
     if method == "tools/call":
+        # Validate tool name and arguments before execution.
         name = params.get("name")
         if not name:
             return _result_response(
@@ -98,11 +107,13 @@ def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional
 
 
 def run_server(device: str, mode: str) -> None:
+    """Run a blocking stdio loop that reads JSON-RPC lines and writes responses."""
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
+            # Parse each line as a single JSON-RPC request.
             request = json.loads(line)
         except json.JSONDecodeError as exc:
             response = _error_response(None, -32700, f"Invalid JSON: {exc}")
@@ -111,6 +122,7 @@ def run_server(device: str, mode: str) -> None:
             continue
 
         try:
+            # Dispatch into the request handler, guarding against unexpected errors.
             response = _handle_request(request, device, mode)
         except Exception:
             response = _error_response(request.get("id"), -32000, "Internal error")
@@ -122,6 +134,7 @@ def run_server(device: str, mode: str) -> None:
 
 
 def main() -> None:
+    """Parse CLI flags, configure logging, and start the MCP server loop."""
     parser = argparse.ArgumentParser(description="SVS MCP server (stdio).")
     parser.add_argument("--device", default="cpu", help="Inference device (internal only).")
     parser.add_argument(
@@ -140,6 +153,7 @@ def main() -> None:
     args = parser.parse_args()
     startup_start = time.monotonic()
     if args.debug:
+        # Allow CLI debug to override the configured log level.
         os.environ.setdefault("BACKEND_LOG_LEVEL", "debug")
     mcp_config = "config/logging.mcp.prod.json"
     if os.getenv("APP_ENV", "dev").lower() in {"dev", "development", "local", "test"}:
@@ -150,6 +164,7 @@ def main() -> None:
     logger.info("mcp_startup_begin service=%s device=%s mode=%s", args.service_name, args.device, args.mode)
     nltk_start = time.monotonic()
     try:
+        # Warm NLTK resources so first request is not impacted by download latency.
         import nltk
 
         nltk.data.find("taggers/averaged_perceptron_tagger_eng")

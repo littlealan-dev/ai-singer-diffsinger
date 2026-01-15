@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""FastAPI entrypoint for the backend service."""
+
 from pathlib import Path
 from typing import Any, Dict, AsyncIterator, Iterator, Optional
 import asyncio
@@ -33,13 +35,16 @@ from firebase_admin import app_check
 
 
 class ChatRequest(BaseModel):
+    """Request payload for chat-based interactions."""
     message: str
 
 
 def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
     configure_logging()
     settings = Settings.from_env()
     if settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        # Use filesystem-backed sessions in development.
         sessions = SessionStore(
             project_root=settings.project_root,
             sessions_dir=settings.sessions_dir,
@@ -47,6 +52,7 @@ def create_app() -> FastAPI:
             max_sessions=settings.max_sessions,
         )
     else:
+        # Use Firestore-backed sessions in production.
         sessions = FirestoreSessionStore(
             project_root=settings.project_root,
             sessions_dir=settings.sessions_dir,
@@ -60,6 +66,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Start/stop shared services and handle cleanup."""
         settings.sessions_dir.mkdir(parents=True, exist_ok=True)
         router.start()
         try:
@@ -85,6 +92,7 @@ def create_app() -> FastAPI:
     if cors_env:
         cors_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
     else:
+        # Default local dev origins.
         cors_origins = [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
@@ -102,6 +110,7 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
+        """Attach per-request logging context and timings."""
         start = time.monotonic()
         session_id = request.path_params.get("session_id") if request.path_params else None
         set_log_context(session_id=session_id)
@@ -130,6 +139,7 @@ def create_app() -> FastAPI:
 
     @app.post("/sessions")
     async def create_session(request: Request) -> Dict[str, str]:
+        """Create a new session for a user."""
         user_id = await _get_user_id_or_401(request)
         session = await request.app.state.sessions.create_session(user_id=user_id)
         return {"session_id": session.id}
@@ -140,6 +150,7 @@ def create_app() -> FastAPI:
         request: Request,
         file: UploadFile = File(...),
     ) -> Dict[str, Any]:
+        """Upload a MusicXML file, parse it, and attach to a session."""
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
@@ -159,6 +170,7 @@ def create_app() -> FastAPI:
         if original_name:
             await sessions.set_metadata(session_id, "musicxml_name", original_name)
         if settings.backend_use_storage:
+            # Persist the uploaded file in object storage when configured.
             storage_path = _session_input_storage_path(
                 user_id, session_id, target_path.suffix
             )
@@ -193,6 +205,7 @@ def create_app() -> FastAPI:
 
     @app.post("/sessions/{session_id}/chat")
     async def chat(session_id: str, request: Request, payload: ChatRequest) -> Dict[str, Any]:
+        """Handle chat requests and orchestrate LLM/tool execution."""
         sessions: SessionStore = request.app.state.sessions
         orchestrator: Orchestrator = request.app.state.orchestrator
         user_id = await _get_user_id_or_401(request)
@@ -295,6 +308,7 @@ def create_app() -> FastAPI:
 async def _get_session_or_404(
     sessions: SessionStore, session_id: str, user_id: Optional[str]
 ) -> Any:
+    """Fetch a session or raise an HTTP error for auth/missing cases."""
     try:
         return await sessions.get_session(session_id, user_id)
     except PermissionError as exc:
@@ -306,6 +320,7 @@ async def _get_session_or_404(
 async def _get_snapshot_or_404(
     sessions: SessionStore, session_id: str, user_id: Optional[str]
 ) -> Dict[str, Any]:
+    """Fetch a score snapshot or raise an HTTP error for auth/missing cases."""
     try:
         return await sessions.get_snapshot(session_id, user_id)
     except PermissionError as exc:
@@ -315,6 +330,7 @@ async def _get_snapshot_or_404(
 
 
 def _extract_bearer_token(request: Request) -> str:
+    """Extract a bearer token from headers or query params."""
     auth_header = request.headers.get("authorization")
     if not auth_header:
         token = request.query_params.get("id_token") or request.query_params.get("auth")
@@ -328,6 +344,7 @@ def _extract_bearer_token(request: Request) -> str:
 
 
 async def _get_user_id_or_401(request: Request) -> str:
+    """Return the authenticated user ID or raise HTTP 401."""
     if request.app.state.settings.backend_auth_disabled:
         user_id = "dev-user"
         set_log_context(user_id=user_id)
@@ -344,6 +361,7 @@ async def _get_user_id_or_401(request: Request) -> str:
 
 
 async def _require_app_check(request: Request) -> None:
+    """Enforce Firebase App Check on incoming requests."""
     settings: Settings = request.app.state.settings
     if not settings.backend_require_app_check:
         return
@@ -360,6 +378,7 @@ async def _require_app_check(request: Request) -> None:
 
 
 async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
+    """Write an upload to disk while enforcing a size limit."""
     path.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     try:
@@ -380,11 +399,13 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
 
 
 def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:
+    """Build the storage object path for a session upload."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     return f"sessions/{user_id}/{session_id}/input{safe_suffix}"
 
 
 async def _stream_storage_audio(settings: Settings, storage_path: str) -> Response:
+    """Fetch audio bytes from storage and return a typed response."""
     suffix = Path(storage_path).suffix.lower()
     if suffix == ".wav":
         media_type = "audio/wav"
@@ -397,6 +418,7 @@ async def _stream_storage_audio(settings: Settings, storage_path: str) -> Respon
 
 
 def _read_musicxml_content(path: Path) -> str:
+    """Read MusicXML content from .xml or .mxl files."""
     if path.suffix.lower() != ".mxl":
         return path.read_text(encoding="utf-8", errors="replace")
     with zipfile.ZipFile(path) as archive:
@@ -406,6 +428,7 @@ def _read_musicxml_content(path: Path) -> str:
 
 
 def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+    """Iterate over a file in fixed-size chunks."""
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
@@ -415,6 +438,7 @@ def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
 
 
 def _find_mxl_xml(archive: zipfile.ZipFile) -> str:
+    """Find the referenced XML file inside an MXL archive."""
     try:
         container_bytes = archive.read("META-INF/container.xml")
     except KeyError:
@@ -432,6 +456,7 @@ def _find_mxl_xml(archive: zipfile.ZipFile) -> str:
 
 
 def _first_mxl_xml(archive: zipfile.ZipFile) -> str:
+    """Return the first XML entry found in an MXL archive."""
     candidates = [
         name
         for name in archive.namelist()

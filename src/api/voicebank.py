@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 
 
 def _load_character_data(path: Path) -> Dict[str, Any]:
+    """Load character.yaml if present, otherwise return an empty dict."""
     char_file = path / "character.yaml"
     if not char_file.exists():
         return {}
@@ -26,6 +27,7 @@ def _load_character_data(path: Path) -> Dict[str, Any]:
 
 
 def _extract_voice_colors(path: Path) -> List[Dict[str, str]]:
+    """Extract subbank color/suffix metadata from character.yaml."""
     data = _load_character_data(path)
     subbanks = data.get("subbanks")
     voice_colors: List[Dict[str, str]] = []
@@ -42,6 +44,7 @@ def _extract_voice_colors(path: Path) -> List[Dict[str, str]]:
 
 
 def _resolve_default_voice_color(voice_colors: List[Dict[str, str]]) -> Optional[str]:
+    """Pick a preferred voice color name using common defaults."""
     if not voice_colors:
         return None
     preferred = ("normal", "standard", "default")
@@ -54,6 +57,7 @@ def _resolve_default_voice_color(voice_colors: List[Dict[str, str]]) -> Optional
 
 
 def resolve_default_voice_color(voicebank: Union[str, Path]) -> Optional[str]:
+    """Resolve the default voice color name from a voicebank directory."""
     path = Path(voicebank)
     voice_colors = _extract_voice_colors(path)
     return _resolve_default_voice_color(voice_colors)
@@ -63,6 +67,7 @@ def resolve_voice_color_suffix(
     voicebank: Union[str, Path],
     voice_color: Optional[str],
 ) -> Optional[str]:
+    """Find the suffix associated with a voice color name."""
     if not voice_color:
         return None
     path = Path(voicebank)
@@ -77,6 +82,7 @@ def resolve_voice_color_speaker(
     voicebank: Union[str, Path],
     voice_color: Optional[str],
 ) -> Optional[str]:
+    """Resolve a speaker suffix that matches a chosen voice color."""
     suffix = resolve_voice_color_suffix(voicebank, voice_color)
     if not suffix:
         return None
@@ -133,6 +139,7 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
         )
     root_dir = Path(__file__).parent.parent.parent
     if search_path is None and is_prod_env():
+        # Production mode uses cached IDs to avoid filesystem scans.
         ids = list_voicebank_ids()
         voicebanks = [{"id": voicebank_id, "name": voicebank_id, "path": voicebank_id} for voicebank_id in ids]
         if logger.isEnabledFor(logging.DEBUG):
@@ -166,7 +173,7 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
                 "id": item.name,
                 "path": str(relative_path),
             }
-            # Try to get name from character.yaml
+            # Try to get name from character.yaml.
             char_file = item / "character.yaml"
             if char_file.exists():
                 try:
@@ -208,15 +215,16 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         )
     path = Path(voicebank)
     if isinstance(voicebank, str) and not path.exists() and "/" not in voicebank and "\\" not in voicebank:
+        # Treat plain IDs as cached production voicebanks.
         path = resolve_voicebank_path(voicebank)
     config = load_voicebank_config(path)
-    
-    # Check for sub-models
+
+    # Check for sub-models.
     has_pitch = (path / "dspitch").exists()
     has_variance = (path / "dsvariance").exists()
     has_duration = (path / "dsdur").exists()
     
-    # Get languages
+    # Get languages.
     languages = []
     if "languages" in config:
         lang_path = path / config["languages"]
@@ -225,10 +233,10 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
             if isinstance(lang_data, dict):
                 languages = list(lang_data.keys())
     
-    # Get speakers
+    # Get speakers.
     speakers = config.get("speakers", [])
     
-    # Get name from character.yaml
+    # Get name from character.yaml.
     name = path.name
     char_file = path / "character.yaml"
     if char_file.exists():
@@ -291,7 +299,7 @@ def load_speaker_embed(
     if not speakers:
         raise FileNotFoundError("No speaker embeddings in voicebank")
     
-    # Select speaker
+    # Select speaker.
     chosen = speakers[0]
     if speaker_name:
         for entry in speakers:
@@ -299,7 +307,7 @@ def load_speaker_embed(
                 chosen = entry
                 break
     
-    # Load embedding
+    # Load embedding.
     embed_path = path / chosen
     if not embed_path.exists():
         embed_path = embed_path.with_suffix(".emb")

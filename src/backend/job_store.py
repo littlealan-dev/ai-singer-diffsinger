@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Firestore-backed job tracking helpers."""
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
@@ -10,10 +12,12 @@ from src.backend.firebase_app import get_firestore_client
 
 @dataclass
 class JobStore:
+    """CRUD helpers for Firestore job documents."""
     collection: str = "jobs"
     _client: Optional[firestore.Client] = field(default=None, init=False, repr=False)
 
     def _ensure_client(self) -> None:
+        """Lazily initialize the Firestore client."""
         if self._client is None:
             self._client = get_firestore_client()
 
@@ -27,6 +31,7 @@ class JobStore:
         input_path: Optional[str] = None,
         render_type: Optional[str] = None,
     ) -> None:
+        """Create a new job record with initial metadata."""
         payload: Dict[str, Any] = {
             "userId": user_id,
             "sessionId": session_id,
@@ -42,6 +47,7 @@ class JobStore:
         self._client.collection(self.collection).document(job_id).set(payload)
 
     def update_job(self, job_id: str, **fields: Any) -> None:
+        """Update a job record with new fields and a fresh timestamp."""
         payload = dict(fields)
         payload["updatedAt"] = firestore.SERVER_TIMESTAMP
         self._ensure_client()
@@ -50,6 +56,7 @@ class JobStore:
     def get_latest_job_by_session(
         self, *, user_id: str, session_id: str
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return the most recent job for a user/session pair."""
         self._ensure_client()
         query = (
             self._client.collection(self.collection)
@@ -67,6 +74,7 @@ class JobStore:
 
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize job data into a progress payload for clients."""
     status = data.get("status", "idle")
     if status == "completed":
         status = "done"

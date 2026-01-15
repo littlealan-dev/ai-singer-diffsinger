@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Gemini REST client implementation for LLM interactions."""
+
 from typing import Any, Dict, List
 import json
 import urllib.error
@@ -9,18 +11,22 @@ from src.backend.config import Settings
 
 
 class GeminiRestClient:
+    """Lightweight REST client for Google Gemini."""
     def __init__(self, settings: Settings, *, api_key: str | None = None) -> None:
+        """Configure client endpoints, model, and timeouts."""
         self._api_key = api_key or settings.gemini_api_key
         self._base_url = settings.gemini_base_url
         self._model = settings.gemini_model
         self._timeout = settings.gemini_timeout_seconds
 
     def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
+        """Generate a response from Gemini using the REST API."""
         url = f"{self._base_url}/models/{self._model}:generateContent"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": self._history_to_contents(history),
         }
+        # Encode payload as JSON for the HTTP request body.
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url,
@@ -51,6 +57,7 @@ class GeminiRestClient:
         return text
 
     def _history_to_contents(self, history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Convert chat history into Gemini content payloads."""
         contents: List[Dict[str, Any]] = []
         for entry in history[-10:]:
             role = entry.get("role", "user")

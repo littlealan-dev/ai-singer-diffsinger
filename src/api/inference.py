@@ -24,6 +24,7 @@ def _get_model(model_class, model_path: Path, device: str = "cpu"):
     """Get or create a cached model instance."""
     cache_key = f"{model_class.__name__}:{model_path}"
     if cache_key not in _model_cache:
+        # Cache instantiated models to avoid repeated disk loading.
         _model_cache[cache_key] = model_class(model_path, device)
     return _model_cache[cache_key]
 
@@ -167,13 +168,13 @@ def predict_durations(
         )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
-    
-    # Load models
+
+    # Load model components and speaker embedding.
     linguistic = _load_linguistic_model(voicebank_path, device)
     duration = _load_duration_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
-    
-    # Prepare tensors
+
+    # Prepare tensors for model inputs.
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     word_div_tensor = np.array(word_boundaries, dtype=np.int64)[None, :]
     word_dur_tensor = np.array(word_durations, dtype=np.int64)[None, :]
@@ -182,7 +183,7 @@ def predict_durations(
         language_ids = [0] * len(phoneme_ids)
     languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
     
-    # Run linguistic encoder
+    # Run linguistic encoder to produce phoneme-level representations.
     ling_inputs = {
         "tokens": tokens_tensor,
         "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
@@ -193,20 +194,20 @@ def predict_durations(
     encoder_out = ling_out[0]
     x_masks = ling_out[1]
     
-    # Expand note pitches to phoneme level
+    # Expand note pitches to phoneme level.
     ph_midi = []
     for midi, count in zip(word_pitches, word_boundaries):
         ph_midi.extend([int(round(midi))] * count)
     ph_midi_tensor = np.array(ph_midi, dtype=np.int64)[None, :]
     
-    # Prepare speaker embedding
+    # Prepare speaker embedding per-phoneme.
     spk_embed_tokens = np.repeat(spk_embed[None, None, :], tokens_tensor.shape[1], axis=1).astype(np.float32)
-    
-    # Run duration predictor
+
+    # Run duration predictor.
     duration_out = duration.forward(encoder_out, x_masks, ph_midi_tensor, spk_embed_tokens)
     ph_dur_pred = duration_out[0]
     
-    # Align durations to match note timing
+    # Align durations to match note timing.
     ph_durations = _align_durations(ph_dur_pred, word_boundaries, [int(d) for d in word_durations])
     
     result = {
@@ -229,7 +230,8 @@ def _align_durations(
     ph2word = _build_ph2word(word_div)
     if ph2word.shape[0] != ph_dur_pred.shape[0]:
         raise ValueError("Phoneme durations and word_div are misaligned")
-    
+
+    # Aggregate predicted durations by word to compute scaling factors.
     ph_dur_pred = np.maximum(ph_dur_pred, 0.0)
     word_dur_in = np.zeros(len(word_div), dtype=np.float32)
     for ph_idx, word_idx in enumerate(ph2word):
@@ -240,10 +242,11 @@ def _align_durations(
         if total > 0:
             alpha[idx] = word_dur[idx] / total
     
+    # Apply per-word scaling and round to frame counts.
     ph_dur = np.round(ph_dur_pred * alpha[ph2word - 1]).astype(np.int64)
     ph_dur = np.maximum(ph_dur, 1)
-    
-    # Adjust rounding drift
+
+    # Adjust rounding drift so each word hits its target duration.
     offset = 0
     for word_idx, count in enumerate(word_div):
         target = word_dur[word_idx]
@@ -320,12 +323,12 @@ def predict_pitch(
     config = load_voicebank_config(voicebank_path)
     
     n_frames = sum(durations)
-    
-    # Try to load pitch model
+
+    # Try to load pitch model.
     pitch_model = _load_pitch_model(voicebank_path, device)
-    
+
     if pitch_model is None:
-        # Fallback: naive MIDI-derived pitch
+        # Fallback: naive MIDI-derived pitch.
         f0 = _naive_pitch(note_pitches, note_durations, note_rests)
         result = {
             "f0": f0[:n_frames].tolist(),
@@ -345,6 +348,7 @@ def predict_pitch(
     languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
 
     if pitch_linguistic is not None:
+        # Prefer pitch-specific linguistic encoder if available.
         pitch_ling_inputs = {
             "tokens": tokens_tensor,
             "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
@@ -352,8 +356,10 @@ def predict_pitch(
         }
         pitch_encoder_out = pitch_linguistic.run(pitch_ling_inputs)[0]
     elif encoder_out is not None:
+        # Reuse encoder output from duration pass if provided.
         pitch_encoder_out = encoder_out
     else:
+        # Last-resort fallback when no encoder output is available.
         f0 = _naive_pitch(note_pitches, note_durations, note_rests)
         result = {
             "f0": f0[:n_frames].tolist(),
@@ -371,6 +377,7 @@ def predict_pitch(
     retake = np.ones((1, n_frames), dtype=bool)
     spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
 
+    # Build pitch model inputs with frame-level features and embeddings.
     pitch_inputs = {
         "encoder_out": pitch_encoder_out,
         "ph_dur": durations_tensor,
@@ -404,6 +411,7 @@ def _naive_pitch(
     """Generate naive F0 curve from MIDI notes."""
     f0 = []
     for midi, dur, is_rest in zip(note_pitches, note_durations, note_rests):
+        # Assign zero frequency for rests or invalid MIDI values.
         if is_rest or midi <= 0:
             freq = 0.0
         else:
@@ -468,12 +476,12 @@ def predict_variance(
         )
     voicebank_path = Path(voicebank)
     n_frames = len(f0)
-    
-    # Try to load variance model
+
+    # Try to load variance model.
     variance_model = _load_variance_model(voicebank_path, device)
-    
+
     if variance_model is None:
-        # Fallback: zeros
+        # Fallback: zeros.
         result = {
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
@@ -495,6 +503,7 @@ def predict_variance(
     languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
 
     if variance_linguistic is not None:
+        # Prefer variance-specific linguistic encoder if available.
         ling_inputs = {
             "tokens": tokens_tensor,
             "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
@@ -502,8 +511,10 @@ def predict_variance(
         }
         variance_encoder_out = variance_linguistic.run(ling_inputs)[0]
     elif encoder_out is not None:
+        # Reuse encoder output from duration pass if provided.
         variance_encoder_out = encoder_out
     else:
+        # Fallback when no encoder output exists.
         result = {
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
@@ -513,9 +524,11 @@ def predict_variance(
             logger.debug("predict_variance output=%s", summarize_payload(result))
         return result
 
+    # Convert F0 to MIDI for variance model input.
     pitch_midi = _hz_to_midi(np.array(f0, dtype=np.float32))
     pitch_midi = pitch_midi.astype(np.float32)[None, :]
 
+    # Enable only the variance heads configured in the model.
     predict_energy = bool(variance_conf.get("predict_energy", False))
     predict_breathiness = bool(variance_conf.get("predict_breathiness", False))
     predict_voicing = bool(variance_conf.get("predict_voicing", False))
@@ -627,13 +640,14 @@ def synthesize_mel(
         )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
-    
+
+    # Load acoustic model and speaker embedding for conditioning.
     acoustic = _load_acoustic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
-    
+
     n_frames = len(f0)
-    
-    # Prepare tensors
+
+    # Prepare tensors.
     tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     durations_tensor = np.array(durations, dtype=np.int64)[None, :]
     f0_tensor = np.array(f0, dtype=np.float32)[None, :]
@@ -642,7 +656,7 @@ def synthesize_mel(
         language_ids = [0] * len(phoneme_ids)
     languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
     
-    # Variance defaults
+    # Variance defaults.
     if breathiness is None:
         breathiness = [0.0] * n_frames
     if tension is None:
@@ -652,7 +666,8 @@ def synthesize_mel(
     
     spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
     depth = float(config.get("max_depth", 1.0)) if config.get("use_variable_depth") else 1.0
-    
+
+    # Assemble acoustic model inputs.
     acoustic_inputs = {
         "tokens": tokens_tensor,
         "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
@@ -733,6 +748,7 @@ def synthesize_audio(
                 }
             ),
         )
+    # Synthesize mel then run vocoder to get waveform.
     mel_result = synthesize_mel(
         phoneme_ids=phoneme_ids,
         durations=durations,

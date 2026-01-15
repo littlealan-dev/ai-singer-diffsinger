@@ -1,9 +1,12 @@
+"""ONNX vocoder wrapper for HiFi-GAN-style waveform synthesis."""
+
 import onnxruntime as ort
 import numpy as np
 import logging
 import os
 from pathlib import Path
 from typing import Dict, Any
+
 
 class Vocoder:
     """
@@ -12,6 +15,7 @@ class Vocoder:
     Outputs: waveform
     """
     def __init__(self, model_path: Path, device: str = "cpu"):
+        """Initialize the vocoder with a model path and device preference."""
         self.model_path = model_path
         self.device = device
         self.session = self._load_session()
@@ -19,12 +23,14 @@ class Vocoder:
         self.output_names = [node.name for node in self.session.get_outputs()]
 
     def _load_session(self) -> ort.InferenceSession:
+        """Create an ONNX Runtime session with the best available provider."""
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found at {self.model_path}")
-        
+
         available = ort.get_available_providers()
         providers = ["CPUExecutionProvider"]
         if self.device == "cuda":
+            # Prefer CUDA when available.
             if "CUDAExecutionProvider" in available:
                 providers.insert(0, "CUDAExecutionProvider")
             else:
@@ -34,6 +40,7 @@ class Vocoder:
                     available,
                 )
         elif self.device == "coreml":
+            # Prefer CoreML for Apple devices when available.
             if "CoreMLExecutionProvider" in available:
                 providers.insert(0, "CoreMLExecutionProvider")
             else:
@@ -44,6 +51,7 @@ class Vocoder:
                 )
             
         opts = ort.SessionOptions()
+        # Allow thread overrides via environment variables.
         intra_threads = os.getenv("ORT_INTRA_OP_NUM_THREADS")
         inter_threads = os.getenv("ORT_INTER_OP_NUM_THREADS")
         if intra_threads:
@@ -67,9 +75,10 @@ class Vocoder:
         Returns:
             waveform: [B, output_len]
         """
+        # Prepare input feed and run inference.
         inputs = {
             "mel": mel,
-            "f0": f0
+            "f0": f0,
         }
         outputs = self.session.run(self.output_names, inputs)
         return outputs[0]

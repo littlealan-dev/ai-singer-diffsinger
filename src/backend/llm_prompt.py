@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Helpers for building and parsing LLM prompts/responses."""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,12 +14,14 @@ _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_promp
 
 @dataclass(frozen=True)
 class ToolCall:
+    """LLM-specified tool invocation."""
     name: str
     arguments: Dict[str, Any]
 
 
 @dataclass(frozen=True)
 class LlmResponse:
+    """Structured LLM response with tool calls and final text."""
     tool_calls: List[ToolCall]
     final_message: str
     include_score: bool
@@ -30,6 +34,7 @@ def build_system_prompt(
     score_summary: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
+    """Build the system prompt with tool specs and context metadata."""
     tool_specs = []
     for tool in tools:
         tool_specs.append(
@@ -62,16 +67,19 @@ def build_system_prompt(
 
 
 def _load_system_prompt() -> str:
+    """Load the system prompt template from disk."""
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:
+    """Parse an LLM response JSON snippet into a structured response."""
     if not text:
         return None
     cleaned = text.strip()
     if cleaned.startswith("```"):
+        # Strip optional fenced code blocks.
         cleaned = cleaned.strip("`")
         lines = cleaned.splitlines()
         if lines and lines[0].strip().startswith("json"):

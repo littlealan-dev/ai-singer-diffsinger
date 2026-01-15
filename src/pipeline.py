@@ -1,3 +1,5 @@
+"""End-to-end synthesis pipeline for DiffSinger-style inference."""
+
 import yaml
 import numpy as np
 import logging
@@ -14,6 +16,7 @@ from src.musicxml.parser import parse_musicxml, ScoreData, NoteEvent, TempoEvent
 
 @dataclass
 class PipelineConfig:
+    """Config values derived from the voicebank dsconfig.yaml."""
     sample_rate: int = 44100
     hop_size: int = 512
     frame_ms: float = 512 / 44100 * 1000
@@ -25,6 +28,7 @@ class PipelineConfig:
 
 @dataclass
 class NoteTiming:
+    """Timing information derived from score notes."""
     start_frames: List[int]
     end_frames: List[int]
     midi: np.ndarray
@@ -33,6 +37,7 @@ class NoteTiming:
 
 @dataclass
 class PhraseData:
+    """Prepared phrase inputs for model inference."""
     phrase_groups: List[Dict[str, Any]]
     input_tokens: List[int]
     input_languages: List[int]
@@ -44,6 +49,7 @@ class PhraseData:
 
 @dataclass
 class LinguisticResult:
+    """Outputs from the linguistic encoder."""
     tokens: np.ndarray
     languages: np.ndarray
     word_div: np.ndarray
@@ -54,6 +60,7 @@ class LinguisticResult:
 
 @dataclass
 class DurationResult:
+    """Outputs from the duration predictor."""
     ph_midi: np.ndarray
     ph_midi_list: List[int]
     ph_dur_pred: np.ndarray
@@ -62,6 +69,7 @@ class DurationResult:
 
 @dataclass
 class PitchContext:
+    """Inputs required for pitch prediction."""
     pitch_tokens: np.ndarray
     pitch_languages: np.ndarray
     ph_durations: np.ndarray
@@ -73,6 +81,7 @@ class PitchContext:
 
 
 class TimeAxis:
+    """Tempo-aware conversion from beats to elapsed milliseconds."""
     def __init__(self, tempos: List[TempoEvent]):
         """Build a tempo-aware time axis.
         Inputs: tempos list with offset_beats and bpm.
@@ -108,6 +117,7 @@ class TimeAxis:
 
 
 class Pipeline:
+    """High-level synthesis pipeline wrapper for voicebanks."""
     HEAD_FRAMES = 8
     TAIL_FRAMES = 8
     PADDING_MS = 500.0

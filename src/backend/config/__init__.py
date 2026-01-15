@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Backend settings loader from environment variables."""
+
 from dataclasses import dataclass
 from pathlib import Path
 import os
@@ -8,6 +10,7 @@ from src.mcp.resolve import PROJECT_ROOT
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an int env var with a default."""
     value = os.getenv(name)
     if value is None or value == "":
         return default
@@ -15,6 +18,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """Read a float env var with a default."""
     value = os.getenv(name)
     if value is None or value == "":
         return default
@@ -22,6 +26,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var with a default."""
     value = os.getenv(name)
     if value is None or value == "":
         return default
@@ -29,6 +34,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _project_id() -> str | None:
+    """Return the active GCP project ID if set."""
     for key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "PROJECT_ID"):
         value = os.getenv(key)
         if value:
@@ -37,11 +43,13 @@ def _project_id() -> str | None:
 
 
 def _app_env() -> str:
+    """Return the application environment name."""
     return os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
 
 
 @dataclass(frozen=True)
 class Settings:
+    """Configuration values parsed from the environment."""
     project_root: Path
     data_dir: Path
     sessions_dir: Path
@@ -78,6 +86,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """Construct settings from environment variables."""
         data_dir_name = os.getenv("BACKEND_DATA_DIR", "data")
         data_dir = (PROJECT_ROOT / data_dir_name).resolve()
         if data_dir != PROJECT_ROOT and PROJECT_ROOT not in data_dir.parents:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Firebase app initialization and helper utilities."""
+
 from typing import Optional
 import os
 
@@ -12,6 +14,7 @@ _firestore_client: Optional[firestore.Client] = None
 
 
 def _project_id() -> Optional[str]:
+    """Resolve GCP project ID from common environment variables."""
     return (
         os.getenv("GOOGLE_CLOUD_PROJECT")
         or os.getenv("GCLOUD_PROJECT")
@@ -20,6 +23,7 @@ def _project_id() -> Optional[str]:
 
 
 def initialize_firebase_app() -> firebase_admin.App:
+    """Initialize the Firebase app with optional credentials."""
     global _app
     if _app is not None:
         return _app
@@ -42,6 +46,7 @@ def initialize_firebase_app() -> firebase_admin.App:
         credential = credentials.Certificate(service_account_path)
         _app = firebase_admin.initialize_app(credential, options or None)
     elif use_emulator:
+        # Emulators do not require real credentials.
         credential = AnonymousCredentials()
         _app = firebase_admin.initialize_app(credential, options or None)
     else:
@@ -50,6 +55,7 @@ def initialize_firebase_app() -> firebase_admin.App:
 
 
 def get_firestore_client() -> firestore.Client:
+    """Return a cached Firestore client."""
     global _firestore_client
     if _firestore_client is None:
         initialize_firebase_app()
@@ -58,6 +64,7 @@ def get_firestore_client() -> firestore.Client:
 
 
 def verify_id_token(token: str) -> str:
+    """Verify a Firebase ID token and return the UID."""
     initialize_firebase_app()
     decoded = auth.verify_id_token(token)
     uid = decoded.get("uid")

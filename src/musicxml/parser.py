@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MusicXML parsing utilities for extracting notes, tempos, and lyrics."""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -9,12 +11,14 @@ from music21 import chord, converter, note, stream, tempo
 
 @dataclass(frozen=True)
 class TempoEvent:
+    """Tempo change event in beat space."""
     offset_beats: float
     bpm: float
 
 
 @dataclass(frozen=True)
 class NoteEvent:
+    """Note or rest event extracted from a MusicXML score."""
     offset_beats: float
     duration_beats: float
     pitch_midi: Optional[float]
@@ -30,6 +34,7 @@ class NoteEvent:
 
 @dataclass(frozen=True)
 class PartData:
+    """Parsed part with its metadata and note events."""
     part_id: str
     part_name: Optional[str]
     notes: Sequence[NoteEvent]
@@ -37,6 +42,7 @@ class PartData:
 
 @dataclass(frozen=True)
 class ScoreData:
+    """Parsed score representation with tempos and parts."""
     title: Optional[str]
     tempos: Sequence[TempoEvent]
     parts: Sequence[PartData]
@@ -79,6 +85,7 @@ def parse_musicxml_with_summary(
     lyrics_only: bool = True,
     keep_rests: bool = False,
 ) -> tuple[ScoreData, Dict[str, Any]]:
+    """Parse MusicXML and return both score data and a summary dict."""
     score = converter.parse(str(path))
     summary = _summarize_score(score)
     normalized_verse = _normalize_verse_number(verse_number)
@@ -106,6 +113,8 @@ def _parse_score(
     lyrics_only: bool,
     keep_rests: bool,
 ) -> ScoreData:
+    """Transform a music21 score into the internal ScoreData structure."""
+    # Select the part(s) to parse based on user inputs and lyric availability.
     selected_parts = _select_parts(
         score,
         part_id=part_id,
@@ -141,6 +150,7 @@ def _select_parts(
     part_index: Optional[int],
     verse_number: Optional[str | int],
 ) -> Sequence[stream.Part]:
+    """Select parts by ID/index or choose a reasonable default part."""
     if part_id is not None and part_index is not None:
         raise ValueError("Provide part_id or part_index, not both.")
     parts = list(score.parts)
@@ -162,6 +172,7 @@ def _select_parts(
 
 
 def _select_top_part(parts: Sequence[stream.Part]) -> stream.Part:
+    """Pick the part with the highest average pitch as a fallback."""
     best_part = parts[0]
     best_pitch = _part_average_midi(best_part)
     for part in parts[1:]:
@@ -173,6 +184,7 @@ def _select_top_part(parts: Sequence[stream.Part]) -> stream.Part:
 
 
 def _part_average_midi(part: stream.Part) -> float:
+    """Compute an average MIDI pitch for a part."""
     midis = []
     for element in part.recurse().notes:
         if isinstance(element, chord.Chord):
@@ -186,6 +198,7 @@ def _part_average_midi(part: stream.Part) -> float:
 
 
 def _part_has_lyrics(part: stream.Part, *, verse_number: Optional[str | int]) -> bool:
+    """Return True when a part contains any lyric-bearing notes."""
     for element in part.recurse().notes:
         if element.isRest:
             continue
@@ -196,6 +209,7 @@ def _part_has_lyrics(part: stream.Part, *, verse_number: Optional[str | int]) ->
 
 
 def _summarize_score(score: stream.Score) -> Dict[str, Any]:
+    """Summarize metadata, parts, and lyric verses for a score."""
     metadata = score.metadata
     summary: Dict[str, Any] = {
         "title": metadata.title if metadata else None,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MCP tool handlers that bridge JSON-RPC calls to backend APIs."""
+
 import base64
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -19,12 +21,14 @@ from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve
 
 
 def _strip_path(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of voicebank info without the filesystem path."""
     info = dict(info)
     info.pop("path", None)
     return info
 
 
 def handle_parse_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle parse_score tool calls."""
     file_path = resolve_project_path(params["file_path"])
     return parse_score(
         file_path,
@@ -36,10 +40,12 @@ def handle_parse_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
 
 
 def handle_modify_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle modify_score tool calls."""
     return modify_score(params["score"], params["code"])
 
 
 def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle save_audio tool calls and return base64 audio."""
     output_path = resolve_project_path(params["output_path"])
     result = save_audio(
         params["waveform"],
@@ -49,6 +55,7 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         mp3_bitrate=params.get("mp3_bitrate", "256k"),
         keep_wav=bool(params.get("keep_wav", False)),
     )
+    # Read the saved audio and return it inline as base64.
     audio_bytes = Path(result["path"]).read_bytes()
     return {
         "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
@@ -58,6 +65,7 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
 
 
 def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle synthesize tool calls and wire optional progress updates."""
     voicebank_path = resolve_voicebank_id(params["voicebank"])
     part_index = _resolve_part_index(
         params.get("score", {}),
@@ -69,6 +77,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     progress_user_id = params.get("progress_user_id")
     progress_callback = None
     if progress_path:
+        # File-based progress updates.
         resolved_progress = resolve_project_path(progress_path)
 
         def progress_callback(step: str, message: str, progress: float) -> None:
@@ -84,6 +93,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
                 expected_job_id=progress_job_id,
             )
     elif progress_job_id:
+        # Firestore-backed progress updates.
         initialize_firebase_app()
         job_store = JobStore()
 
@@ -118,6 +128,7 @@ def _resolve_part_index(
     part_id: Optional[str],
     part_index: Optional[int],
 ) -> int:
+    """Resolve the target part index from score metadata."""
     if part_id is not None and part_index is not None:
         raise ValueError("Provide part_id or part_index, not both.")
     parts = score.get("parts") or []
@@ -136,6 +147,7 @@ def _resolve_part_index(
 
 
 def handle_list_voicebanks(params: Dict[str, Any], device: str) -> Any:
+    """Handle list_voicebanks tool calls."""
     search_path = params.get("search_path")
     resolved_search = resolve_optional_path(search_path)
     voicebanks = list_voicebanks(resolved_search) if resolved_search else list_voicebanks()
@@ -143,6 +155,7 @@ def handle_list_voicebanks(params: Dict[str, Any], device: str) -> Any:
 
 
 def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle get_voicebank_info tool calls."""
     voicebank_path = resolve_voicebank_id(params["voicebank"])
     info = get_voicebank_info(voicebank_path)
     return _strip_path(info)

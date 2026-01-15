@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Client wrapper to run MCP server processes and route tool calls."""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -15,16 +17,19 @@ from src.backend.config import Settings
 
 
 class McpError(RuntimeError):
+    """Raised when an MCP request fails or times out."""
     pass
 
 
 @dataclass(frozen=True)
 class McpRequest:
+    """JSON-RPC request payload for MCP tools."""
     method: str
     params: Dict[str, Any]
 
 
 class McpProcess:
+    """Manage a single MCP server subprocess and JSON-RPC messaging."""
     def __init__(
         self,
         name: str,
@@ -47,6 +52,7 @@ class McpProcess:
         self._stderr_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
+        """Start the MCP subprocess and wait for tool discovery."""
         if self._proc is not None:
             return
         start_time = time.monotonic()
@@ -60,6 +66,7 @@ class McpProcess:
             text=True,
         )
         if self._pipe_stderr:
+            # Drain stderr to avoid blocking the process.
             self._stderr_thread = threading.Thread(
                 target=self._drain_stderr,
                 name="mcp-stderr",
@@ -78,6 +85,7 @@ class McpProcess:
         )
 
     def stop(self) -> None:
+        """Stop the MCP subprocess and close pipes."""
         if self._proc is None:
             return
         self._proc.terminate()
@@ -94,12 +102,14 @@ class McpProcess:
         self._proc = None
 
     def list_tools(self, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """Request the tool list from the MCP server."""
         return self._send_request(
             McpRequest(method="tools/list", params={}),
             timeout_seconds=timeout_seconds or self._timeout_seconds,
         )
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        """Invoke a tool by name with arguments."""
         result = self._send_request(
             McpRequest(method="tools/call", params={"name": name, "arguments": arguments}),
             timeout_seconds=self._timeout_seconds,
@@ -109,6 +119,7 @@ class McpProcess:
         return result
 
     def _send_request(self, request: McpRequest, timeout_seconds: float) -> Any:
+        """Send a JSON-RPC request and block until the matching response."""
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
             raise McpError("MCP process is not running.")
         req_id = self._next_id
@@ -123,6 +134,7 @@ class McpProcess:
         )
         deadline = time.monotonic() + timeout_seconds
         with self._lock:
+            # Serialize writes/reads per request to avoid interleaving responses.
             try:
                 self._proc.stdin.write(payload + "\n")
                 self._proc.stdin.flush()
@@ -160,6 +172,7 @@ class McpProcess:
                 return response["result"]
 
     def _drain_stderr(self) -> None:
+        """Continuously read stderr to avoid blocking when piped."""
         if self._proc is None or self._proc.stderr is None:
             return
         for line in self._proc.stderr:
@@ -169,6 +182,7 @@ class McpProcess:
 
 
 class McpRouter:
+    """Route tool calls to CPU/GPU MCP processes with retry logic."""
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         pipe_stderr = settings.app_env.lower() in {"dev", "development", "local", "test"}
@@ -221,18 +235,22 @@ class McpRouter:
         }
 
     def start(self) -> None:
+        """Start both CPU and GPU MCP processes."""
         self._cpu.start()
         self._gpu.start()
 
     def stop(self) -> None:
+        """Stop both CPU and GPU MCP processes."""
         self._cpu.stop()
         self._gpu.stop()
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        """Route a tool call to the appropriate MCP process."""
         worker = self._tool_to_worker.get(name, "cpu")
         return self._call_with_retry(worker, name, arguments)
 
     def _call_with_retry(self, worker: str, name: str, arguments: Dict[str, Any]) -> Any:
+        """Retry a tool call once after restarting a failed process."""
         process = self._gpu if worker == "gpu" else self._cpu
         try:
             start = time.monotonic()
