@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth.tsx";
-import { AuthModal } from "./AuthModal";
 import { Loader2 } from "lucide-react";
 import "./ProtectedRoute.css";
 
@@ -15,7 +15,13 @@ interface ProtectedRouteProps {
  */
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
     const { user, loading, isAuthenticated, error } = useAuth();
-    const [showAuthModal, setShowAuthModal] = useState(false);
+    const navigate = useNavigate();
+
+    useEffect(() => {
+        if (!loading && !isAuthenticated) {
+            navigate("/", { replace: true });
+        }
+    }, [loading, isAuthenticated, navigate]);
 
     // Show loading while checking auth state
     if (loading) {
@@ -27,25 +33,11 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         );
     }
 
-    // If not authenticated, show prompt to sign in
     if (!isAuthenticated) {
         return (
-            <div className="protected-route-unauthenticated">
-                <div className="protected-route-card">
-                    <h2>Sign in to continue</h2>
-                    <p>You need to sign in to access the SightSinger.ai studio.</p>
-                    {error && <p className="protected-route-error">{error}</p>}
-                    <button
-                        className="protected-route-signin-btn"
-                        onClick={() => setShowAuthModal(true)}
-                    >
-                        Sign In / Start Free Trial
-                    </button>
-                </div>
-                <AuthModal
-                    isOpen={showAuthModal}
-                    onClose={() => setShowAuthModal(false)}
-                />
+            <div className="protected-route-loading">
+                <Loader2 className="protected-route-spinner" size={32} />
+                <p>{error ? "Redirecting..." : "Redirecting..."}</p>
             </div>
         );
     }

@@ -3,6 +3,8 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Sparkles, UploadCloud, Minus, Plus, Info } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
+import { useAuth } from "./hooks/useAuth.tsx";
+import { UserMenu } from "./components/UserMenu";
 
 type Role = "user" | "assistant";
 
@@ -35,6 +37,7 @@ const DEMO_STEPS = [
 
 export default function DemoApp() {
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [status, setStatus] = useState<string>("Demo mode");
   const [scoreLoaded, setScoreLoaded] = useState(false);
@@ -238,7 +241,10 @@ export default function DemoApp() {
             <p>Interactive Demo</p>
           </div>
         </div>
-        <div className="status-pill">{status}</div>
+        <div className="header-actions">
+          <div className="status-pill">{status}</div>
+          {isAuthenticated && <UserMenu />}
+        </div>
       </header>
       <div className="message-box info">
         <Info size={16} />

@@ -13,8 +13,7 @@ import {
   type ScoreSummary,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
-import { logOut } from "./firebase";
-import { LogOut } from "lucide-react";
+import { UserMenu } from "./components/UserMenu";
 
 type Role = "user" | "assistant";
 
@@ -401,9 +400,7 @@ export default function MainApp() {
         <div className="header-actions">
           <CreditsHeader />
           <div className="status-pill">{status ?? "Ready"}</div>
-          <button className="icon-button" onClick={() => logOut()} title="Sign Out">
-            <LogOut size={18} />
-          </button>
+          <UserMenu />
         </div>
       </header>
 

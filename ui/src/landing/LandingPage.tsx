@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Instagram, Mail, MessageCircle, MessageSquare, Sparkles } from "lucide-react";
 import { AuthModal } from "../components/AuthModal";
+import { UserMenu } from "../components/UserMenu";
 import { useAuth } from "../hooks/useAuth.tsx";
 import "./LandingPage.css";
 
@@ -113,6 +114,7 @@ export default function LandingPage() {
                     <button className="btn-nav-primary" onClick={handleStartTrial}>
                         {isAuthenticated ? "Go to Studio" : "Start Free Trial"}
                     </button>
+                    {isAuthenticated && <UserMenu />}
                 </div>
             </nav>
 

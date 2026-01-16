@@ -109,6 +109,9 @@ export async function signInWithGoogleRedirect(): Promise<void> {
   if (!auth) {
     throw new Error("Firebase Auth not initialized");
   }
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem("postSignInRedirect", "/app");
+  }
   await signInWithRedirect(auth, googleProvider);
 }
 
@@ -124,6 +127,13 @@ export async function completeGoogleRedirect(): Promise<User | null> {
   try {
     const result = await getRedirectResult(auth);
     console.log("[firebase] getRedirectResult returned:", result ? (result.user ? result.user.email : "user without email") : "null");
+    if (result?.user && typeof window !== "undefined") {
+      const redirectPath = window.localStorage.getItem("postSignInRedirect");
+      if (redirectPath) {
+        window.localStorage.removeItem("postSignInRedirect");
+        window.location.replace(redirectPath);
+      }
+    }
     return result?.user ?? null;
   } catch (error) {
     console.error("Google redirect sign-in failed:", error);
