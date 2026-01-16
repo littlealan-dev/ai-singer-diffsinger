@@ -4,8 +4,12 @@ import App from "./App";
 import "./styles.css";
 import "./firebase";
 
+import { AuthProvider } from "./hooks/useAuth.tsx";
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AuthProvider>
+      <App />
+    </AuthProvider>
   </React.StrictMode>
 );

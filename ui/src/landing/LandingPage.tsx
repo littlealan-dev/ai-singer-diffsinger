@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Instagram, Mail, MessageCircle, MessageSquare, Sparkles } from "lucide-react";
+import { AuthModal } from "../components/AuthModal";
+import { useAuth } from "../hooks/useAuth.tsx";
 import "./LandingPage.css";
 
-// Temporary placeholder for HeroSection until fully implemented
-const HeroSection = () => {
+// Hero section with parallax effect
+interface HeroSectionProps {
+    onStartTrial: () => void;
+}
+
+const HeroSection = ({ onStartTrial }: HeroSectionProps) => {
     const navigate = useNavigate();
     const heroRef = useRef<HTMLElement | null>(null);
 
@@ -39,7 +45,7 @@ const HeroSection = () => {
             <div className="hero-center">
                 <div className="hero-headline">
                     <h1 className="hero-title">
-                        “Drop me the score. Say a few words. I’ll sing it for you.”
+                        "Drop me the score. Say a few words. I'll sing it for you."
                     </h1>
                     <p className="hero-subtitle hero-subtitle-wide">
                         AI sight-singing from MusicXML, via chat. No DAW required.
@@ -49,7 +55,13 @@ const HeroSection = () => {
             <div className="hero-footer">
                 <div className="hero-actions">
                     <button
-                        className="btn-primary"
+                        className="btn-primary btn-trial"
+                        onClick={onStartTrial}
+                    >
+                        Start Free Trial <Sparkles size={18} />
+                    </button>
+                    <button
+                        className="btn-secondary"
                         onClick={() => navigate("/demo")}
                     >
                         Try Interactive Demo <ArrowRight size={20} />
@@ -63,7 +75,9 @@ const HeroSection = () => {
 
 export default function LandingPage() {
     const navigate = useNavigate();
+    const { isAuthenticated } = useAuth();
     const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
+    const [showAuthModal, setShowAuthModal] = useState(false);
 
     useEffect(() => {
         document.body.classList.add("landing-active");
@@ -79,6 +93,14 @@ export default function LandingPage() {
         }
     };
 
+    const handleStartTrial = () => {
+        if (isAuthenticated) {
+            navigate("/app");
+        } else {
+            setShowAuthModal(true);
+        }
+    };
+
     return (
         <div className="landing-page">
             <nav className="landing-nav">
@@ -87,11 +109,20 @@ export default function LandingPage() {
                     <span>SightSinger.ai</span>
                 </div>
                 <div className="nav-links">
-                    <button className="btn-primary" onClick={() => navigate("/demo")}>Try the Demo</button>
+                    <button className="btn-nav-secondary" onClick={() => navigate("/demo")}>Try the Demo</button>
+                    <button className="btn-nav-primary" onClick={handleStartTrial}>
+                        {isAuthenticated ? "Go to Studio" : "Start Free Trial"}
+                    </button>
                 </div>
             </nav>
 
-            <HeroSection />
+            <HeroSection onStartTrial={handleStartTrial} />
+
+            <AuthModal
+                isOpen={showAuthModal}
+                onClose={() => setShowAuthModal(false)}
+                onSuccess={() => navigate("/app")}
+            />
 
             <section className="landing-section">
                 <h2 className="section-title">Who is SightSinger.ai for?</h2>

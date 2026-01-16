@@ -10,6 +10,7 @@ LOG_FILE="${LOG_DIR}/frontend_dev.log"
 : "${FRONTEND_HOST:=0.0.0.0}"
 : "${FRONTEND_PORT:=5173}"
 : "${FRONTEND_LOG_LEVEL:=info}"
+: "${VITE_APP_ENV:=dev}"
 
 if [[ ! -d "${UI_DIR}" ]]; then
   echo "UI directory not found: ${UI_DIR}"
@@ -29,7 +30,7 @@ fi
 
 cd "${UI_DIR}"
 
-nohup npm run dev -- --host "${FRONTEND_HOST}" --port "${FRONTEND_PORT}" \
+VITE_APP_ENV="${VITE_APP_ENV}" nohup npm run dev -- --host "${FRONTEND_HOST}" --port "${FRONTEND_PORT}" \
   --log-level "${FRONTEND_LOG_LEVEL}" \
   > "${LOG_FILE}" 2>&1 &
 

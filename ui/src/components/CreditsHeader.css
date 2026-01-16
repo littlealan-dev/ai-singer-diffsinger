@@ -1,0 +1,102 @@
+.credits-pill {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #e2e8f0;
+    transition: all 0.2s ease;
+    height: 32px;
+}
+
+.credits-pill.loading {
+    width: 80px;
+    justify-content: center;
+    color: #94a3b8;
+}
+
+.credits-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.credits-label {
+    white-space: nowrap;
+}
+
+.credits-divider {
+    width: 1px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.credits-expiry {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.75rem;
+    color: #94a3b8;
+}
+
+.icon {
+    color: #3b82f6;
+    flex-shrink: 0;
+}
+
+.icon-small {
+    color: #64748b;
+    flex-shrink: 0;
+}
+
+/* Status Variants */
+
+.credits-pill.normal:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(59, 130, 246, 0.3);
+}
+
+.credits-pill.warning {
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.05);
+}
+
+.credits-pill.warning .icon {
+    color: #f59e0b;
+}
+
+.credits-pill.danger {
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(239, 68, 68, 0.05);
+    color: #ef4444;
+}
+
+.credits-pill.danger .icon {
+    color: #ef4444;
+}
+
+/* Micro-animations */
+@keyframes pulse-soft {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.02);
+        opacity: 0.9;
+    }
+
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.credits-pill.danger {
+    animation: pulse-soft 2s infinite ease-in-out;
+}

@@ -1,0 +1,87 @@
+/* Protected Route Styles */
+
+.protected-route-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--bg-primary, #0f0f1a);
+    color: var(--text-secondary, #aaa);
+    gap: 1rem;
+}
+
+.protected-route-spinner {
+    animation: spin 1s linear infinite;
+    color: var(--accent-color, #7c3aed);
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.protected-route-unauthenticated {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--bg-primary, #0f0f1a);
+    padding: 2rem;
+}
+
+.protected-route-card {
+    background: var(--card-bg, #1a1a2e);
+    border: 1px solid var(--border-color, #2a2a4e);
+    border-radius: 16px;
+    padding: 2.5rem;
+    text-align: center;
+    max-width: 400px;
+    width: 100%;
+}
+
+.protected-route-card h2 {
+    color: var(--text-primary, #fff);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0 0 0.75rem 0;
+}
+
+.protected-route-card p {
+    color: var(--text-secondary, #aaa);
+    margin: 0 0 1.5rem 0;
+    line-height: 1.5;
+}
+
+.protected-route-error {
+    color: #f87171;
+    margin: -0.5rem 0 1rem 0;
+    font-size: 0.95rem;
+}
+
+.protected-route-signin-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.875rem 2rem;
+    background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.protected-route-signin-btn:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}

@@ -12,6 +12,9 @@ import {
   type ProgressResponse,
   type ScoreSummary,
 } from "./api";
+import CreditsHeader from "./components/CreditsHeader";
+import { logOut } from "./firebase";
+import { LogOut } from "lucide-react";
 
 type Role = "user" | "assistant";
 
@@ -395,7 +398,13 @@ export default function MainApp() {
             <p>{headerSubtitle}</p>
           </div>
         </div>
-        <div className="status-pill">{status ?? "Ready"}</div>
+        <div className="header-actions">
+          <CreditsHeader />
+          <div className="status-pill">{status ?? "Ready"}</div>
+          <button className="icon-button" onClick={() => logOut()} title="Sign Out">
+            <LogOut size={18} />
+          </button>
+        </div>
       </header>
 
       {error && <div className="error-banner">{error}</div>}
