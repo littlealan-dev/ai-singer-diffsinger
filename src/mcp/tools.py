@@ -201,6 +201,31 @@ TOOLS: List[Tool] = [
             "additionalProperties": False,
         },
     ),
+    Tool(
+        name="estimate_credits",
+        description="Estimate the credit cost for a score.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "score": {"type": "object"},
+                "uid": {"type": "string"}, # Optional, provided by orchestrator
+            },
+            "required": ["score"],
+            "additionalProperties": True,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "estimated_seconds": {"type": "number"},
+                "estimated_credits": {"type": "integer"},
+                "current_balance": {"type": "integer"},
+                "balance_after": {"type": "integer"},
+                "sufficient": {"type": "boolean"},
+            },
+            "required": ["estimated_seconds", "estimated_credits"],
+            "additionalProperties": True,
+        },
+    ),
 ]
 
 

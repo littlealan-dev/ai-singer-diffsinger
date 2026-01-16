@@ -118,7 +118,7 @@ class Settings:
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
-        mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 10.0)
+        mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         mcp_debug = _env_bool("MCP_DEBUG", False)
         backend_auth_disabled = _env_bool("BACKEND_AUTH_DISABLED", False)
         backend_use_storage = _env_bool("BACKEND_USE_STORAGE", False)

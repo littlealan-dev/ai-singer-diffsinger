@@ -162,24 +162,30 @@ def main() -> None:
     configure_logging()
     logger = logging.getLogger(__name__)
     logger.info("mcp_startup_begin service=%s device=%s mode=%s", args.service_name, args.device, args.mode)
-    nltk_start = time.monotonic()
-    try:
-        # Warm NLTK resources so first request is not impacted by download latency.
-        import nltk
 
-        nltk.data.find("taggers/averaged_perceptron_tagger_eng")
-        nltk_status = "cached"
-    except Exception:
+    def warm_nltk():
+        nltk_start = time.monotonic()
         try:
+            # Warm NLTK resources in background so startup handshake is not blocked.
             import nltk
 
-            nltk.download("averaged_perceptron_tagger_eng")
-            nltk_status = "downloaded"
-        except Exception as exc:  # pragma: no cover - defensive log
-            logger.warning("nltk_download_failed error=%s", exc, exc_info=True)
-            nltk_status = "failed"
-    nltk_ms = (time.monotonic() - nltk_start) * 1000.0
-    logger.info("nltk_ready status=%s elapsed_ms=%.2f", nltk_status, nltk_ms)
+            nltk.data.find("taggers/averaged_perceptron_tagger_eng")
+            nltk_status = "cached"
+        except Exception:
+            try:
+                import nltk
+
+                nltk.download("averaged_perceptron_tagger_eng")
+                nltk_status = "downloaded"
+            except Exception as exc:  # pragma: no cover - defensive log
+                logger.warning("nltk_download_failed error=%s", exc, exc_info=True)
+                nltk_status = "failed"
+        nltk_ms = (time.monotonic() - nltk_start) * 1000.0
+        logger.info("nltk_ready status=%s elapsed_ms=%.2f", nltk_status, nltk_ms)
+
+    import threading
+    threading.Thread(target=warm_nltk, name="nltk-warmer", daemon=True).start()
+
     run_server(args.device, args.mode)
     startup_ms = (time.monotonic() - startup_start) * 1000.0
     logger.info("mcp_startup_ready elapsed_ms=%.2f", startup_ms)

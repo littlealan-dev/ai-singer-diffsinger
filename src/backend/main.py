@@ -287,6 +287,23 @@ def create_app() -> FastAPI:
         job_id, data = latest
         return build_progress_payload(job_id, data)
 
+    @app.get("/credits")
+    async def get_credits(request: Request) -> Dict[str, Any]:
+        """Fetch user credit balance and expiry."""
+        user_id = await _get_user_id_or_401(request)
+        from src.backend.credits import get_or_create_credits
+        # Use a dummy email for now as verify_id_token doesn't return it yet
+        # (though we could enhance it later).
+        user_credits = await asyncio.to_thread(get_or_create_credits, user_id, "user@example.com")
+        return {
+            "balance": user_credits.balance,
+            "reserved": user_credits.reserved,
+            "available": user_credits.available_balance,
+            "expires_at": user_credits.expires_at.isoformat(),
+            "overdrafted": user_credits.overdrafted,
+            "is_expired": user_credits.is_expired
+        }
+
     @app.get("/sessions/{session_id}/score")
     async def get_score(session_id: str, request: Request) -> Response:
         sessions: SessionStore = request.app.state.sessions

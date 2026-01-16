@@ -41,7 +41,7 @@ class Orchestrator:
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
-        self._llm_tool_allowlist = {"modify_score", "synthesize"}
+        self._llm_tool_allowlist = {"modify_score", "synthesize", "estimate_credits"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
@@ -220,12 +220,14 @@ class Orchestrator:
         arguments: Dict[str, Any],
         *,
         user_id: str,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a Firestore job and kick off synthesis in the background."""
         existing = self._synthesis_tasks.get(session_id)
         if existing and not existing.done():
             existing.cancel()
-        job_id = uuid.uuid4().hex
+        if job_id is None:
+            job_id = uuid.uuid4().hex
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
         input_path = files.get("musicxml_path")
@@ -339,7 +341,13 @@ class Orchestrator:
                 outputPath=response.get("output_storage_path") or response.get("output_path"),
                 audioUrl=response.get("audio_url"),
             )
+            # Settle credits
+            from src.backend.credits import settle_credits
+            await asyncio.to_thread(settle_credits, user_id, job_id, duration)
         except asyncio.CancelledError:
+            # Release credits
+            from src.backend.credits import release_credits
+            await asyncio.to_thread(release_credits, user_id, job_id)
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
@@ -350,6 +358,9 @@ class Orchestrator:
             )
             raise
         except Exception as exc:
+            # Release credits
+            from src.backend.credits import release_credits
+            await asyncio.to_thread(release_credits, user_id, job_id)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
             await asyncio.to_thread(
                 self._job_store.update_job,
@@ -594,12 +605,73 @@ class Orchestrator:
                     await self._sessions.set_score(session_id, current_score)
                 continue
             if call.name == "synthesize":
+                # Check for overdraft before even starting
+                from src.backend.credits import get_or_create_credits, reserve_credits
+                user_credits = get_or_create_credits(user_id, "user@example.com")
+                if user_credits.overdrafted:
+                    return ToolExecutionResult(
+                        score=current_score, 
+                        audio_response={
+                            "type": "chat_text", 
+                            "message": "Your account is locked due to a negative credit balance. Please join the waiting list for more credits."
+                        }
+                    )
+                if user_credits.is_expired:
+                    return ToolExecutionResult(
+                        score=current_score, 
+                        audio_response={
+                            "type": "chat_text", 
+                            "message": "Your free trial credits have expired."
+                        }
+                    )
+
                 # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
+                
+                # Note: We don't have the estimate here yet if the LLM didn't call estimate_credits.
+                # However, our design says the LLM MUST call estimate_credits first.
+                # If it didn't, we'll do a quick estimate here for the reservation.
+                from src.mcp.handlers import _calculate_score_duration
+                from src.backend.credits import estimate_credits
+                duration = _calculate_score_duration(current_score)
+                est_credits = estimate_credits(duration)
+                
+                job_id = uuid.uuid4().hex
+                reserved = await asyncio.to_thread(reserve_credits, user_id, job_id, est_credits)
+                if not reserved:
+                    return ToolExecutionResult(
+                        score=current_score, 
+                        audio_response={
+                            "type": "chat_text", 
+                            "message": f"Insufficient credits. This render requires ~{est_credits} credits, but you only have {user_credits.available_balance} available."
+                        }
+                    )
+
                 audio_response = await self._start_synthesis_job(
-                    session_id, current_score, synth_args, user_id=user_id
+                    session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                 )
+            if call.name == "estimate_credits":
+                est_args = dict(call.arguments)
+                est_args["score"] = current_score
+                est_args["uid"] = user_id
+                self._logger.info("mcp_call tool=estimate_credits session=%s", session_id)
+                est_result = await asyncio.to_thread(
+                    self._router.call_tool, "estimate_credits", est_args
+                )
+                # LLM will see this result and can present it to the user.
+                # We return it as a special chat type or just text.
+                # For now, we'll let the orchestrator return it as metadata for the LLM to process.
+                # But we need to make sure the LLM sees the tool output.
+                # In this architecture, _execute_tool_calls is called after the LLM decision.
+                # If we want the LLM to *discuss* the estimate, it should be a loop.
+                # But currently handle_chat is a single pass: LLM decide -> execute tools -> return.
+                # So if LLM calls estimate_credits, the output is returned to the user.
+                audio_response = {
+                    "type": "chat_text",
+                    "message": f"Estimated cost: {est_result.get('estimated_credits')} credits (~{est_result.get('estimated_seconds')}s). "
+                               f"Current balance: {est_result.get('current_balance')} credits."
+                }
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
 

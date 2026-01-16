@@ -161,6 +161,86 @@ def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, 
     return _strip_path(info)
 
 
+def handle_estimate_credits(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle estimate_credits tool calls."""
+    score = params["score"]
+    uid = params.get("uid")
+    
+    # 1. Calculate duration in seconds
+    duration_seconds = _calculate_score_duration(score)
+    
+    # 2. Estimate credits
+    from src.backend.credits import estimate_credits, get_or_create_credits
+    est_credits = estimate_credits(duration_seconds)
+    
+    result = {
+        "estimated_seconds": round(duration_seconds, 2),
+        "estimated_credits": est_credits,
+    }
+    
+    # 3. Add balance info if uid is provided
+    if uid:
+        try:
+            # We use a dummy email if not found, since get_or_create might be called
+            # but usually the user is already signed in if we have a uid.
+            user_credits = get_or_create_credits(uid, "user@example.com")
+            result["current_balance"] = user_credits.balance
+            result["balance_after"] = user_credits.balance - est_credits
+            result["sufficient"] = (user_credits.available_balance >= est_credits)
+            result["overdrafted"] = user_credits.overdrafted
+            result["is_expired"] = user_credits.is_expired
+        except Exception as e:
+            # Logging is handled by the logger in handlers.py
+            pass
+            
+    return result
+
+
+def _calculate_score_duration(score: Dict[str, Any]) -> float:
+    """Calculate the total duration of a score in seconds."""
+    tempos = score.get("tempos", [{"offset_beats": 0.0, "bpm": 120.0}])
+    parts = score.get("parts", [])
+    if not parts:
+        return 0.0
+        
+    # Find the max beat offset across all parts
+    max_beats = 0.0
+    for part in parts:
+        notes = part.get("notes", [])
+        if notes:
+            last_note = notes[-1]
+            max_beats = max(max_beats, last_note["offset_beats"] + last_note["duration_beats"])
+            
+    if max_beats <= 0:
+        return 0.0
+        
+    # Piecewise linear duration calculation based on tempos
+    tempos.sort(key=lambda x: x["offset_beats"])
+    
+    total_seconds = 0.0
+    current_beat = 0.0
+    
+    for i in range(len(tempos)):
+        start_beat = tempos[i]["offset_beats"]
+        bpm = tempos[i]["bpm"]
+        
+        # Determine the end beat for this tempo segment
+        if i + 1 < len(tempos):
+            end_beat = min(max_beats, tempos[i+1]["offset_beats"])
+        else:
+            end_beat = max_beats
+            
+        if end_beat > start_beat:
+            segment_beats = end_beat - start_beat
+            total_seconds += segment_beats * (60.0 / bpm)
+            current_beat = end_beat
+            
+        if current_beat >= max_beats:
+            break
+            
+    return total_seconds
+
+
 HANDLERS = {
     "parse_score": handle_parse_score,
     "modify_score": handle_modify_score,
@@ -168,4 +248,5 @@ HANDLERS = {
     "synthesize": handle_synthesize,
     "list_voicebanks": handle_list_voicebanks,
     "get_voicebank_info": handle_get_voicebank_info,
+    "estimate_credits": handle_estimate_credits,
 }
