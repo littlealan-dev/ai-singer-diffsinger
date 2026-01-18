@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional
 import asyncio
 import logging
 import copy
+import json
 import uuid
+from datetime import datetime, timezone
 
 from src.backend.config import Settings
 from src.backend.job_store import build_progress_payload
@@ -20,6 +22,8 @@ from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
+
+TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 
 
 class Orchestrator:
@@ -54,6 +58,11 @@ class Orchestrator:
                     "Message too long. Please keep instructions under "
                     f"{self._settings.llm_max_message_chars} characters."
                 ),
+            }
+        if message.strip().startswith(TOOL_RESULT_PREFIX):
+            return {
+                "type": "chat_text",
+                "message": "That request is not allowed.",
             }
         self._logger.debug("chat_user session=%s message=%s", session_id, message)
         await self._sessions.append_history(session_id, "user", message)
@@ -92,12 +101,21 @@ class Orchestrator:
         if llm_response is not None:
             # Execute tool calls and package response.
             include_score = llm_response.include_score
+            session_files = snapshot.get("files") or {}
             tool_result = await self._execute_tool_calls(
-                session_id, current_score["score"], llm_response.tool_calls, user_id=user_id
+                session_id,
+                current_score["score"],
+                llm_response.tool_calls,
+                user_id=user_id,
+                session_files=session_files,
+                score_summary=snapshot.get("score_summary") if isinstance(snapshot, dict) else None,
             )
             response_message = llm_response.final_message or response_message
             response = tool_result.audio_response or {"type": "chat_text", "message": response_message}
-            if response_message:
+            if tool_result.followup_prompt:
+                followup_message = await self._render_tool_followup(snapshot, tool_result.followup_prompt)
+                response["message"] = followup_message
+            elif response_message:
                 response["message"] = response_message
             if include_score:
                 updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -210,6 +228,7 @@ class Orchestrator:
             "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
             "output_path": str(output_path.relative_to(self._settings.project_root)),
             "output_storage_path": output_storage_path,
+            "duration_seconds": duration,
         }
         return response
 
@@ -343,7 +362,8 @@ class Orchestrator:
             )
             # Settle credits
             from src.backend.credits import settle_credits
-            await asyncio.to_thread(settle_credits, user_id, job_id, duration)
+            duration_seconds = response.get("duration_seconds", 0.0)
+            await asyncio.to_thread(settle_credits, user_id, job_id, duration_seconds)
         except asyncio.CancelledError:
             # Release credits
             from src.backend.credits import release_credits
@@ -484,6 +504,57 @@ class Orchestrator:
             return None, "LLM returned an invalid response. Please try again."
         return response, None
 
+    async def _render_tool_followup(
+        self, snapshot: Dict[str, Any], tool_summary: str
+    ) -> str:
+        """Ask the LLM to turn a tool summary into a user-facing response."""
+        if self._llm_client is None:
+            return tool_summary
+        history = list(snapshot.get("history", []))
+        history.append(
+            {
+                "role": "user",
+                "content": f"{TOOL_RESULT_PREFIX}{tool_summary}",
+            }
+        )
+        try:
+            voicebank_ids = await self._get_voicebank_ids()
+            voicebank_details = await self._get_voicebank_details()
+            llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            system_prompt = build_system_prompt(
+                llm_tools,
+                score_available=True,
+                voicebank_ids=voicebank_ids,
+                score_summary=snapshot.get("score_summary"),
+                voicebank_details=voicebank_details,
+            )
+            text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
+        except RuntimeError as exc:
+            self._logger.warning("llm_followup_failed error=%s", exc)
+            return tool_summary
+        response = parse_llm_response(text)
+        if response is None or not response.final_message:
+            return tool_summary
+        cleaned = response.final_message.strip()
+        if cleaned.startswith("{") and cleaned.endswith("}"):
+            try:
+                payload = json.loads(cleaned)
+            except json.JSONDecodeError:
+                return response.final_message
+            estimated_credits = payload.get("estimated_credits")
+            estimated_seconds = payload.get("estimated_seconds")
+            current_balance = payload.get("current_balance")
+            balance_after = payload.get("balance_after")
+            if estimated_credits is not None and estimated_seconds is not None:
+                return (
+                    f"Estimated duration: ~{estimated_seconds} seconds\n"
+                    f"Estimated cost: {estimated_credits} credits\n"
+                    f"Your balance: {current_balance} credits\n"
+                    f"Balance after generation: {balance_after} credits\n\n"
+                    "Would you like me to proceed?"
+                )
+        return response.final_message
+
     async def _get_voicebank_ids(self) -> List[str]:
         """Return cached voicebank IDs or fetch them from the MCP server."""
         if self._cached_voicebank_ids is not None:
@@ -575,10 +646,21 @@ class Orchestrator:
         tool_calls: List[ToolCall],
         *,
         user_id: str,
+        session_files: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
+        estimate_handled = False
+        followup_prompt: Optional[str] = None
+        credit_estimate: Optional[Dict[str, Any]] = None
+        raw_estimate = session_files.get("credit_estimate") if isinstance(session_files, dict) else None
+        if isinstance(raw_estimate, str) and raw_estimate.strip():
+            try:
+                credit_estimate = json.loads(raw_estimate)
+            except json.JSONDecodeError:
+                credit_estimate = None
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
@@ -605,6 +687,14 @@ class Orchestrator:
                     await self._sessions.set_score(session_id, current_score)
                 continue
             if call.name == "synthesize":
+                if not credit_estimate:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_text",
+                            "message": "Please request an estimate first so I can confirm credit usage before rendering."
+                        }
+                    )
                 # Check for overdraft before even starting
                 from src.backend.credits import get_or_create_credits, reserve_credits
                 user_credits = get_or_create_credits(user_id, "user@example.com")
@@ -629,16 +719,21 @@ class Orchestrator:
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
                 
-                # Note: We don't have the estimate here yet if the LLM didn't call estimate_credits.
-                # However, our design says the LLM MUST call estimate_credits first.
-                # If it didn't, we'll do a quick estimate here for the reservation.
-                from src.mcp.handlers import _calculate_score_duration
-                from src.backend.credits import estimate_credits
-                duration = _calculate_score_duration(current_score)
-                est_credits = estimate_credits(duration)
+                est_credits = credit_estimate.get("estimated_credits")
+                if not isinstance(est_credits, int) or est_credits <= 0:
+                    from src.mcp.handlers import _calculate_score_duration
+                    from src.backend.credits import estimate_credits
+                    duration = _calculate_score_duration(current_score)
+                    est_credits = estimate_credits(duration)
                 
                 job_id = uuid.uuid4().hex
-                reserved = await asyncio.to_thread(reserve_credits, user_id, job_id, est_credits)
+                reserved = await asyncio.to_thread(
+                    reserve_credits,
+                    user_id,
+                    job_id,
+                    est_credits,
+                    self._settings.session_ttl_seconds,
+                )
                 if not reserved:
                     return ToolExecutionResult(
                         score=current_score, 
@@ -647,6 +742,7 @@ class Orchestrator:
                             "message": f"Insufficient credits. This render requires ~{est_credits} credits, but you only have {user_credits.available_balance} available."
                         }
                     )
+                await self._sessions.set_metadata(session_id, "credit_estimate", "")
 
                 audio_response = await self._start_synthesis_job(
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
@@ -655,23 +751,31 @@ class Orchestrator:
                 est_args = dict(call.arguments)
                 est_args["score"] = current_score
                 est_args["uid"] = user_id
+                if isinstance(score_summary, dict):
+                    duration_seconds = score_summary.get("duration_seconds")
+                    if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:
+                        est_args["duration_seconds"] = float(duration_seconds)
                 self._logger.info("mcp_call tool=estimate_credits session=%s", session_id)
                 est_result = await asyncio.to_thread(
                     self._router.call_tool, "estimate_credits", est_args
                 )
-                # LLM will see this result and can present it to the user.
-                # We return it as a special chat type or just text.
-                # For now, we'll let the orchestrator return it as metadata for the LLM to process.
-                # But we need to make sure the LLM sees the tool output.
-                # In this architecture, _execute_tool_calls is called after the LLM decision.
-                # If we want the LLM to *discuss* the estimate, it should be a loop.
-                # But currently handle_chat is a single pass: LLM decide -> execute tools -> return.
-                # So if LLM calls estimate_credits, the output is returned to the user.
-                audio_response = {
-                    "type": "chat_text",
-                    "message": f"Estimated cost: {est_result.get('estimated_credits')} credits (~{est_result.get('estimated_seconds')}s). "
-                               f"Current balance: {est_result.get('current_balance')} credits."
+                estimate_payload = {
+                    "estimated_credits": est_result.get("estimated_credits"),
+                    "estimated_seconds": est_result.get("estimated_seconds"),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                 }
+                await self._sessions.set_metadata(
+                    session_id, "credit_estimate", json.dumps(estimate_payload)
+                )
+                credit_estimate = estimate_payload
+                followup_prompt = json.dumps(est_result, sort_keys=True)
+                estimate_handled = True
+        if estimate_handled:
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response=audio_response,
+                followup_prompt=followup_prompt,
+            )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
 
@@ -680,6 +784,7 @@ class ToolExecutionResult:
     """Return value for tool execution: optional audio plus score."""
     score: Dict[str, Any]
     audio_response: Optional[Dict[str, Any]]
+    followup_prompt: Optional[str] = None
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

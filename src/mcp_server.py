@@ -34,7 +34,13 @@ def _result_response(request_id: Optional[Any], result: Any) -> Dict[str, Any]:
 
 
 _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
-    "cpu": {"parse_score", "modify_score", "list_voicebanks", "get_voicebank_info"},
+    "cpu": {
+        "parse_score",
+        "modify_score",
+        "list_voicebanks",
+        "get_voicebank_info",
+        "estimate_credits",
+    },
     "gpu": {"synthesize", "save_audio"},
     "all": set(),
 }

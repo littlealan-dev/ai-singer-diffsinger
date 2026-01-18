@@ -216,6 +216,7 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
         "composer": metadata.composer if metadata else None,
         "lyricist": getattr(metadata, "lyricist", None) if metadata else None,
     }
+    summary["duration_seconds"] = _estimate_duration_seconds(score)
 
     parts_summary: List[Dict[str, Any]] = []
     available_verses: set[str] = set()
@@ -250,6 +251,22 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
     summary["parts"] = parts_summary
     summary["available_verses"] = sorted(available_verses, key=_lyric_sort_key)
     return summary
+
+
+def _estimate_duration_seconds(score: stream.Score) -> float:
+    """Estimate total duration in seconds using music21's seconds map."""
+    try:
+        seconds_map = score.secondsMap
+    except Exception:
+        seconds_map = None
+    if not seconds_map:
+        return 0.0
+    max_end = 0.0
+    for entry in seconds_map:
+        offset = float(entry.get("offsetSeconds", 0.0))
+        duration = float(entry.get("durationSeconds", 0.0))
+        max_end = max(max_end, offset + duration)
+    return round(max_end, 2)
 
 
 def _lyric_sort_key(value: str) -> tuple[int, object]:

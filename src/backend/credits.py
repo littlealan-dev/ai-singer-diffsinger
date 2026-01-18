@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 CREDIT_DURATION_SECONDS = 30
 TRIAL_CREDIT_AMOUNT = 10
 TRIAL_EXPIRY_DAYS = 7
-RESERVATION_TTL_MINUTES = 60
+DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
 
 @dataclass(frozen=True)
 class UserCredits:
@@ -92,7 +92,12 @@ def estimate_credits(duration_seconds: float) -> int:
         return 0
     return math.ceil(duration_seconds / CREDIT_DURATION_SECONDS)
 
-def reserve_credits(uid: str, job_id: str, estimated_credits: int) -> bool:
+def reserve_credits(
+    uid: str,
+    job_id: str,
+    estimated_credits: int,
+    reservation_ttl_seconds: Optional[int] = None,
+) -> bool:
     """
     Atomically reserve credits for a job.
     Returns True if successful, False if insufficient balance or overdrafted.
@@ -134,12 +139,26 @@ def reserve_credits(uid: str, job_id: str, estimated_credits: int) -> bool:
         
         # Create reservation record
         now = datetime.now(timezone.utc)
+        ttl_seconds = reservation_ttl_seconds or DEFAULT_RESERVATION_TTL_SECONDS
         transaction.set(res_ref, {
             "userId": uid,
             "estimatedCredits": estimated_credits,
             "createdAt": now,
-            "expiresAt": now + timedelta(minutes=RESERVATION_TTL_MINUTES),
+            "expiresAt": now + timedelta(seconds=ttl_seconds),
             "status": "pending"
+        })
+
+        # Log to ledger for audit trail.
+        ledger_ref = db.collection("credit_ledger").document()
+        transaction.set(ledger_ref, {
+            "userId": uid,
+            "type": "reserve",
+            "jobId": job_id,
+            "amount": 0,
+            "reservedDelta": estimated_credits,
+            "reservedAfter": reserved + estimated_credits,
+            "balanceAfter": balance,
+            "createdAt": now
         })
         
         return True
@@ -211,6 +230,8 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Tup
             "type": "settle",
             "jobId": job_id,
             "amount": -actual_credits,
+            "reservedDelta": -estimated_credits,
+            "reservedAfter": new_reserved,
             "balanceAfter": new_balance,
             "createdAt": datetime.now(timezone.utc)
         })
@@ -261,6 +282,19 @@ def release_credits(uid: str, job_id: str) -> bool:
         transaction.update(res_ref, {
             "status": "released",
             "releasedAt": datetime.now(timezone.utc)
+        })
+
+        # Log to ledger for audit trail.
+        ledger_ref = db.collection("credit_ledger").document()
+        transaction.set(ledger_ref, {
+            "userId": uid,
+            "type": "release",
+            "jobId": job_id,
+            "amount": 0,
+            "reservedDelta": -estimated_credits,
+            "reservedAfter": max(0, reserved - estimated_credits),
+            "balanceAfter": credits.get("balance", 0),
+            "createdAt": datetime.now(timezone.utc)
         })
         
         return True

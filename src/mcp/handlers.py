@@ -165,9 +165,13 @@ def handle_estimate_credits(params: Dict[str, Any], device: str) -> Dict[str, An
     """Handle estimate_credits tool calls."""
     score = params["score"]
     uid = params.get("uid")
+    duration_override = params.get("duration_seconds")
     
     # 1. Calculate duration in seconds
-    duration_seconds = _calculate_score_duration(score)
+    if isinstance(duration_override, (int, float)) and duration_override > 0:
+        duration_seconds = float(duration_override)
+    else:
+        duration_seconds = _calculate_score_duration(score)
     
     # 2. Estimate credits
     from src.backend.credits import estimate_credits, get_or_create_credits
