@@ -32,6 +32,7 @@ venv/
 # IDE
 .vscode/
 .idea/
+.agent/
 
 # UI
 ui/node_modules/
