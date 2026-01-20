@@ -24,6 +24,7 @@ from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context
 from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
 
 
 class Orchestrator:
@@ -88,7 +89,7 @@ class Orchestrator:
         if llm_error:
             response_message = llm_error
             await self._sessions.append_history(session_id, "assistant", response_message)
-            return {"type": "chat_text", "message": response_message}
+            return {"type": "chat_error", "message": response_message}
         if llm_response is not None:
             self._logger.debug(
                 "chat_llm session=%s response=%s",
@@ -122,6 +123,9 @@ class Orchestrator:
             response = tool_result.audio_response or {"type": "chat_text", "message": response_message}
             if tool_result.followup_prompt:
                 followup_message = await self._render_tool_followup(snapshot, tool_result.followup_prompt)
+                if self._is_llm_error_message(followup_message):
+                    await self._sessions.append_history(session_id, "assistant", followup_message)
+                    return {"type": "chat_error", "message": followup_message}
                 response["message"] = followup_message
             elif response_message:
                 response["message"] = response_message
@@ -480,6 +484,33 @@ class Orchestrator:
         lowered = message.lower()
         return any(keyword in lowered for keyword in ("score", "json", "notes"))
 
+    def _format_llm_error(self, exc: RuntimeError) -> str:
+        """Return a user-facing LLM error message."""
+        message = str(exc).strip()
+        if not message:
+            return LLM_ERROR_FALLBACK
+        json_start = message.find("{")
+        json_message = message if json_start == 0 else message[json_start:] if json_start != -1 else ""
+        if not json_message:
+            return LLM_ERROR_FALLBACK
+        try:
+            payload = json.loads(json_message)
+        except json.JSONDecodeError:
+            return LLM_ERROR_FALLBACK
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                code = error.get("code")
+                detail = error.get("message")
+                if code is not None and detail:
+                    return f"LLM error {code}: {detail}"
+        return LLM_ERROR_FALLBACK
+
+    def _is_llm_error_message(self, message: str) -> bool:
+        """Return True if the message is an LLM error string."""
+        cleaned = message.strip()
+        return cleaned == LLM_ERROR_FALLBACK or cleaned.startswith("LLM error ")
+
     async def _decide_with_llm(
         self, snapshot: Dict[str, Any], score_available: bool
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
@@ -503,10 +534,7 @@ class Orchestrator:
             )
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
-            message = str(exc)
-            if "HTTP error 429" in message or "RESOURCE_EXHAUSTED" in message:
-                return None, "Gemini API usage limit exceeded. Please try again tomorrow."
-            return None, "LLM request failed. Please try again."
+            return None, self._format_llm_error(exc)
         response = parse_llm_response(text)
         if response is None:
             return None, "LLM returned an invalid response. Please try again."
@@ -539,7 +567,7 @@ class Orchestrator:
             text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
         except RuntimeError as exc:
             self._logger.warning("llm_followup_failed error=%s", exc)
-            return tool_summary
+            return self._format_llm_error(exc)
         response = parse_llm_response(text)
         if response is None or not response.final_message:
             return tool_summary

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { db, getIdToken } from '../firebase';
+import { db } from '../firebase';
+import { ensureCredits } from '../api';
 import { useAuth } from './useAuth.tsx';
 
 export interface UserCredits {
@@ -31,19 +32,15 @@ export function useCredits(): UserCredits {
             return;
         }
 
-        const ensureCredits = async () => {
+        const ensureCreditsOnce = async () => {
             try {
-                const token = await getIdToken();
-                if (!token) return;
-                await fetch(`${import.meta.env.VITE_API_BASE}/credits`, {
-                    headers: { Authorization: `Bearer ${token}` },
-                });
+                await ensureCredits();
             } catch (error) {
                 console.error("Error ensuring credits:", error);
             }
         };
 
-        ensureCredits();
+        ensureCreditsOnce();
 
         const userDocRef = doc(db, 'users', user.uid);
 

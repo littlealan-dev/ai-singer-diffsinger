@@ -31,7 +31,8 @@ export type ChatResponse =
       progress_url: string;
       job_id?: string;
       current_score?: unknown;
-    };
+    }
+  | { type: "chat_error"; message: string };
 
 export type ProgressResponse = {
   status: "idle" | "queued" | "running" | "done" | "error";
@@ -115,6 +116,10 @@ async function request<T>(path: string, options: RequestInit): Promise<T> {
 
 export async function createSession(): Promise<{ session_id: string }> {
   return request("/sessions", { method: "POST" });
+}
+
+export async function ensureCredits(): Promise<unknown> {
+  return request("/credits", { method: "GET" });
 }
 
 export async function uploadScore(sessionId: string, file: File): Promise<UploadResponse> {

@@ -291,6 +291,10 @@ export default function MainApp() {
 
     try {
       const response = await chat(sessionId, content);
+      if (response.type === "chat_error") {
+        setError(response.message || "LLM request failed. Please try again.");
+        return;
+      }
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
