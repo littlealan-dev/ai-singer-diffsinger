@@ -368,8 +368,9 @@ def _extract_bearer_token(request: Request) -> str:
 
 async def _get_user_id_or_401(request: Request) -> str:
     """Return the authenticated user ID or raise HTTP 401."""
-    if request.app.state.settings.backend_auth_disabled:
-        user_id = "dev-user"
+    settings: Settings = request.app.state.settings
+    if settings.backend_auth_disabled and settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        user_id = settings.dev_user_id
         set_log_context(user_id=user_id)
         return user_id
     token = _extract_bearer_token(request)
@@ -385,10 +386,11 @@ async def _get_user_id_or_401(request: Request) -> str:
 
 async def _get_user_context_or_401(request: Request) -> tuple[str, str]:
     """Return the authenticated user ID and email, or raise HTTP 401."""
-    if request.app.state.settings.backend_auth_disabled:
-        user_id = "dev-user"
+    settings: Settings = request.app.state.settings
+    if settings.backend_auth_disabled and settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        user_id = settings.dev_user_id
         set_log_context(user_id=user_id)
-        return user_id, "user@example.com"
+        return user_id, settings.dev_user_email
     token = _extract_bearer_token(request)
     try:
         claims = await asyncio.to_thread(verify_id_token_claims, token)

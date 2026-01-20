@@ -78,6 +78,8 @@ class Settings:
     mcp_startup_timeout_seconds: float
     mcp_debug: bool
     backend_auth_disabled: bool
+    dev_user_id: str
+    dev_user_email: str
     backend_use_storage: bool
     storage_bucket: str
     app_env: str
@@ -121,6 +123,8 @@ class Settings:
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         mcp_debug = _env_bool("MCP_DEBUG", False)
         backend_auth_disabled = _env_bool("BACKEND_AUTH_DISABLED", False)
+        dev_user_id = os.getenv("BACKEND_DEV_USER_ID", "dev-user").strip()
+        dev_user_email = os.getenv("BACKEND_DEV_USER_EMAIL", "user@example.com").strip()
         backend_use_storage = _env_bool("BACKEND_USE_STORAGE", False)
         project_id = _project_id()
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
@@ -160,6 +164,8 @@ class Settings:
             mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
             mcp_debug=mcp_debug,
             backend_auth_disabled=backend_auth_disabled,
+            dev_user_id=dev_user_id,
+            dev_user_email=dev_user_email,
             backend_use_storage=backend_use_storage,
             storage_bucket=storage_bucket,
             app_env=app_env,
