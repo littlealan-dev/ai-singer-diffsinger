@@ -19,8 +19,8 @@ const CreditsHeader: React.FC = () => {
     if (overdrafted || isExpired || available <= 0) {
         statusClass = 'danger';
         icon = <AlertCircle size={14} className="icon" />;
-        if (overdrafted) label = 'Overdraft';
-        else if (isExpired) label = 'Expired';
+        if (overdrafted) label = `${available} Credits (Overdraft)`;
+        else if (isExpired) label = `${available} Credits (Expired)`;
         else label = '0 Credits';
     } else if (available <= 2) {
         statusClass = 'warning';

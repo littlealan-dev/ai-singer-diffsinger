@@ -63,11 +63,17 @@ def get_firestore_client() -> firestore.Client:
     return _firestore_client
 
 
-def verify_id_token(token: str) -> str:
-    """Verify a Firebase ID token and return the UID."""
+def verify_id_token_claims(token: str) -> dict:
+    """Verify a Firebase ID token and return the decoded claims."""
     initialize_firebase_app()
     decoded = auth.verify_id_token(token)
     uid = decoded.get("uid")
     if not uid:
         raise ValueError("Missing uid in Firebase token.")
-    return uid
+    return decoded
+
+
+def verify_id_token(token: str) -> str:
+    """Verify a Firebase ID token and return the UID."""
+    decoded = verify_id_token_claims(token)
+    return decoded["uid"]

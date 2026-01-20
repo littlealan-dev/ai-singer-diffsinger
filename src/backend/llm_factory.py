@@ -19,9 +19,24 @@ def create_llm_client(settings: Settings) -> Optional[LlmClient]:
     if provider in {"", "none", "disabled"}:
         return None
     if provider == "static":
-        # Static mode uses a fixed response payload (helpful for tests).
+        # Static mode uses fixed response payloads (helpful for tests).
         response_text = os.getenv("LLM_STATIC_RESPONSE")
-        if not response_text:
+        loop = os.getenv("LLM_STATIC_LOOP", "").strip().lower() in {"1", "true", "yes"}
+        responses: list[str] = []
+        if response_text:
+            try:
+                parsed = json.loads(response_text)
+                if isinstance(parsed, list):
+                    for entry in parsed:
+                        if isinstance(entry, str):
+                            responses.append(entry)
+                        else:
+                            responses.append(json.dumps(entry))
+                elif isinstance(parsed, dict):
+                    response_text = json.dumps(parsed)
+            except json.JSONDecodeError:
+                pass
+        if not response_text and not responses:
             response_text = json.dumps(
                 {
                     "tool_calls": [{"name": "synthesize", "arguments": {}}],
@@ -29,7 +44,11 @@ def create_llm_client(settings: Settings) -> Optional[LlmClient]:
                     "include_score": False,
                 }
             )
-        return StaticLlmClient(response_text=response_text)
+        return StaticLlmClient(
+            response_text=response_text or (responses[-1] if responses else ""),
+            responses=responses,
+            loop=loop,
+        )
     if provider == "gemini":
         api_key = settings.gemini_api_key
         if settings.app_env.lower() not in {"dev", "development", "local", "test"}:

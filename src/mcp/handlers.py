@@ -165,6 +165,7 @@ def handle_estimate_credits(params: Dict[str, Any], device: str) -> Dict[str, An
     """Handle estimate_credits tool calls."""
     score = params["score"]
     uid = params.get("uid")
+    email = params.get("email") or ""
     duration_override = params.get("duration_seconds")
     
     # 1. Calculate duration in seconds
@@ -185,9 +186,7 @@ def handle_estimate_credits(params: Dict[str, Any], device: str) -> Dict[str, An
     # 3. Add balance info if uid is provided
     if uid:
         try:
-            # We use a dummy email if not found, since get_or_create might be called
-            # but usually the user is already signed in if we have a uid.
-            user_credits = get_or_create_credits(uid, "user@example.com")
+            user_credits = get_or_create_credits(uid, email)
             result["current_balance"] = user_credits.balance
             result["balance_after"] = user_credits.balance - est_credits
             result["sufficient"] = (user_credits.available_balance >= est_credits)

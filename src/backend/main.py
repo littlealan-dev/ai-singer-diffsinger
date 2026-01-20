@@ -23,7 +23,11 @@ from src.backend.mcp_client import McpRouter, McpError
 from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore, FirestoreSessionStore
-from src.backend.firebase_app import initialize_firebase_app, verify_id_token
+from src.backend.firebase_app import (
+    initialize_firebase_app,
+    verify_id_token,
+    verify_id_token_claims,
+)
 from src.backend.storage_client import download_bytes, upload_file
 from src.mcp.logging_utils import (
     clear_log_context,
@@ -153,7 +157,8 @@ def create_app() -> FastAPI:
         """Upload a MusicXML file, parse it, and attach to a session."""
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
+        await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
 
         original_name = Path(file.filename or "").name
@@ -208,12 +213,15 @@ def create_app() -> FastAPI:
         """Handle chat requests and orchestrate LLM/tool execution."""
         sessions: SessionStore = request.app.state.sessions
         orchestrator: Orchestrator = request.app.state.orchestrator
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
+        await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
         if len(payload.message) > request.app.state.settings.llm_max_message_chars:
             raise HTTPException(status_code=400, detail="Message too long.")
         try:
-            return await orchestrator.handle_chat(session_id, payload.message, user_id=user_id)
+            return await orchestrator.handle_chat(
+                session_id, payload.message, user_id=user_id, user_email=user_email
+            )
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -290,11 +298,9 @@ def create_app() -> FastAPI:
     @app.get("/credits")
     async def get_credits(request: Request) -> Dict[str, Any]:
         """Fetch user credit balance and expiry."""
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
         from src.backend.credits import get_or_create_credits
-        # Use a dummy email for now as verify_id_token doesn't return it yet
-        # (though we could enhance it later).
-        user_credits = await asyncio.to_thread(get_or_create_credits, user_id, "user@example.com")
+        user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
         return {
             "balance": user_credits.balance,
             "reserved": user_credits.reserved,
@@ -375,6 +381,46 @@ async def _get_user_id_or_401(request: Request) -> str:
         raise
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
+
+
+async def _get_user_context_or_401(request: Request) -> tuple[str, str]:
+    """Return the authenticated user ID and email, or raise HTTP 401."""
+    if request.app.state.settings.backend_auth_disabled:
+        user_id = "dev-user"
+        set_log_context(user_id=user_id)
+        return user_id, "user@example.com"
+    token = _extract_bearer_token(request)
+    try:
+        claims = await asyncio.to_thread(verify_id_token_claims, token)
+        user_id = claims["uid"]
+        user_email = claims.get("email") or ""
+        set_log_context(user_id=user_id)
+        return user_id, user_email
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
+
+
+async def _require_active_credits(user_id: str, user_email: str) -> None:
+    """Block actions when the account is locked or credits are exhausted/expired."""
+    from src.backend.credits import get_or_create_credits
+    user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
+    if user_credits.overdrafted:
+        raise HTTPException(
+            status_code=403,
+            detail="Account locked due to negative credit balance.",
+        )
+    if user_credits.is_expired:
+        raise HTTPException(
+            status_code=403,
+            detail="Free trial credits have expired.",
+        )
+    if user_credits.available_balance <= 0:
+        raise HTTPException(
+            status_code=403,
+            detail="No credits remaining.",
+        )
 
 
 async def _require_app_check(request: Request) -> None:

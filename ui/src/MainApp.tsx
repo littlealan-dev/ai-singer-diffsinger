@@ -14,6 +14,7 @@ import {
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
+import { useCredits } from "./hooks/useCredits";
 
 type Role = "user" | "assistant";
 
@@ -108,6 +109,13 @@ export default function MainApp() {
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
     [splitPct]
   );
+  const {
+    available,
+    overdrafted,
+    isExpired,
+    loading: creditsLoading,
+  } = useCredits();
+  const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
@@ -249,7 +257,7 @@ export default function MainApp() {
   };
 
   const handleUpload = async (file: File) => {
-    if (!sessionId) return;
+    if (!sessionId || creditsLocked) return;
     setUploading(true);
     setError(null);
     try {
@@ -272,7 +280,7 @@ export default function MainApp() {
   };
 
   const sendMessage = async (content: string) => {
-    if (!content.trim() || !sessionId) return;
+    if (!content.trim() || !sessionId || creditsLocked) return;
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -318,14 +326,14 @@ export default function MainApp() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !sessionId) return;
+    if (!input.trim() || !sessionId || creditsLocked) return;
     const content = input.trim();
     setInput("");
     await sendMessage(content);
   };
 
   const handleSelectionSend = async () => {
-    if (!selectedPartKey || !selectedVerse) return;
+    if (!selectedPartKey || !selectedVerse || creditsLocked) return;
     const selected = partOptions.find((option) => option.key === selectedPartKey);
     if (!selected) return;
     const partDescriptor = selected.part_name
@@ -348,6 +356,7 @@ export default function MainApp() {
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (creditsLocked) return;
     if (!isDragging) setIsDragging(true);
   };
 
@@ -358,6 +367,7 @@ export default function MainApp() {
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (creditsLocked) return;
     setIsDragging(false);
     const file = event.dataTransfer.files?.[0];
     if (file) handleUpload(file);
@@ -519,7 +529,7 @@ export default function MainApp() {
               <input
                 type="file"
                 accept=".xml,.mxl"
-                disabled={!sessionId || uploading}
+                disabled={!sessionId || uploading || creditsLocked}
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) handleUpload(file);
@@ -534,12 +544,12 @@ export default function MainApp() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") handleSend();
                 }}
-                disabled={!sessionId}
+                disabled={!sessionId || creditsLocked}
               />
               <button
                 onClick={handleSend}
                 className="send-button"
-                disabled={!input.trim() || !sessionId}
+                disabled={!input.trim() || !sessionId || creditsLocked}
               >
                 <Send size={18} />
               </button>

@@ -49,7 +49,14 @@ class Orchestrator:
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
-    async def handle_chat(self, session_id: str, message: str, *, user_id: str) -> Dict[str, Any]:
+    async def handle_chat(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        user_id: str,
+        user_email: str,
+    ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         if len(message) > self._settings.llm_max_message_chars:
             return {
@@ -109,6 +116,7 @@ class Orchestrator:
                 user_id=user_id,
                 session_files=session_files,
                 score_summary=snapshot.get("score_summary") if isinstance(snapshot, dict) else None,
+                user_email=user_email,
             )
             response_message = llm_response.final_message or response_message
             response = tool_result.audio_response or {"type": "chat_text", "message": response_message}
@@ -648,6 +656,7 @@ class Orchestrator:
         user_id: str,
         session_files: Dict[str, Any],
         score_summary: Optional[Dict[str, Any]],
+        user_email: str,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -697,7 +706,7 @@ class Orchestrator:
                     )
                 # Check for overdraft before even starting
                 from src.backend.credits import get_or_create_credits, reserve_credits
-                user_credits = get_or_create_credits(user_id, "user@example.com")
+                user_credits = get_or_create_credits(user_id, user_email)
                 if user_credits.overdrafted:
                     return ToolExecutionResult(
                         score=current_score, 
@@ -751,6 +760,8 @@ class Orchestrator:
                 est_args = dict(call.arguments)
                 est_args["score"] = current_score
                 est_args["uid"] = user_id
+                if user_email:
+                    est_args["email"] = user_email
                 if isinstance(score_summary, dict):
                     duration_seconds = score_summary.get("duration_seconds")
                     if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:

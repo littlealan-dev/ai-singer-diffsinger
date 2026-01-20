@@ -209,6 +209,8 @@ TOOLS: List[Tool] = [
             "properties": {
                 "score": {"type": "object"},
                 "uid": {"type": "string"}, # Optional, provided by orchestrator
+                "email": {"type": "string"},
+                "duration_seconds": {"type": "number"},
             },
             "required": ["score"],
             "additionalProperties": True,
