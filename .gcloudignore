@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv310/
 env/
 venv/
 .env
@@ -52,6 +53,9 @@ runs/
 checkpoints/
 cache/
 tmp/
+data/
+docs/
+third_party/
 
 # Git
 .git/

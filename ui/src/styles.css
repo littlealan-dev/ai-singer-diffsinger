@@ -351,6 +351,19 @@ body.landing-active #root {
   gap: 16px;
 }
 
+.score-subtitles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.score-estimate {
+  color: rgba(220, 210, 255, 0.85);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .zoom-controls {
   display: inline-flex;
   align-items: center;
@@ -488,6 +501,34 @@ body.landing-active #root {
 .chat-bubble p {
   margin: 0;
   white-space: pre-wrap;
+}
+
+.chat-markdown {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-markdown p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.chat-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.chat-markdown th,
+.chat-markdown td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.chat-markdown th {
+  color: rgba(220, 210, 255, 0.9);
+  font-weight: 600;
 }
 
 .thinking-bubble {

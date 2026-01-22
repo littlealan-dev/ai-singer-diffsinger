@@ -10,7 +10,6 @@ import logging
 import copy
 import json
 import uuid
-from datetime import datetime, timezone
 
 from src.backend.config import Settings
 from src.backend.job_store import build_progress_payload
@@ -46,7 +45,7 @@ class Orchestrator:
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
-        self._llm_tool_allowlist = {"modify_score", "synthesize", "estimate_credits"}
+        self._llm_tool_allowlist = {"modify_score", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
 
@@ -109,13 +108,11 @@ class Orchestrator:
         if llm_response is not None:
             # Execute tool calls and package response.
             include_score = llm_response.include_score
-            session_files = snapshot.get("files") or {}
             tool_result = await self._execute_tool_calls(
                 session_id,
                 current_score["score"],
                 llm_response.tool_calls,
                 user_id=user_id,
-                session_files=session_files,
                 score_summary=snapshot.get("score_summary") if isinstance(snapshot, dict) else None,
                 user_email=user_email,
             )
@@ -126,6 +123,8 @@ class Orchestrator:
                 if self._is_llm_error_message(followup_message):
                     await self._sessions.append_history(session_id, "assistant", followup_message)
                     return {"type": "chat_error", "message": followup_message}
+                if self._tool_payload_has_error(tool_result.followup_prompt):
+                    response["suppress_selector"] = True
                 response["message"] = followup_message
             elif response_message:
                 response["message"] = response_message
@@ -511,6 +510,16 @@ class Orchestrator:
         cleaned = message.strip()
         return cleaned == LLM_ERROR_FALLBACK or cleaned.startswith("LLM error ")
 
+    def _tool_payload_has_error(self, payload: str) -> bool:
+        """Return True if the tool payload JSON includes an error object."""
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return False
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+            return True
+        return False
+
     async def _decide_with_llm(
         self, snapshot: Dict[str, Any], score_available: bool
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
@@ -682,22 +691,12 @@ class Orchestrator:
         tool_calls: List[ToolCall],
         *,
         user_id: str,
-        session_files: Dict[str, Any],
         score_summary: Optional[Dict[str, Any]],
         user_email: str,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
-        estimate_handled = False
-        followup_prompt: Optional[str] = None
-        credit_estimate: Optional[Dict[str, Any]] = None
-        raw_estimate = session_files.get("credit_estimate") if isinstance(session_files, dict) else None
-        if isinstance(raw_estimate, str) and raw_estimate.strip():
-            try:
-                credit_estimate = json.loads(raw_estimate)
-            except json.JSONDecodeError:
-                credit_estimate = None
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
@@ -724,14 +723,6 @@ class Orchestrator:
                     await self._sessions.set_score(session_id, current_score)
                 continue
             if call.name == "synthesize":
-                if not credit_estimate:
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={
-                            "type": "chat_text",
-                            "message": "Please request an estimate first so I can confirm credit usage before rendering."
-                        }
-                    )
                 # Check for overdraft before even starting
                 from src.backend.credits import get_or_create_credits, reserve_credits
                 user_credits = get_or_create_credits(user_id, user_email)
@@ -756,12 +747,14 @@ class Orchestrator:
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
                 
-                est_credits = credit_estimate.get("estimated_credits")
-                if not isinstance(est_credits, int) or est_credits <= 0:
-                    from src.mcp.handlers import _calculate_score_duration
-                    from src.backend.credits import estimate_credits
-                    duration = _calculate_score_duration(current_score)
-                    est_credits = estimate_credits(duration)
+                from src.mcp.handlers import _calculate_score_duration
+                from src.backend.credits import estimate_credits
+                duration_seconds = None
+                if isinstance(score_summary, dict):
+                    duration_seconds = score_summary.get("duration_seconds")
+                if not isinstance(duration_seconds, (int, float)) or duration_seconds <= 0:
+                    duration_seconds = _calculate_score_duration(current_score)
+                est_credits = estimate_credits(float(duration_seconds))
                 
                 job_id = uuid.uuid4().hex
                 reserved = await asyncio.to_thread(
@@ -772,49 +765,31 @@ class Orchestrator:
                     self._settings.session_ttl_seconds,
                 )
                 if not reserved:
+                    followup_prompt = json.dumps(
+                        {
+                            "error": {
+                                "type": "insufficient_credits",
+                                "message": (
+                                    f"Insufficient credits. This render requires ~{est_credits} credits, "
+                                    f"but you only have {user_credits.available_balance} available."
+                                ),
+                                "estimated_credits": est_credits,
+                                "available_credits": user_credits.available_balance,
+                            }
+                        },
+                        sort_keys=True,
+                    )
                     return ToolExecutionResult(
                         score=current_score, 
                         audio_response={
-                            "type": "chat_text", 
-                            "message": f"Insufficient credits. This render requires ~{est_credits} credits, but you only have {user_credits.available_balance} available."
-                        }
+                            "type": "chat_text",
+                            "message": "",
+                        },
+                        followup_prompt=followup_prompt,
                     )
-                await self._sessions.set_metadata(session_id, "credit_estimate", "")
-
                 audio_response = await self._start_synthesis_job(
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                 )
-            if call.name == "estimate_credits":
-                est_args = dict(call.arguments)
-                est_args["score"] = current_score
-                est_args["uid"] = user_id
-                if user_email:
-                    est_args["email"] = user_email
-                if isinstance(score_summary, dict):
-                    duration_seconds = score_summary.get("duration_seconds")
-                    if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:
-                        est_args["duration_seconds"] = float(duration_seconds)
-                self._logger.info("mcp_call tool=estimate_credits session=%s", session_id)
-                est_result = await asyncio.to_thread(
-                    self._router.call_tool, "estimate_credits", est_args
-                )
-                estimate_payload = {
-                    "estimated_credits": est_result.get("estimated_credits"),
-                    "estimated_seconds": est_result.get("estimated_seconds"),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await self._sessions.set_metadata(
-                    session_id, "credit_estimate", json.dumps(estimate_payload)
-                )
-                credit_estimate = estimate_payload
-                followup_prompt = json.dumps(est_result, sort_keys=True)
-                estimate_handled = True
-        if estimate_handled:
-            return ToolExecutionResult(
-                score=current_score,
-                audio_response=audio_response,
-                followup_prompt=followup_prompt,
-            )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
 

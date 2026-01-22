@@ -73,6 +73,7 @@ def create_app() -> FastAPI:
         """Start/stop shared services and handle cleanup."""
         settings.sessions_dir.mkdir(parents=True, exist_ok=True)
         router.start()
+        _log_onnx_providers()
         try:
             yield
         finally:
@@ -326,6 +327,17 @@ def create_app() -> FastAPI:
         return Response(content=content, media_type="application/xml")
 
     return app
+
+
+def _log_onnx_providers() -> None:
+    """Log ONNX Runtime available providers at startup."""
+    logger = get_logger("backend.ort")
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        logger.info("onnxruntime_providers=%s", providers)
+    except Exception as exc:
+        logger.warning("onnxruntime_providers_error=%s", exc)
 
 
 async def _get_session_or_404(

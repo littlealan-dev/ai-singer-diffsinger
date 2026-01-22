@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -116,6 +118,11 @@ export default function MainApp() {
     loading: creditsLoading,
   } = useCredits();
   const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
+  const estimatedDuration = scoreSummary?.duration_seconds;
+  const estimatedDurationLabel =
+    typeof estimatedDuration === "number" && estimatedDuration > 0
+      ? `Estimated duration: ${formatDuration(estimatedDuration)}`
+      : null;
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
@@ -300,7 +307,12 @@ export default function MainApp() {
         role: "assistant",
         content: response.message,
       };
-      if (response.type === "chat_text" && pendingSelection && !selectorShown) {
+      if (
+        response.type === "chat_text" &&
+        pendingSelection &&
+        !selectorShown &&
+        !response.suppress_selector
+      ) {
         assistantMessage.showSelector = true;
         setSelectorShown(true);
       }
@@ -453,7 +465,13 @@ export default function MainApp() {
                 )}
                 style={{ animationDelay: `${index * 40}ms` }}
               >
-                <p>{msg.content}</p>
+                {msg.role === "assistant" ? (
+                  <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  <p>{msg.content}</p>
+                )}
                 {msg.isProgress && !msg.audioUrl && (
                   <div className="thinking-dots" aria-label="Processing">
                     <span />
@@ -573,9 +591,14 @@ export default function MainApp() {
           <div className="score-header">
             <h2>Score Preview</h2>
             <div className="score-controls">
-              <span className="chat-subtitle">
-                Latest upload only {audioUrl ? "· Audio ready" : ""}
-              </span>
+              <div className="score-subtitles">
+                <span className="chat-subtitle">
+                  Latest upload only {audioUrl ? "· Audio ready" : ""}
+                </span>
+                {estimatedDurationLabel && (
+                  <span className="score-estimate">{estimatedDurationLabel}</span>
+                )}
+              </div>
               <div className="zoom-controls">
                 <button
                   type="button"
@@ -611,4 +634,18 @@ export default function MainApp() {
       </main>
     </div>
   );
+}
+
+function formatDuration(totalSeconds: number): string {
+  const rounded = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  if (minutes > 0) {
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${seconds}s`;
 }

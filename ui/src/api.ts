@@ -11,6 +11,7 @@ export type ScoreSummary = {
   title?: string | null;
   composer?: string | null;
   lyricist?: string | null;
+  duration_seconds?: number;
   parts?: ScoreSummaryPart[];
   available_verses?: Array<string | number>;
 };
@@ -23,7 +24,12 @@ export type UploadResponse = {
 };
 
 export type ChatResponse =
-  | { type: "chat_text"; message: string; current_score?: unknown }
+  | {
+      type: "chat_text";
+      message: string;
+      current_score?: unknown;
+      suppress_selector?: boolean;
+    }
   | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown }
   | {
       type: "chat_progress";

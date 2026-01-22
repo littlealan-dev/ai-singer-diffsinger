@@ -19,6 +19,9 @@ runs/
 checkpoints/
 cache/
 tmp/
+data/
+docs/
+third_party/
 
 # Exclude assets from image build
 assets/
