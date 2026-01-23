@@ -41,7 +41,7 @@ fi
 : "${BACKEND_PORT:=8000}"
 : "${BACKEND_LOG_LEVEL:=debug}"
 
-PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv310/bin/python}"
 
 mkdir -p "${LOG_DIR}"
 

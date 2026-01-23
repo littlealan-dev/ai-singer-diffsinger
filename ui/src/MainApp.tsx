@@ -17,6 +17,8 @@ import {
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
 import { useCredits } from "./hooks/useCredits";
+import { WaitlistModal } from "./components/WaitlistModal";
+import type { WaitlistSource } from "./components/WaitingListForm";
 
 type Role = "user" | "assistant";
 
@@ -101,6 +103,10 @@ export default function MainApp() {
   const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState(false);
   const [selectorShown, setSelectorShown] = useState(false);
+  const [showWaitlistModal, setShowWaitlistModal] = useState(false);
+  const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
+  const [showCreditsModal, setShowCreditsModal] = useState(false);
+  const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -149,6 +155,21 @@ export default function MainApp() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (creditsLoading) return;
+    if (isExpired && !showTrialExpiredModal) {
+      setShowTrialExpiredModal(true);
+      setWaitlistSource("trial_expired");
+      setShowWaitlistModal(true);
+      return;
+    }
+    if ((available <= 0 || overdrafted) && !isExpired && !showCreditsModal) {
+      setShowCreditsModal(true);
+      setWaitlistSource("credits_exhausted");
+      setShowWaitlistModal(true);
+    }
+  }, [available, creditsLoading, isExpired, overdrafted, showCreditsModal, showTrialExpiredModal]);
 
   useEffect(() => {
     if (!scoreRef.current || !score) return;
@@ -413,6 +434,11 @@ export default function MainApp() {
     window.addEventListener("pointerup", handleUp);
   };
 
+  const handleJoinWaitlist = (source: WaitlistSource) => {
+    setWaitlistSource(source);
+    setShowWaitlistModal(true);
+  };
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -426,11 +452,30 @@ export default function MainApp() {
         <div className="header-actions">
           <CreditsHeader />
           <div className="status-pill">{status ?? "Ready"}</div>
+          <button
+            className="btn-secondary"
+            onClick={() => handleJoinWaitlist("studio_menu")}
+          >
+            Join Waiting List
+          </button>
           <UserMenu />
         </div>
       </header>
 
       {error && <div className="error-banner">{error}</div>}
+      <WaitlistModal
+        isOpen={showWaitlistModal}
+        onClose={() => setShowWaitlistModal(false)}
+        source={waitlistSource}
+        title={showTrialExpiredModal ? "Trial Expired" : showCreditsModal ? "Credits Exhausted" : undefined}
+        subtitle={
+          showTrialExpiredModal
+            ? "Your free trial has ended. Join the waiting list for paid plans."
+            : showCreditsModal
+              ? "You're out of credits. Join the waiting list to get notified."
+              : undefined
+        }
+      />
 
       <main
         className="split-grid"

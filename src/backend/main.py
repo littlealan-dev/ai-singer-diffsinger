@@ -12,7 +12,7 @@ import os
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 import logging
 import zipfile
 from xml.etree import ElementTree
@@ -29,6 +29,7 @@ from src.backend.firebase_app import (
     verify_id_token_claims,
 )
 from src.backend.storage_client import download_bytes, upload_file
+from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -41,6 +42,15 @@ from firebase_admin import app_check
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
     message: str
+
+
+class WaitlistSubscribeRequest(BaseModel):
+    """Request payload for waitlist subscriptions."""
+    email: EmailStr
+    first_name: str | None = None
+    gdpr_consent: bool
+    consent_text: str
+    source: str
 
 
 def create_app() -> FastAPI:
@@ -309,6 +319,37 @@ def create_app() -> FastAPI:
             "expires_at": user_credits.expires_at.isoformat(),
             "overdrafted": user_credits.overdrafted,
             "is_expired": user_credits.is_expired
+        }
+
+    @app.post("/waitlist/subscribe")
+    async def waitlist_subscribe(
+        request_body: WaitlistSubscribeRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Subscribe a user to the waiting list."""
+        settings: Settings = request.app.state.settings
+        app_check_token = request.headers.get("X-Firebase-AppCheck")
+        if settings.backend_require_app_check:
+            if not app_check_token:
+                raise HTTPException(status_code=401, detail="Missing App Check token.")
+            if not verify_app_check_token(app_check_token):
+                raise HTTPException(status_code=403, detail="App Check verification failed.")
+        if not request_body.gdpr_consent:
+            raise HTTPException(status_code=400, detail="GDPR consent is required.")
+        result = await subscribe_to_waitlist(
+            settings,
+            email=request_body.email,
+            first_name=request_body.first_name,
+            gdpr_consent=request_body.gdpr_consent,
+            consent_text=request_body.consent_text,
+            source=request_body.source,
+        )
+        if not result.success:
+            raise HTTPException(status_code=500, detail=result.message)
+        return {
+            "success": result.success,
+            "message": result.message,
+            "requires_confirmation": result.requires_confirmation,
         }
 
     @app.get("/sessions/{session_id}/score")

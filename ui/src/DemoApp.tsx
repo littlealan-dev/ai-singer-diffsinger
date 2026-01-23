@@ -5,6 +5,8 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { useAuth } from "./hooks/useAuth.tsx";
 import { UserMenu } from "./components/UserMenu";
+import { WaitlistModal } from "./components/WaitlistModal";
+import type { WaitlistSource } from "./components/WaitingListForm";
 
 type Role = "user" | "assistant";
 
@@ -51,6 +53,8 @@ export default function DemoApp() {
   const [progressMessageId, setProgressMessageId] = useState<string | null>(null);
   const [splitPct, setSplitPct] = useState(40);
   const timersRef = useRef<number[]>([]);
+  const [showWaitlistModal, setShowWaitlistModal] = useState(false);
+  const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("demo_menu");
 
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
@@ -74,6 +78,11 @@ export default function DemoApp() {
   const clearTimers = () => {
     timersRef.current.forEach((timer) => window.clearTimeout(timer));
     timersRef.current = [];
+  };
+
+  const handleJoinWaitlist = (source: WaitlistSource) => {
+    setWaitlistSource(source);
+    setShowWaitlistModal(true);
   };
 
   useEffect(() => {
@@ -243,9 +252,20 @@ export default function DemoApp() {
         </div>
         <div className="header-actions">
           <div className="status-pill">{status}</div>
+          <button
+            className="btn-secondary"
+            onClick={() => handleJoinWaitlist("demo_menu")}
+          >
+            Join Waiting List
+          </button>
           {isAuthenticated && <UserMenu />}
         </div>
       </header>
+      <WaitlistModal
+        isOpen={showWaitlistModal}
+        onClose={() => setShowWaitlistModal(false)}
+        source={waitlistSource}
+      />
       <div className="message-box info">
         <Info size={16} />
         Chat is scripted for demo purposes. Audio is pre-rendered using the actual in-app synthesis engine.

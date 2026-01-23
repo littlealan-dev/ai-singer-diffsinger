@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { ArrowRight, Instagram, Mail, MessageCircle, MessageSquare, Sparkles } from "lucide-react";
 import { AuthModal } from "../components/AuthModal";
 import { UserMenu } from "../components/UserMenu";
+import { WaitlistModal } from "../components/WaitlistModal";
+import type { WaitlistSource } from "../components/WaitingListForm";
 import { useAuth } from "../hooks/useAuth.tsx";
 import "./LandingPage.css";
 
@@ -79,6 +81,8 @@ export default function LandingPage() {
     const { isAuthenticated } = useAuth();
     const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
     const [showAuthModal, setShowAuthModal] = useState(false);
+    const [showWaitlistModal, setShowWaitlistModal] = useState(false);
+    const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("landing");
 
     useEffect(() => {
         document.body.classList.add("landing-active");
@@ -102,6 +106,11 @@ export default function LandingPage() {
         }
     };
 
+    const handleJoinWaitlist = (source: WaitlistSource) => {
+        setWaitlistSource(source);
+        setShowWaitlistModal(true);
+    };
+
     return (
         <div className="landing-page">
             <nav className="landing-nav">
@@ -114,16 +123,29 @@ export default function LandingPage() {
                     <button className="btn-nav-primary" onClick={handleStartTrial}>
                         {isAuthenticated ? "Go to Studio" : "Start Free Trial"}
                     </button>
+                    <button className="btn-nav-secondary" onClick={() => handleJoinWaitlist("menu")}>
+                        Join Waiting List
+                    </button>
                     {isAuthenticated && <UserMenu />}
                 </div>
             </nav>
 
             <HeroSection onStartTrial={handleStartTrial} />
+            <div className="landing-hero-waitlist">
+                <button className="btn-secondary" onClick={() => handleJoinWaitlist("hero_footer")}>
+                    Join the Waiting List
+                </button>
+            </div>
 
             <AuthModal
                 isOpen={showAuthModal}
                 onClose={() => setShowAuthModal(false)}
                 onSuccess={() => navigate("/app")}
+            />
+            <WaitlistModal
+                isOpen={showWaitlistModal}
+                onClose={() => setShowWaitlistModal(false)}
+                source={waitlistSource}
             />
 
             <section className="landing-section">
@@ -419,6 +441,9 @@ export default function LandingPage() {
                     <div className="footer-links">
                         <a href="https://github.com/littlealan-dev/ai-singer-diffsinger" target="_blank" rel="noreferrer">GitHub</a>
                         <a href="#about-section">About Me</a>
+                        <button className="footer-waitlist" onClick={() => handleJoinWaitlist("landing")}>
+                            Join Waiting List
+                        </button>
                     </div>
                 </div>
                 <p className="copyright">© 2026 SightSinger.ai.</p>

@@ -3,6 +3,7 @@ import MainApp from "./MainApp";
 import DemoApp from "./DemoApp";
 import LandingPage from "./landing/LandingPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import WaitlistConfirmed from "./WaitlistConfirmed";
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
           }
         />
         <Route path="/demo" element={<DemoApp />} />
+        <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
       </Routes>
     </BrowserRouter>
   );

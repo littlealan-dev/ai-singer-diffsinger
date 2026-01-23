@@ -49,7 +49,7 @@ JSON
 )
 : "${LLM_STATIC_RESPONSE:=${DEFAULT_STATIC_RESPONSE}}"
 
-PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv310/bin/python}"
 
 mkdir -p "${LOG_DIR}"
 

@@ -149,6 +149,12 @@
   margin-bottom: 2rem;
 }
 
+.landing-hero-waitlist {
+  display: flex;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
 .hero-title {
   font-size: 3.9rem;
   line-height: 1.1;
@@ -1095,6 +1101,22 @@
 
 .footer-links a:hover {
   color: #fff;
+}
+
+.footer-waitlist {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  color: #94a3b8;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+
+.footer-waitlist:hover {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.5);
 }
 
 .copyright {

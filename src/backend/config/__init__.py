@@ -85,6 +85,11 @@ class Settings:
     app_env: str
     project_id: str | None
     backend_require_app_check: bool
+    brevo_waitlist_list_id: int
+    brevo_doi_template_id: int
+    brevo_doi_redirect_url: str
+    brevo_waitlist_api_key_secret: str
+    brevo_waitlist_api_key_secret_version: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -135,6 +140,17 @@ class Settings:
             "BACKEND_REQUIRE_APP_CHECK",
             app_env_lower not in {"dev", "development", "local", "test"},
         )
+        brevo_waitlist_list_id = _env_int("BREVO_WAITLIST_LIST_ID", 0)
+        brevo_doi_template_id = _env_int("BREVO_DOI_TEMPLATE_ID", 0)
+        brevo_doi_redirect_url = os.getenv("BREVO_DOI_REDIRECT_URL", "").strip()
+        brevo_waitlist_api_key_secret = os.getenv(
+            "BREVO_WAITLIST_API_KEY_SECRET",
+            "BREVO_WAITLIST_API_KEY",
+        ).strip()
+        brevo_waitlist_api_key_secret_version = os.getenv(
+            "BREVO_WAITLIST_API_KEY_SECRET_VERSION",
+            "latest",
+        ).strip()
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -171,4 +187,9 @@ class Settings:
             app_env=app_env,
             project_id=project_id,
             backend_require_app_check=backend_require_app_check,
+            brevo_waitlist_list_id=brevo_waitlist_list_id,
+            brevo_doi_template_id=brevo_doi_template_id,
+            brevo_doi_redirect_url=brevo_doi_redirect_url,
+            brevo_waitlist_api_key_secret=brevo_waitlist_api_key_secret,
+            brevo_waitlist_api_key_secret_version=brevo_waitlist_api_key_secret_version,
         )

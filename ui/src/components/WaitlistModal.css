@@ -1,0 +1,42 @@
+.waitlist-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 1100;
+}
+
+.waitlist-modal {
+  width: min(520px, 100%);
+  background: rgba(20, 24, 32, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 24px;
+  position: relative;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.waitlist-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+
+.waitlist-modal-header h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.waitlist-modal-header p {
+  margin: 6px 0 16px 0;
+  color: var(--text-muted, #9aa0a6);
+  font-size: 0.95rem;
+}

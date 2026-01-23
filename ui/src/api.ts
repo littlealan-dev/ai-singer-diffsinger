@@ -50,6 +50,20 @@ export type ProgressResponse = {
   error?: string;
 };
 
+export type WaitlistSubscribeRequest = {
+  email: string;
+  first_name?: string;
+  gdpr_consent: boolean;
+  consent_text: string;
+  source: string;
+};
+
+export type WaitlistSubscribeResponse = {
+  success: boolean;
+  message: string;
+  requires_confirmation: boolean;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 function withApiBase(url: string): string {
@@ -126,6 +140,16 @@ export async function createSession(): Promise<{ session_id: string }> {
 
 export async function ensureCredits(): Promise<unknown> {
   return request("/credits", { method: "GET" });
+}
+
+export async function subscribeToWaitlist(
+  payload: WaitlistSubscribeRequest
+): Promise<WaitlistSubscribeResponse> {
+  return request("/waitlist/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function uploadScore(sessionId: string, file: File): Promise<UploadResponse> {

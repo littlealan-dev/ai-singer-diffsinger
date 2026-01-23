@@ -71,6 +71,7 @@ if (app && appCheckSiteKey && !isDev) {
       isTokenAutoRefreshEnabled: true,
     });
     appCheckEnabled = true;
+    console.log("[firebase] App Check initialized");
   } catch (error) {
     console.error("App Check failed", error);
   }
