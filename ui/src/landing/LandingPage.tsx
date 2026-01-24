@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Instagram, Mail, MessageCircle, MessageSquare, Sparkles } from "lucide-react";
+import { ArrowRight, Instagram, Mail, Menu, MessageCircle, MessageSquare, Sparkles, X } from "lucide-react";
 import { AuthModal } from "../components/AuthModal";
 import { UserMenu } from "../components/UserMenu";
 import { WaitlistModal } from "../components/WaitlistModal";
@@ -80,10 +80,24 @@ const HeroSection = ({ onStartTrial }: HeroSectionProps) => {
 export default function LandingPage() {
     const navigate = useNavigate();
     const { isAuthenticated } = useAuth();
+    const whatItDoesRef = useRef<HTMLElement | null>(null);
     const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
     const [showAuthModal, setShowAuthModal] = useState(false);
     const [showWaitlistModal, setShowWaitlistModal] = useState(false);
     const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("landing");
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+    const menuItems = [
+        { id: "top", label: "Top" },
+        { id: "what-it-does", label: "What It Does" },
+        { id: "who-for", label: "Who It’s For / Not For" },
+        { id: "why", label: "Why SightSinger.ai" },
+        { id: "how-it-works", label: "How It Works" },
+        { id: "ai-voices", label: "AI Voices" },
+        { id: "pricing", label: "Pricing" },
+        { id: "faq", label: "FAQ" },
+        { id: "about", label: "About Me" },
+    ];
 
     useEffect(() => {
         document.body.classList.add("landing-active");
@@ -92,10 +106,50 @@ export default function LandingPage() {
         };
     }, []);
 
+    useEffect(() => {
+        const sectionEl = whatItDoesRef.current;
+        if (!sectionEl) return;
+        const scrollContainer = sectionEl.closest(".landing-page") as HTMLElement | null;
+
+        const update = () => {
+            const scrollTop = scrollContainer ? scrollContainer.scrollTop : window.scrollY;
+            const sectionTop = scrollContainer ? sectionEl.offsetTop : sectionEl.getBoundingClientRect().top + scrollTop;
+            const local = Math.max(0, Math.min(scrollTop - sectionTop, sectionEl.offsetHeight));
+            sectionEl.style.setProperty("--what-parallax-bg", `${local * 0.12}px`);
+            sectionEl.style.setProperty("--what-parallax-fg", `${local * 0.22}px`);
+        };
+
+        update();
+
+        const onScroll = () => update();
+        if (scrollContainer) scrollContainer.addEventListener("scroll", onScroll, { passive: true });
+        else window.addEventListener("scroll", onScroll, { passive: true });
+        window.addEventListener("resize", onScroll);
+        return () => {
+            if (scrollContainer) scrollContainer.removeEventListener("scroll", onScroll);
+            else window.removeEventListener("scroll", onScroll);
+            window.removeEventListener("resize", onScroll);
+        };
+    }, []);
+
     const scrollToTop = () => {
         const container = document.querySelector(".landing-page");
         if (container) {
             container.scrollTo({ top: 0, behavior: "smooth" });
+        }
+    };
+
+    const scrollToSection = (id: string) => {
+        if (id === "top") {
+            scrollToTop();
+            return;
+        }
+        const container = document.querySelector(".landing-page");
+        const target = document.getElementById(id);
+        if (container && target) {
+            container.scrollTo({ top: target.offsetTop - 72, behavior: "smooth" });
+        } else if (target) {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
         }
     };
 
@@ -115,28 +169,59 @@ export default function LandingPage() {
     return (
         <div className="landing-page">
             <nav className="landing-nav">
-                <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
-                    <Sparkles className="brand-icon" />
-                    <span>SightSinger.ai</span>
+                <div className="nav-left">
+                    <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
+                        <Sparkles className="brand-icon" />
+                        <span>SightSinger.ai</span>
+                    </div>
+                    <div className="nav-shortcuts">
+                        <button type="button" onClick={() => scrollToSection("what-it-does")}>
+                            What it is
+                        </button>
+                        <button type="button" onClick={() => scrollToSection("who-for")}>
+                            Who's for
+                        </button>
+                        <button type="button" onClick={() => scrollToSection("pricing")}>
+                            Pricing
+                        </button>
+                    </div>
+                </div>
+                <div className="nav-menu">
+                    <button
+                        className="nav-menu-toggle"
+                        onClick={() => setIsMenuOpen((prev) => !prev)}
+                        aria-expanded={isMenuOpen}
+                        aria-controls="landing-menu"
+                    >
+                        {isMenuOpen ? <X size={20} /> : <Menu size={20} />}
+                    </button>
+                    {isMenuOpen && (
+                        <div id="landing-menu" className="nav-menu-dropdown">
+                            {menuItems.map((item) => (
+                                <button
+                                    key={item.id}
+                                    className="nav-menu-dropdown-item"
+                                    onClick={() => {
+                                        scrollToSection(item.id);
+                                        setIsMenuOpen(false);
+                                    }}
+                                >
+                                    {item.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
                 <div className="nav-links">
                     <button className="btn-nav-secondary" onClick={() => navigate("/demo")}>Try the Demo</button>
                     <button className="btn-nav-primary" onClick={handleStartTrial}>
                         {isAuthenticated ? "Go to Studio" : "Start Free Trial"}
                     </button>
-                    <button className="btn-nav-secondary" onClick={() => handleJoinWaitlist("menu")}>
-                        Join Waiting List
-                    </button>
                     {isAuthenticated && <UserMenu />}
                 </div>
             </nav>
 
             <HeroSection onStartTrial={handleStartTrial} />
-            <div className="landing-hero-waitlist">
-                <button className="btn-secondary" onClick={() => handleJoinWaitlist("hero_footer")}>
-                    Join the Waiting List
-                </button>
-            </div>
 
             <AuthModal
                 isOpen={showAuthModal}
@@ -149,26 +234,35 @@ export default function LandingPage() {
                 source={waitlistSource}
             />
 
-            <section className="landing-section">
+            <section
+                className="landing-section what-it-does-section"
+                id="what-it-does"
+                ref={whatItDoesRef}
+            >
                 <h2 className="section-title">What it does</h2>
                 <p className="section-subtitle">Turn your MusicXML score into a singing demo in minutes.</p>
-                <div className="use-cases-grid">
-                    <div className="use-case-card">
-                        <h3>Score → Singing Demo</h3>
-                        <p className="description">Upload MusicXML and get a realistic vocal preview without a DAW.</p>
-                    </div>
-                    <div className="use-case-card">
-                        <h3>Chat-driven Takes</h3>
-                        <p className="description">Ask for parts, verses, and style changes using natural language.</p>
-                    </div>
-                    <div className="use-case-card">
-                        <h3>Fast Iteration</h3>
-                        <p className="description">Generate multiple interpretations quickly for practice or review.</p>
+                <div className="what-it-does-layout">
+                    <div className="what-it-does-stage" aria-hidden="true" />
+                    <div className="what-it-does-cards">
+                        <div className="use-cases-grid what-it-does-grid">
+                            <div className="use-case-card">
+                                <h3>Score → Singing Demo</h3>
+                                <p className="description">Upload MusicXML and get a realistic vocal preview without a DAW.</p>
+                            </div>
+                            <div className="use-case-card">
+                                <h3>Chat-driven Takes</h3>
+                                <p className="description">Ask for parts, verses, and style changes using natural language.</p>
+                            </div>
+                            <div className="use-case-card">
+                                <h3>Fast Iteration</h3>
+                                <p className="description">Generate multiple interpretations quickly for practice or review.</p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
 
-            <section className="landing-section">
+            <section className="landing-section" id="who-for">
                 <h2 className="section-title">Who is SightSinger.ai for?</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
@@ -194,7 +288,7 @@ export default function LandingPage() {
                 </div>
             </section>
 
-            <section className="landing-section alt-bg">
+            <section className="landing-section alt-bg" id="not-for">
                 <h2 className="section-title">SightSinger.ai is <i>NOT</i>...</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
@@ -216,7 +310,7 @@ export default function LandingPage() {
                 </div>
             </section>
 
-            <section className="landing-section">
+            <section className="landing-section" id="why">
                 <h2 className="section-title">Why SightSinger.ai?</h2>
                 <p className="section-subtitle">Speak music, not MIDI.</p>
 
@@ -254,7 +348,7 @@ export default function LandingPage() {
                     </table>
                 </div>
             </section>
-            <section className="landing-section compact">
+            <section className="landing-section compact" id="how-it-works">
                 <h2 className="section-title">How it works</h2>
                 <div className="timeline">
                     <div className="timeline-row">
@@ -288,7 +382,7 @@ export default function LandingPage() {
                 </div>
             </section>
 
-            <section className="landing-section">
+            <section className="landing-section" id="ai-voices">
                 <h2 className="section-title">AI Voices</h2>
                 <p className="section-subtitle voicebanks-subtitle">
                     Current AI voices are <span className="highlight-text">not cleared for commercial use</span>. <br/>Royalty-free voices will be added when paid plans launch.
@@ -340,28 +434,30 @@ export default function LandingPage() {
                 </div>
             </section>
 
-            <section className="landing-section">
-                <h2 className="section-title">Pricing</h2>
+            <section className="landing-section" id="pricing">
+                <h2 className="section-title">
+                    Pricing <span className="section-title-note">(Will be announced soon)</span>
+                </h2>
                 <p className="section-subtitle">
                     Credits keep usage predictable. Each credit covers 30 seconds of generated audio.
                 </p>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
-                        <h3>Balance check</h3>
-                        <p className="description">We estimate and reserve credits from the score duration to avoid overdraft surprises.</p>
+                        <h3>Credit Based Subscription</h3>
+                        <p className="description">Paid plan credits will carry a 1‑year expiry so you can cover peak seasons like Christmas.</p>
                     </div>
                     <div className="use-case-card">
-                        <h3>Pay only for output</h3>
-                        <p className="description">Credits are consumed when audio is delivered, rounded up to the nearest 30 seconds.</p>
+                        <h3>Pay Only For Output</h3>
+                        <p className="description">Credits are reserved pre-render, and consumed when audio is delivered, rounded up to the nearest 30 seconds.</p>
                     </div>
                     <div className="use-case-card">
-                        <h3>Trial credits</h3>
-                        <p className="description">Free‑trial credits expire in {TRIAL_EXPIRY_DAYS} days. Paid plan pricing will be announced soon.</p>
+                        <h3>Flexible Usage</h3>
+                        <p className="description">Spend credits on one long take or many short parts and verses—it’s up to you.</p>
                     </div>
                 </div>
             </section>
 
-            <section className="landing-section alt-bg">
+            <section className="landing-section alt-bg" id="faq">
                 <h2 className="section-title">FAQ</h2>
                 <div className="faq-list">
                     {[
@@ -416,7 +512,7 @@ export default function LandingPage() {
                 </div>
             </section>
 
-            <section id="about-section" className="landing-section">
+            <section id="about" className="landing-section">
                 <h2 className="section-title">About Me</h2>
                 <div className="about-content">
                     <div className="bio-list">
@@ -481,7 +577,7 @@ export default function LandingPage() {
                     </div>
                     <div className="footer-links">
                         <a href="https://github.com/littlealan-dev/ai-singer-diffsinger" target="_blank" rel="noreferrer">GitHub</a>
-                        <a href="#about-section">About Me</a>
+                        <a href="#about">About Me</a>
                         <button className="footer-waitlist" onClick={() => handleJoinWaitlist("landing")}>
                             Join Waiting List
                         </button>

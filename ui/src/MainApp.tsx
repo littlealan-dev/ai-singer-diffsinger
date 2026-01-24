@@ -453,7 +453,7 @@ export default function MainApp() {
           <CreditsHeader />
           <div className="status-pill">{status ?? "Ready"}</div>
           <button
-            className="btn-secondary"
+            className="btn-primary-inline"
             onClick={() => handleJoinWaitlist("studio_menu")}
           >
             Join Waiting List

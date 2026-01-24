@@ -253,7 +253,7 @@ export default function DemoApp() {
         <div className="header-actions">
           <div className="status-pill">{status}</div>
           <button
-            className="btn-secondary"
+            className="btn-primary-inline"
             onClick={() => handleJoinWaitlist("demo_menu")}
           >
             Join Waiting List
