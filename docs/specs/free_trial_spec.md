@@ -3,13 +3,13 @@ Free Trial Plan, UI Flow, and Design Spec
 
 Overview
 --------
-Enable a "Free Trial" that requires sign-in (Google or email magic link). Once authenticated, the user receives 10 credits, each credit covering 30 seconds of generated audio. Credits expire 7 days after grant. Also provide a "Join Waiting List" action for already signed-in users.
+Enable a "Free Trial" that requires sign-in (Google or email magic link). Once authenticated, the user receives 10 credits, each credit covering 30 seconds of generated audio. Credits expire 14 days after grant. Also provide a "Join Waiting List" action for already signed-in users.
 
 Assumptions and Definitions
 ---------------------------
 - Credit: 1 credit = 30 seconds of generated audio time.
 - Trial grant: 10 credits = 300 seconds total.
-- Expiry: 7 days from the time the credits are granted.
+- Expiry: 14 days from the time the credits are granted.
 - Usage rounding: charge per started 30-second block (ceil).
 - Auth methods: Google OAuth or email magic link.
 - "Join Waiting List": available only to signed-in users.
@@ -30,7 +30,7 @@ Flow A: Start Free Trial (not signed in)
 3) User completes auth:
    - Google: OAuth consent, redirect back.
    - Email: enter email, receive link, click to confirm.
-4) On first successful login, grant 10 credits with 7-day expiry.
+4) On first successful login, grant 10 credits with 14-day expiry.
 5) Redirect to main app with a success toast:
    "Free trial activated: 10 credits (300s) available until <date>."
 6) User can proceed to upload MusicXML and synthesize.
@@ -66,11 +66,11 @@ Global UI elements:
 - Account badge with credit summary:
   - "Credits: 7 (210s) | Expires in 4d"
 - Trial ribbon for new users:
-  - "Free Trial: 10 credits, 7 days"
+  - "Free Trial: 10 credits, 14 days"
 
 Auth modal:
 - Title: "Sign in to start your free trial"
-- Body copy: "Get 10 credits (300 seconds) valid for 7 days."
+- Body copy: "Get 10 credits (300 seconds) valid for 14 days."
 - Buttons:
   - "Continue with Google"
   - "Email me a magic link"
@@ -132,7 +132,7 @@ Phase 1: Product and data model
 
 Phase 2: Auth and trial grant
 1) Implement Google OAuth and email magic link flows.
-2) On first login, grant 10 credits and set expiry at now + 7 days.
+2) On first login, grant 10 credits and set expiry at now + 14 days.
 3) Ensure idempotent grant logic.
 
 Phase 3: Credit usage and enforcement

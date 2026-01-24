@@ -5,6 +5,7 @@ import {
     sendMagicLink,
 } from "../firebase";
 import "./AuthModal.css";
+import { TRIAL_EXPIRY_DAYS } from "../constants";
 
 export interface AuthModalProps {
     isOpen: boolean;
@@ -123,7 +124,7 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
                     <p className="auth-modal-subtitle">
                         Get 10 credits (5 minutes of audio)
                         <br />
-                        Valid for 7 days
+                        Valid for {TRIAL_EXPIRY_DAYS} days
                     </p>
 
                     {error && (

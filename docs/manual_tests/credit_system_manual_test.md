@@ -24,7 +24,7 @@ Steps:
 
 Expected:
 - User document created with `credits.balance = 10`, `credits.reserved = 0`.
-- `credits.expiresAt` is about 7 days in the future.
+- `credits.expiresAt` is about 14 days in the future.
 - Credits header shows available credits > 0.
 
 

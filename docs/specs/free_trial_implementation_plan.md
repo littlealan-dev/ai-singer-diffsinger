@@ -7,7 +7,7 @@ This document outlines the implementation plan for the Free Trial system includi
 ## Goals
 
 1. **Authentication**: Allow users to sign in via Google Account (redirect) or Email Magic Link
-2. **Free Trial Credits**: Grant 10 credits (30 seconds each = 300 seconds total) on first sign-in, expiring in 7 days
+2. **Free Trial Credits**: Grant 10 credits (30 seconds each = 300 seconds total) on first sign-in, expiring in 14 days
 3. **Waiting List**: Allow signed-in users to join a waiting list for future features/capacity
 
 ---
@@ -98,7 +98,7 @@ flowchart TD
 │        ✨ Start Your Free Trial          │
 │                                          │
 │   Get 10 credits (5 minutes of audio)    │
-│        Valid for 7 days                  │
+│        Valid for 14 days                  │
 │                                          │
 ├──────────────────────────────────────────┤
 │                                          │
@@ -417,7 +417,7 @@ pytest tests/test_credits.py -v
 ```
 
 Test cases:
-- `test_create_credits_for_new_user` - 10 credits allocated, expires in 7 days
+- `test_create_credits_for_new_user` - 10 credits allocated, expires in 14 days
 - `test_estimate_credits` - Returns estimate + balance info, ceil(duration/30)
 - `test_reserve_credits_success` - Atomically reserves credits
 - `test_reserve_credits_insufficient` - Raises error when estimated > available

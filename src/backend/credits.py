@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 # Constants
 CREDIT_DURATION_SECONDS = 30
 TRIAL_CREDIT_AMOUNT = 10
-TRIAL_EXPIRY_DAYS = 7
+TRIAL_EXPIRY_DAYS = 14
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ import { UserMenu } from "../components/UserMenu";
 import { WaitlistModal } from "../components/WaitlistModal";
 import type { WaitlistSource } from "../components/WaitingListForm";
 import { useAuth } from "../hooks/useAuth.tsx";
+import { TRIAL_EXPIRY_DAYS } from "../constants";
 import "./LandingPage.css";
 
 // Hero section with parallax effect
@@ -149,6 +150,25 @@ export default function LandingPage() {
             />
 
             <section className="landing-section">
+                <h2 className="section-title">What it does</h2>
+                <p className="section-subtitle">Turn your MusicXML score into a singing demo in minutes.</p>
+                <div className="use-cases-grid">
+                    <div className="use-case-card">
+                        <h3>Score → Singing Demo</h3>
+                        <p className="description">Upload MusicXML and get a realistic vocal preview without a DAW.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>Chat-driven Takes</h3>
+                        <p className="description">Ask for parts, verses, and style changes using natural language.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>Fast Iteration</h3>
+                        <p className="description">Generate multiple interpretations quickly for practice or review.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section className="landing-section">
                 <h2 className="section-title">Who is SightSinger.ai for?</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
@@ -170,6 +190,28 @@ export default function LandingPage() {
                         <h3>Quick Song Learners</h3>
                         <p>"Learn it fast"</p>
                         <p className="description">Pick up a few songs quickly for occasions without diving into theory or breath training.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section className="landing-section alt-bg">
+                <h2 className="section-title">SightSinger.ai is <i>NOT</i>...</h2>
+                <div className="use-cases-grid">
+                    <div className="use-case-card">
+                        <h3>A DAW replacement</h3>
+                        <p className="description">It doesn’t replace professional vocal synthesis tools. But it can be used to complement them with fast, score-based vocal previews.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>A human vocalist</h3>
+                        <p className="description">It’s a fast, score-accurate singing demo for rehearsal and practice. It doesn't replace human singers or human recordings.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>A Song Generator</h3>
+                        <p className="description">It doesn’t generate songs from text prompts (like Suno). It sings the music you’ve already written and follows the score exactly.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>A Voice Converter</h3>
+                        <p className="description">It doesn’t convert recorded vocals or require a base audio track. It sings directly from the score.</p>
                     </div>
                 </div>
             </section>
@@ -212,28 +254,6 @@ export default function LandingPage() {
                     </table>
                 </div>
             </section>
-
-            <section className="landing-section alt-bg">
-                <h2 className="section-title">SightSinger.ai is <i>NOT</i>...</h2>
-                <div className="use-cases-grid">
-                    <div className="use-case-card">
-                        <h3>A DAW replacement</h3>
-                        <p className="description">It doesn’t replace professional vocal synthesis tools. But it can be used to complement them with fast, score-based vocal previews.</p>
-                    </div>
-                    <div className="use-case-card">
-                        <h3>A human vocalist</h3>
-                        <p className="description">It’s a fast, score-accurate singing demo for rehearsal and practice. It doesn't replace human singers or human recordings.</p>
-                    </div>
-                    <div className="use-case-card">
-                        <h3>A Song Generator</h3>
-                        <p className="description">It doesn’t generate songs from text prompts (like Suno). It sings the music you’ve already written and follows the score exactly.</p>
-                    </div>
-                    <div className="use-case-card">
-                        <h3>A Voice Converter</h3>
-                        <p className="description">It doesn’t convert recorded vocals or require a base audio track. It sings directly from the score.</p>
-                    </div>
-                </div>
-            </section>
             <section className="landing-section compact">
                 <h2 className="section-title">How it works</h2>
                 <div className="timeline">
@@ -241,28 +261,28 @@ export default function LandingPage() {
                         <div className="timeline-step">01</div>
                         <div className="timeline-content">
                             <h3>Upload your score</h3>
-                            <p>Drop in MusicXML from MuseScore, Logic Pro, Finale, or Sibelius. <br />SightSinger.ai parses tempo, parts, and lyrics.</p>
+                            <p>Drop in MusicXML from MuseScore, Logic Pro, Finale, or Sibelius. <br />We parse tempo maps, part labels, and lyric syllables with music21.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
                         <div className="timeline-step">02</div>
                         <div className="timeline-content">
                             <h3>Tell the singer</h3>
-                            <p>Use natural language to pick parts/verses and shape phrasing, tone, and expression. <br />The AI translates your intent into performance instructions.</p>
+                            <p>Use natural language to pick parts/verses and shape phrasing, tone, and expression. <br />Gemini Flash 3 calls internal MCP tools to map intent into performance parameters.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
                         <div className="timeline-step">03</div>
                         <div className="timeline-content">
                             <h3>Generate the singing voice</h3>
-                            <p>SightSinger.ai uses DiffSinger, an open-source singing voice synthesis model, to generate a realistic vocal demo directly from the score. <br />Voicebanks are OpenUtau-compatible ONNX format, a widely supported format that allows easy voice bank expansion.</p>
+                            <p>SightSinger.ai runs a custom singing synthesis pipeline to render a realistic vocal demo directly from the score. <br />Voicebanks are DiffSinger-compatible OpenUtau ONNX models, so adding new voices is straightforward.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
                         <div className="timeline-step">04</div>
                         <div className="timeline-content">
                             <h3>Refine and share</h3>
-                            <p>Chat to iterate quickly, render new takes, and share the demo with singers.</p>
+                            <p>Iterate quickly, render new takes, and export a shareable demo for singers.</p>
                         </div>
                     </div>
                 </div>
@@ -271,7 +291,7 @@ export default function LandingPage() {
             <section className="landing-section">
                 <h2 className="section-title">AI Voices</h2>
                 <p className="section-subtitle voicebanks-subtitle">
-                    All AI voices in SightSinger.ai are <span className="highlight-text">royalty-free</span>. More AI voices are coming soon.
+                    Current AI voices are <span className="highlight-text">not cleared for commercial use</span>. <br/>Royalty-free voices will be added when paid plans launch.
                 </p>
                 <div className="voicebanks-grid">
                     <div className="voicebank-card">
@@ -320,6 +340,27 @@ export default function LandingPage() {
                 </div>
             </section>
 
+            <section className="landing-section">
+                <h2 className="section-title">Pricing</h2>
+                <p className="section-subtitle">
+                    Credits keep usage predictable. Each credit covers 30 seconds of generated audio.
+                </p>
+                <div className="use-cases-grid">
+                    <div className="use-case-card">
+                        <h3>Balance check</h3>
+                        <p className="description">We estimate and reserve credits from the score duration to avoid overdraft surprises.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>Pay only for output</h3>
+                        <p className="description">Credits are consumed when audio is delivered, rounded up to the nearest 30 seconds.</p>
+                    </div>
+                    <div className="use-case-card">
+                        <h3>Trial credits</h3>
+                        <p className="description">Free‑trial credits expire in {TRIAL_EXPIRY_DAYS} days. Paid plan pricing will be announced soon.</p>
+                    </div>
+                </div>
+            </section>
+
             <section className="landing-section alt-bg">
                 <h2 className="section-title">FAQ</h2>
                 <div className="faq-list">
@@ -352,7 +393,7 @@ export default function LandingPage() {
                         {
                             key: "royalty",
                             q: "Are the AI voices in SightSinger.ai royalty-free for music production?",
-                            a: "Yes, all the AI voices in SightSinger.ai are royalty-free for commercial projects. You can publish, distribute, or monetize your music without paying extra fees.",
+                            a: "Not yet. The current voicebanks are for demo use only and not cleared for commercial release. Royalty-free voices will be introduced once paid plans launch.",
                         },
                     ].map((item, index) => {
                         const isOpen = openFaqIndex === index;
