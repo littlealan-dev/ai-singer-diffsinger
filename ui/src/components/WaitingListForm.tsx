@@ -81,10 +81,6 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
 
   return (
     <form className="waitlist-form" onSubmit={handleSubmit}>
-      <div className="waitlist-header">
-        <h3>Join the Waiting List</h3>
-        <p>Get notified when paid plans are available.</p>
-      </div>
       <label className="waitlist-field">
         Email
         <input
@@ -114,11 +110,17 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
         />
         <span>{CONSENT_TEXT}</span>
       </label>
+      <p className="waitlist-legal">
+        By joining, you agree to our{" "}
+        <a href="/legal/privacy" target="_blank" rel="noreferrer">
+          Privacy Policy
+        </a>
+        .
+      </p>
       {message && <div className={`waitlist-message ${status}`}>{message}</div>}
       <button type="submit" disabled={status === "loading"}>
         {status === "loading" ? "Joining..." : "Join Waiting List"}
       </button>
-      <span className="waitlist-protection">Protected by Firebase App Check</span>
     </form>
   );
 }

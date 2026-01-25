@@ -4,6 +4,8 @@ import DemoApp from "./DemoApp";
 import LandingPage from "./landing/LandingPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import WaitlistConfirmed from "./WaitlistConfirmed";
+import LegalTerms from "./LegalTerms";
+import LegalPrivacy from "./LegalPrivacy";
 
 export default function App() {
   return (
@@ -20,6 +22,8 @@ export default function App() {
         />
         <Route path="/demo" element={<DemoApp />} />
         <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
+        <Route path="/legal/terms" element={<LegalTerms />} />
+        <Route path="/legal/privacy" element={<LegalPrivacy />} />
       </Routes>
     </BrowserRouter>
   );

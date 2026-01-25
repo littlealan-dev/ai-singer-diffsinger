@@ -80,7 +80,6 @@ const HeroSection = ({ onStartTrial }: HeroSectionProps) => {
 export default function LandingPage() {
     const navigate = useNavigate();
     const { isAuthenticated } = useAuth();
-    const whatItDoesRef = useRef<HTMLElement | null>(null);
     const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
     const [showAuthModal, setShowAuthModal] = useState(false);
     const [showWaitlistModal, setShowWaitlistModal] = useState(false);
@@ -106,31 +105,6 @@ export default function LandingPage() {
         };
     }, []);
 
-    useEffect(() => {
-        const sectionEl = whatItDoesRef.current;
-        if (!sectionEl) return;
-        const scrollContainer = sectionEl.closest(".landing-page") as HTMLElement | null;
-
-        const update = () => {
-            const scrollTop = scrollContainer ? scrollContainer.scrollTop : window.scrollY;
-            const sectionTop = scrollContainer ? sectionEl.offsetTop : sectionEl.getBoundingClientRect().top + scrollTop;
-            const local = Math.max(0, Math.min(scrollTop - sectionTop, sectionEl.offsetHeight));
-            sectionEl.style.setProperty("--what-parallax-bg", `${local * 0.12}px`);
-            sectionEl.style.setProperty("--what-parallax-fg", `${local * 0.22}px`);
-        };
-
-        update();
-
-        const onScroll = () => update();
-        if (scrollContainer) scrollContainer.addEventListener("scroll", onScroll, { passive: true });
-        else window.addEventListener("scroll", onScroll, { passive: true });
-        window.addEventListener("resize", onScroll);
-        return () => {
-            if (scrollContainer) scrollContainer.removeEventListener("scroll", onScroll);
-            else window.removeEventListener("scroll", onScroll);
-            window.removeEventListener("resize", onScroll);
-        };
-    }, []);
 
     const scrollToTop = () => {
         const container = document.querySelector(".landing-page");
@@ -169,23 +143,6 @@ export default function LandingPage() {
     return (
         <div className="landing-page">
             <nav className="landing-nav">
-                <div className="nav-left">
-                    <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
-                        <Sparkles className="brand-icon" />
-                        <span>SightSinger.ai</span>
-                    </div>
-                    <div className="nav-shortcuts">
-                        <button type="button" onClick={() => scrollToSection("what-it-does")}>
-                            What it is
-                        </button>
-                        <button type="button" onClick={() => scrollToSection("who-for")}>
-                            Who's for
-                        </button>
-                        <button type="button" onClick={() => scrollToSection("pricing")}>
-                            Pricing
-                        </button>
-                    </div>
-                </div>
                 <div className="nav-menu">
                     <button
                         className="nav-menu-toggle"
@@ -209,13 +166,46 @@ export default function LandingPage() {
                                     {item.label}
                                 </button>
                             ))}
+                            <button
+                                className="nav-menu-dropdown-item"
+                                onClick={() => {
+                                    handleJoinWaitlist("menu");
+                                    setIsMenuOpen(false);
+                                }}
+                            >
+                                Join Waitlist
+                            </button>
                         </div>
                     )}
                 </div>
+                <div className="nav-left">
+                    <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
+                        <Sparkles className="brand-icon" />
+                        <span>SightSinger.ai</span>
+                    </div>
+                    <div className="nav-shortcuts">
+                        <button type="button" onClick={() => scrollToSection("what-it-does")}>
+                            What it is
+                        </button>
+                        <button type="button" onClick={() => scrollToSection("who-for")}>
+                            Who's for
+                        </button>
+                        <button type="button" onClick={() => scrollToSection("pricing")}>
+                            Pricing
+                        </button>
+                    </div>
+                </div>
                 <div className="nav-links">
-                    <button className="btn-nav-secondary" onClick={() => navigate("/demo")}>Try the Demo</button>
-                    <button className="btn-nav-primary" onClick={handleStartTrial}>
-                        {isAuthenticated ? "Go to Studio" : "Start Free Trial"}
+                    <button className="btn-nav-secondary btn-nav-compact" onClick={() => navigate("/demo")}>
+                        <span className="label-long">Try the Demo</span>
+                        <span className="label-short">Demo</span>
+                    </button>
+                    <button className="btn-nav-primary btn-nav-compact" onClick={handleStartTrial}>
+                        <span className="label-long">{isAuthenticated ? "Go to Studio" : "Start Free Trial"}</span>
+                        <span className="label-short">{isAuthenticated ? "Studio" : "Free Trial"}</span>
+                    </button>
+                    <button className="btn-nav-primary" onClick={() => handleJoinWaitlist("menu")}>
+                        Join Waitlist
                     </button>
                     {isAuthenticated && <UserMenu />}
                 </div>
@@ -237,12 +227,18 @@ export default function LandingPage() {
             <section
                 className="landing-section what-it-does-section"
                 id="what-it-does"
-                ref={whatItDoesRef}
             >
                 <h2 className="section-title">What it does</h2>
                 <p className="section-subtitle">Turn your MusicXML score into a singing demo in minutes.</p>
                 <div className="what-it-does-layout">
-                    <div className="what-it-does-stage" aria-hidden="true" />
+                    <div className="what-it-does-media">
+                        <img
+                            src="/landing/sightsinger_screenshot.png"
+                            alt="SightSinger.ai studio preview"
+                            className="what-it-does-image"
+                            loading="lazy"
+                        />
+                    </div>
                     <div className="what-it-does-cards">
                         <div className="use-cases-grid what-it-does-grid">
                             <div className="use-case-card">
@@ -385,7 +381,7 @@ export default function LandingPage() {
             <section className="landing-section" id="ai-voices">
                 <h2 className="section-title">AI Voices</h2>
                 <p className="section-subtitle voicebanks-subtitle">
-                    Current AI voices are <span className="highlight-text">not cleared for commercial use</span>. <br/>Royalty-free voices will be added when paid plans launch.
+                    Current AI voices are <span className="highlight-text">not cleared for commercial use</span>. <br/>Royalty-free voices will be added when paid subscription plans launch.
                 </p>
                 <div className="voicebanks-grid">
                     <div className="voicebank-card">
@@ -578,12 +574,8 @@ export default function LandingPage() {
                     <div className="footer-links">
                         <a href="https://github.com/littlealan-dev/ai-singer-diffsinger" target="_blank" rel="noreferrer">GitHub</a>
                         <a href="#about">About Me</a>
-                        <button className="footer-waitlist" onClick={() => handleJoinWaitlist("landing")}>
-                            Join Waiting List
-                        </button>
                     </div>
                 </div>
-                <p className="copyright">© 2026 SightSinger.ai.</p>
             </footer>
         </div>
     );

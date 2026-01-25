@@ -88,6 +88,28 @@
   line-height: 1.5;
 }
 
+.auth-modal-note {
+  font-size: 0.9rem;
+  color: var(--text-muted, #8a8f98);
+}
+
+.auth-modal-legal {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted, #8a8f98);
+  text-align: center;
+  line-height: 1.4;
+}
+
+.auth-modal-legal a {
+  color: #c4b5fd;
+  text-decoration: none;
+}
+
+.auth-modal-legal a:hover {
+  text-decoration: underline;
+}
+
 .auth-modal-email {
   font-weight: 600;
   color: var(--accent-color, #7c3aed);

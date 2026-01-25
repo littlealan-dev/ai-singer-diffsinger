@@ -46,6 +46,10 @@ body.landing-active {
   overflow: hidden;
 }
 
+body.legal-active {
+  overflow: auto;
+}
+
 /* Global scroll fix */
 html,
 body {
@@ -74,6 +78,13 @@ body::before {
 }
 
 body.landing-active #root {
+  padding: 0;
+  height: auto;
+  min-height: 100vh;
+  align-items: stretch;
+}
+
+body.legal-active #root {
   padding: 0;
   height: auto;
   min-height: 100vh;

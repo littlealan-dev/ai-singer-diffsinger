@@ -51,6 +51,22 @@
   margin-top: 3px;
 }
 
+.waitlist-legal {
+  font-size: 0.8rem;
+  color: var(--text-muted, #8a8f98);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.waitlist-legal a {
+  color: #c4b5fd;
+  text-decoration: none;
+}
+
+.waitlist-legal a:hover {
+  text-decoration: underline;
+}
+
 .waitlist-message {
   font-size: 0.85rem;
   padding: 8px 10px;

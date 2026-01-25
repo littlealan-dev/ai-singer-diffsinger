@@ -126,7 +126,9 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
                         <br />
                         Valid for {TRIAL_EXPIRY_DAYS} days
                     </p>
-
+                    <p className="auth-modal-subtitle auth-modal-note">
+                        No password required. No marketing spam.
+                    </p>
                     {error && (
                         <div className="auth-modal-error" role="alert">
                             {error}
@@ -191,9 +193,9 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
 
                     <p className="auth-modal-terms">
                         By continuing, you agree to our{" "}
-                        <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+                        <a href="/legal/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a>
                         {" "}and{" "}
-                        <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+                        <a href="/legal/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
                     </p>
                 </div>
             </div>

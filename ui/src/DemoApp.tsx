@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { useAuth } from "./hooks/useAuth.tsx";
 import { UserMenu } from "./components/UserMenu";
+import { AuthModal } from "./components/AuthModal";
 import { WaitlistModal } from "./components/WaitlistModal";
 import type { WaitlistSource } from "./components/WaitingListForm";
 
@@ -53,6 +54,7 @@ export default function DemoApp() {
   const [progressMessageId, setProgressMessageId] = useState<string | null>(null);
   const [splitPct, setSplitPct] = useState(40);
   const timersRef = useRef<number[]>([]);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [showWaitlistModal, setShowWaitlistModal] = useState(false);
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("demo_menu");
 
@@ -78,6 +80,14 @@ export default function DemoApp() {
   const clearTimers = () => {
     timersRef.current.forEach((timer) => window.clearTimeout(timer));
     timersRef.current = [];
+  };
+
+  const handleStartTrial = () => {
+    if (isAuthenticated) {
+      navigate("/app");
+    } else {
+      setShowAuthModal(true);
+    }
   };
 
   const handleJoinWaitlist = (source: WaitlistSource) => {
@@ -254,6 +264,12 @@ export default function DemoApp() {
           <div className="status-pill">{status}</div>
           <button
             className="btn-primary-inline"
+            onClick={handleStartTrial}
+          >
+            Start Free Trial
+          </button>
+          <button
+            className="btn-primary-inline"
             onClick={() => handleJoinWaitlist("demo_menu")}
           >
             Join Waiting List
@@ -261,6 +277,11 @@ export default function DemoApp() {
           {isAuthenticated && <UserMenu />}
         </div>
       </header>
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onSuccess={() => navigate("/app")}
+      />
       <WaitlistModal
         isOpen={showWaitlistModal}
         onClose={() => setShowWaitlistModal(false)}
