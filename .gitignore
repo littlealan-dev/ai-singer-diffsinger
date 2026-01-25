@@ -10,6 +10,14 @@ venv/
 # MacOS
 .DS_Store
 
+# Firebase/local debug
+.firebase/
+firebase-debug.log
+firestore-debug.log
+
+# Local artifacts
+pricing_model.csv
+
 # Media & Models
 *.wav
 *.mp3
