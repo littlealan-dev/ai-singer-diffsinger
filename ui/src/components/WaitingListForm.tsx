@@ -13,7 +13,7 @@ export type WaitlistSource =
   | "trial_expired";
 
 const CONSENT_TEXT =
-  "I agree to receive product updates, marketing emails, and announcements about SightSinger.ai paid plans. I can unsubscribe at any time.";
+  "I agree to receive product updates, marketing emails, and announcements about SightSinger.app paid plans. I can unsubscribe at any time.";
 
 interface WaitingListFormProps {
   source: WaitlistSource;

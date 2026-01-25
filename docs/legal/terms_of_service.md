@@ -48,7 +48,7 @@ We may update these Terms from time to time. The "Last updated" date indicates t
 These Terms are governed by the laws of England and Wales, and you agree to the exclusive jurisdiction of the courts of England and Wales, unless mandatory local law provides otherwise.
 
 ## 14. Contact
-If you have questions about these Terms, contact us at support@sightsinger.ai.
+If you have questions about these Terms, contact us at support@sightsinger.app.
 
 ---
 

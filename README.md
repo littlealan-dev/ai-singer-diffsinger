@@ -108,4 +108,4 @@ End-to-end synthesis:
 
 ## License
 
-MIT. See `LICENSE`.
+PolyForm Noncommercial License 1.0.0. See `LICENSE`.

@@ -445,7 +445,7 @@ export default function MainApp() {
         <div className="brand" onClick={() => navigate("/")} style={{ cursor: 'pointer' }}>
           <Sparkles className="brand-icon" />
           <div>
-            <h1>SightSinger.ai</h1>
+            <h1>SightSinger.app</h1>
             <p>{headerSubtitle}</p>
           </div>
         </div>

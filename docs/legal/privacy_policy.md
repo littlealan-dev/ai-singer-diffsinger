@@ -60,7 +60,7 @@ The Service is not intended for children under the minimum age required by law. 
 We may update this policy from time to time. The "Last updated" date indicates the latest revision.
 
 ## 13. Contact
-For privacy requests or questions, contact us at privacy@sightsinger.ai.
+For privacy requests or questions, contact us at privacy@sightsinger.app.
 
 ---
 

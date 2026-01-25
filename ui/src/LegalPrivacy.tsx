@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import "./LegalPage.css";
 
+const APP_DOMAIN = "sightsinger.app";
+const APP_BRAND_DOMAIN = "SightSinger.app";
+const PRIVACY_EMAIL = `privacy@${APP_DOMAIN}`;
+
 export default function LegalPrivacy() {
   useEffect(() => {
     document.body.classList.add("legal-active");
@@ -15,14 +19,16 @@ export default function LegalPrivacy() {
       <p className="legal-updated">Last updated: 2026-01-23</p>
 
       <p>
-        This Privacy Policy explains how SightSinger.ai ("we", "us", "our")
-        collects, uses, and protects personal data when you use SightSinger.ai
+        This Privacy Policy explains how {APP_BRAND_DOMAIN} ("we", "us", "our")
+        collects, uses, and protects personal data when you use {APP_BRAND_DOMAIN}
         (the "Service"). We comply with the UK GDPR and the EU GDPR where
         applicable.
       </p>
 
       <h2>1. Controller</h2>
-      <p>SightSinger.ai is the data controller for personal data processed through the Service.</p>
+      <p>
+        {APP_BRAND_DOMAIN} is the data controller for personal data processed through the Service.
+      </p>
 
       <h2>2. Personal Data We Collect</h2>
       <ul>
@@ -107,7 +113,7 @@ export default function LegalPrivacy() {
       </p>
 
       <h2>13. Contact</h2>
-      <p>For privacy requests or questions, contact privacy@sightsinger.ai.</p>
+      <p>For privacy requests or questions, contact {PRIVACY_EMAIL}.</p>
 
       <p className="legal-disclaimer">
         This document is provided for general informational purposes and does

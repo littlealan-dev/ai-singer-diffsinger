@@ -52,7 +52,7 @@ const HeroSection = ({ onStartTrial }: HeroSectionProps) => {
                         "Drop me the score. Say a few words. I'll sing it for you."
                     </h1>
                     <p className="hero-subtitle hero-subtitle-wide">
-                        AI sight-singing from MusicXML, via chat. No DAW required.
+                        AI sight-singing from MusicXML, via chat. No MIDI editing required.
                     </p>
                 </div>
             </div>
@@ -68,7 +68,9 @@ const HeroSection = ({ onStartTrial }: HeroSectionProps) => {
                         className="btn-secondary"
                         onClick={() => navigate("/demo")}
                     >
-                        Try Interactive Demo <ArrowRight size={20} />
+                        <span className="label-long">Try Interactive Demo</span>
+                        <span className="label-short">Try the Demo</span>
+                        <ArrowRight size={20} />
                     </button>
                 </div>
             </div>
@@ -90,7 +92,7 @@ export default function LandingPage() {
         { id: "top", label: "Top" },
         { id: "what-it-does", label: "What It Does" },
         { id: "who-for", label: "Who It’s For / Not For" },
-        { id: "why", label: "Why SightSinger.ai" },
+        { id: "why", label: "Why SightSinger.app" },
         { id: "how-it-works", label: "How It Works" },
         { id: "ai-voices", label: "AI Voices" },
         { id: "pricing", label: "Pricing" },
@@ -181,7 +183,7 @@ export default function LandingPage() {
                 <div className="nav-left">
                     <div className="brand" onClick={scrollToTop} style={{ cursor: 'pointer' }}>
                         <Sparkles className="brand-icon" />
-                        <span>SightSinger.ai</span>
+                        <span className="brand-name">SightSinger.app</span>
                     </div>
                     <div className="nav-shortcuts">
                         <button type="button" onClick={() => scrollToSection("what-it-does")}>
@@ -196,7 +198,7 @@ export default function LandingPage() {
                     </div>
                 </div>
                 <div className="nav-links">
-                    <button className="btn-nav-secondary btn-nav-compact" onClick={() => navigate("/demo")}>
+                    <button className="btn-nav-secondary btn-nav-compact btn-nav-bold" onClick={() => navigate("/demo")}>
                         <span className="label-long">Try the Demo</span>
                         <span className="label-short">Demo</span>
                     </button>
@@ -230,11 +232,19 @@ export default function LandingPage() {
             >
                 <h2 className="section-title">What it does</h2>
                 <p className="section-subtitle">Turn your MusicXML score into a singing demo in minutes.</p>
+                <div className="what-it-does-cta">
+                    <button
+                        className="btn-primary"
+                        onClick={() => navigate("/demo")}
+                    >
+                        Try Interactive Demo <ArrowRight size={18} />
+                    </button>
+                </div>
                 <div className="what-it-does-layout">
                     <div className="what-it-does-media">
                         <img
                             src="/landing/sightsinger_screenshot.png"
-                            alt="SightSinger.ai studio preview"
+                            alt="SightSinger.app studio preview"
                             className="what-it-does-image"
                             loading="lazy"
                         />
@@ -259,7 +269,7 @@ export default function LandingPage() {
             </section>
 
             <section className="landing-section" id="who-for">
-                <h2 className="section-title">Who is SightSinger.ai for?</h2>
+                <h2 className="section-title">Who is SightSinger.app for?</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
                         <h3>Indie Songwriters</h3>
@@ -285,7 +295,7 @@ export default function LandingPage() {
             </section>
 
             <section className="landing-section alt-bg" id="not-for">
-                <h2 className="section-title">SightSinger.ai is <i>NOT</i>...</h2>
+                <h2 className="section-title">SightSinger.app is <i>NOT</i>...</h2>
                 <div className="use-cases-grid">
                     <div className="use-case-card">
                         <h3>A DAW replacement</h3>
@@ -307,7 +317,7 @@ export default function LandingPage() {
             </section>
 
             <section className="landing-section" id="why">
-                <h2 className="section-title">Why SightSinger.ai?</h2>
+                <h2 className="section-title">Why SightSinger.app?</h2>
                 <p className="section-subtitle">Speak music, not MIDI.</p>
 
                 <div className="comparison-container">
@@ -315,7 +325,7 @@ export default function LandingPage() {
                         <thead>
                             <tr>
                                 <th>Feature</th>
-                                <th className="highlight">SightSinger.ai</th>
+                                <th className="highlight">SightSinger.app</th>
                                 <th>Professional DAW (Digital Audio Workstation)</th>
                             </tr>
                         </thead>
@@ -365,7 +375,7 @@ export default function LandingPage() {
                         <div className="timeline-step">03</div>
                         <div className="timeline-content">
                             <h3>Generate the singing voice</h3>
-                            <p>SightSinger.ai runs a custom singing synthesis pipeline to render a realistic vocal demo directly from the score. <br />Voicebanks are DiffSinger-compatible OpenUtau ONNX models, so adding new voices is straightforward.</p>
+                            <p>SightSinger.app runs a custom singing synthesis pipeline to render a realistic vocal demo directly from the score. <br />Voicebanks are DiffSinger-compatible OpenUtau ONNX models, so adding new voices is straightforward.</p>
                         </div>
                     </div>
                     <div className="timeline-row">
@@ -460,7 +470,7 @@ export default function LandingPage() {
                         {
                             key: "alternatives",
                             q: "Why not use ACE Studio, Cantai, or OpenUtau?",
-                            a: "Those tools are built for detailed vocal production and require note-by-note or phoneme editing. SightSinger.ai generates quick song previews using natural language directions, without DAW or MIDI knowledge.",
+                            a: "Those tools are built for detailed vocal production and require note-by-note or phoneme editing. SightSinger.app generates quick song previews using natural language directions, without DAW or MIDI knowledge.",
                         },
                         {
                             key: "formats",
@@ -484,7 +494,7 @@ export default function LandingPage() {
                         },
                         {
                             key: "royalty",
-                            q: "Are the AI voices in SightSinger.ai royalty-free for music production?",
+                            q: "Are the AI voices in SightSinger.app royalty-free for music production?",
                             a: "Not yet. The current voicebanks are for demo use only and not cleared for commercial release. Royalty-free voices will be introduced once paid plans launch.",
                         },
                     ].map((item, index) => {
@@ -569,7 +579,7 @@ export default function LandingPage() {
                 <div className="footer-content">
                     <div className="footer-brand">
                         <Sparkles size={24} />
-                        <span>SightSinger.ai</span>
+                        <span>SightSinger.app</span>
                     </div>
                     <div className="footer-links">
                         <a href="https://github.com/littlealan-dev/ai-singer-diffsinger" target="_blank" rel="noreferrer">GitHub</a>

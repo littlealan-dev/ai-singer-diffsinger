@@ -897,9 +897,13 @@ def synthesize(
         - sample_rate: Sample rate
         - duration_seconds: Audio duration
     """
+    allowed_messages = {"Taking a breath for the take..."}
+
     def _notify(step: str, message: str, progress: float) -> None:
         # Best-effort progress callbacks.
         if not progress_callback:
+            return
+        if message not in allowed_messages:
             return
         try:
             progress_callback(step, message, progress)
@@ -952,7 +956,6 @@ def synthesize(
 
     start_total = time.monotonic()
 
-    _notify("align", "Reading the lyrics and score...", 0.1)
     start = time.monotonic()
     alignment = align_phonemes_to_notes(
         score,
@@ -964,7 +967,6 @@ def synthesize(
     _log_step("align", start)
     
     # Step 3: Predict durations.
-    _notify("durations", "Locking in the tempo...", 0.3)
     start = time.monotonic()
     dur_result = predict_durations(
         phoneme_ids=alignment["phoneme_ids"],
@@ -993,7 +995,6 @@ def synthesize(
         )
     
     # Step 4: Predict pitch.
-    _notify("pitch", "Finding the melody line...", 0.5)
     start = time.monotonic()
     pitch_result = predict_pitch(
         phoneme_ids=phoneme_ids,
@@ -1029,7 +1030,6 @@ def synthesize(
             )
     
     # Step 5: Predict variance.
-    _notify("variance", "Planning the phrasing...", 0.65)
     start = time.monotonic()
     var_result = predict_variance(
         phoneme_ids=phoneme_ids,

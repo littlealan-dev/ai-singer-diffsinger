@@ -33,9 +33,8 @@ const DEMO_PROMPTS = [
 ];
 
 const DEMO_STEPS = [
-  "Got it, getting ready to sing...",
   "Warming up the voice...",
-  "Capturing the take...",
+  "Taking a breath for the take...",
 ];
 
 export default function DemoApp() {
@@ -256,7 +255,7 @@ export default function DemoApp() {
         <div className="brand" onClick={() => navigate("/")} style={{ cursor: "pointer" }}>
           <Sparkles className="brand-icon" />
           <div>
-            <h1>SightSinger.ai</h1>
+            <h1>SightSinger.app</h1>
             <p>Interactive Demo</p>
           </div>
         </div>

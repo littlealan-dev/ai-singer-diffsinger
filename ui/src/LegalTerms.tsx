@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import "./LegalPage.css";
 
+const APP_DOMAIN = "sightsinger.app";
+const APP_BRAND_DOMAIN = "SightSinger.app";
+const SUPPORT_EMAIL = `support@${APP_DOMAIN}`;
+
 export default function LegalTerms() {
   useEffect(() => {
     document.body.classList.add("legal-active");
@@ -16,7 +20,7 @@ export default function LegalTerms() {
 
       <p>
         These Terms of Service ("Terms") govern your access to and use of
-        SightSinger.ai (the "Service"). By accessing or using the Service, you
+        {APP_BRAND_DOMAIN} (the "Service"). By accessing or using the Service, you
         agree to these Terms.
       </p>
 
@@ -118,7 +122,7 @@ export default function LegalTerms() {
       </p>
 
       <h2>14. Contact</h2>
-      <p>If you have questions about these Terms, contact support@sightsinger.ai.</p>
+      <p>If you have questions about these Terms, contact {SUPPORT_EMAIL}.</p>
 
       <p className="legal-disclaimer">
         This document is provided for general informational purposes and does

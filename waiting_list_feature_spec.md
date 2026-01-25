@@ -288,7 +288,7 @@ Pseudocode (optional Brevo webhook):
 |----------|-------------|---------|
 | `BREVO_WAITLIST_LIST_ID` | Brevo contact list ID | `3` |
 | `BREVO_DOI_TEMPLATE_ID` | Double opt-in email template ID | `1` |
-| `BREVO_DOI_REDIRECT_URL` | URL after DOI confirmation | `https://sightsinger.ai/welcome` |
+| `BREVO_DOI_REDIRECT_URL` | URL after DOI confirmation | `https://sightsinger.app/welcome` |
 | `GCP_PROJECT_ID` | For Secret Manager | `sightsinger-prod` |
 
 ### Secrets (GCP Secret Manager)
