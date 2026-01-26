@@ -6,10 +6,12 @@ import { ProtectedRoute } from "./components/ProtectedRoute";
 import WaitlistConfirmed from "./WaitlistConfirmed";
 import LegalTerms from "./LegalTerms";
 import LegalPrivacy from "./LegalPrivacy";
+import CookieBanner from "./components/CookieBanner";
 
 export default function App() {
   return (
     <BrowserRouter>
+      <CookieBanner />
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route

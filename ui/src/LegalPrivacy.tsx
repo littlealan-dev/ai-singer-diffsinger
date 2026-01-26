@@ -16,7 +16,7 @@ export default function LegalPrivacy() {
   return (
     <main className="legal-page">
       <h1>Privacy Policy</h1>
-      <p className="legal-updated">Last updated: 2026-01-23</p>
+      <p className="legal-updated">Last updated: 2026-01-26</p>
 
       <p>
         This Privacy Policy explains how {APP_BRAND_DOMAIN} ("we", "us", "our")
@@ -96,8 +96,9 @@ export default function LegalPrivacy() {
       <h2>10. Cookies and Similar Technologies</h2>
       <p>
         We use essential cookies and local storage for authentication and session
-        management. We may use additional analytics tools in the future and will
-        update this policy accordingly.
+        management. We also use analytics cookies to understand how the Service
+        is used. Where required by law (including EU/UK), we will only enable
+        analytics cookies after you provide consent via our cookie banner.
       </p>
 
       <h2>11. Children's Privacy</h2>

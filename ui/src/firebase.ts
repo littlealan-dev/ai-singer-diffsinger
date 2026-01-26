@@ -1,4 +1,5 @@
 import { initializeApp } from "firebase/app";
+import { getAnalytics, setDefaultEventParameters, type Analytics } from "firebase/analytics";
 import {
   initializeAppCheck,
   ReCaptchaV3Provider,
@@ -34,6 +35,7 @@ const firebaseConfig = {
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET as string,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID as string,
   appId: import.meta.env.VITE_FIREBASE_APP_ID as string,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID as string | undefined,
 };
 
 const requiredConfigKeys = Object.entries(firebaseConfig).filter(
@@ -43,13 +45,13 @@ let app: any = null;
 let auth: Auth | null = null;
 let db: any = null;
 let appCheckEnabled = false;
+let analytics: Analytics | null = null;
 
 try {
   if (requiredConfigKeys.length === 0) {
     app = initializeApp(firebaseConfig);
     auth = getAuth(app);
     db = getFirestore(app);
-
     if (import.meta.env.VITE_APP_ENV === "dev") {
       const emulatorOrigin = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:5173";
       connectAuthEmulator(auth, emulatorOrigin, { disableWarnings: true });
@@ -78,6 +80,18 @@ if (app && appCheckSiteKey && !isDev) {
 }
 
 export { auth, app, db };
+
+export function initAnalytics(): Analytics | null {
+  if (!app || !firebaseConfig.measurementId) return null;
+  if (typeof window === "undefined") return null;
+  if (!analytics) {
+    analytics = getAnalytics(app);
+    if (import.meta.env.VITE_APP_ENV) {
+      setDefaultEventParameters(analytics, { env: import.meta.env.VITE_APP_ENV });
+    }
+  }
+  return analytics;
+}
 
 export async function getAppCheckToken(): Promise<string | null> {
   if (!appCheckEnabled || !appCheckInstance) return null;
