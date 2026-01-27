@@ -453,12 +453,12 @@ export default function MainApp() {
           <CreditsHeader />
           <div className="status-pill">{status ?? "Ready"}</div>
           <button
-            className="btn-primary-inline"
+            className="btn-primary-inline app-join-button"
             onClick={() => handleJoinWaitlist("studio_menu")}
           >
             Join Waiting List
           </button>
-          <UserMenu />
+          <UserMenu onJoinWaitlist={() => handleJoinWaitlist("studio_menu")} />
         </div>
       </header>
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Sparkles, UploadCloud, Minus, Plus, Info } from "lucide-react";
+import { Sparkles, UploadCloud, Minus, Plus, Info, User, ChevronDown } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { useAuth } from "./hooks/useAuth.tsx";
@@ -40,6 +40,8 @@ const DEMO_STEPS = [
 export default function DemoApp() {
   const navigate = useNavigate();
   const { isAuthenticated } = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [status, setStatus] = useState<string>("Demo mode");
   const [scoreLoaded, setScoreLoaded] = useState(false);
@@ -249,6 +251,24 @@ export default function DemoApp() {
     window.addEventListener("pointerup", handleUp);
   };
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClick = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
   return (
     <div className="app-shell demo-app">
       <header className="app-header">
@@ -261,19 +281,57 @@ export default function DemoApp() {
         </div>
         <div className="header-actions">
           <div className="status-pill">{status}</div>
-          <button
-            className="btn-primary-inline"
-            onClick={handleStartTrial}
-          >
-            Start Free Trial
-          </button>
-          <button
-            className="btn-primary-inline"
-            onClick={() => handleJoinWaitlist("demo_menu")}
-          >
-            Join Waiting List
-          </button>
-          {isAuthenticated && <UserMenu />}
+          {isAuthenticated ? (
+            <>
+              <button
+                className="btn-primary-inline demo-join-button"
+                onClick={() => handleJoinWaitlist("demo_menu")}
+              >
+                Join Waiting List
+              </button>
+              <UserMenu onJoinWaitlist={() => handleJoinWaitlist("demo_menu")} />
+            </>
+          ) : (
+            <div className="user-menu" ref={menuRef}>
+              <button
+                className="user-menu-button"
+                type="button"
+                onClick={() => setMenuOpen((prev) => !prev)}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label="Demo menu"
+              >
+                <span className="user-menu-avatar">
+                  <User size={16} />
+                </span>
+                <ChevronDown size={16} />
+              </button>
+              {menuOpen && (
+                <div className="user-menu-dropdown" role="menu">
+                  <button
+                    className="user-menu-item"
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      handleStartTrial();
+                    }}
+                  >
+                    Start Free Trial
+                  </button>
+                  <button
+                    className="user-menu-item"
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      handleJoinWaitlist("demo_menu");
+                    }}
+                  >
+                    Join Waiting List
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </header>
       <AuthModal

@@ -12,6 +12,23 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "redirects": [
+      {
+        "source": "/r/choir",
+        "destination": "/?utm_source=reddit&utm_medium=social&utm_campaign=community_launch&utm_content=r_choir&utm_id=community_launch&utm_source_platform=reddit",
+        "type": 302
+      },
+      {
+        "source": "/r/singing",
+        "destination": "/?utm_source=reddit&utm_medium=social&utm_campaign=community_launch&utm_content=r_singing&utm_id=community_launch&utm_source_platform=reddit",
+        "type": 302
+      },
+      {
+        "source": "/li/post",
+        "destination": "/?utm_source=linkedin&utm_medium=social&utm_campaign=community_launch&utm_content=post&utm_id=community_launch&utm_source_platform=linkedin",
+        "type": 302
+      }
+    ],
     "rewrites": [
       {
         "source": "**",

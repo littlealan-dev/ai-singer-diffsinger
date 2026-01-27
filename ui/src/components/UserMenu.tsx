@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, LogOut } from "lucide-react";
+import { ChevronDown, LogOut, Users } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.tsx";
 import { logOut } from "../firebase";
 
@@ -10,7 +10,11 @@ const getInitials = (name: string) => {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase() || "?";
 };
 
-export function UserMenu() {
+type UserMenuProps = {
+  onJoinWaitlist?: () => void;
+};
+
+export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
   const { user, isAuthenticated } = useAuth();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -64,6 +68,19 @@ export function UserMenu() {
             <div className="user-menu-name">{displayName}</div>
             {email && <div className="user-menu-email">{email}</div>}
           </div>
+          {onJoinWaitlist && (
+            <button
+              className="user-menu-item user-menu-item-mobile-only"
+              type="button"
+              onClick={() => {
+                onJoinWaitlist();
+                setOpen(false);
+              }}
+            >
+              <Users size={16} />
+              Join Waiting List
+            </button>
+          )}
           <button className="user-menu-item" type="button" onClick={() => logOut()}>
             <LogOut size={16} />
             Sign out

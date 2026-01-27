@@ -1427,6 +1427,31 @@
     padding: 1rem 1.25rem;
   }
 
+  .nav-left {
+    gap: 0.4rem;
+  }
+
+  .landing-nav .brand {
+    gap: 0.4rem;
+  }
+
+  .landing-nav .brand-icon {
+    width: 32px;
+    height: 32px;
+    padding: 7px;
+  }
+
+  .nav-links {
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+  }
+
+  .btn-nav-primary,
+  .btn-nav-secondary {
+    font-size: 0.78rem;
+    padding: 0.45rem 0.65rem;
+  }
+
   .landing-nav .brand-name {
     display: none;
   }

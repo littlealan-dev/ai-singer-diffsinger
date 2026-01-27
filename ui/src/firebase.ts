@@ -1,5 +1,10 @@
 import { initializeApp } from "firebase/app";
-import { getAnalytics, setDefaultEventParameters, type Analytics } from "firebase/analytics";
+import {
+  getAnalytics,
+  setDefaultEventParameters,
+  logEvent,
+  type Analytics,
+} from "firebase/analytics";
 import {
   initializeAppCheck,
   ReCaptchaV3Provider,
@@ -91,6 +96,25 @@ export function initAnalytics(): Analytics | null {
     }
   }
   return analytics;
+}
+
+export function logPageView(instance?: Analytics | null) {
+  const active = instance ?? analytics ?? initAnalytics();
+  if (!active || typeof window === "undefined") return;
+  try {
+    const key = "ga_page_view_logged";
+    if (window.sessionStorage.getItem(key)) return;
+    window.sessionStorage.setItem(key, "1");
+  } catch {
+    // Ignore storage errors and proceed.
+  }
+  const env = import.meta.env.VITE_APP_ENV as string | undefined;
+  logEvent(active, "page_view", {
+    page_location: window.location.href,
+    page_path: window.location.pathname + window.location.search,
+    page_title: document.title,
+    ...(env ? { env } : {}),
+  });
 }
 
 export async function getAppCheckToken(): Promise<string | null> {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { initAnalytics } from "../firebase";
+import { initAnalytics, logPageView } from "../firebase";
 
 type ConsentState = "unknown" | "granted" | "denied";
 
@@ -27,7 +27,8 @@ export default function CookieBanner() {
   const handleAccept = () => {
     window.localStorage.setItem(CONSENT_KEY, "granted");
     setConsent("granted");
-    initAnalytics();
+    const analytics = initAnalytics();
+    logPageView(analytics);
   };
 
   const handleDecline = () => {
