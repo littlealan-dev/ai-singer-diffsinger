@@ -25,18 +25,25 @@ export function useCredits(): UserCredits {
         isExpired: false,
     });
     const [loading, setLoading] = useState(true);
+    const [ensureDone, setEnsureDone] = useState(false);
+    const [hasSnapshot, setHasSnapshot] = useState(false);
 
     useEffect(() => {
         if (!user) {
             setLoading(false);
             return;
         }
+        setLoading(true);
+        setEnsureDone(false);
+        setHasSnapshot(false);
 
         const ensureCreditsOnce = async () => {
             try {
                 await ensureCredits();
             } catch (error) {
                 console.error("Error ensuring credits:", error);
+            } finally {
+                setEnsureDone(true);
             }
         };
 
@@ -65,14 +72,21 @@ export function useCredits(): UserCredits {
                     isExpired,
                 });
             }
-            setLoading(false);
+            setHasSnapshot(true);
         }, (error) => {
             console.error("Error listening to credits:", error);
+            setHasSnapshot(true);
             setLoading(false);
         });
 
         return () => unsubscribe();
     }, [user]);
+
+    useEffect(() => {
+        if (ensureDone && hasSnapshot) {
+            setLoading(false);
+        }
+    }, [ensureDone, hasSnapshot]);
 
     return { ...credits, loading };
 }

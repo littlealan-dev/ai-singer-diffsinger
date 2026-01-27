@@ -1,8 +1,8 @@
 import { initializeApp } from "firebase/app";
 import {
   getAnalytics,
-  setDefaultEventParameters,
   logEvent,
+  setUserProperties,
   type Analytics,
 } from "firebase/analytics";
 import {
@@ -92,7 +92,7 @@ export function initAnalytics(): Analytics | null {
   if (!analytics) {
     analytics = getAnalytics(app);
     if (import.meta.env.VITE_APP_ENV) {
-      setDefaultEventParameters(analytics, { env: import.meta.env.VITE_APP_ENV });
+      setUserProperties(analytics, { env: import.meta.env.VITE_APP_ENV });
     }
   }
   return analytics;
@@ -101,6 +101,7 @@ export function initAnalytics(): Analytics | null {
 export function logPageView(instance?: Analytics | null) {
   const active = instance ?? analytics ?? initAnalytics();
   if (!active || typeof window === "undefined") return;
+  if (!hasUtmParams(window.location.search)) return;
   try {
     const key = "ga_page_view_logged";
     if (window.sessionStorage.getItem(key)) return;
@@ -115,6 +116,14 @@ export function logPageView(instance?: Analytics | null) {
     page_title: document.title,
     ...(env ? { env } : {}),
   });
+}
+
+function hasUtmParams(search: string): boolean {
+  if (!search) return false;
+  const params = new URLSearchParams(search);
+  return ["utm_source", "utm_medium", "utm_campaign", "utm_id", "utm_source_platform"].some(
+    (key) => params.has(key)
+  );
 }
 
 export async function getAppCheckToken(): Promise<string | null> {

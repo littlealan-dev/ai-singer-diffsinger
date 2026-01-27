@@ -28,7 +28,9 @@ export default function CookieBanner() {
     window.localStorage.setItem(CONSENT_KEY, "granted");
     setConsent("granted");
     const analytics = initAnalytics();
-    logPageView(analytics);
+    Promise.resolve().then(() => {
+      logPageView(analytics);
+    });
   };
 
   const handleDecline = () => {
