@@ -565,7 +565,7 @@ export default function LandingPage() {
                             </a>
                             <a
                                 className="bio-social"
-                                href="mailto:littlealan@gmail.com"
+                                href="mailto:hello@sightsinger.app"
                                 aria-label="Email"
                             >
                                 <Mail size={18} />
