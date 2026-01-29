@@ -30,6 +30,7 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
   const isNameLocked = Boolean(user?.displayName);
   const [email, setEmail] = useState(initialEmail);
   const [firstName, setFirstName] = useState(initialFirstName);
+  const [feedback, setFeedback] = useState("");
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
@@ -56,6 +57,7 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
       const result = await subscribeToWaitlist({
         email: email.trim(),
         first_name: firstName.trim() || undefined,
+        feedback: feedback.trim() || undefined,
         gdpr_consent: consent,
         consent_text: CONSENT_TEXT,
         source,
@@ -101,6 +103,17 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
           placeholder="First name"
           readOnly={isNameLocked}
         />
+      </label>
+      <label className="waitlist-field">
+        Feedback (optional)
+        <textarea
+          value={feedback}
+          onChange={(event) => setFeedback(event.target.value)}
+          placeholder="What would make SightSinger.app more useful for you?"
+          maxLength={4000}
+          rows={4}
+        />
+        <span className="waitlist-hint">{feedback.length}/4000</span>
       </label>
       <label className="waitlist-consent">
         <input

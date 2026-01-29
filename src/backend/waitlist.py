@@ -55,6 +55,7 @@ async def subscribe_to_waitlist(
     *,
     email: str,
     first_name: Optional[str],
+    feedback: Optional[str],
     gdpr_consent: bool,
     consent_text: str,
     source: str,
@@ -75,6 +76,7 @@ async def subscribe_to_waitlist(
         "redirectionUrl": settings.brevo_doi_redirect_url,
         "attributes": {
             "FIRSTNAME": first_name or "",
+            "FEEDBACK": feedback or "",
             "SIGNUP_SOURCE": source,
             "GDPR_CONSENT": True,
             "GDPR_CONSENT_TEXT": consent_text,

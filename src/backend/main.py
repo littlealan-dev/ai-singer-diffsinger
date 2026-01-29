@@ -48,6 +48,7 @@ class WaitlistSubscribeRequest(BaseModel):
     """Request payload for waitlist subscriptions."""
     email: EmailStr
     first_name: str | None = None
+    feedback: str | None = None
     gdpr_consent: bool
     consent_text: str
     source: str
@@ -340,6 +341,7 @@ def create_app() -> FastAPI:
             settings,
             email=request_body.email,
             first_name=request_body.first_name,
+            feedback=request_body.feedback,
             gdpr_consent=request_body.gdpr_consent,
             consent_text=request_body.consent_text,
             source=request_body.source,

@@ -32,11 +32,27 @@
   color: var(--text-strong, #f4f4f7);
 }
 
+.waitlist-field textarea {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-strong, #f4f4f7);
+  resize: vertical;
+  min-height: 90px;
+}
+
 .waitlist-field input[readonly] {
   border-color: rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.02);
   color: rgba(154, 160, 166, 0.85);
   cursor: not-allowed;
+}
+
+.waitlist-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted, #8a8f98);
+  text-align: right;
 }
 
 .waitlist-consent {

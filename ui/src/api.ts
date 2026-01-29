@@ -53,6 +53,7 @@ export type ProgressResponse = {
 export type WaitlistSubscribeRequest = {
   email: string;
   first_name?: string;
+  feedback?: string;
   gdpr_consent: boolean;
   consent_text: string;
   source: string;
