@@ -24,6 +24,11 @@
         "type": 302
       },
       {
+        "source": "/r/musescore",
+        "destination": "/?utm_source=reddit&utm_medium=social&utm_campaign=community_launch&utm_content=r_musescore&utm_id=community_launch&utm_source_platform=reddit",
+        "type": 302
+      },
+      {
         "source": "/li/post",
         "destination": "/?utm_source=linkedin&utm_medium=social&utm_campaign=community_launch&utm_content=post&utm_id=community_launch&utm_source_platform=linkedin",
         "type": 302
