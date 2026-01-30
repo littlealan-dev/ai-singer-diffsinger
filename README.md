@@ -16,7 +16,7 @@ AI sight-singing from MusicXML, via AI chat. No DAW required.
 3. AI interprets your request and calls the API through MCP server to synthesize the audio
 4. Chat to iterate quickly, render new takes, and share the demo with others
 
-## SightSinger.ai is NOT
+## SightSinger.app is NOT
 
 - A DAW replacement
 - A human vocalist
