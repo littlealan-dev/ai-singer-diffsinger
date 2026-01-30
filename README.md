@@ -26,7 +26,6 @@ AI sight-singing from MusicXML, via AI chat. No DAW required.
 ## What’s in this repo
 
 ```
-marketing/               # Next.js marketing site (App Router)
 ui/                      # React/Vite app frontend
 src/backend/             # FastAPI backend + orchestration
 src/api/                 # DiffSinger pipeline (parse/synthesize)
@@ -49,13 +48,6 @@ docker run --rm -p 8080:8080 \
   sightsinger-backend
 ```
 
-Marketing (Next.js):
-```bash
-cd marketing
-npm install
-npm run dev
-```
-
 App frontend (Vite):
 ```bash
 cd ui
@@ -64,7 +56,6 @@ npm run dev
 ```
 
 URLs:
-- Marketing: `http://localhost:3000/`
 - App: `http://localhost:5173/`
 - App demo: `http://localhost:5173/demo`
 - Backend: `http://localhost:8080`
