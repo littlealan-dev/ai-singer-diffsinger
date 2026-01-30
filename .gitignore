@@ -49,6 +49,7 @@ ui/dist/
 ui/.vite/
 ui/.env*
 ui/*.log
+marketing/
 
 # Artifacts
 outputs/

@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://sightsinger.app/</loc>
+    <loc>https://app.sightsinger.app/</loc>
   </url>
   <url>
-    <loc>https://sightsinger.app/demo</loc>
+    <loc>https://app.sightsinger.app/demo</loc>
   </url>
   <url>
-    <loc>https://sightsinger.app/app</loc>
+    <loc>https://app.sightsinger.app/app</loc>
   </url>
   <url>
-    <loc>https://sightsinger.app/legal/terms</loc>
+    <loc>https://app.sightsinger.app/legal/terms</loc>
   </url>
   <url>
-    <loc>https://sightsinger.app/legal/privacy</loc>
+    <loc>https://app.sightsinger.app/legal/privacy</loc>
   </url>
 </urlset>

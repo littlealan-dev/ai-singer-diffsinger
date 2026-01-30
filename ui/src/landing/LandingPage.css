@@ -15,6 +15,34 @@
   font-family: "Space Grotesk", sans-serif;
 }
 
+.landing-auth-only {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.landing-auth-card {
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+  background: rgba(12, 12, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  padding: 2.5rem 2rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.landing-auth-card h1 {
+  margin: 0 0 0.75rem;
+  font-size: 2rem;
+}
+
+.landing-auth-card p {
+  margin: 0 0 1.5rem;
+  color: #94a3b8;
+}
+
 .landing-nav {
   display: flex;
   justify-content: space-between;
