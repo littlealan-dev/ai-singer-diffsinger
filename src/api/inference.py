@@ -597,6 +597,7 @@ def synthesize_mel(
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
+    velocity: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
     speaker_name: Optional[str] = None,
     device: str = "cpu",
@@ -632,6 +633,7 @@ def synthesize_mel(
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
+                    "velocity": velocity,
                     "language_ids": language_ids,
                     "speaker_name": speaker_name,
                     "device": device,
@@ -663,6 +665,8 @@ def synthesize_mel(
         tension = [0.0] * n_frames
     if voicing is None:
         voicing = [0.0] * n_frames
+    if velocity is None:
+        velocity = [1.0] * n_frames
     
     spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
     depth = float(config.get("max_depth", 1.0)) if config.get("use_variable_depth") else 1.0
@@ -677,7 +681,7 @@ def synthesize_mel(
         "voicing": np.array(voicing, dtype=np.float32)[None, :],
         "tension": np.array(tension, dtype=np.float32)[None, :],
         "gender": np.zeros((1, n_frames), dtype=np.float32),
-        "velocity": np.ones((1, n_frames), dtype=np.float32),
+        "velocity": np.array(velocity, dtype=np.float32)[None, :],
         "spk_embed": spk_embed_frames,
         "depth": np.array(depth, dtype=np.float32),
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
@@ -704,6 +708,7 @@ def synthesize_audio(
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
+    velocity: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
     vocoder_path: Optional[Union[str, Path]] = None,
     speaker_name: Optional[str] = None,
@@ -741,6 +746,7 @@ def synthesize_audio(
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
+                    "velocity": velocity,
                     "language_ids": language_ids,
                     "vocoder_path": str(vocoder_path) if vocoder_path else None,
                     "speaker_name": speaker_name,
@@ -757,6 +763,7 @@ def synthesize_audio(
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,
+        velocity=velocity,
         language_ids=language_ids,
         speaker_name=speaker_name,
         device=device,

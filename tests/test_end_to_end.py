@@ -17,7 +17,7 @@ class TestEndToEndAPI(unittest.TestCase):
         self.root_dir = Path(__file__).parent.parent
         self.voicebank_path = self.root_dir / "assets/voicebanks/Raine_Rena_2.01"
         self.voicebank_reizo_path = self.root_dir / "assets/voicebanks/Raine_Reizo_2.01"
-        self.score_path = self.root_dir / "assets/test_data/amazing-grace-satb-verse1.xml"
+        self.score_path = self.root_dir / "assets/test_data/amazing-grace.mxl"
         self.output_dir = self.root_dir / "tests/output"
         self.output_dir.mkdir(exist_ok=True)
         self.output_wav = self.output_dir / "api_output.wav"

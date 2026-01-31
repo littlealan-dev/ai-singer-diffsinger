@@ -3,6 +3,7 @@ from __future__ import annotations
 """Phonemization utilities for mapping lyrics to voicebank phonemes."""
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -92,6 +93,9 @@ class Phonemizer:
         self._dictionary = self._load_dictionary(self.dictionary_path)
         self._vowel_symbols, self._glide_symbols = self._load_symbol_types(self.dictionary_path)
         self._language_map = self._load_language_map(self.languages_path) if self.languages_path else {}
+        self._phoneme_meta = self._load_phoneme_metadata(
+            self.phonemes_path.with_name("phoneme_metadata.json")
+        )
         self._g2p: Optional[G2p] = None
 
     def phonemize_tokens(self, tokens: Sequence[str]) -> PhonemeResult:
@@ -118,6 +122,13 @@ class Phonemizer:
     def is_glide(self, phoneme: str) -> bool:
         """Return True if the phoneme is a glide/semivowel."""
         return phoneme in self._glide_symbols
+
+    def vowel_strength(self, phoneme: str) -> Optional[float]:
+        """Return optional vowel strength metadata for the phoneme."""
+        meta = self._phoneme_meta.get(phoneme)
+        if not meta:
+            return None
+        return meta.get("vowel_strength")
 
     def _phonemize_token(self, token: str) -> List[str]:
         """Phonemize a single token using dictionary or G2P."""
@@ -160,6 +171,16 @@ class Phonemizer:
                 )
             validated.append(phoneme)
         return validated
+
+    @staticmethod
+    def _load_phoneme_metadata(path: Path) -> Dict[str, Dict[str, float]]:
+        """Load optional phoneme metadata (e.g., vowel strength)."""
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            return {}
+        return data
 
     @staticmethod
     def _normalize_grapheme(value: str) -> str:

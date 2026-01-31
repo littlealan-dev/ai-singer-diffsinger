@@ -27,9 +27,6 @@ from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
 
-_REDUCED_VOWELS = {"ax", "ah", "uh", "ih", "er", "ix", "axr"}
-
-
 class TimeAxis:
     """Tempo-aware time axis for converting beats to milliseconds."""
     
@@ -219,10 +216,11 @@ def _trim_single_note_multisyllable(
         # Prefer the most stressed vowel if any are present.
         chosen = max(stress_candidates, key=lambda idx: _phoneme_stress(phonemes[idx]))
     else:
-        non_reduced = [
-            idx for idx in vowel_indices if _phoneme_base(phonemes[idx]) not in _REDUCED_VOWELS
-        ]
-        chosen = non_reduced[0] if non_reduced else vowel_indices[0]
+        strengths = []
+        for idx in vowel_indices:
+            strength = phonemizer.vowel_strength(phonemes[idx])
+            strengths.append((idx, 1.0 if strength is None else float(strength)))
+        chosen = max(strengths, key=lambda item: item[1])[0]
 
     # Trim between surrounding vowels to reduce to one syllable.
     prev_vowel = max([v for v in vowel_indices if v < chosen], default=-1)
@@ -328,6 +326,96 @@ def _adjust_durations_to_total(durations: List[int], target_total: int) -> List[
         else:
             idx -= 1
     return durations
+
+
+def _build_slur_velocity_envelope(
+    note_durations: List[int],
+    slur_groups: List[List[int]],
+    *,
+    reference_peak: float = 1.0,
+    attack_frames: int = 3,
+    baseline: float = 1.0,
+) -> List[float]:
+    """Build a per-frame velocity envelope that re-attacks slur notes.
+
+    Each note onset in the provided slur groups receives a short envelope that
+    peaks at reference_peak and decays to baseline over attack_frames. The
+    envelope never exceeds reference_peak.
+    """
+    if reference_peak < baseline:
+        raise ValueError("reference_peak must be >= baseline.")
+    if attack_frames < 1:
+        attack_frames = 1
+
+    total_frames = int(sum(note_durations))
+    envelope = np.full(total_frames, baseline, dtype=np.float32)
+
+    note_starts: List[int] = []
+    cursor = 0
+    for dur in note_durations:
+        note_starts.append(cursor)
+        cursor += int(dur)
+
+    for group in slur_groups:
+        for note_idx in group:
+            if note_idx < 0 or note_idx >= len(note_starts):
+                continue
+            start = note_starts[note_idx]
+            end = min(total_frames, start + attack_frames)
+            if end <= start:
+                continue
+            ramp = np.linspace(reference_peak, baseline, num=end - start, dtype=np.float32)
+            envelope[start:end] = np.minimum(envelope[start:end], ramp) if reference_peak == baseline else np.maximum(
+                envelope[start:end], ramp
+            )
+
+    return envelope.tolist()
+
+
+def _apply_coda_tail_durations(
+    durations: List[int],
+    coda_tails: List[Dict[str, int]],
+    *,
+    tail_frames: int = 3,
+) -> List[int]:
+    """Shorten vowel duration to reserve a brief coda tail without shifting timing."""
+    if not coda_tails or tail_frames <= 0:
+        return durations
+    new_durations = list(durations)
+    for tail in coda_tails:
+        vowel_idx = int(tail["vowel_idx"])
+        coda_start = int(tail["coda_start"])
+        coda_len = int(tail["coda_len"])
+        if coda_len <= 0:
+            continue
+        if vowel_idx < 0 or vowel_idx >= len(new_durations):
+            continue
+        if coda_start < 0 or coda_start + coda_len > len(new_durations):
+            continue
+
+        per_tail_frames = int(tail.get("tail_frames", tail_frames) or tail_frames)
+        orig_coda_total = sum(new_durations[coda_start:coda_start + coda_len])
+        desired = min(per_tail_frames, orig_coda_total)
+        if desired < coda_len:
+            desired = coda_len
+
+        delta = desired - orig_coda_total
+        if delta > 0:
+            max_steal = new_durations[vowel_idx] - 1
+            if max_steal <= 0:
+                continue
+            if delta > max_steal:
+                desired = orig_coda_total + max_steal
+                delta = max_steal
+            new_durations[vowel_idx] -= delta
+        elif delta < 0:
+            new_durations[vowel_idx] -= delta
+
+        for i in range(coda_len):
+            new_durations[coda_start + i] = 1
+        new_durations[coda_start + coda_len - 1] += desired - coda_len
+
+    return new_durations
 
 
 def _apply_articulation_gaps(
@@ -595,6 +683,29 @@ def _build_phoneme_groups(
                 else:
                     is_start[i] = True
 
+        is_slur_group = len(note_indices) > 1
+        slur_vowel_ph: Optional[str] = None
+        slur_coda_len = 0
+        slur_coda_tail_frames = 0
+        if is_slur_group and any(is_vowel):
+            last_note = notes_in_group[-1]
+            last_lyric = last_note.get("lyric")
+            last_is_slur = isinstance(last_lyric, str) and last_lyric.startswith("+")
+            last_is_extension = (
+                bool(last_note.get("lyric_is_extended"))
+                or last_note.get("tie_type") in ("stop", "continue")
+                or last_is_slur
+            )
+            vowel_idx = next(idx for idx, v in enumerate(is_vowel) if v)
+            slur_vowel_ph = phonemes[vowel_idx]
+            if last_is_extension and vowel_idx < len(phonemes) - 1:
+                slur_coda_len = len(phonemes) - vowel_idx - 1
+                last_note_idx = note_indices[-1]
+                note_start = start_frames[last_note_idx]
+                note_end = end_frames[last_note_idx]
+                note_frames = max(1, note_end - note_start)
+                slur_coda_tail_frames = min(3, max(1, note_frames // 8))
+
         non_extension_indices = [note_indices[0]]
         word_entries: List[Dict[str, Any]] = [
             {
@@ -622,6 +733,16 @@ def _build_phoneme_groups(
             word_entries[-1]["phonemes"].append(phoneme)
             word_entries[-1]["ids"].append(ids[idx])
             word_entries[-1]["lang_ids"].append(lang_ids[idx])
+
+        if is_slur_group and slur_vowel_ph:
+            for note_idx in note_indices[1:]:
+                note_phonemes.setdefault(note_idx, []).append(slur_vowel_ph)
+            for entry in reversed(word_entries):
+                if entry["phonemes"]:
+                    if slur_coda_len > 0:
+                        entry["coda_len"] = slur_coda_len
+                        entry["coda_tail_frames"] = slur_coda_tail_frames
+                    break
 
         if word_entries[0]["phonemes"]:
             # If we have a prefix cluster, attach to previous word when possible.
@@ -668,6 +789,8 @@ def _build_phoneme_groups(
                     "lang_ids": entry["lang_ids"],
                     "tone": float(timing_midi[note_idx]) if note_idx is not None else 0.0,
                     "note_idx": note_idx,
+                    "coda_len": entry.get("coda_len", 0),
+                    "coda_tail_frames": entry.get("coda_tail_frames", 0),
                 }
             )
             if note_idx is not None:
@@ -691,6 +814,24 @@ def _build_phoneme_groups(
     language_ids = [lid for group in phrase_groups for lid in group["lang_ids"]]
     phonemes = [ph for group in phrase_groups for ph in group.get("phonemes", [])]
     word_pitches = [group["tone"] for group in phrase_groups]
+    coda_tails: List[Dict[str, int]] = []
+    offset = 0
+    for group in phrase_groups:
+        group_len = len(group["ids"])
+        coda_len = int(group.get("coda_len") or 0)
+        if coda_len > 0 and group_len > coda_len:
+            coda_start = offset + group_len - coda_len
+            vowel_idx = offset + group_len - coda_len - 1
+            tail_frames = int(group.get("coda_tail_frames") or 0)
+            coda_tails.append(
+                {
+                    "vowel_idx": vowel_idx,
+                    "coda_start": coda_start,
+                    "coda_len": coda_len,
+                    "tail_frames": tail_frames,
+                }
+            )
+        offset += group_len
 
     return {
         "phoneme_ids": phoneme_ids,
@@ -700,6 +841,7 @@ def _build_phoneme_groups(
         "word_durations": word_durations,
         "word_pitches": word_pitches,
         "note_phonemes": note_phonemes,
+        "coda_tails": coda_tails,
     }
 
 
@@ -841,6 +983,21 @@ def align_phonemes_to_notes(
         prev_rest = is_rest
 
     pitch_note_rests = [computed_note_rests[idx] for idx in pitch_indices]
+    pitch_index_map = {note_idx: pitch_idx for pitch_idx, note_idx in enumerate(pitch_indices)}
+    slur_groups: List[List[int]] = []
+    for group in word_groups:
+        if group.get("is_rest"):
+            continue
+        note_indices = group.get("note_indices") or []
+        if len(note_indices) <= 1:
+            continue
+        pitch_group = [
+            pitch_index_map[note_idx]
+            for note_idx in note_indices
+            if note_idx in pitch_index_map
+        ]
+        if len(pitch_group) > 1:
+            slur_groups.append(pitch_group)
     result = {
         "phoneme_ids": ph_result["phoneme_ids"],
         "language_ids": ph_result["language_ids"],
@@ -850,6 +1007,8 @@ def align_phonemes_to_notes(
         "note_durations": pitch_note_durations,
         "note_pitches": pitch_note_pitches,
         "note_rests": pitch_note_rests,
+        "slur_groups": slur_groups,
+        "coda_tails": ph_result.get("coda_tails", []),
     }
     if include_phonemes:
         result["phonemes"] = ph_result["phonemes"]
@@ -982,6 +1141,13 @@ def synthesize(
     phoneme_ids = alignment["phoneme_ids"]
     language_ids = alignment["language_ids"]
     durations = dur_result["durations"]
+    coda_tails = alignment.get("coda_tails") or []
+    if coda_tails:
+        durations = _apply_coda_tail_durations(
+            durations,
+            coda_tails,
+            tail_frames=3,
+        )
     if articulation < 0.0:
         # Insert short gaps to increase articulation.
         phoneme_ids, language_ids, durations = _apply_articulation_gaps(
@@ -1028,6 +1194,19 @@ def synthesize(
             pitch_result["pitch_midi"] = _pad_curve_to_length(
                 pitch_result["pitch_midi"], expected_frames
             )
+
+    slur_groups = alignment.get("slur_groups") or []
+    velocity: Optional[List[float]] = None
+    if slur_groups:
+        velocity = _build_slur_velocity_envelope(
+            alignment["note_durations"],
+            slur_groups,
+            reference_peak=1.0,
+            attack_frames=3,
+            baseline=0.9,
+        )
+        if expected_frames > 0 and len(velocity) != expected_frames:
+            velocity = _pad_curve_to_length(velocity, expected_frames)
     
     # Step 5: Predict variance.
     start = time.monotonic()
@@ -1074,6 +1253,7 @@ def synthesize(
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,
+        velocity=velocity,
         language_ids=language_ids,
         speaker_name=speaker_name,
         device=device,

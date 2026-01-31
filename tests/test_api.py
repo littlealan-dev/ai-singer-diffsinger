@@ -17,6 +17,7 @@ from src.api import (
     get_voicebank_info,
     save_audio,
 )
+from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 
 
 ROOT_DIR = Path(__file__).parent.parent
@@ -226,6 +227,45 @@ class TestVoicebankAPIs(unittest.TestCase):
         if voice_colors:
             color_names = [entry.get("name") for entry in voice_colors]
             self.assertIn(info.get("default_voice_color"), color_names)
+
+
+class TestSlurVelocityEnvelope(unittest.TestCase):
+    """Tests for the slur velocity envelope helper."""
+
+    def test_slur_group_peaks_match_reference(self):
+        note_durations = [10, 8, 6, 12]
+        slur_groups = [[1, 2, 3]]
+        reference_peak = 1.2
+        attack_frames = 3
+
+        envelope = _build_slur_velocity_envelope(
+            note_durations,
+            slur_groups,
+            reference_peak=reference_peak,
+            attack_frames=attack_frames,
+            baseline=1.0,
+        )
+
+        note_starts = [0, 10, 18, 24]
+        for idx in slur_groups[0]:
+            start = note_starts[idx]
+            self.assertAlmostEqual(envelope[start], reference_peak, places=6)
+
+        self.assertEqual(envelope[note_starts[0]], 1.0)
+        self.assertLessEqual(max(envelope), reference_peak + 1e-6)
+
+
+class TestCodaTailDurations(unittest.TestCase):
+    """Tests for coda tail duration adjustment."""
+
+    def test_coda_tail_steals_from_vowel(self):
+        durations = [5, 4, 3]
+        coda_tails = [{"vowel_idx": 1, "coda_start": 2, "coda_len": 1, "tail_frames": 2}]
+        adjusted = _apply_coda_tail_durations(durations, coda_tails, tail_frames=2)
+
+        self.assertEqual(sum(adjusted), sum(durations))
+        self.assertEqual(adjusted[2], 2)
+        self.assertEqual(adjusted[1], 5)
 
 
 class TestSaveAudio(unittest.TestCase):
