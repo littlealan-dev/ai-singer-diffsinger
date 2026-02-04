@@ -163,6 +163,13 @@ function sanitizeRedirectPath(path?: string | null): string {
   return "/app";
 }
 
+function resolveAppBaseUrl(): string {
+  const configured = import.meta.env.VITE_APP_BASE_URL as string | undefined;
+  if (configured) return configured.replace(/\/$/, "");
+  if (typeof window === "undefined") return "";
+  return window.location.origin.replace(/\/$/, "");
+}
+
 /**
  * Initiate Google sign-in via full-page redirect.
  * After sign-in, user returns to the app and completeGoogleRedirect() finalizes.
@@ -217,8 +224,9 @@ export async function sendMagicLink(email: string): Promise<void> {
   if (!auth) {
     throw new Error("Firebase Auth not initialized");
   }
+  const appBaseUrl = resolveAppBaseUrl();
   const actionCodeSettings = {
-    url: `${window.location.origin}/app?finishSignIn=true`,
+    url: `${appBaseUrl}/app?finishSignIn=true`,
     handleCodeInApp: true,
   };
   await sendSignInLinkToEmail(auth, email, actionCodeSettings);

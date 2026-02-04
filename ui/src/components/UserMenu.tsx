@@ -10,6 +10,15 @@ const getInitials = (name: string) => {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase() || "?";
 };
 
+const resolveMarketingBaseUrl = (value?: string): string => {
+  if (value) return value.replace(/\/$/, "");
+  if (typeof window === "undefined") return "/";
+  const baseHost = window.location.host.startsWith("app.")
+    ? window.location.host.slice(4)
+    : window.location.host;
+  return `${window.location.protocol}//${baseHost}`;
+};
+
 type UserMenuProps = {
   onJoinWaitlist?: () => void;
 };
@@ -21,6 +30,9 @@ export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
 
   const displayName = user?.displayName?.trim() || "Signed in";
   const email = user?.email?.trim() || "";
+  const resolvedMarketingBaseUrl = resolveMarketingBaseUrl(
+    import.meta.env.VITE_MARKETING_BASE_URL as string | undefined
+  );
   const initials = useMemo(() => {
     const base = user?.displayName || user?.email || "";
     return getInitials(base);
@@ -45,6 +57,16 @@ export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
   }, [open]);
 
   if (!isAuthenticated || !user) return null;
+
+  const handleSignOut = async () => {
+    try {
+      await logOut();
+    } finally {
+      if (typeof window !== "undefined") {
+        window.location.assign(resolvedMarketingBaseUrl);
+      }
+    }
+  };
 
   return (
     <div className="user-menu" ref={menuRef}>
@@ -81,7 +103,7 @@ export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
               Join Waiting List
             </button>
           )}
-          <button className="user-menu-item" type="button" onClick={() => logOut()}>
+          <button className="user-menu-item" type="button" onClick={handleSignOut}>
             <LogOut size={16} />
             Sign out
           </button>

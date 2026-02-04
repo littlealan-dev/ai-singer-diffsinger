@@ -11,6 +11,7 @@ import {
 export interface AuthState {
     user: User | null;
     loading: boolean;
+    authReady: boolean;
     error: string | null;
     isAuthenticated: boolean;
     /** True if user signed in for the first time (new account) */
@@ -29,6 +30,7 @@ const AuthContext = createContext<AuthState | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
+    const [authReady, setAuthReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isNewUser, setIsNewUser] = useState(false);
 
@@ -45,6 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (mounted && redirectResolved && authResolved) {
                 console.log("[useAuth] All resolved. Setting loading to false.");
                 setLoading(false);
+                setAuthReady(true);
             }
         };
 
@@ -122,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const value = {
         user,
         loading,
+        authReady,
         error,
         isAuthenticated: !!user && !user.isAnonymous,
         isNewUser,
