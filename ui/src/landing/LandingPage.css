@@ -33,6 +33,31 @@
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
 
+.landing-auth-loading {
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+  background: rgba(12, 12, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  padding: 2.5rem 2rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.landing-auth-spinner {
+  animation: landing-auth-spin 1s linear infinite;
+}
+
+@keyframes landing-auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .landing-auth-card h1 {
   margin: 0 0 0.75rem;
   font-size: 2rem;

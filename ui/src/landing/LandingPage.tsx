@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { AuthModal } from "../components/AuthModal";
 import { useAuth } from "../hooks/useAuth.tsx";
 import "./LandingPage.css";
@@ -31,6 +32,17 @@ export default function LandingPage() {
             setShowAuthModal(false);
         }
     }, [authReady, isAuthenticated, navigate, hasAuthLinkParams]);
+
+    if (!authReady) {
+        return (
+            <div className="landing-page landing-auth-only">
+                <div className="landing-auth-loading">
+                    <Loader2 className="landing-auth-spinner" size={32} />
+                    <p>Signing you in...</p>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="landing-page landing-auth-only">
