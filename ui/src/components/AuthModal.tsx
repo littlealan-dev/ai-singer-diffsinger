@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { X, Mail, Loader2 } from "lucide-react";
 import {
     signInWithGoogleRedirect,
@@ -28,6 +28,38 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
     const [email, setEmail] = useState("");
     const [error, setError] = useState<string | null>(null);
     const [sentEmail, setSentEmail] = useState<string | null>(null);
+    const autoGoogleStarted = useRef(false);
+
+    useEffect(() => {
+        if (!isOpen || autoGoogleStarted.current || typeof window === "undefined") return;
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("start") !== "google") return;
+        const rawReturnUrl = params.get("returnUrl");
+        let returnUrl: string | null = null;
+        if (rawReturnUrl) {
+            try {
+                const parsed = new URL(rawReturnUrl, window.location.origin);
+                if (parsed.origin === window.location.origin) {
+                    returnUrl = parsed.toString();
+                }
+            } catch {
+                // Ignore invalid return URLs.
+            }
+        }
+        params.delete("start");
+        params.delete("returnUrl");
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", nextUrl);
+        autoGoogleStarted.current = true;
+        setState("signingInGoogle");
+        setError(null);
+        signInWithGoogleRedirect(returnUrl).catch((err) => {
+            autoGoogleStarted.current = false;
+            setState("error");
+            setError(err instanceof Error ? err.message : "Google sign-in failed");
+        });
+    }, [isOpen]);
 
     if (!isOpen) return null;
 

@@ -149,16 +149,30 @@ export async function getIdToken(): Promise<string | null> {
 
 const googleProvider = new GoogleAuthProvider();
 
+function sanitizeRedirectPath(path?: string | null): string {
+  if (!path) return "/app";
+  try {
+    if (path.startsWith("/")) return path;
+    const url = new URL(path);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.toString();
+    }
+  } catch {
+    // Ignore invalid URLs and fall back to default.
+  }
+  return "/app";
+}
+
 /**
  * Initiate Google sign-in via full-page redirect.
  * After sign-in, user returns to the app and completeGoogleRedirect() finalizes.
  */
-export async function signInWithGoogleRedirect(): Promise<void> {
+export async function signInWithGoogleRedirect(redirectPath?: string | null): Promise<void> {
   if (!auth) {
     throw new Error("Firebase Auth not initialized");
   }
   if (typeof window !== "undefined") {
-    window.localStorage.setItem("postSignInRedirect", "/app");
+    window.localStorage.setItem("postSignInRedirect", sanitizeRedirectPath(redirectPath));
   }
   await signInWithRedirect(auth, googleProvider);
 }
