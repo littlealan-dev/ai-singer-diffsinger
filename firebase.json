@@ -14,8 +14,27 @@
     ],
     "rewrites": [
       {
+        "source": "/__/auth/**",
+        "destination": "/__/auth/handler"
+      },
+      {
+        "source": "/__/firebase/**",
+        "destination": "/__/firebase/init.json"
+      },
+      {
+        "source": "/app/**",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/demo/**",
+        "destination": "/app.html"
+      },
+      {
         "source": "**",
-        "destination": "/index.html"
+        "run": {
+          "serviceId": "sightsinger-marketing-be",
+          "region": "us-east4"
+        }
       }
     ]
   },

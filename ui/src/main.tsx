@@ -9,7 +9,7 @@ import { AuthProvider } from "./hooks/useAuth.tsx";
 if (typeof window !== "undefined") {
   const host = window.location.hostname;
   if (host === "sightsinger-app.web.app") {
-    const target = `https://app.sightsinger.app${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const target = `https://sightsinger.app${window.location.pathname}${window.location.search}${window.location.hash}`;
     window.location.replace(target);
   }
 }
