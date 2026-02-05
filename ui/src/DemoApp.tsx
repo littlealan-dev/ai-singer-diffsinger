@@ -269,10 +269,17 @@ export default function DemoApp() {
     };
   }, [menuOpen]);
 
+  const marketingBaseUrl =
+    (import.meta.env.VITE_MARKETING_BASE_URL as string | undefined) ?? "/";
+  const handleBrandClick = () => {
+    if (typeof window === "undefined") return;
+    window.location.assign(marketingBaseUrl);
+  };
+
   return (
     <div className="app-shell demo-app">
       <header className="app-header">
-        <div className="brand" onClick={() => navigate("/")} style={{ cursor: "pointer" }}>
+        <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
           <Sparkles className="brand-icon" />
           <div>
             <h1>SightSinger.app</h1>

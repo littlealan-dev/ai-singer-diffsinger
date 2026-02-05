@@ -22,7 +22,15 @@
         "destination": "/__/firebase/init.json"
       },
       {
+        "source": "/app",
+        "destination": "/app.html"
+      },
+      {
         "source": "/app/**",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/demo",
         "destination": "/app.html"
       },
       {
