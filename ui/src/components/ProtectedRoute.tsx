@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../hooks/useAuth.tsx";
+import { useAuth } from "../hooks/useAuth";
 import { AuthModal } from "./AuthModal";
 import { Loader2 } from "lucide-react";
 import "./ProtectedRoute.css";
@@ -29,8 +29,9 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
                 searchParams.has("finishSignIn")
             );
         })();
-    const hasStartParam =
-        typeof window !== "undefined" && searchParams ? searchParams.has("start") : false;
+    const hasStartParam = useRef(
+        typeof window !== "undefined" && searchParams ? searchParams.has("start") : false
+    ).current;
 
     useEffect(() => {
         if (!loading && !isAuthenticated && !hasAuthLinkParams && !hasStartParam) {
@@ -58,7 +59,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
                     </div>
                     <AuthModal
                         isOpen={true}
-                        onClose={() => {}}
+                        onClose={() => { }}
                         onSuccess={() => navigate("/app")}
                     />
                 </>

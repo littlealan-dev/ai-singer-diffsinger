@@ -46,11 +46,6 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
                 // Ignore invalid return URLs.
             }
         }
-        params.delete("start");
-        params.delete("returnUrl");
-        const nextSearch = params.toString();
-        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
-        window.history.replaceState({}, "", nextUrl);
         autoGoogleStarted.current = true;
         setState("signingInGoogle");
         setError(null);
