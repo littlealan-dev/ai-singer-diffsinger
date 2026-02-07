@@ -11,6 +11,8 @@ from typing import Dict, Iterable, List, Optional, Sequence
 from g2p_en import G2p
 import yaml
 
+from .phoneme_logic_handler import get_phoneme_logic_handler
+
 ARPABET_TO_VOICEBANK = {
     "AA": "aa",
     "AE": "ae",
@@ -97,6 +99,16 @@ class Phonemizer:
             self.phonemes_path.with_name("phoneme_metadata.json")
         )
         self._g2p: Optional[G2p] = None
+        self._logic_handler = get_phoneme_logic_handler(language)
+
+    def distribute_slur(self, phonemes: Sequence[str], note_count: int) -> Optional[List[List[str]]]:
+        """
+        Distribute phonemes across notes for a slur.
+        Returns:
+            - List of phoneme lists (one per note) if a strategy exists.
+            - None if no strategy exists (caller should use default/fallback logic).
+        """
+        return self._logic_handler.distribute_slur(phonemes, note_count, self)
 
     def phonemize_tokens(self, tokens: Sequence[str]) -> PhonemeResult:
         """Convert a list of tokens into phonemes and IDs."""

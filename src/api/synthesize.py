@@ -630,6 +630,16 @@ def _build_phoneme_groups(
     for group in word_groups:
         notes_in_group = group["notes"]
         note_indices = group["note_indices"]
+        is_slur_group = len(note_indices) > 1
+        word_entries = [
+            {
+                "position": None,
+                "phonemes": [],
+                "ids": [],
+                "lang_ids": [],
+                "note_idx": None,
+            }
+        ]
         if group["is_rest"]:
             # Rests become explicit silence phoneme groups.
             note_idx = note_indices[0]
@@ -670,79 +680,138 @@ def _build_phoneme_groups(
                 note_idx=note_idx,
             )
 
-        # Determine syllable starts for aligning phonemes to notes.
-        is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
-        is_glide = [phonemizer.is_glide(p) for p in phonemes]
-        is_start = [False] * len(phonemes)
-        if not any(is_vowel):
-            is_start[0] = True
-        for i in range(len(phonemes)):
-            if is_vowel[i]:
-                if i >= 2 and is_glide[i - 1] and not is_vowel[i - 2]:
-                    is_start[i - 1] = True
-                else:
-                    is_start[i] = True
+        if is_slur_group:
+            # Check if this is a "pure tie" (sustain) or a "slur" (melisma).
+            # A pure tie has unchanged pitch across all notes.
+            # A slur changes pitch.
+            group_pitches = [timing_midi[n_idx] for n_idx in note_indices]
+            # Use a small epsilon for float comparison if needed, though timing_midi likely ints/rounded floats
+            # But checking strict equality is usually fine for MIDI notes.
+            first_pitch = group_pitches[0]
+            is_same_pitch = all(p == first_pitch for p in group_pitches)
 
-        is_slur_group = len(note_indices) > 1
-        slur_vowel_ph: Optional[str] = None
-        slur_coda_len = 0
-        slur_coda_tail_frames = 0
-        if is_slur_group and any(is_vowel):
-            last_note = notes_in_group[-1]
-            last_lyric = last_note.get("lyric")
-            last_is_slur = isinstance(last_lyric, str) and last_lyric.startswith("+")
-            last_is_extension = (
-                bool(last_note.get("lyric_is_extended"))
-                or last_note.get("tie_type") in ("stop", "continue")
-                or last_is_slur
-            )
-            vowel_idx = next(idx for idx, v in enumerate(is_vowel) if v)
-            slur_vowel_ph = phonemes[vowel_idx]
-            if last_is_extension and vowel_idx < len(phonemes) - 1:
-                slur_coda_len = len(phonemes) - vowel_idx - 1
-                last_note_idx = note_indices[-1]
-                note_start = start_frames[last_note_idx]
-                note_end = end_frames[last_note_idx]
-                note_frames = max(1, note_end - note_start)
-                slur_coda_tail_frames = min(3, max(1, note_frames // 8))
+            if is_same_pitch:
+                # This is likely a tied note (sustain).
+                # We should NOT distribute phonemes (which causes re-articulation).
+                # Fall back to default logic which handles sustains by mapping to the first note/extending.
+                is_slur_group = False
 
-        non_extension_indices = [note_indices[0]]
-        word_entries: List[Dict[str, Any]] = [
-            {
-                "position": None,
-                "phonemes": [],
-                "ids": [],
-                "lang_ids": [],
-                "note_idx": None,
-            }
-        ]
-        note_index = 0
-        for idx, phoneme in enumerate(phonemes):
-            if is_start[idx] and note_index < len(non_extension_indices):
-                note_idx = non_extension_indices[note_index]
-                note_index += 1
-                word_entries.append(
+        if is_slur_group:
+            # Try to use the phonemizer's specific slur distribution strategy (e.g. for English)
+            slur_distribution = phonemizer.distribute_slur(phonemes, len(note_indices))
+            if slur_distribution is not None:
+                # STRATEGY PATH: Use the provided distribution
+                # We construct word_entries such that word_entries[0] is empty (no prefix attachment),
+                # and subsequent entries correspond to the distributed notes.
+                word_entries = [
                     {
-                        "position": start_frames[note_idx],
+                        "position": None,
                         "phonemes": [],
                         "ids": [],
                         "lang_ids": [],
-                        "note_idx": note_idx,
+                        "note_idx": None,
                     }
-                )
-            word_entries[-1]["phonemes"].append(phoneme)
-            word_entries[-1]["ids"].append(ids[idx])
-            word_entries[-1]["lang_ids"].append(lang_ids[idx])
+                ]
+                for i, ph_list in enumerate(slur_distribution):
+                    if not ph_list:
+                        # Should unlikely happen with our strategies, but safe to skip or handle empty notes
+                        continue
+                    
+                    # Resolve IDs and Lang IDs
+                    p_ids = [phonemizer._phoneme_to_id[p] for p in ph_list]
+                    l_ids = []
+                    for p in ph_list:
+                        code = p.split("/")[0] if "/" in p else ""
+                        l_ids.append(phonemizer._language_map.get(code, 0))
 
-        if is_slur_group and slur_vowel_ph:
-            for note_idx in note_indices[1:]:
-                note_phonemes.setdefault(note_idx, []).append(slur_vowel_ph)
-            for entry in reversed(word_entries):
-                if entry["phonemes"]:
-                    if slur_coda_len > 0:
-                        entry["coda_len"] = slur_coda_len
-                        entry["coda_tail_frames"] = slur_coda_tail_frames
-                    break
+                    word_entries.append(
+                        {
+                            "position": start_frames[note_indices[i]],
+                            "phonemes": ph_list,
+                            "ids": p_ids,
+                            "lang_ids": l_ids,
+                            "note_idx": note_indices[i],
+                        }
+                    )
+                # Skip the default logic below
+                is_slur_group = False  # Prevent the coda logic block from running
+                is_start = []  # invalidating to be safe, though we break/skip loop
+
+        if len(word_entries) == 1:
+            # DEFAULT PATH: Run existing logic if no strategy populated word_entries
+            # Determine syllable starts for aligning phonemes to notes.
+            is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
+            is_glide = [phonemizer.is_glide(p) for p in phonemes]
+            is_start = [False] * len(phonemes)
+            if not any(is_vowel):
+                is_start[0] = True
+            for i in range(len(phonemes)):
+                if is_vowel[i]:
+                    if i >= 2 and is_glide[i - 1] and not is_vowel[i - 2]:
+                        is_start[i - 1] = True
+                    else:
+                        is_start[i] = True
+
+            slur_vowel_ph: Optional[str] = None
+            slur_coda_len = 0
+            slur_coda_tail_frames = 0
+            if is_slur_group and any(is_vowel):
+                last_note = notes_in_group[-1]
+                last_lyric = last_note.get("lyric")
+                last_is_slur = isinstance(last_lyric, str) and last_lyric.startswith("+")
+                last_is_extension = (
+                    bool(last_note.get("lyric_is_extended"))
+                    or last_note.get("tie_type") in ("stop", "continue")
+                    or last_is_slur
+                )
+                vowel_idx = next(idx for idx, v in enumerate(is_vowel) if v)
+                slur_vowel_ph = phonemes[vowel_idx]
+                if last_is_extension and vowel_idx < len(phonemes) - 1:
+                    slur_coda_len = len(phonemes) - vowel_idx - 1
+                    last_note_idx = note_indices[-1]
+                    note_start = start_frames[last_note_idx]
+                    note_end = end_frames[last_note_idx]
+                    note_frames = max(1, note_end - note_start)
+                    slur_coda_tail_frames = min(3, max(1, note_frames // 8))
+
+            non_extension_indices = [note_indices[0]]
+            # Reset word entries for default loop
+            word_entries = [
+                {
+                    "position": None,
+                    "phonemes": [],
+                    "ids": [],
+                    "lang_ids": [],
+                    "note_idx": None,
+                }
+            ]
+            note_index = 0
+            for idx, phoneme in enumerate(phonemes):
+                if is_start[idx] and note_index < len(non_extension_indices):
+                    note_idx = non_extension_indices[note_index]
+                    note_index += 1
+                    word_entries.append(
+                        {
+                            "position": start_frames[note_idx],
+                            "phonemes": [],
+                            "ids": [],
+                            "lang_ids": [],
+                            "note_idx": note_idx,
+                        }
+                    )
+                word_entries[-1]["phonemes"].append(phoneme)
+                word_entries[-1]["ids"].append(ids[idx])
+                word_entries[-1]["lang_ids"].append(lang_ids[idx])
+    
+            if is_slur_group and slur_vowel_ph:
+                for note_idx in note_indices[1:]:
+                    note_phonemes.setdefault(note_idx, []).append(slur_vowel_ph)
+                for entry in reversed(word_entries):
+                    if entry["phonemes"]:
+                        if slur_coda_len > 0:
+                            entry["coda_len"] = slur_coda_len
+                            entry["coda_tail_frames"] = slur_coda_tail_frames
+                        break
 
         if word_entries[0]["phonemes"]:
             # If we have a prefix cluster, attach to previous word when possible.
