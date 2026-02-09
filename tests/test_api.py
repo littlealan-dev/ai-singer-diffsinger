@@ -43,6 +43,7 @@ class TestParseScore(unittest.TestCase):
         self.assertIn("tempos", score)
         self.assertIn("parts", score)
         self.assertIn("structure", score)
+        self.assertIn("voice_part_signals", score)
     
     def test_parse_extracts_title(self):
         """Should extract title from MusicXML."""
@@ -66,6 +67,19 @@ class TestParseScore(unittest.TestCase):
         self.assertIn("duration_beats", note)
         self.assertIn("pitch_midi", note)
         self.assertIn("lyric", note)
+
+    def test_parse_exposes_voice_part_signals(self):
+        """parse_score should expose multi-voice and missing lyric signals."""
+        score = parse_score(TEST_XML)
+        signals = score.get("voice_part_signals")
+        self.assertIsInstance(signals, dict)
+        self.assertIn("has_multi_voice_parts", signals)
+        self.assertIn("has_missing_lyric_voice_parts", signals)
+        self.assertIn("parts", signals)
+        self.assertTrue(signals["parts"])
+        part_signal = signals["parts"][0]
+        self.assertIn("multi_voice_part", part_signal)
+        self.assertIn("missing_lyric_voice_parts", part_signal)
 
 
 class TestModifyScore(unittest.TestCase):

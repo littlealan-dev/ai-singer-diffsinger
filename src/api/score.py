@@ -23,6 +23,7 @@ except ImportError:
     logger.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
 
 from src.musicxml.parser import parse_musicxml_with_summary
+from src.api.voice_parts import analyze_score_voice_parts
 
 
 def parse_score(
@@ -72,6 +73,7 @@ def parse_score(
         part_id=part_id,
         part_index=part_index,
         verse_number=verse_number,
+        lyrics_only=False,
         keep_rests=True,
     )
     
@@ -85,6 +87,7 @@ def parse_score(
         "jumps": [],
     }
     score_dict["score_summary"] = score_summary
+    score_dict["voice_part_signals"] = analyze_score_voice_parts(score_dict)
     
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(score_dict))

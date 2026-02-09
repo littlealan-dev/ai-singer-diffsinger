@@ -19,6 +19,7 @@ from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
+from src.api.voice_parts import prepare_score_for_voice_part
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
@@ -746,6 +747,39 @@ class Orchestrator:
                 # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
+
+                # Precheck voice-part requirements before reserving credits/spawning a job.
+                precheck_part_index = self._resolve_synthesize_part_index(
+                    current_score,
+                    part_id=synth_args.get("part_id"),
+                    part_index=synth_args.get("part_index"),
+                )
+                part_notes = []
+                parts = current_score.get("parts") or []
+                if 0 <= precheck_part_index < len(parts):
+                    part_notes = parts[precheck_part_index].get("notes") or []
+                if part_notes:
+                    precheck = prepare_score_for_voice_part(
+                        current_score,
+                        part_index=precheck_part_index,
+                        voice_id=synth_args.get("voice_id"),
+                        voice_part_id=synth_args.get("voice_part_id"),
+                        allow_lyric_propagation=bool(
+                            synth_args.get("allow_lyric_propagation", False)
+                        ),
+                        source_voice_part_id=synth_args.get("source_voice_part_id"),
+                        source_part_index=synth_args.get("source_part_index"),
+                    )
+                    if precheck.get("status") == "action_required":
+                        followup_prompt = json.dumps(precheck, sort_keys=True)
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={"type": "chat_text", "message": ""},
+                            followup_prompt=followup_prompt,
+                        )
+                    if precheck.get("status") == "ready":
+                        current_score = precheck["score"]
+                        await self._sessions.set_score(session_id, current_score)
                 
                 from src.mcp.handlers import _calculate_score_duration
                 from src.backend.credits import estimate_credits
@@ -791,6 +825,23 @@ class Orchestrator:
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                 )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
+
+    def _resolve_synthesize_part_index(
+        self,
+        score: Dict[str, Any],
+        *,
+        part_id: Optional[str],
+        part_index: Optional[int],
+    ) -> int:
+        """Resolve part index for synth prechecks."""
+        parts = score.get("parts") or []
+        if part_id is not None:
+            for idx, part in enumerate(parts):
+                if part.get("part_id") == part_id:
+                    return idx
+        if isinstance(part_index, int):
+            return part_index
+        return 0
 
 
 @dataclass(frozen=True)

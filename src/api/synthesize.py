@@ -4,6 +4,7 @@ Convenience synthesize API - runs the full pipeline.
 
 import logging
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import json
@@ -22,6 +23,7 @@ from src.api.voicebank import (
     resolve_default_voice_color,
     resolve_voice_color_speaker,
 )
+from src.api.voice_parts import prepare_score_for_voice_part
 from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
 
@@ -1092,6 +1094,10 @@ def synthesize(
     *,
     part_index: int = 0,
     voice_id: Optional[str] = None,
+    voice_part_id: Optional[str] = None,
+    allow_lyric_propagation: bool = False,
+    source_voice_part_id: Optional[str] = None,
+    source_part_index: Optional[int] = None,
     voice_color: Optional[str] = None,
     articulation: float = 0.0,
     airiness: float = 1.0,
@@ -1120,10 +1126,10 @@ def synthesize(
         progress_callback: Optional callback for step updates
         
     Returns:
-        Dict with:
-        - waveform: Audio samples as list
-        - sample_rate: Sample rate
-        - duration_seconds: Audio duration
+        Dict with either:
+        - waveform/sample_rate/duration_seconds on success, or
+        - status="action_required" with confirmation details when
+          voice-part lyric propagation needs explicit user choice.
     """
     allowed_messages = {"Taking a breath for the take..."}
 
@@ -1152,6 +1158,10 @@ def synthesize(
                     "voicebank": str(voicebank),
                     "part_index": part_index,
                     "voice_id": voice_id,
+                    "voice_part_id": voice_part_id,
+                    "allow_lyric_propagation": allow_lyric_propagation,
+                    "source_voice_part_id": source_voice_part_id,
+                    "source_part_index": source_part_index,
                     "voice_color": voice_color,
                     "articulation": articulation,
                     "airiness": airiness,
@@ -1161,9 +1171,26 @@ def synthesize(
                 }
             ),
         )
+    preprocessed = prepare_score_for_voice_part(
+        score,
+        part_index=part_index,
+        voice_id=voice_id,
+        voice_part_id=voice_part_id,
+        allow_lyric_propagation=allow_lyric_propagation,
+        source_voice_part_id=source_voice_part_id,
+        source_part_index=source_part_index,
+    )
+    if preprocessed.get("status") == "action_required":
+        return preprocessed
+    working_score = preprocessed["score"]
+    # Persist transformed score structure in-place for caller-side reuse.
+    if working_score is not score:
+        score.clear()
+        score.update(deepcopy(working_score))
+
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
-    
+
     # Resolve voice color to an optional speaker embedding.
     sample_rate = config.get("sample_rate", 44100)
     default_voice_color = resolve_default_voice_color(voicebank_path)
@@ -1186,7 +1213,7 @@ def synthesize(
 
     start = time.monotonic()
     alignment = align_phonemes_to_notes(
-        score,
+        working_score,
         voicebank_path,
         part_index=part_index,
         voice_id=voice_id,

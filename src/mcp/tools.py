@@ -104,6 +104,10 @@ TOOLS: List[Tool] = [
                 "part_index": {"type": ["integer", "null"]},
                 "verse_number": {"type": ["integer", "string", "null"]},
                 "voice_id": {"type": ["string", "null"]},
+                "voice_part_id": {"type": ["string", "null"]},
+                "allow_lyric_propagation": {"type": "boolean"},
+                "source_voice_part_id": {"type": ["string", "null"]},
+                "source_part_index": {"type": ["integer", "null"]},
                 "voice_color": {"type": ["string", "null"]},
                 "articulation": {"type": "number", "minimum": -1.0, "maximum": 1.0},
                 "airiness": {"type": "number", "minimum": 0.0, "maximum": 1.0},
@@ -116,12 +120,14 @@ TOOLS: List[Tool] = [
         output_schema={
             "type": "object",
             "properties": {
+                "status": {"type": "string"},
+                "action": {"type": "string"},
+                "message": {"type": "string"},
                 "waveform": {"type": "array", "items": {"type": "number"}},
                 "sample_rate": {"type": "integer"},
                 "duration_seconds": {"type": "number"},
             },
-            "required": ["waveform", "sample_rate", "duration_seconds"],
-            "additionalProperties": False,
+            "additionalProperties": True,
         },
     ),
     Tool(
