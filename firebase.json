@@ -38,14 +38,6 @@
         "destination": "/app.html"
       },
       {
-        "source": "/waitlist/confirmed",
-        "destination": "/app.html"
-      },
-      {
-        "source": "/waitlist/confirmed/**",
-        "destination": "/app.html"
-      },
-      {
         "source": "**",
         "run": {
           "serviceId": "sightsinger-marketing-be",
