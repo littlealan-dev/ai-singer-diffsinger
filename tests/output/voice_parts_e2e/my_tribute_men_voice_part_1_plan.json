@@ -1,0 +1,43 @@
+{
+  "targets": [
+    {
+      "actions": [
+        {
+          "split_shared_note_policy": "duplicate_to_all",
+          "type": "split_voice_part"
+        },
+        {
+          "copy_all_verses": false,
+          "policy": "fill_missing_only",
+          "section_overrides": [
+            {
+              "end_measure": 41,
+              "policy": "fill_missing_only",
+              "source": {
+                "part_index": 1,
+                "voice_part_id": "voice part 1"
+              },
+              "start_measure": 36,
+              "strategy": "strict_onset"
+            }
+          ],
+          "source_priority": [
+            {
+              "part_index": 0,
+              "voice_part_id": "voice part 1"
+            }
+          ],
+          "strategy": "overlap_best_match",
+          "type": "propagate_lyrics",
+          "verse_number": "1"
+        }
+      ],
+      "confidence": 0.7,
+      "notes": "Men voice part 1 uses P1 lyrics except m36-41.",
+      "target": {
+        "part_index": 1,
+        "voice_part_id": "voice part 1"
+      }
+    }
+  ]
+}

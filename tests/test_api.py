@@ -7,6 +7,7 @@ Tests cover the core public APIs defined in api_design.md.
 import unittest
 from pathlib import Path
 import json
+import os
 
 from src.api import (
     parse_score,
@@ -18,6 +19,7 @@ from src.api import (
     save_audio,
 )
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
+from src.api.voice_parts import preprocess_voice_parts
 
 
 ROOT_DIR = Path(__file__).parent.parent
@@ -80,6 +82,135 @@ class TestParseScore(unittest.TestCase):
         part_signal = signals["parts"][0]
         self.assertIn("multi_voice_part", part_signal)
         self.assertIn("missing_lyric_voice_parts", part_signal)
+
+    def test_parse_exposes_extended_voice_part_signals(self):
+        """parse_score should expose analyzer extensions for planning."""
+        score = parse_score(TEST_XML, verse_number=1)
+        signals = score.get("voice_part_signals")
+        self.assertEqual(signals.get("requested_verse_number"), "1")
+        self.assertIn("full_score_analysis", signals)
+        part_signal = signals["parts"][0]
+        self.assertIn("measure_lyric_coverage", part_signal)
+        self.assertIn("source_candidate_hints", part_signal)
+
+    def test_preprocess_invalid_plan_returns_action_required(self):
+        """Invalid preprocessing plan should produce action_required payload."""
+        score = parse_score(TEST_XML)
+        result = preprocess_voice_parts(score, plan={"targets": "invalid"})
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "invalid_plan_payload")
+
+    def test_preprocess_ready_with_warnings(self):
+        """Propagation with 90% coverage should return ready_with_warnings."""
+        notes = []
+        for idx in range(10):
+            notes.append(
+                {
+                    "offset_beats": float(idx),
+                    "duration_beats": 1.0,
+                    "pitch_midi": 64.0,
+                    "lyric": f"L{idx}" if idx < 9 else None,
+                    "syllabic": "single",
+                    "lyric_is_extended": False,
+                    "is_rest": False,
+                    "voice": "1",
+                    "measure_number": 1,
+                }
+            )
+            notes.append(
+                {
+                    "offset_beats": float(idx),
+                    "duration_beats": 1.0,
+                    "pitch_midi": 55.0,
+                    "lyric": None,
+                    "syllabic": None,
+                    "lyric_is_extended": False,
+                    "is_rest": False,
+                    "voice": "2",
+                    "measure_number": 1,
+                }
+            )
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": notes,
+                }
+            ]
+        }
+        result = preprocess_voice_parts(
+            score,
+            part_index=0,
+            voice_part_id="alto",
+            allow_lyric_propagation=True,
+            source_part_index=0,
+            source_voice_part_id="soprano",
+        )
+        self.assertEqual(result.get("status"), "ready_with_warnings")
+
+    def test_preprocess_repair_loop(self):
+        """Repair loop should retry and annotate output when enabled."""
+        original = os.environ.get("VOICE_PART_REPAIR_LOOP_ENABLED")
+        os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
+        try:
+            score = {
+                "parts": [
+                    {
+                        "part_id": "P1",
+                        "part_name": "SOPRANO ALTO",
+                        "notes": [
+                            {
+                                "offset_beats": 0.0,
+                                "duration_beats": 1.0,
+                                "pitch_midi": 64.0,
+                                "lyric": "A",
+                                "syllabic": "single",
+                                "lyric_is_extended": False,
+                                "is_rest": False,
+                                "voice": "1",
+                                "measure_number": 1,
+                            },
+                            {
+                                "offset_beats": 0.5,
+                                "duration_beats": 1.0,
+                                "pitch_midi": 55.0,
+                                "lyric": None,
+                                "syllabic": None,
+                                "lyric_is_extended": False,
+                                "is_rest": False,
+                                "voice": "2",
+                                "measure_number": 1,
+                            },
+                        ],
+                    }
+                ]
+            }
+            plan = {
+                "targets": [
+                    {
+                        "target": {"part_index": 0, "voice_part_id": "alto"},
+                        "actions": [
+                            {"type": "split_voice_part"},
+                            {
+                                "type": "propagate_lyrics",
+                                "strategy": "strict_onset",
+                                "source_priority": [
+                                    {"part_index": 0, "voice_part_id": "soprano"}
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            }
+            result = preprocess_voice_parts(score, plan=plan)
+            self.assertEqual(result.get("status"), "ready")
+            self.assertIn("repair_loop", result.get("metadata", {}))
+        finally:
+            if original is None:
+                os.environ.pop("VOICE_PART_REPAIR_LOOP_ENABLED", None)
+            else:
+                os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = original
 
 
 class TestModifyScore(unittest.TestCase):

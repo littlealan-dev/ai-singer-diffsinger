@@ -1,0 +1,35 @@
+Here are my review comments on both specs:
+
+Overall Impression
+Both docs are very well structured. The separation of AI planning from deterministic execution is the right call — it gives you auditability and debuggability while still getting AI-level reasoning for source selection. The my-tribute worked example grounds everything nicely.
+
+Workflow Spec (High-Level) Comments
+Strengths
+Core Principles are solid. "AI never edits raw MusicXML directly" and "every operation is explicit and typed" are exactly right for trustworthiness.
+Demand-driven flow (Principle 5) is smart — avoids unnecessary computation on parts the user doesn't care about.
+Non-destructive append (Principle 7) is the safest approach. Original score stays immutable.
+Questions & Gaps
+Tool #3 split_voice_part — what happens with shared notes? In some scores, voice 1 and voice 2 share notes at unison passages (same pitch, same rhythm). Does "split" duplicate these into both voice parts, or assign to one? The spec doesn't say. This matters for lyric ownership.
+Tool #4 propagate_lyrics — syllable_flow strategy is under-specified. The workflow lists it as an option but doesn't define what "phrase boundaries" means or how they're detected. The low-level doc (§8.3) adds a bit more but still says "walk target sung notes and advance token index by phrase boundaries" without defining what constitutes a phrase boundary (rest? barline? breath mark?).
+Escalation Rules — missing "partial success" path. The spec says escalate when "validation still fails after repair attempts," but what if 95% of lyrics propagated and only 2 notes in one bar are missing? Is that action_required or a warning the user can accept? The threshold between "good enough" and "needs intervention" should be explicit.
+No mention of verse handling. MusicXML supports multiple lyric verses (<lyric number="1"> vs <lyric number="2">). If the source has Verse 1 and Verse 2 lyrics, does propagation copy all verses? Only the requested one? This should be specified, especially since your parser already handles verse_number.
+Materializer — stable part naming. "Append as a new score-part" is great, but what if the user runs this twice for the same target (e.g., re-does Tenor with different source)? Do you overwrite the previous derived part or create a second one? The spec should address idempotency.
+Low-Level Design Comments
+Strengths
+Data contracts (§5) are clear and concrete. The JSON schemas make it unambiguous what the AI planner must output.
+Section override precedence (§7.3: "later entries win on overlap") is a good simple rule.
+Feature flags (§16) for staged rollout is pragmatic.
+Error taxonomy (§12) is comprehensive.
+Questions & Gaps
+§5.1 — voice_id vs voice_part_id normalization. The spec says voice_id is accepted for compatibility but normalized to voice_part_id. Your existing voice_parts.py uses both. Should the old voice_id parameter be deprecated? A migration note would help.
+§6.2 preprocess_voice_parts — relationship to prepare_score_for_voice_part. The existing voice_parts.py already has prepare_score_for_voice_part() which does split + propagation + action_required. The new spec proposes preprocess_voice_parts as a new API. Is this a rename, a wrapper, or a replacement? The relationship isn't clear. I see that synthesize.py was just updated to call prepare_score_for_voice_part — is the plan to eventually replace that call with the new API?
+§8.2 overlap_best_match — tie-breaking. "Score by overlap ratio + onset distance" — what are the weights? If two source notes have equal overlap with a target note but different onset distances, which wins? This will matter for contrapuntal passages. Consider documenting the scoring formula.
+§9 Validation — lyric_coverage_ratio >= 0.98 seems tight. For real-world scores with pickup notes, instrumental interludes, or humming passages, some sung notes legitimately don't have lyrics. Should there be a way to mark notes as "lyric-exempt" (e.g., vocalise/humming) so they don't count against coverage?
+§10 Repair Loop — AI context budget. "AI receives previous plan + validator issues + candidate sources by section." For a large score, this could be a substantial payload. Is there a plan to summarize/truncate the context sent to the AI planner? LLM context limits could be a concern for very large scores.
+§11 Persistence — plan hash collision. Key format is part:{part_index}|target:{voice_part_id}|hash:{plan_hash}. If someone changes the source MusicXML but keeps the same plan, the hash would match but the result should differ. Should the hash include a score content fingerprint?
+§14 Performance — "sub-second" assumption. The spec says "analyzer + execution + validation should remain sub-second." The MusicXML append step (§7.4) involves XML serialization which could be slow for large scores. Worth noting this as a potential bottleneck.
+Missing: Concurrency/locking. If two users (or two AI calls) try to transform the same score simultaneously, is there a risk of conflicting appended parts? The persistence layer should handle this, but it's not mentioned.
+The Recent synthesize.py Changes
+I noticed you already wired prepare_score_for_voice_part into synthesize() with the new params (voice_part_id, allow_lyric_propagation, source_voice_part_id, source_part_index). This aligns well with the spec's §6.4 integration pattern. One concern:
+
+score.clear(); score.update(deepcopy(working_score)) — this mutates the caller's score dict in-place, which contradicts the spec's "non-destructive" principle. If the caller holds a reference to the original score dict, it's now been replaced. Consider returning the working score separately rather than mutating the input.

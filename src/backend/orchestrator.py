@@ -19,7 +19,7 @@ from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
-from src.api.voice_parts import prepare_score_for_voice_part
+from src.api.voice_parts import preprocess_voice_parts
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
@@ -759,7 +759,7 @@ class Orchestrator:
                 if 0 <= precheck_part_index < len(parts):
                     part_notes = parts[precheck_part_index].get("notes") or []
                 if part_notes:
-                    precheck = prepare_score_for_voice_part(
+                    precheck = preprocess_voice_parts(
                         current_score,
                         part_index=precheck_part_index,
                         voice_id=synth_args.get("voice_id"),

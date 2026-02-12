@@ -59,7 +59,7 @@ def parse_musicxml(
 ) -> ScoreData:
     """Parse MusicXML (.xml or .mxl) into a lightweight score structure.
 
-    If no part is specified, the first part with lyrics is selected.
+    If no part is specified, all parts are parsed.
     verse_number: when provided, select lyrics for the matching verse number.
     lyrics_only: when True, parts with lyrics drop notes without lyric tokens unless
     the lyric is marked as extended.
@@ -150,7 +150,7 @@ def _select_parts(
     part_index: Optional[int],
     verse_number: Optional[str | int],
 ) -> Sequence[stream.Part]:
-    """Select parts by ID/index or choose a reasonable default part."""
+    """Select parts by ID/index or return all parts by default."""
     if part_id is not None and part_index is not None:
         raise ValueError("Provide part_id or part_index, not both.")
     parts = list(score.parts)
@@ -163,12 +163,7 @@ def _select_parts(
         if part_index < 0 or part_index >= len(parts):
             raise IndexError(f"part_index out of range: {part_index}")
         return [parts[part_index]]
-    if not parts:
-        return []
-    for part in parts:
-        if _part_has_lyrics(part, verse_number=verse_number):
-            return [part]
-    return [_select_top_part(parts)]
+    return parts
 
 
 def _select_top_part(parts: Sequence[stream.Part]) -> stream.Part:

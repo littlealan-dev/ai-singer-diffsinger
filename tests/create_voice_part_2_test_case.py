@@ -22,7 +22,7 @@ class TestVoicePart2(unittest.TestCase):
             self.skipTest(f"Score not found at {self.score_path}")
 
         print(f"Synthesizing voice part 2 from {self.score_path.name}...")
-        score = parse_score(self.score_path, part_index=0, verse_number=1)
+        score = parse_score(self.score_path, verse_number=1)
         print(f"Parsed {len(score['parts'][0]['notes'])} notes in selected part.")
 
         # For this score, part_index=0 is "SOPRANO ALTO".
@@ -59,10 +59,7 @@ class TestVoicePart2(unittest.TestCase):
             self.skipTest(f"Score not found at {self.score_path}")
 
         print(f"Synthesizing voice part 3 from {self.score_path.name}...")
-        upper_score = parse_score(self.score_path, part_index=0, verse_number=1)
-        lower_score = parse_score(self.score_path, part_index=1, verse_number=1)
-        score = dict(upper_score)
-        score["parts"] = [upper_score["parts"][0], lower_score["parts"][0]]
+        score = parse_score(self.score_path, verse_number=1)
         print(
             f"Parsed {len(score['parts'][1]['notes'])} notes in selected part."
         )
@@ -100,10 +97,7 @@ class TestVoicePart2(unittest.TestCase):
             self.skipTest(f"Score not found at {self.score_path}")
 
         print(f"Synthesizing voice part 4 from {self.score_path.name}...")
-        upper_score = parse_score(self.score_path, part_index=0, verse_number=1)
-        lower_score = parse_score(self.score_path, part_index=1, verse_number=1)
-        score = dict(upper_score)
-        score["parts"] = [upper_score["parts"][0], lower_score["parts"][0]]
+        score = parse_score(self.score_path, verse_number=1)
         print(
             f"Parsed {len(score['parts'][1]['notes'])} notes in selected part."
         )

@@ -1,0 +1,17 @@
+{
+  "targets": [
+    {
+      "actions": [
+        {
+          "type": "split_voice_part"
+        }
+      ],
+      "confidence": 0.7,
+      "notes": "Men voice part 3 contains lyrics; split only.",
+      "target": {
+        "part_index": 1,
+        "voice_part_id": "voice part 3"
+      }
+    }
+  ]
+}

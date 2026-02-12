@@ -136,11 +136,11 @@ class TestEndToEndAPI(unittest.TestCase):
         tenor_index = tenor_part["part_index"]
 
         print("Step 2: Parsing tenor verse 1...")
-        score = parse_score(self.score_path, part_index=tenor_index, verse_number="1")
-        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
+        score = parse_score(self.score_path, verse_number="1")
+        print(f"  Parsed {len(score['parts'][tenor_index]['notes'])} notes")
 
         print("Step 3: Synthesizing audio...")
-        result = synthesize(score, self.voicebank_reizo_path)
+        result = synthesize(score, self.voicebank_reizo_path, part_index=tenor_index)
         print(f"  Generated {result['duration_seconds']:.2f}s of audio")
 
         print("Step 4: Saving audio...")

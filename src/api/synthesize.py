@@ -3,6 +3,7 @@ Convenience synthesize API - runs the full pipeline.
 """
 
 import logging
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -23,11 +24,16 @@ from src.api.voicebank import (
     resolve_default_voice_color,
     resolve_voice_color_speaker,
 )
-from src.api.voice_parts import prepare_score_for_voice_part
+from src.api.voice_parts import preprocess_voice_parts
 from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 class TimeAxis:
     """Tempo-aware time axis for converting beats to milliseconds."""
@@ -1171,7 +1177,7 @@ def synthesize(
                 }
             ),
         )
-    preprocessed = prepare_score_for_voice_part(
+    preprocessed = preprocess_voice_parts(
         score,
         part_index=part_index,
         voice_id=voice_id,
@@ -1183,8 +1189,9 @@ def synthesize(
     if preprocessed.get("status") == "action_required":
         return preprocessed
     working_score = preprocessed["score"]
-    # Persist transformed score structure in-place for caller-side reuse.
-    if working_score is not score:
+    effective_part_index = int(preprocessed.get("part_index", part_index))
+    # Legacy compatibility mode for callers that expect input-score mutation.
+    if working_score is not score and _env_flag_enabled("VOICE_PART_LEGACY_INPLACE_MUTATION"):
         score.clear()
         score.update(deepcopy(working_score))
 
@@ -1215,7 +1222,7 @@ def synthesize(
     alignment = align_phonemes_to_notes(
         working_score,
         voicebank_path,
-        part_index=part_index,
+        part_index=effective_part_index,
         voice_id=voice_id,
         include_phonemes=False,
     )
