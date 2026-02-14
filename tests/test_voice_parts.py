@@ -221,6 +221,93 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertEqual(result.get("status"), "action_required")
         self.assertEqual(result.get("action"), "invalid_plan_payload")
 
+    def test_plan_parser_accepts_timeline_sections(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                    "verse_number": "1",
+                    "copy_all_verses": False,
+                }
+            ]
+        }
+        parsed = parse_voice_part_plan(plan, score=score)
+        self.assertTrue(parsed.get("ok"))
+        target = parsed["plan"]["targets"][0]
+        self.assertIn("sections", target)
+        self.assertEqual(target["sections"][0]["mode"], "derive")
+
+    def test_plan_parser_rejects_timeline_sections_non_contiguous(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 2,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                }
+            ]
+        }
+        parsed = parse_voice_part_plan(plan, score=score)
+        self.assertFalse(parsed.get("ok"))
+        self.assertEqual(parsed["error"]["action"], "non_contiguous_sections")
+
+    def test_preprocess_plan_executes_timeline_sections(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
+        metadata = result.get("metadata", {})
+        self.assertEqual(metadata.get("plan_mode"), "timeline_sections")
+
 
 class VoicePartPropagationStrategyTests(unittest.TestCase):
     def _note(

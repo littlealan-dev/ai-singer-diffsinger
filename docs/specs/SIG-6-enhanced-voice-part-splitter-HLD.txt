@@ -1,0 +1,293 @@
+Voice-Part Splitter High-Level Design
+
+Single-Target Extraction Mode (LLM planner + deterministic executor)
+
+Purpose
+
+User requests one part to listen to (e.g., Tenor). The system extracts/splits only that requested target line from a MusicXML score and produces a synthesis-safe monophonic MusicXML (or an internal event stream) for audio generation.
+
+Hard requirement: no chords / no overlaps in the extracted result, otherwise synthesis fails.
+
+⸻
+
+1) System Components
+
+A) Score Analyzer (code, fact provider)
+
+Read-only pass over MusicXML → emits a compact “Score Report” (JSON) + region indices.
+
+What it extracts (facts only):
+	•	Timeline: measures, divisions, tempo/time sig, absolute time grid
+	•	Events: notes/rests with onset, duration, pitch, tie state, staff, voice id, chord group id
+	•	Lyrics: per note lyric text, syllabic, lyric line index
+	•	Notation cues (when present): stem direction, staff number, clef changes, beams
+
+Problem/ambiguity detection (still facts):
+	•	Regions containing chords (simultaneous notes at same onset)
+	•	Regions with unnamed / _default voice activity
+	•	Regions where target is “unresolved” (see below)
+	•	Signals: narrow pitch spacing, frequent crossings risk, high lyric density
+
+Target resolution status per region
+For the requested target part only, each region is labeled:
+	•	RESOLVED (already clearly target or trivially extractable)
+	•	NEEDS_SPLIT (chords / mixed ownership)
+	•	UNASSIGNED_SOURCE (e.g., _default voice, or voice name not mapped)
+	•	NO_MUSIC (source is silent; target should rest/silence)
+
+This is the key replacement for “global coverage”.
+
+⸻
+
+B) Planner (LLM, opinion owner)
+
+Consumes Score Report and produces one executable Target Resolution Plan.
+
+Planner responsibilities
+	1.	Resolve every unresolved region for the requested target
+Each region must become one of:
+	•	extract notes for target (monophonic)
+	•	explicit rests
+	•	intentional silence (explicitly stated), if you support that
+	2.	Choose splitting method per region
+	•	Method A: Rule-based (fast)
+	•	Method B: Local optimizer DP (robust fallback)
+	•	Ask user if confidence low / ambiguous
+	3.	Enforce synthesis constraints
+	•	Never leave chords in target output
+	•	If needed, allow controlled degradation:
+	•	drop notes that would create chords
+	•	simplify melismas / elide lyrics per policy (only if required for your synthesizer)
+	4.	Emit structured plan
+	•	Exact operations with parameters (no “do something smart”)
+
+⸻
+
+C) Executor (code, deterministic)
+
+Applies the plan for the requested target only.
+
+Primitives (examples)
+	•	create_target_part(target_name, clef, instrument)
+	•	copy_region(src_voice, dst_target, region, policy)
+	•	split_chord(chord_group_id, select_note_ids_for_target)
+	•	move_note(note_id, dst_target) / delete_note(note_id)
+	•	insert_rest(dst_target, time, duration)
+	•	copy_lyrics(src_note_id, dst_note_id) / align_lyrics_by_time(...)
+
+Executor never decides ownership; it only follows instructions.
+
+⸻
+
+D) Validators (code, deterministic)
+
+Run after execution; gate synthesis.
+
+Hard-fail validators
+	•	Monophony: ≤1 sounding note at any onset in target output
+	•	No overlaps due to ties/durations
+	•	Measure duration consistency; ties valid
+
+Synthesis feasibility (engine-specific)
+	•	Lyric/phoneme density checks (hard or soft depending on failure mode)
+	•	Produce a structured report so LLM can repair
+
+⸻
+
+2) Control Flow
+	1.	User request: “Play Tenor”
+	2.	Analyze (code) → Score Report + unresolved region list
+	3.	Plan (LLM)
+	•	evaluate method candidates (mentally)
+	•	decide per region
+	•	if confidence < threshold → ask user a tight question
+	4.	Execute (code) → mutated target-only MusicXML
+	5.	Validate (code)
+	•	pass → synthesize
+	•	fail → return validation report → LLM repairs plan → re-execute (bounded retries)
+
+⸻
+
+3) Target Resolution Plan (what LLM outputs)
+
+At high level, the plan is a list of region decisions:
+
+For each region_id:
+	•	decision type:
+	•	EXTRACT_FROM_VOICE
+	•	SPLIT_CHORDS_SELECT_NOTES
+	•	COPY_UNISON_SECTION
+	•	INSERT_RESTS
+	•	DROP_NOTES_IF_NEEDED (explicit, localized)
+	•	method: A or B (or “trivial copy”)
+	•	parameters (ranges, penalties, lyric policy)
+	•	confidence + reason codes (debuggable)
+
+⸻
+
+4) Method A — Rule-Based Split (fast, good default)
+
+When to use
+	•	Clear register separation (upper vs lower)
+	•	Notation cues exist (stems/staff)
+	•	Low ambiguity signals
+
+Core idea
+
+For each chord/time-slice in a region, select one note for the requested target, using deterministic rules + small context.
+
+Inputs (facts)
+	•	chord group notes (same onset)
+	•	pitches
+	•	tie states
+	•	stems/staff (if present)
+	•	neighboring resolved target notes (before/after)
+
+Steps (logic)
+	1.	Candidate filtering (hard constraints)
+
+	•	Prefer notes that:
+	•	continue an existing tie chain for target (tie continuity)
+	•	do not create overlaps with target’s previous note duration
+
+	2.	Pitch banding (ownership heuristic)
+
+	•	Maintain a target “expected register band” for this region:
+	•	derived from nearby resolved target notes
+	•	or a default tenor/bass tessitura
+	•	Score each candidate note by distance to that band center.
+	•	closer → better
+
+	3.	Avoid crossings (local consistency)
+
+	•	If you also have a “lower line” in the source region (even if you’re not outputting it), you can compute crossing risk facts:
+	•	selecting a very low note for tenor when adjacent slices suggest tenor is higher is penalized
+	•	Practically: prefer the candidate that keeps the extracted line’s pitch contour smooth and avoids jumping below the likely other line.
+
+	4.	Stem/staff cues (when present)
+
+	•	If stems differ within the chord:
+	•	Tenor often aligns with stem-up (or a consistent stem direction used for upper voice)
+	•	Bass aligns with stem-down (depends on engraving)
+	•	If staff assignment differs:
+	•	prefer notes on the staff that the target usually inhabits in this part
+
+	5.	Deterministic tie breaker
+
+	•	If still tied:
+	•	choose closest to previous extracted pitch (min leap)
+	•	else choose highest pitch for upper target (tenor request) / lowest for bass request
+
+Output
+
+A single selected note per chord onset (others not selected are either ignored or explicitly dropped per plan), plus rests inserted where target is silent.
+
+Why it works
+
+Most practical choir/hymn MusicXML exports follow predictable engraving conventions (register separation + ties + stems).
+
+⸻
+
+5) Method B — Local Optimizer (DP) (robust fallback, still performant)
+
+When to use
+	•	Frequent chords with unclear separation
+	•	Narrow pitch spacing
+	•	Crossing-like passages
+	•	Rule-based yields low confidence
+
+Core idea
+
+Instead of deciding each chord independently, solve over a short window (e.g., 2–8 measures) to find the most plausible continuous monophonic line for the requested target, while implicitly “leaving the rest” to the other voice.
+
+Even in single-target mode, DP is useful because:
+	•	you’re selecting one note per onset from a set of candidates
+	•	you want the globally best sequence, not locally best picks
+
+Inputs (facts)
+	•	time-ordered “slots” (each onset time that has any notes)
+	•	for each slot: candidate note list (pitches + tie info + staff/stem cues)
+	•	context anchors:
+	•	last resolved target note before window (optional)
+	•	first resolved target note after window (optional)
+
+State and transitions (2-voice concept without generating both)
+
+Think of each slot as choosing which note belongs to target.
+DP finds the best path of chosen notes.
+	•	State at time t: chosen candidate index i (the note you pick for target at that onset) or REST if target silent.
+	•	Transition cost from state (t-1, i) → (t, j) is:
+
+Cost terms
+	1.	Leaps
+
+	•	penalize large melodic jumps:
+	•	small steps: low cost
+	•	big leaps: higher cost (especially repeated)
+
+	2.	Crossings proxy
+
+	•	penalize choices that make target line “swap register” abruptly relative to prior window behavior
+	•	in practice (single-target), this can be approximated by:
+	•	penalize sudden drops far below the window’s running median (for tenor)
+	•	or sudden spikes far above it (for bass)
+
+	3.	Range violations
+
+	•	soft penalty if chosen pitch outside expected tessitura band
+
+	4.	Unnecessary silence
+
+	•	allow REST, but penalize REST when notes exist and the region is likely target-owned (based on cues/lyrics/ties)
+	•	REST is still chosen if all candidates are terrible (e.g., would cause overlap or violate monophony)
+
+	5.	Tie continuity (strong preference)
+
+	•	if a tie is continuing, breaking it is heavily penalized
+	•	if a tie requires continuing on a specific pitch, the DP basically locks onto it
+
+Algorithm
+	•	Build slots from unique onset times in window
+	•	For each slot, candidates = notes sounding at that time (plus REST)
+	•	Run DP (Viterbi-style):
+	•	dp[t][j] = min_i dp[t-1][i] + cost(i→j)
+	•	store backpointers
+	•	Recover best path
+	•	Emit selection decisions per onset
+
+Output
+
+A monophonic sequence for the target in that window that is globally consistent and synthesis-safe.
+
+Performance
+	•	Very manageable if you cap:
+	•	window size (measures)
+	•	candidates per slot (chord note count is usually small)
+	•	You only run it on flagged regions, not the whole score.
+
+⸻
+
+6) Handling _default / Unassigned Unison Segments (single-target safe)
+
+Because you’re not generating all parts, the planner must resolve unassigned segments for the requested target:
+
+LLM chooses among:
+	•	Copy into requested target (most common for men’s unison)
+	•	Insert rests (only when strong evidence it’s not the target)
+	•	Ask user if confidence low
+
+Decision is made using a grounded scoring rubric over facts (pitch register, clef/staff, lyric alignment, continuity to neighbor target notes, exact duplication elsewhere if detectable).
+
+⸻
+
+7) Practical recommendation: How many methods
+
+In single-target mode, implement two:
+	•	Method A (Rule-based) as default
+	•	Method B (DP) as fallback for ambiguous regions
+
+Add user clarification as your third “escape hatch”.
+
+Only add ILP/SAT later if real user data shows repeated failures that DP cannot repair.
+
+⸻

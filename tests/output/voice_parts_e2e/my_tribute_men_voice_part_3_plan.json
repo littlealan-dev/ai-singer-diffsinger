@@ -1,17 +1,103 @@
 {
   "targets": [
     {
-      "actions": [
+      "confidence": 0.7,
+      "copy_all_verses": false,
+      "notes": "Timeline sections: men voice part 3",
+      "sections": [
         {
-          "type": "split_voice_part"
+          "end_measure": 18,
+          "mode": "rest",
+          "start_measure": 1
+        },
+        {
+          "end_measure": 24,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 3"
+          },
+          "lyric_strategy": "strict_onset",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 2"
+          },
+          "mode": "derive",
+          "start_measure": 19
+        },
+        {
+          "end_measure": 30,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 2"
+          },
+          "lyric_strategy": "strict_onset",
+          "mode": "derive",
+          "start_measure": 25
+        },
+        {
+          "end_measure": 36,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "overlap_best_match",
+          "mode": "derive",
+          "start_measure": 31
+        },
+        {
+          "end_measure": 41,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "strict_onset",
+          "mode": "derive",
+          "start_measure": 37
+        },
+        {
+          "end_measure": 49,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "overlap_best_match",
+          "mode": "derive",
+          "start_measure": 42
+        },
+        {
+          "end_measure": 51,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 2"
+          },
+          "lyric_strategy": "strict_onset",
+          "mode": "derive",
+          "start_measure": 50
+        },
+        {
+          "end_measure": 57,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "overlap_best_match",
+          "mode": "derive",
+          "start_measure": 52
         }
       ],
-      "confidence": 0.7,
-      "notes": "Men voice part 3 contains lyrics; split only.",
+      "split_shared_note_policy": "duplicate_to_all",
       "target": {
         "part_index": 1,
         "voice_part_id": "voice part 3"
-      }
+      },
+      "verse_number": "1"
     }
   ]
 }

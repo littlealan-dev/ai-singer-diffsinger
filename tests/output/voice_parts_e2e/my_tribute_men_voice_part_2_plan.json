@@ -1,43 +1,55 @@
 {
   "targets": [
     {
-      "actions": [
+      "confidence": 0.7,
+      "copy_all_verses": false,
+      "notes": "Timeline sections: men voice part 2",
+      "sections": [
         {
-          "split_shared_note_policy": "duplicate_to_all",
-          "type": "split_voice_part"
+          "end_measure": 18,
+          "mode": "rest",
+          "start_measure": 1
         },
         {
-          "copy_all_verses": false,
-          "policy": "fill_missing_only",
-          "section_overrides": [
-            {
-              "end_measure": 41,
-              "policy": "fill_missing_only",
-              "source": {
-                "part_index": 1,
-                "voice_part_id": "voice part 1"
-              },
-              "start_measure": 36,
-              "strategy": "strict_onset"
-            }
-          ],
-          "source_priority": [
-            {
-              "part_index": 0,
-              "voice_part_id": "voice part 3"
-            }
-          ],
-          "strategy": "overlap_best_match",
-          "type": "propagate_lyrics",
-          "verse_number": "1"
+          "end_measure": 35,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 3"
+          },
+          "lyric_strategy": "overlap_best_match",
+          "mode": "derive",
+          "start_measure": 19
+        },
+        {
+          "end_measure": 41,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "strict_onset",
+          "mode": "derive",
+          "start_measure": 36
+        },
+        {
+          "end_measure": 57,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 1"
+          },
+          "lyric_strategy": "overlap_best_match",
+          "mode": "derive",
+          "start_measure": 42
         }
       ],
-      "confidence": 0.7,
-      "notes": "Men voice part 2 uses P1 lyrics except m36-41.",
+      "split_shared_note_policy": "duplicate_to_all",
       "target": {
         "part_index": 1,
         "voice_part_id": "voice part 2"
-      }
+      },
+      "verse_number": "1"
     }
   ]
 }

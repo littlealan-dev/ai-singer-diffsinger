@@ -100,6 +100,9 @@ def parse_score(
     score_dict["voice_part_signals"]["measure_staff_voice_map"] = _build_measure_staff_voice_map(
         Path(file_path)
     )
+    score_dict["voice_part_signals"]["measure_annotations"] = _build_measure_annotations(
+        Path(file_path)
+    )
     
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(score_dict))
@@ -235,6 +238,67 @@ def _build_measure_staff_voice_map(path: Path) -> List[Dict[str, Any]]:
                     "lyric_svs": _sv_list(lyric_svs),
                 }
             )
+        parts.append(
+            {
+                "part_id": part_id,
+                "part_name": part_name_by_id.get(part_id),
+                "measures": measures,
+            }
+        )
+    return parts
+
+
+def _build_measure_annotations(path: Path) -> List[Dict[str, Any]]:
+    """Extract measure-level direction words (annotations) per part."""
+    content = _read_musicxml_content(path)
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError as exc:
+        raise ValueError(f"Invalid MusicXML: {exc}") from exc
+
+    part_name_by_id: Dict[str, Optional[str]] = {}
+    for elem in root.iter():
+        if _local_tag(elem.tag) != "score-part":
+            continue
+        part_id = elem.attrib.get("id")
+        if not part_id:
+            continue
+        part_name = None
+        for child in elem:
+            if _local_tag(child.tag) == "part-name":
+                part_name = (child.text or "").strip() or None
+                break
+        part_name_by_id[part_id] = part_name
+
+    parts: List[Dict[str, Any]] = []
+    for part in root.iter():
+        if _local_tag(part.tag) != "part":
+            continue
+        part_id = part.attrib.get("id")
+        measures: List[Dict[str, Any]] = []
+        measure_index = 0
+        for measure in part:
+            if _local_tag(measure.tag) != "measure":
+                continue
+            measure_index += 1
+            measure_number = measure.attrib.get("number") or str(measure_index)
+            directions: List[str] = []
+            for child in measure:
+                if _local_tag(child.tag) != "direction":
+                    continue
+                for direction_type in child:
+                    if _local_tag(direction_type.tag) != "direction-type":
+                        continue
+                    for direction_child in direction_type:
+                        if _local_tag(direction_child.tag) != "words":
+                            continue
+                        text = (direction_child.text or "").strip()
+                        if text:
+                            directions.append(text)
+            if directions:
+                measures.append(
+                    {"measure_number": measure_number, "directions": directions}
+                )
         parts.append(
             {
                 "part_id": part_id,

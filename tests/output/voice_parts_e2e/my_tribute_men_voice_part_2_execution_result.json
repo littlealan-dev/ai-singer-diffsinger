@@ -1,15 +1,50 @@
 {
   "appended_part_ref": {
-    "part_id": "P_DERIVED_424C98F414",
+    "part_id": "P_DERIVED_D68D165955",
     "part_index": 4,
     "part_name": "voice part 2 (Derived)"
   },
   "metadata": {
     "plan_applied": true,
-    "section_overrides_received": 1,
+    "plan_mode": "timeline_sections",
+    "section_count": 4,
+    "section_results": [
+      {
+        "copied_lyric_count": 0,
+        "copied_note_count": 0,
+        "end_measure": 18,
+        "missing_lyric_sung_note_count": 0,
+        "section_mode": "rest",
+        "start_measure": 1
+      },
+      {
+        "copied_lyric_count": 19,
+        "copied_note_count": 0,
+        "end_measure": 35,
+        "missing_lyric_sung_note_count": 0,
+        "section_mode": "derive",
+        "start_measure": 19
+      },
+      {
+        "copied_lyric_count": 0,
+        "copied_note_count": 0,
+        "end_measure": 41,
+        "missing_lyric_sung_note_count": 0,
+        "section_mode": "derive",
+        "start_measure": 36
+      },
+      {
+        "copied_lyric_count": 0,
+        "copied_note_count": 0,
+        "end_measure": 57,
+        "missing_lyric_sung_note_count": 0,
+        "section_mode": "derive",
+        "start_measure": 42
+      }
+    ],
     "split_shared_note_policy": "duplicate_to_all"
   },
-  "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/my-tribute.mxl/score.derived_424c98f414.xml",
+  "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/my-tribute.mxl/score.derived_d68d165955.xml",
   "part_index": 4,
   "reused_transform": false,
   "score": {
@@ -3298,240 +3333,6 @@
       },
       {
         "notes": [
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 1,
-            "offset_beats": 0.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 2,
-            "offset_beats": 4.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 3,
-            "offset_beats": 8.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 4,
-            "offset_beats": 12.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 5,
-            "offset_beats": 16.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 6,
-            "offset_beats": 20.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 7,
-            "offset_beats": 24.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 8,
-            "offset_beats": 28.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 9,
-            "offset_beats": 32.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 10,
-            "offset_beats": 36.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 11,
-            "offset_beats": 40.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 12,
-            "offset_beats": 44.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 13,
-            "offset_beats": 48.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 14,
-            "offset_beats": 52.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 15,
-            "offset_beats": 56.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 16,
-            "offset_beats": 60.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 17,
-            "offset_beats": 64.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 18,
-            "offset_beats": 68.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
           {
             "duration_beats": 0.5,
             "is_rest": true,
@@ -11975,240 +11776,6 @@
       {
         "notes": [
           {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 1,
-            "offset_beats": 0.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 2,
-            "offset_beats": 4.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 3,
-            "offset_beats": 8.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 4,
-            "offset_beats": 12.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 5,
-            "offset_beats": 16.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 6,
-            "offset_beats": 20.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 7,
-            "offset_beats": 24.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 8,
-            "offset_beats": 28.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 9,
-            "offset_beats": 32.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 10,
-            "offset_beats": 36.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 11,
-            "offset_beats": 40.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 12,
-            "offset_beats": 44.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 13,
-            "offset_beats": 48.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 14,
-            "offset_beats": 52.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 15,
-            "offset_beats": 56.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 16,
-            "offset_beats": 60.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 17,
-            "offset_beats": 64.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
-            "duration_beats": 4.0,
-            "is_rest": true,
-            "lyric": null,
-            "lyric_is_extended": false,
-            "measure_number": 18,
-            "offset_beats": 68.0,
-            "pitch_hz": null,
-            "pitch_midi": null,
-            "syllabic": null,
-            "tie_type": null,
-            "voice": null
-          },
-          {
             "duration_beats": 0.5,
             "is_rest": true,
             "lyric": null,
@@ -12508,7 +12075,7 @@
             "voice": null
           }
         ],
-        "part_id": "P_DERIVED_424C98F414",
+        "part_id": "P_DERIVED_D68D165955",
         "part_name": "voice part 2 (Derived)"
       }
     ],
@@ -16299,6 +15866,93 @@
       },
       "has_missing_lyric_voice_parts": true,
       "has_multi_voice_parts": true,
+      "measure_annotations": [
+        {
+          "measures": [
+            {
+              "directions": [
+                "Unhurried, but steadily"
+              ],
+              "measure_number": "1"
+            },
+            {
+              "directions": [
+                "Choir in Unison",
+                "smoothly"
+              ],
+              "measure_number": "5"
+            },
+            {
+              "directions": [
+                "S.A."
+              ],
+              "measure_number": "19"
+            },
+            {
+              "directions": [
+                "unis."
+              ],
+              "measure_number": "37"
+            },
+            {
+              "directions": [
+                "div."
+              ],
+              "measure_number": "43"
+            },
+            {
+              "directions": [
+                "cresc."
+              ],
+              "measure_number": "45"
+            },
+            {
+              "directions": [
+                "rit."
+              ],
+              "measure_number": "56"
+            }
+          ],
+          "part_id": "P1",
+          "part_name": "Women"
+        },
+        {
+          "measures": [
+            {
+              "directions": [
+                "unis."
+              ],
+              "measure_number": "36"
+            },
+            {
+              "directions": [
+                "div."
+              ],
+              "measure_number": "43"
+            }
+          ],
+          "part_id": "P2",
+          "part_name": "Men"
+        },
+        {
+          "measures": [
+            {
+              "directions": [
+                "ped."
+              ],
+              "measure_number": "44"
+            },
+            {
+              "directions": [
+                "rit."
+              ],
+              "measure_number": "56"
+            }
+          ],
+          "part_id": "P3",
+          "part_name": "Pipe Organ"
+        }
+      ],
       "measure_staff_voice_map": [
         {
           "measures": [
@@ -22506,249 +22160,15 @@
       "requested_verse_number": "1"
     },
     "voice_part_transforms": {
-      "part:1|target:voice part 2|source_part:0|source:voice part 3|score:4b8fc3d009779574|hash:424c98f4149a361d997232315ceb2087995a4801a4795a856290a8139d0c9de2": {
+      "part:1|target:voice part 2|source_part:0|source:voice part 3|score:3923b4b7bbb86726|hash:d68d165955855bf1e4423ffdef11aae89d1f6b8cf2ea40555dada47bb1254987": {
         "appended_part_ref": {
-          "part_id": "P_DERIVED_424C98F414",
+          "part_id": "P_DERIVED_D68D165955",
           "part_index": 4,
           "part_name": "voice part 2 (Derived)"
         },
-        "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/my-tribute.mxl/score.derived_424c98f414.xml",
+        "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/my-tribute.mxl/score.derived_d68d165955.xml",
         "part": {
           "notes": [
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 1,
-              "offset_beats": 0.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 2,
-              "offset_beats": 4.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 3,
-              "offset_beats": 8.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 4,
-              "offset_beats": 12.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 5,
-              "offset_beats": 16.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 6,
-              "offset_beats": 20.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 7,
-              "offset_beats": 24.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 8,
-              "offset_beats": 28.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 9,
-              "offset_beats": 32.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 10,
-              "offset_beats": 36.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 11,
-              "offset_beats": 40.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 12,
-              "offset_beats": 44.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 13,
-              "offset_beats": 48.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 14,
-              "offset_beats": 52.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 15,
-              "offset_beats": 56.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 16,
-              "offset_beats": 60.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 17,
-              "offset_beats": 64.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
-            {
-              "duration_beats": 4.0,
-              "is_rest": true,
-              "lyric": null,
-              "lyric_is_extended": false,
-              "measure_number": 18,
-              "offset_beats": 68.0,
-              "pitch_hz": null,
-              "pitch_midi": null,
-              "syllabic": null,
-              "tie_type": null,
-              "voice": null
-            },
             {
               "duration_beats": 0.5,
               "is_rest": true,
@@ -23054,19 +22474,19 @@
         },
         "part_index": 1,
         "propagated_lyrics": true,
-        "score_fingerprint": "4b8fc3d009779574",
+        "score_fingerprint": "3923b4b7bbb86726",
         "source_part_index": 0,
         "source_voice_part_id": "voice part 3",
         "target_voice_part_id": "voice part 2",
-        "transform_hash": "424c98f4149a361d997232315ceb2087995a4801a4795a856290a8139d0c9de2",
-        "transform_id": "vp:part1:voice part 2:424c98f4149a"
+        "transform_hash": "d68d165955855bf1e4423ffdef11aae89d1f6b8cf2ea40555dada47bb1254987",
+        "transform_id": "vp:part1:voice part 2:d68d16595585"
       }
     }
   },
-  "score_fingerprint": "4b8fc3d009779574",
+  "score_fingerprint": "3923b4b7bbb86726",
   "status": "ready",
-  "transform_hash": "424c98f4149a361d997232315ceb2087995a4801a4795a856290a8139d0c9de2",
-  "transform_id": "vp:part1:voice part 2:424c98f4149a",
+  "transform_hash": "d68d165955855bf1e4423ffdef11aae89d1f6b8cf2ea40555dada47bb1254987",
+  "transform_id": "vp:part1:voice part 2:d68d16595585",
   "validation": {
     "lyric_coverage_ratio": 1.0,
     "lyric_exempt_note_count": 0,

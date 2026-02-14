@@ -16,6 +16,11 @@ class VoicePartEndToEndTests(unittest.TestCase):
         self.output_dir = self.root_dir / "tests/output/voice_parts_e2e"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "0"
+        self.skip_synthesis = os.environ.get("VOICE_PART_E2E_SKIP_SYNTHESIS", "0").strip() in {
+            "1",
+            "true",
+            "yes",
+        }
 
     def _load_full_score(self) -> dict:
         score = parse_score(self.score_path, verse_number=1)
@@ -76,7 +81,11 @@ class VoicePartEndToEndTests(unittest.TestCase):
         )
 
         preprocess_result = preprocess_voice_parts(score, plan=plan)
-        self.assertIn(preprocess_result.get("status"), {"ready", "ready_with_warnings"})
+        self.assertIn(
+            preprocess_result.get("status"),
+            {"ready", "ready_with_warnings"},
+            msg=f"{label} preprocess failed: {json.dumps(preprocess_result, default=str)[:1200]}",
+        )
         self.assertTrue(preprocess_result.get("modified_musicxml_path"))
 
         plan_path = self.output_dir / f"{label}_plan.json"
@@ -89,6 +98,10 @@ class VoicePartEndToEndTests(unittest.TestCase):
             json.dumps(preprocess_result, indent=2, sort_keys=True, default=str)
         )
         shutil.copyfile(preprocess_result["modified_musicxml_path"], musicxml_path)
+        self.assertTrue(musicxml_path.exists())
+
+        if self.skip_synthesis:
+            return
 
         synth_result = synthesize(
             score,
@@ -108,7 +121,70 @@ class VoicePartEndToEndTests(unittest.TestCase):
             sample_rate=synth_result["sample_rate"],
         )
         self.assertTrue(audio_path.exists())
-        self.assertTrue(musicxml_path.exists())
+
+    def _find_derived_part(self, parsed_score: dict) -> dict:
+        derived_parts = [
+            part
+            for part in parsed_score.get("parts", [])
+            if str(part.get("part_name") or "").endswith("(Derived)")
+        ]
+        self.assertTrue(
+            derived_parts,
+            msg="No derived part found after re-parsing derived MusicXML.",
+        )
+        return derived_parts[-1]
+
+    def _assert_derived_output(
+        self,
+        *,
+        label: str,
+        min_sung_measure: int,
+        max_sung_measure: int,
+        lyric_presence_ranges: list[tuple[int, int]],
+    ) -> None:
+        derived_path = self.output_dir / f"{label}_derived.xml"
+        self.assertTrue(derived_path.exists(), msg=f"Missing derived output: {derived_path}")
+        parsed = parse_score(derived_path, verse_number=1)
+        derived_part = self._find_derived_part(parsed)
+        notes = derived_part.get("notes") or []
+        sung = [note for note in notes if not note.get("is_rest")]
+        self.assertTrue(sung, msg=f"{label}: derived part has no sung notes.")
+        sung_measures = sorted(
+            {
+                int(note.get("measure_number") or 0)
+                for note in sung
+                if int(note.get("measure_number") or 0) > 0
+            }
+        )
+        self.assertTrue(sung_measures, msg=f"{label}: no sung measure numbers detected.")
+        self.assertEqual(
+            sung_measures[0],
+            min_sung_measure,
+            msg=f"{label}: unexpected first sung measure.",
+        )
+        self.assertEqual(
+            sung_measures[-1],
+            max_sung_measure,
+            msg=f"{label}: unexpected last sung measure.",
+        )
+        for start_measure, end_measure in lyric_presence_ranges:
+            lyric_count = sum(
+                1
+                for note in sung
+                if (
+                    start_measure <= int(note.get("measure_number") or 0) <= end_measure
+                    and isinstance(note.get("lyric"), str)
+                    and bool(str(note.get("lyric")).strip())
+                )
+            )
+            self.assertGreater(
+                lyric_count,
+                0,
+                msg=(
+                    f"{label}: expected lyrics in measures {start_measure}-{end_measure}, "
+                    "but none were found."
+                ),
+            )
 
     def _find_viable_source_ref(
         self,
@@ -150,6 +226,12 @@ class VoicePartEndToEndTests(unittest.TestCase):
         try:
             self.score_path = tribute_path
             score_snapshot = self._load_full_score()
+            max_measure = max(
+                int(note.get("measure_number") or 0)
+                for part in score_snapshot.get("parts", [])
+                for note in (part.get("notes") or [])
+                if int(note.get("measure_number") or 0) > 0
+            )
             snapshot_path = self.output_dir / "my_tribute_full_score.json"
             snapshot_path.write_text(
                 json.dumps(score_snapshot, indent=2, sort_keys=True, default=str)
@@ -164,49 +246,31 @@ class VoicePartEndToEndTests(unittest.TestCase):
                         "targets": [
                             {
                                 "target": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                "actions": [
+                                "sections": [
+                                    {"start_measure": 1, "end_measure": 4, "mode": "rest"},
                                     {
-                                        "type": "split_voice_part",
-                                        "split_shared_note_policy": "duplicate_to_all",
+                                        "start_measure": 5,
+                                        "end_measure": 24,
+                                        "mode": "derive",
+                                        "melody_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
                                     },
                                     {
-                                        "type": "propagate_lyrics",
-                                        "verse_number": "1",
-                                        "copy_all_verses": False,
-                                        "source_priority": [
-                                            {
-                                                "part_index": 0,
-                                                "voice_part_id": "voice part 1",
-                                            }
-                                        ],
-                                        "strategy": "strict_onset",
-                                        "policy": "fill_missing_only",
-                                        "section_overrides": [
-                                            {
-                                                "start_measure": 1,
-                                                "end_measure": 24,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 3",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            },
-                                            {
-                                                "start_measure": 25,
-                                                "end_measure": 29,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 2",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            }
-                                        ],
+                                        "start_measure": 25,
+                                        "end_measure": max_measure,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
                                     },
                                 ],
+                                "verse_number": "1",
+                                "copy_all_verses": False,
+                                "split_shared_note_policy": "duplicate_to_all",
                                 "confidence": 0.9,
-                                "notes": "Women voice part 1 with lyric overrides for m25-29.",
+                                "notes": "Timeline sections: women voice part 1",
                             }
                         ]
                     },
@@ -220,69 +284,71 @@ class VoicePartEndToEndTests(unittest.TestCase):
                         "targets": [
                             {
                                 "target": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                "actions": [
+                                "sections": [
+                                    {"start_measure": 1, "end_measure": 4, "mode": "rest"},
                                     {
-                                        "type": "split_voice_part",
-                                        "split_shared_note_policy": "duplicate_to_all",
+                                        "start_measure": 5,
+                                        "end_measure": 24,
+                                        "mode": "derive",
+                                        "melody_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
                                     },
                                     {
-                                        "type": "propagate_lyrics",
-                                        "verse_number": "1",
-                                        "copy_all_verses": False,
-                                        "source_priority": [
-                                            {
-                                                "part_index": 0,
-                                                "voice_part_id": "voice part 2",
-                                            }
-                                        ],
-                                        "strategy": "strict_onset",
-                                        "policy": "fill_missing_only",
-                                        "section_overrides": [
-                                            {
-                                                "start_measure": 5,
-                                                "end_measure": 24,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            },
-                                            {
-                                                "start_measure": 31,
-                                                "end_measure": 36,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            },
-                                            {
-                                                "start_measure": 45,
-                                                "end_measure": 48,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            },
-                                            {
-                                                "start_measure": 52,
-                                                "end_measure": 54,
-                                                "source": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            },
-                                        ],
+                                        "start_measure": 25,
+                                        "end_measure": 30,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 31,
+                                        "end_measure": 36,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 37,
+                                        "end_measure": 41,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 42,
+                                        "end_measure": 49,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 50,
+                                        "end_measure": 51,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 52,
+                                        "end_measure": max_measure,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
                                     },
                                 ],
+                                "verse_number": "1",
+                                "copy_all_verses": False,
+                                "split_shared_note_policy": "duplicate_to_all",
                                 "confidence": 0.9,
-                                "notes": "Women voice part 2 uses voice part 2 except P1 overrides.",
+                                "notes": "Timeline sections: women voice part 2",
                             }
                         ]
                     },
@@ -296,85 +362,149 @@ class VoicePartEndToEndTests(unittest.TestCase):
                         "targets": [
                             {
                                 "target": {"part_index": 1, "voice_part_id": "voice part 1"},
-                                "actions": [
+                                "sections": [
+                                    {"start_measure": 1, "end_measure": 18, "mode": "rest"},
                                     {
-                                        "type": "split_voice_part",
-                                        "split_shared_note_policy": "duplicate_to_all",
+                                        "start_measure": 19,
+                                        "end_measure": 24,
+                                        "mode": "derive",
+                                        "melody_source": {"part_index": 1, "voice_part_id": "voice part 2"},
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
                                     },
                                     {
-                                        "type": "propagate_lyrics",
-                                        "verse_number": "1",
-                                        "copy_all_verses": False,
-                                        "source_priority": [
-                                            {
-                                                "part_index": 0,
-                                                "voice_part_id": "voice part 1",
-                                            }
-                                        ],
-                                        "strategy": "overlap_best_match",
-                                        "policy": "fill_missing_only",
-                                        "section_overrides": [
-                                            {
-                                                "start_measure": 36,
-                                                "end_measure": 41,
-                                                "source": {
-                                                    "part_index": 1,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            }
-                                        ],
+                                        "start_measure": 25,
+                                        "end_measure": 30,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 31,
+                                        "end_measure": 36,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 37,
+                                        "end_measure": 41,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 42,
+                                        "end_measure": 49,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 50,
+                                        "end_measure": 51,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 52,
+                                        "end_measure": max_measure,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
                                     },
                                 ],
+                                "verse_number": "1",
+                                "copy_all_verses": False,
+                                "split_shared_note_policy": "duplicate_to_all",
                                 "confidence": 0.7,
-                                "notes": "Men voice part 1 uses P1 lyrics except m36-41.",
+                                "notes": "Timeline sections: men voice part 1",
                             }
                         ]
                     },
                 },
                 {
-                    "label": "my_tribute_men_voice_part_2",
+                    "label": "my_tribute_men_voice_part_3",
                     "part_index": 1,
-                    "voice_part_id": "voice part 2",
+                    "voice_part_id": "voice part 3",
                     "source_ref": {"part_index": 0, "voice_part_id": "voice part 3"},
                     "plan": {
                         "targets": [
                             {
-                                "target": {"part_index": 1, "voice_part_id": "voice part 2"},
-                                "actions": [
+                                "target": {"part_index": 1, "voice_part_id": "voice part 3"},
+                                "sections": [
+                                    {"start_measure": 1, "end_measure": 18, "mode": "rest"},
                                     {
-                                        "type": "split_voice_part",
-                                        "split_shared_note_policy": "duplicate_to_all",
+                                        "start_measure": 19,
+                                        "end_measure": 24,
+                                        "mode": "derive",
+                                        "melody_source": {"part_index": 1, "voice_part_id": "voice part 2"},
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
                                     },
                                     {
-                                        "type": "propagate_lyrics",
-                                        "verse_number": "1",
-                                        "copy_all_verses": False,
-                                        "source_priority": [
-                                            {
-                                                "part_index": 0,
-                                                "voice_part_id": "voice part 3",
-                                            }
-                                        ],
-                                        "strategy": "overlap_best_match",
-                                        "policy": "fill_missing_only",
-                                        "section_overrides": [
-                                            {
-                                                "start_measure": 36,
-                                                "end_measure": 41,
-                                                "source": {
-                                                    "part_index": 1,
-                                                    "voice_part_id": "voice part 1",
-                                                },
-                                                "strategy": "strict_onset",
-                                                "policy": "fill_missing_only",
-                                            }
-                                        ],
+                                        "start_measure": 25,
+                                        "end_measure": 30,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 31,
+                                        "end_measure": 36,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 37,
+                                        "end_measure": 41,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 42,
+                                        "end_measure": 49,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 50,
+                                        "end_measure": 51,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                                        "lyric_strategy": "strict_onset",
+                                        "lyric_policy": "replace_all",
+                                    },
+                                    {
+                                        "start_measure": 52,
+                                        "end_measure": max_measure,
+                                        "mode": "derive",
+                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                        "lyric_strategy": "overlap_best_match",
+                                        "lyric_policy": "replace_all",
                                     },
                                 ],
+                                "verse_number": "1",
+                                "copy_all_verses": False,
+                                "split_shared_note_policy": "duplicate_to_all",
                                 "confidence": 0.7,
-                                "notes": "Men voice part 2 uses P1 lyrics except m36-41.",
+                                "notes": "Timeline sections: men voice part 3",
                             }
                         ]
                     },
@@ -389,6 +519,30 @@ class VoicePartEndToEndTests(unittest.TestCase):
                     source_ref=entry.get("source_ref"),
                     plan_override=entry["plan"],
                 )
+            self._assert_derived_output(
+                label="my_tribute_women_voice_part_1",
+                min_sung_measure=5,
+                max_sung_measure=54,
+                lyric_presence_ranges=[(5, 24), (25, max_measure)],
+            )
+            self._assert_derived_output(
+                label="my_tribute_women_voice_part_2",
+                min_sung_measure=5,
+                max_sung_measure=max_measure,
+                lyric_presence_ranges=[(5, 24), (25, max_measure)],
+            )
+            self._assert_derived_output(
+                label="my_tribute_men_voice_part_1",
+                min_sung_measure=19,
+                max_sung_measure=54,
+                lyric_presence_ranges=[(19, 24), (25, 35), (42, max_measure)],
+            )
+            self._assert_derived_output(
+                label="my_tribute_men_voice_part_3",
+                min_sung_measure=19,
+                max_sung_measure=max_measure,
+                lyric_presence_ranges=[(19, 24), (25, 35), (42, max_measure)],
+            )
         finally:
             self.score_path = original_score_path
 

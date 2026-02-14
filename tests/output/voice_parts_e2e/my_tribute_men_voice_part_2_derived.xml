@@ -96,7 +96,7 @@
         <pan>0</pan>
         </midi-instrument>
       </score-part>
-    <score-part id="P_DERIVED_424C98F414"><part-name>voice part 2 (Derived)</part-name></score-part></part-list>
+    <score-part id="P_DERIVED_D68D165955"><part-name>voice part 2 (Derived)</part-name></score-part></part-list>
   <part id="P1">
     <measure number="1" width="357.15">
       <print>
@@ -23519,7 +23519,7 @@
         </barline>
       </measure>
     </part>
-  <part id="P_DERIVED_424C98F414"><measure number="1"><attributes>
+  <part id="P_DERIVED_D68D165955"><measure number="1"><attributes>
         <divisions>12</divisions>
         <key>
           <fifths>-2</fifths>

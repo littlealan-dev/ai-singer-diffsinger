@@ -17839,6 +17839,93 @@
     },
     "has_missing_lyric_voice_parts": true,
     "has_multi_voice_parts": true,
+    "measure_annotations": [
+      {
+        "measures": [
+          {
+            "directions": [
+              "Unhurried, but steadily"
+            ],
+            "measure_number": "1"
+          },
+          {
+            "directions": [
+              "Choir in Unison",
+              "smoothly"
+            ],
+            "measure_number": "5"
+          },
+          {
+            "directions": [
+              "S.A."
+            ],
+            "measure_number": "19"
+          },
+          {
+            "directions": [
+              "unis."
+            ],
+            "measure_number": "37"
+          },
+          {
+            "directions": [
+              "div."
+            ],
+            "measure_number": "43"
+          },
+          {
+            "directions": [
+              "cresc."
+            ],
+            "measure_number": "45"
+          },
+          {
+            "directions": [
+              "rit."
+            ],
+            "measure_number": "56"
+          }
+        ],
+        "part_id": "P1",
+        "part_name": "Women"
+      },
+      {
+        "measures": [
+          {
+            "directions": [
+              "unis."
+            ],
+            "measure_number": "36"
+          },
+          {
+            "directions": [
+              "div."
+            ],
+            "measure_number": "43"
+          }
+        ],
+        "part_id": "P2",
+        "part_name": "Men"
+      },
+      {
+        "measures": [
+          {
+            "directions": [
+              "ped."
+            ],
+            "measure_number": "44"
+          },
+          {
+            "directions": [
+              "rit."
+            ],
+            "measure_number": "56"
+          }
+        ],
+        "part_id": "P3",
+        "part_name": "Pipe Organ"
+      }
+    ],
     "measure_staff_voice_map": [
       {
         "measures": [

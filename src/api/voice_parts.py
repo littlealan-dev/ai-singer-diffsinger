@@ -22,6 +22,7 @@ VOICE_PART_STATUSES = {
 VALID_PLAN_ACTION_TYPES = {
     "split_voice_part",
     "propagate_lyrics",
+    "duplicate_section_to_all_voice_parts",
 }
 VALID_SPLIT_SHARED_NOTE_POLICIES = {
     "duplicate_to_all",
@@ -37,6 +38,7 @@ VALID_PROPAGATION_POLICIES = {
     "replace_all",
     "preserve_existing",
 }
+VALID_TIMELINE_SECTION_MODES = {"rest", "derive"}
 DEFAULT_REPAIR_MAX_RETRIES = 2
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
@@ -334,11 +336,41 @@ def parse_voice_part_plan(
         if error is not None:
             return {"ok": False, "error": error}
 
+        raw_sections = raw_target.get("sections")
+        if raw_sections is not None:
+            sections, sections_error = _normalize_timeline_sections(
+                raw_sections,
+                target_ref=target_ref,
+                score=score,
+                field_name=f"targets[{target_idx}].sections",
+            )
+            if sections_error is not None:
+                return {"ok": False, "error": sections_error}
+            normalized_targets.append(
+                {
+                    "target": target_ref,
+                    "sections": sections,
+                    "verse_number": _normalize_verse_number(
+                        raw_target.get("verse_number", "1")
+                    ),
+                    "copy_all_verses": bool(raw_target.get("copy_all_verses", False)),
+                    "split_shared_note_policy": str(
+                        raw_target.get("split_shared_note_policy", "duplicate_to_all")
+                    ).strip(),
+                    "confidence": raw_target.get("confidence"),
+                    "notes": raw_target.get("notes"),
+                }
+            )
+            continue
+
         raw_actions = raw_target.get("actions")
         if not isinstance(raw_actions, list) or not raw_actions:
             return _plan_error(
                 "invalid_plan_payload",
-                f"targets[{target_idx}].actions must be a non-empty list.",
+                (
+                    f"targets[{target_idx}] must include either a non-empty sections list "
+                    "or a non-empty actions list."
+                ),
             )
         normalized_actions: List[Dict[str, Any]] = []
         for action_idx, raw_action in enumerate(raw_actions):
@@ -369,6 +401,37 @@ def parse_voice_part_plan(
                     {
                         "type": "split_voice_part",
                         "split_shared_note_policy": split_policy,
+                    }
+                )
+                continue
+            if action_type == "duplicate_section_to_all_voice_parts":
+                start_measure = raw_action.get("start_measure")
+                end_measure = raw_action.get("end_measure")
+                if not isinstance(start_measure, int) or not isinstance(end_measure, int):
+                    return _plan_error(
+                        "invalid_plan_payload",
+                        f"targets[{target_idx}].actions[{action_idx}].start_measure/end_measure must be integers.",
+                    )
+                if start_measure > end_measure:
+                    return _plan_error(
+                        "invalid_plan_payload",
+                        f"targets[{target_idx}].actions[{action_idx}].start_measure cannot exceed end_measure.",
+                    )
+                source_ref, source_error = _normalize_voice_ref(
+                    raw_action.get("source"),
+                    field_name=(
+                        f"targets[{target_idx}].actions[{action_idx}].source"
+                    ),
+                    allow_voice_id=False,
+                )
+                if source_error is not None:
+                    return {"ok": False, "error": source_error}
+                normalized_actions.append(
+                    {
+                        "type": "duplicate_section_to_all_voice_parts",
+                        "start_measure": int(start_measure),
+                        "end_measure": int(end_measure),
+                        "source": source_ref,
                     }
                 )
                 continue
@@ -510,7 +573,7 @@ def _prepare_score_for_voice_part_legacy(
     transformed_part["notes"] = selected_notes
     transformed_part["part_name"] = target["voice_part_id"]
 
-    if _part_has_any_lyric(selected_notes):
+    if _part_has_any_lyric(selected_notes) and not allow_lyric_propagation:
         source_score["parts"][part_index] = transformed_part
         return _finalize_transform_result(
             source_score,
@@ -798,18 +861,37 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         )
     target_entry = targets[0]
     target_ref = target_entry["target"]
+    sections = target_entry.get("sections") or []
+    if sections:
+        return _execute_timeline_sections(score, target_entry)
     actions = target_entry.get("actions") or []
     split_action = next((action for action in actions if action["type"] == "split_voice_part"), None)
+    duplicate_actions = [
+        action for action in actions if action["type"] == "duplicate_section_to_all_voice_parts"
+    ]
     propagate_action = next(
         (action for action in actions if action["type"] == "propagate_lyrics"),
         None,
     )
-    if split_action is None and propagate_action is None:
+    if split_action is None and propagate_action is None and not duplicate_actions:
         return _action_required(
             "invalid_plan_payload",
             "Plan target requires split_voice_part and/or propagate_lyrics action.",
             code="invalid_plan_payload",
         )
+
+    if duplicate_actions:
+        for duplicate_action in duplicate_actions:
+            duplicate_result = _duplicate_section_to_all_voice_parts(
+                score,
+                target_part_index=target_ref["part_index"],
+                source_part_index=duplicate_action["source"]["part_index"],
+                source_voice_part_id=duplicate_action["source"]["voice_part_id"],
+                start_measure=duplicate_action["start_measure"],
+                end_measure=duplicate_action["end_measure"],
+            )
+            if duplicate_result is not None:
+                return duplicate_result
 
     source_priority = []
     if propagate_action is not None:
@@ -911,6 +993,368 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         metadata["section_overrides_received"] = len(section_overrides)
         metadata["split_shared_note_policy"] = split_policy
     return result
+
+
+def _execute_timeline_sections(score: Dict[str, Any], target_entry: Dict[str, Any]) -> Dict[str, Any]:
+    target_ref = target_entry["target"]
+    part_index = int(target_ref["part_index"])
+    target_voice_part_id = str(target_ref["voice_part_id"])
+    verse_number = _normalize_verse_number(target_entry.get("verse_number", "1"))
+    copy_all_verses = bool(target_entry.get("copy_all_verses", False))
+    split_shared_note_policy = str(
+        target_entry.get("split_shared_note_policy", "duplicate_to_all")
+    ).strip()
+
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return _action_required(
+            "invalid_part_index",
+            f"part_index {part_index} is out of range.",
+            part_index=part_index,
+        )
+
+    source_score = deepcopy(score)
+    part = source_score["parts"][part_index]
+    analysis = _analyze_part_voice_parts(part, part_index)
+    voice_parts = analysis["voice_parts"]
+    if not voice_parts:
+        return _action_required(
+            "missing_voice_parts",
+            "No voiced note events were found in the selected part.",
+            part_index=part_index,
+        )
+
+    target_meta = _resolve_target_voice_part(
+        voice_parts,
+        voice_id=None,
+        voice_part_id=target_voice_part_id,
+    )
+    if target_meta is None:
+        return _action_required(
+            "target_voice_part_not_found",
+            "Requested voice part was not found in the selected part.",
+            part_index=part_index,
+            voice_part_options=[vp["voice_part_id"] for vp in voice_parts],
+        )
+    target_voice = str(target_meta["source_voice_id"])
+    voice_priority = {
+        str(vp["source_voice_id"]): idx for idx, vp in enumerate(voice_parts)
+    }
+    working_notes = _select_part_notes_for_voice(
+        part.get("notes") or [],
+        target_voice,
+        split_shared_note_policy=split_shared_note_policy,
+        voice_priority=voice_priority,
+    )
+    source_notes_for_validation: List[Dict[str, Any]] = []
+    section_results: List[Dict[str, Any]] = []
+    propagated = False
+    first_source_ref: Optional[Dict[str, Any]] = None
+
+    for section in target_entry.get("sections") or []:
+        start_measure = int(section["start_measure"])
+        end_measure = int(section["end_measure"])
+        mode = str(section["mode"])
+        before_lyric_count = _count_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        copied_note_count = 0
+
+        if mode == "rest":
+            working_notes = [
+                dict(note)
+                for note in working_notes
+                if not _note_in_measure_range(note, (start_measure, end_measure))
+            ]
+        else:
+            melody_source = section.get("melody_source")
+            if isinstance(melody_source, dict):
+                copied_note_count = _copy_section_melody_into_target(
+                    working_notes=working_notes,
+                    source_score=source_score,
+                    target_voice=target_voice,
+                    source_part_index=int(melody_source["part_index"]),
+                    source_voice_part_id=str(melody_source["voice_part_id"]),
+                    start_measure=start_measure,
+                    end_measure=end_measure,
+                )
+            lyric_source = section.get("lyric_source")
+            if isinstance(lyric_source, dict):
+                override_source_notes = _resolve_source_notes(
+                    source_score,
+                    source_part_index=int(lyric_source["part_index"]),
+                    source_voice_part_id=str(lyric_source["voice_part_id"]),
+                )
+                if override_source_notes is None:
+                    return _action_required(
+                        "invalid_section_source",
+                        (
+                            "Selected section lyric source is invalid for lyric propagation."
+                        ),
+                        part_index=part_index,
+                        target_voice_part=target_voice_part_id,
+                        section_start_measure=start_measure,
+                        section_end_measure=end_measure,
+                    )
+                if first_source_ref is None:
+                    first_source_ref = {
+                        "part_index": int(lyric_source["part_index"]),
+                        "voice_part_id": str(lyric_source["voice_part_id"]),
+                    }
+                source_notes_for_validation.extend(override_source_notes)
+                propagated = True
+                working_notes = _propagate_lyrics(
+                    target_notes=working_notes,
+                    source_notes=override_source_notes,
+                    strategy=str(section.get("lyric_strategy") or "strict_onset"),
+                    policy=str(section.get("lyric_policy") or "fill_missing_only"),
+                    verse_number=verse_number,
+                    copy_all_verses=copy_all_verses,
+                    measure_range=(start_measure, end_measure),
+                )
+
+        after_lyric_count = _count_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        section_missing = _count_missing_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        section_results.append(
+            {
+                "section_mode": mode,
+                "start_measure": start_measure,
+                "end_measure": end_measure,
+                "copied_note_count": copied_note_count,
+                "copied_lyric_count": max(0, after_lyric_count - before_lyric_count),
+                "missing_lyric_sung_note_count": section_missing,
+            }
+        )
+
+    working_notes.sort(
+        key=lambda row: (
+            int(row.get("measure_number") or 0),
+            float(row.get("offset_beats") or 0.0),
+            float(row.get("pitch_midi") or 0.0),
+        )
+    )
+    transformed_part = dict(part)
+    transformed_part["notes"] = [dict(note) for note in working_notes]
+    transformed_part["part_name"] = target_voice_part_id
+    source_score["parts"][part_index] = transformed_part
+
+    validation = _validate_transformed_notes(
+        transformed_notes=working_notes,
+        source_notes=source_notes_for_validation,
+    )
+    status = "ready"
+    warnings: List[Dict[str, Any]] = []
+    if validation["missing_lyric_sung_note_count"] > 0:
+        if validation["lyric_coverage_ratio"] >= 0.90:
+            status = "ready_with_warnings"
+            warnings.append(
+                {
+                    "code": "partial_lyric_coverage",
+                    "missing_note_count": validation["missing_lyric_sung_note_count"],
+                    "lyric_coverage_ratio": validation["lyric_coverage_ratio"],
+                    "unresolved_measures": validation["unresolved_measures"][:10],
+                }
+            )
+        else:
+            return _action_required(
+                "validation_failed_needs_review",
+                "Lyric propagation did not meet minimum coverage.",
+                part_index=part_index,
+                target_voice_part=target_voice_part_id,
+                validation=validation,
+                section_results=section_results,
+            )
+
+    result = _finalize_transform_result(
+        source_score,
+        part_index=part_index,
+        target_voice_part_id=target_voice_part_id,
+        source_voice_part_id=(
+            str(first_source_ref["voice_part_id"]) if first_source_ref else None
+        ),
+        source_part_index=(
+            int(first_source_ref["part_index"]) if first_source_ref else part_index
+        ),
+        transformed_part=transformed_part,
+        propagated=propagated,
+        status=status,
+        warnings=warnings,
+        validation=validation,
+        source_musicxml_path=_resolve_source_musicxml_path(score),
+    )
+    if result.get("status") in {"ready", "ready_with_warnings", "action_required"}:
+        metadata = result.setdefault("metadata", {})
+        metadata["plan_applied"] = True
+        metadata["plan_mode"] = "timeline_sections"
+        metadata["section_count"] = len(target_entry.get("sections") or [])
+        metadata["split_shared_note_policy"] = split_shared_note_policy
+        metadata["section_results"] = section_results
+    return result
+
+
+def _copy_section_melody_into_target(
+    *,
+    working_notes: List[Dict[str, Any]],
+    source_score: Dict[str, Any],
+    target_voice: str,
+    source_part_index: int,
+    source_voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+) -> int:
+    source_notes = _resolve_source_notes_allow_lyricless(
+        source_score,
+        source_part_index=source_part_index,
+        source_voice_part_id=source_voice_part_id,
+    )
+    if source_notes is None:
+        return 0
+    copied: List[Dict[str, Any]] = []
+    for source_note in source_notes:
+        if not _note_in_measure_range(source_note, (start_measure, end_measure)):
+            continue
+        note = dict(source_note)
+        note["voice"] = target_voice
+        note["lyric"] = None
+        note["syllabic"] = None
+        note["lyric_is_extended"] = False
+        copied.append(note)
+
+    kept = [
+        dict(note)
+        for note in working_notes
+        if not _note_in_measure_range(note, (start_measure, end_measure))
+    ]
+    kept.extend(copied)
+    working_notes[:] = kept
+    return len([note for note in copied if not note.get("is_rest")])
+
+
+def _resolve_source_notes_allow_lyricless(
+    score: Dict[str, Any],
+    *,
+    source_part_index: int,
+    source_voice_part_id: str,
+) -> Optional[List[Dict[str, Any]]]:
+    parts = score.get("parts") or []
+    if source_part_index < 0 or source_part_index >= len(parts):
+        return None
+    source_part = parts[source_part_index]
+    source_analysis = _analyze_part_voice_parts(source_part, source_part_index)
+    source_meta = _find_voice_part_by_id(
+        source_analysis["voice_parts"], source_voice_part_id
+    )
+    if source_meta is None:
+        return None
+    return _select_part_notes_for_voice(
+        source_part.get("notes") or [],
+        source_meta["source_voice_id"],
+    )
+
+
+def _count_lyric_sung_notes_in_range(
+    notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
+) -> int:
+    return sum(
+        1
+        for note in notes
+        if (
+            not note.get("is_rest")
+            and _note_in_measure_range(note, (start_measure, end_measure))
+            and _has_lyric(note)
+        )
+    )
+
+
+def _count_missing_lyric_sung_notes_in_range(
+    notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
+) -> int:
+    return sum(
+        1
+        for note in notes
+        if (
+            not note.get("is_rest")
+            and _note_in_measure_range(note, (start_measure, end_measure))
+            and not _has_lyric(note)
+        )
+    )
+
+
+def _duplicate_section_to_all_voice_parts(
+    score: Dict[str, Any],
+    *,
+    target_part_index: int,
+    source_part_index: int,
+    source_voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+) -> Optional[Dict[str, Any]]:
+    parts = score.get("parts") or []
+    if target_part_index < 0 or target_part_index >= len(parts):
+        return _action_required(
+            "invalid_part_index",
+            f"part_index {target_part_index} is out of range.",
+            part_index=target_part_index,
+        )
+    if source_part_index < 0 or source_part_index >= len(parts):
+        return _action_required(
+            "invalid_source_part_index",
+            f"source_part_index {source_part_index} is out of range.",
+            part_index=target_part_index,
+        )
+    if source_part_index != target_part_index:
+        return _action_required(
+            "invalid_plan_payload",
+            "duplicate_section_to_all_voice_parts must use a source within the same part.",
+            part_index=target_part_index,
+        )
+    target_part = parts[target_part_index]
+    analysis = _analyze_part_voice_parts(target_part, target_part_index)
+    source_meta = _find_voice_part_by_id(analysis["voice_parts"], source_voice_part_id)
+    if source_meta is None:
+        return _action_required(
+            "invalid_source_voice_part",
+            "Selected source voice part is invalid for duplication.",
+            part_index=target_part_index,
+        )
+    source_voice_id = source_meta["source_voice_id"]
+    voice_ids = [vp["source_voice_id"] for vp in analysis["voice_parts"]]
+    target_voice_ids = [vid for vid in voice_ids if vid != source_voice_id]
+    notes = target_part.get("notes") or []
+    selected_source_notes = [
+        dict(note)
+        for note in notes
+        if not note.get("is_rest")
+        and _voice_key(note.get("voice")) == source_voice_id
+        and start_measure <= int(note.get("measure_number") or 0) <= end_measure
+    ]
+    if not selected_source_notes:
+        return None
+
+    for target_voice_id in target_voice_ids:
+        has_existing = any(
+            _voice_key(note.get("voice")) == target_voice_id
+            and start_measure <= int(note.get("measure_number") or 0) <= end_measure
+            for note in notes
+        )
+        if has_existing:
+            continue
+        for note in selected_source_notes:
+            new_note = dict(note)
+            new_note["voice"] = target_voice_id
+            notes.append(new_note)
+    notes.sort(
+        key=lambda row: (
+            int(row.get("measure_number") or 0),
+            float(row.get("offset_beats") or 0.0),
+            float(row.get("pitch_midi") or 0.0),
+        )
+    )
+    return None
 
 
 def _find_voice_part_by_id(
@@ -1983,6 +2427,150 @@ def _normalize_section_overrides(
                 "precedence": idx,
             }
         )
+    return normalized, None
+
+
+def _normalize_timeline_sections(
+    raw_sections: Any,
+    *,
+    target_ref: Dict[str, Any],
+    score: Optional[Dict[str, Any]],
+    field_name: str,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    if not isinstance(raw_sections, list) or not raw_sections:
+        return [], _plan_error(
+            "invalid_plan_payload",
+            f"{field_name} must be a non-empty list.",
+        )["error"]
+
+    target_part_index = int(target_ref["part_index"])
+    part_span = _resolve_part_measure_span(score, target_part_index)
+    max_measure = part_span[1] if part_span is not None else None
+    normalized: List[Dict[str, Any]] = []
+    prev_end = 0
+    for idx, raw_section in enumerate(raw_sections):
+        section_name = f"{field_name}[{idx}]"
+        if not isinstance(raw_section, dict):
+            return [], _plan_error(
+                "invalid_plan_payload",
+                f"{section_name} must be an object.",
+            )["error"]
+        start_measure = raw_section.get("start_measure")
+        end_measure = raw_section.get("end_measure")
+        if not isinstance(start_measure, int) or not isinstance(end_measure, int):
+            return [], _plan_error(
+                "invalid_section_range",
+                f"{section_name} start_measure/end_measure must be integers.",
+            )["error"]
+        if start_measure < 1 or end_measure < 1:
+            return [], _plan_error(
+                "invalid_section_range",
+                f"{section_name} start_measure/end_measure must be >= 1.",
+            )["error"]
+        if start_measure > end_measure:
+            return [], _plan_error(
+                "invalid_section_range",
+                f"{section_name} start_measure cannot exceed end_measure.",
+            )["error"]
+        if max_measure is not None and end_measure > max_measure:
+            return [], _plan_error(
+                "invalid_section_range",
+                f"{section_name} end_measure exceeds target part max measure {max_measure}.",
+            )["error"]
+        if prev_end and start_measure <= prev_end:
+            return [], _plan_error(
+                "overlapping_sections",
+                f"{section_name} overlaps with the previous section.",
+            )["error"]
+        expected_start = 1 if idx == 0 else prev_end + 1
+        if start_measure != expected_start:
+            return [], _plan_error(
+                "non_contiguous_sections",
+                (
+                    f"{section_name} must start at measure {expected_start} "
+                    "for contiguous coverage."
+                ),
+            )["error"]
+        mode = str(raw_section.get("mode") or "").strip().lower()
+        if mode not in VALID_TIMELINE_SECTION_MODES:
+            return [], _plan_error(
+                "invalid_section_mode",
+                f"{section_name} mode must be one of: {sorted(VALID_TIMELINE_SECTION_MODES)}.",
+            )["error"]
+
+        melody_raw = raw_section.get("melody_source")
+        lyric_raw = raw_section.get("lyric_source")
+        melody_source = None
+        lyric_source = None
+
+        if mode == "rest":
+            if melody_raw is not None or lyric_raw is not None:
+                return [], _plan_error(
+                    "invalid_plan_payload",
+                    f"{section_name} rest mode cannot include source fields.",
+                )["error"]
+        else:
+            if melody_raw is None and lyric_raw is None:
+                return [], _plan_error(
+                    "empty_section_source",
+                    f"{section_name} derive mode must include melody_source and/or lyric_source.",
+                )["error"]
+            if melody_raw is not None:
+                melody_source, melody_error = _normalize_voice_ref(
+                    melody_raw,
+                    field_name=f"{section_name}.melody_source",
+                    allow_voice_id=False,
+                )
+                if melody_error is not None:
+                    return [], _plan_error(
+                        "malformed_section_source",
+                        f"{section_name}.melody_source is invalid.",
+                    )["error"]
+            if lyric_raw is not None:
+                lyric_source, lyric_error = _normalize_voice_ref(
+                    lyric_raw,
+                    field_name=f"{section_name}.lyric_source",
+                    allow_voice_id=False,
+                )
+                if lyric_error is not None:
+                    return [], _plan_error(
+                        "malformed_section_source",
+                        f"{section_name}.lyric_source is invalid.",
+                    )["error"]
+
+        strategy = str(raw_section.get("lyric_strategy", "strict_onset")).strip()
+        policy = str(raw_section.get("lyric_policy", "fill_missing_only")).strip()
+        if strategy not in VALID_PROPAGATION_STRATEGIES:
+            return [], _plan_error(
+                "invalid_plan_enum",
+                f"{section_name} lyric_strategy is invalid: {strategy}",
+            )["error"]
+        if policy not in VALID_PROPAGATION_POLICIES:
+            return [], _plan_error(
+                "invalid_plan_enum",
+                f"{section_name} lyric_policy is invalid: {policy}",
+            )["error"]
+        normalized.append(
+            {
+                "start_measure": int(start_measure),
+                "end_measure": int(end_measure),
+                "mode": mode,
+                "melody_source": melody_source,
+                "lyric_source": lyric_source,
+                "lyric_strategy": strategy,
+                "lyric_policy": policy,
+            }
+        )
+        prev_end = end_measure
+
+    if max_measure is not None and prev_end != max_measure:
+        return [], _plan_error(
+            "non_contiguous_sections",
+            (
+                f"{field_name} must end at target part max measure {max_measure}; "
+                f"got {prev_end}."
+            ),
+        )["error"]
     return normalized, None
 
 
