@@ -13,6 +13,7 @@ import time
 import numpy as np
 
 from src.api.phonemize import phonemize
+import src.api.syllable_alignment as syllable_alignment
 from src.api.inference import (
     predict_durations,
     predict_pitch,
@@ -212,15 +213,28 @@ def _resolve_group_lyric(group: Dict[str, Any]) -> str:
     notes = group.get("notes") or []
     if not notes:
         return ""
+
+    lyric_tokens: List[str] = []
+    syllabic_tokens: List[str] = []
     fallback = str(notes[0].get("lyric", "") or "").strip()
     for note in notes:
         lyric = str(note.get("lyric", "") or "").strip()
-        if not lyric:
+        if not lyric or lyric.startswith("+"):
             continue
-        if lyric.startswith("+"):
-            continue
-        return lyric
-    return "" if fallback.startswith("+") else fallback
+        lyric_tokens.append(lyric)
+        syllabic = str(note.get("syllabic", "") or "").strip().lower()
+        if syllabic:
+            syllabic_tokens.append(syllabic)
+
+    if not lyric_tokens:
+        return "" if fallback.startswith("+") else fallback
+    if len(lyric_tokens) == 1:
+        return lyric_tokens[0]
+
+    # Rebuild split-word syllable chains (e.g. "voic"+"es" -> "voices").
+    if any(token in {"begin", "middle", "end"} for token in syllabic_tokens):
+        return "".join(token.replace("-", "") for token in lyric_tokens)
+    return lyric_tokens[0]
 
 
 def _trim_single_note_multisyllable(
@@ -354,6 +368,91 @@ def _adjust_durations_to_total(durations: List[int], target_total: int) -> List[
         else:
             idx -= 1
     return durations
+
+
+def _largest_remainder_round(weights: List[float], total: int) -> List[int]:
+    """Distribute integer budget using largest remainder method."""
+    if total <= 0 or not weights:
+        return [0] * len(weights)
+    weight_sum = float(sum(weights))
+    if weight_sum <= 0:
+        base = [0] * len(weights)
+        for idx in range(total):
+            base[idx % len(base)] += 1
+        return base
+    quotas = [(w / weight_sum) * float(total) for w in weights]
+    floors = [int(np.floor(q)) for q in quotas]
+    remain = total - sum(floors)
+    remainders = sorted(
+        ((quotas[i] - floors[i], i) for i in range(len(quotas))),
+        key=lambda item: (-item[0], item[1]),
+    )
+    for _, idx in remainders[:remain]:
+        floors[idx] += 1
+    return floors
+
+
+def _rescale_group_durations(
+    predicted: List[int],
+    anchor_total: int,
+) -> List[int]:
+    """Rescale predicted phoneme durations to match an anchor window exactly."""
+    count = len(predicted)
+    if count == 0:
+        return []
+    if anchor_total < count:
+        raise ValueError(
+            f"insufficient_anchor_budget: anchor_total={anchor_total} phonemes={count}"
+        )
+    if anchor_total == count:
+        return [1] * count
+
+    # Reserve one frame per phoneme, then proportionally allocate the remainder.
+    extras_total = anchor_total - count
+    extra_weights = [max(0.0, float(d) - 1.0) for d in predicted]
+    extras = _largest_remainder_round(extra_weights, extras_total)
+    out = [1 + int(extra) for extra in extras]
+    # Defensive fix for any drift.
+    drift = anchor_total - sum(out)
+    if drift != 0 and out:
+        out[-1] = max(1, out[-1] + drift)
+    return out
+
+
+def _apply_anchor_constrained_timing(
+    *,
+    durations: List[int],
+    word_boundaries: List[int],
+    group_anchor_frames: List[Dict[str, int]],
+) -> List[int]:
+    """Apply note/group anchor-constrained timing to phoneme durations."""
+    if not durations or not word_boundaries:
+        return durations
+    if len(group_anchor_frames) != len(word_boundaries):
+        raise ValueError("group_anchor_frames/word_boundaries length mismatch")
+
+    out: List[int] = []
+    offset = 0
+    for idx, count in enumerate(word_boundaries):
+        count = int(count)
+        if count <= 0:
+            continue
+        group = durations[offset:offset + count]
+        if len(group) != count:
+            raise ValueError("durations/word_boundaries misalignment")
+        offset += count
+
+        anchor = group_anchor_frames[idx]
+        start = int(anchor.get("start_frame", 0))
+        end = int(anchor.get("end_frame", 0))
+        anchor_total = end - start
+        if anchor_total <= 0:
+            raise ValueError(f"invalid_group_anchor_window idx={idx} start={start} end={end}")
+        out.extend(_rescale_group_durations(group, anchor_total))
+
+    if offset != len(durations):
+        raise ValueError("word_boundaries does not consume all durations")
+    return out
 
 
 def _build_slur_velocity_envelope(
@@ -597,21 +696,27 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         lyric_value = note.get("lyric")
         is_slur = isinstance(lyric_value, str) and lyric_value.startswith("+")
+        syllabic = str(note.get("syllabic", "") or "").strip().lower()
+        is_syllable_continuation = syllabic in {"middle", "end"}
         is_continuation = (
             bool(note.get("lyric_is_extended"))
             or note.get("tie_type") in ("stop", "continue")
             or is_slur
+            or is_syllable_continuation
         )
         if current_group is None or not is_continuation:
             current_group = {
                 "notes": [note],
                 "note_indices": [idx],
                 "is_rest": False,
+                "is_syllabic_chain": syllabic in {"begin", "middle", "end"},
             }
             word_groups.append(current_group)
         else:
             current_group["notes"].append(note)
             current_group["note_indices"].append(idx)
+            if syllabic in {"begin", "middle", "end"}:
+                current_group["is_syllabic_chain"] = True
 
     return word_groups
 
@@ -659,6 +764,7 @@ def _build_phoneme_groups(
         notes_in_group = group["notes"]
         note_indices = group["note_indices"]
         is_slur_group = len(note_indices) > 1
+        is_syllabic_chain = bool(group.get("is_syllabic_chain"))
         word_entries = [
             {
                 "position": None,
@@ -708,6 +814,39 @@ def _build_phoneme_groups(
                 note_idx=note_idx,
             )
 
+        if is_syllabic_chain:
+            syllable_chunks = _split_phonemes_into_syllable_chunks(
+                phonemes=phonemes,
+                ids=ids,
+                lang_ids=lang_ids,
+                phonemizer=phonemizer,
+                expected_chunks=len(note_indices),
+            )
+            word_entries = [
+                {
+                    "position": None,
+                    "phonemes": [],
+                    "ids": [],
+                    "lang_ids": [],
+                    "note_idx": None,
+                }
+            ]
+            for idx, note_idx in enumerate(note_indices):
+                if idx < len(syllable_chunks):
+                    chunk = syllable_chunks[idx]
+                else:
+                    chunk = {"phonemes": [], "ids": [], "lang_ids": []}
+                word_entries.append(
+                    {
+                        "position": start_frames[note_idx],
+                        "phonemes": chunk["phonemes"],
+                        "ids": chunk["ids"],
+                        "lang_ids": chunk["lang_ids"],
+                        "note_idx": note_idx,
+                    }
+                )
+            is_slur_group = False
+
         if is_slur_group:
             # Check if this is a "pure tie" (sustain) or a "slur" (melisma).
             # A pure tie has unchanged pitch across all notes.
@@ -718,7 +857,7 @@ def _build_phoneme_groups(
             first_pitch = group_pitches[0]
             is_same_pitch = all(p == first_pitch for p in group_pitches)
 
-            if is_same_pitch:
+            if is_same_pitch and not is_syllabic_chain:
                 # This is likely a tied note (sustain).
                 # We should NOT distribute phonemes (which causes re-articulation).
                 # Fall back to default logic which handles sustains by mapping to the first note/extending.
@@ -942,6 +1081,77 @@ def _build_phoneme_groups(
     }
 
 
+def _split_phonemes_into_syllable_chunks(
+    *,
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+    phonemizer: Phonemizer,
+    expected_chunks: int,
+) -> List[Dict[str, List[Any]]]:
+    """Split a phoneme sequence into syllable chunks for note-by-note assignment."""
+    if expected_chunks <= 1 or len(phonemes) <= 1:
+        return [{"phonemes": phonemes, "ids": ids, "lang_ids": lang_ids}]
+
+    is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
+    is_glide = [phonemizer.is_glide(p) for p in phonemes]
+    starts = [False] * len(phonemes)
+    if not any(is_vowel):
+        starts[0] = True
+    for i in range(len(phonemes)):
+        if is_vowel[i]:
+            if i >= 2 and is_glide[i - 1] and not is_vowel[i - 2]:
+                starts[i - 1] = True
+            else:
+                starts[i] = True
+
+    start_indices = [idx for idx, flag in enumerate(starts) if flag]
+    if not start_indices:
+        start_indices = [0]
+    start_indices = sorted(set(start_indices))
+
+    chunks: List[Dict[str, List[Any]]] = []
+    first_start = start_indices[0]
+    lead_ph = phonemes[:first_start] if first_start > 0 else []
+    lead_ids = ids[:first_start] if first_start > 0 else []
+    lead_lang = lang_ids[:first_start] if first_start > 0 else []
+    for idx, start in enumerate(start_indices):
+        end = start_indices[idx + 1] if idx + 1 < len(start_indices) else len(phonemes)
+        chunk_ph = phonemes[start:end]
+        chunk_ids = ids[start:end]
+        chunk_lang = lang_ids[start:end]
+        if idx == 0 and lead_ph:
+            chunk_ph = lead_ph + chunk_ph
+            chunk_ids = lead_ids + chunk_ids
+            chunk_lang = lead_lang + chunk_lang
+        chunks.append(
+            {
+                "phonemes": chunk_ph,
+                "ids": chunk_ids,
+                "lang_ids": chunk_lang,
+            }
+        )
+
+    # Merge overflow chunks into the last requested chunk.
+    if len(chunks) > expected_chunks:
+        merged = chunks[: expected_chunks - 1]
+        tail_ph: List[str] = []
+        tail_ids: List[int] = []
+        tail_lang: List[int] = []
+        for chunk in chunks[expected_chunks - 1 :]:
+            tail_ph.extend(chunk["phonemes"])
+            tail_ids.extend(chunk["ids"])
+            tail_lang.extend(chunk["lang_ids"])
+        merged.append({"phonemes": tail_ph, "ids": tail_ids, "lang_ids": tail_lang})
+        chunks = merged
+
+    # Pad with empty chunks if we got fewer than expected.
+    while len(chunks) < expected_chunks:
+        chunks.append({"phonemes": [], "ids": [], "lang_ids": []})
+
+    return chunks
+
+
 def align_phonemes_to_notes(
     score: Dict[str, Any],
     voicebank: Union[str, Path],
@@ -1005,7 +1215,7 @@ def align_phonemes_to_notes(
     if not notes:
         raise ValueError("No notes left after applying voice selection")
 
-    start_frames, end_frames, _, note_pitches, _ = _compute_note_timing(
+    start_frames, end_frames, note_frame_durations, note_pitches, _ = _compute_note_timing(
         notes,
         tempos,
         frame_ms,
@@ -1028,31 +1238,45 @@ def align_phonemes_to_notes(
         pitch_end_frames,
     )
 
-    word_groups = _group_notes(notes)
-    lyrics: List[str] = []
-    for group in word_groups:
-        if group["is_rest"]:
-            continue
-        lyric = _resolve_group_lyric(group)
-        lyrics.append(lyric)
-
-    word_phonemes: List[Dict[str, Any]] = []
-    if lyrics:
-        # Run phonemizer once per lyric word group.
-        phoneme_result = phonemize(lyrics, voicebank_path)
-        word_phonemes = _split_phonemize_result(phoneme_result)
-        if len(word_phonemes) != len(lyrics):
-            raise ValueError("Phonemize output does not match the selected notes.")
-
     phonemizer = _init_phonemizer(voicebank_path)
-    ph_result = _build_phoneme_groups(
-        word_groups,
-        start_frames,
-        end_frames,
-        note_pitches,
-        phonemizer,
-        word_phonemes,
-    )
+    use_v2_aligner = _env_flag_enabled("SYLLABLE_ALIGNER_V2")
+    if use_v2_aligner:
+        ph_result = syllable_alignment.align(
+            notes=notes,
+            start_frames=start_frames,
+            end_frames=end_frames,
+            timing_midi=note_pitches,
+            note_durations=note_frame_durations,
+            phonemizer=phonemizer,
+            voicebank_path=voicebank_path,
+            include_phonemes=include_phonemes,
+        )
+        word_groups: List[Dict[str, Any]] = []
+    else:
+        word_groups = _group_notes(notes)
+        lyrics: List[str] = []
+        for group in word_groups:
+            if group["is_rest"]:
+                continue
+            lyric = _resolve_group_lyric(group)
+            lyrics.append(lyric)
+
+        word_phonemes: List[Dict[str, Any]] = []
+        if lyrics:
+            # Run phonemizer once per lyric word group.
+            phoneme_result = phonemize(lyrics, voicebank_path)
+            word_phonemes = _split_phonemize_result(phoneme_result)
+            if len(word_phonemes) != len(lyrics):
+                raise ValueError("Phonemize output does not match the selected notes.")
+
+        ph_result = _build_phoneme_groups(
+            word_groups,
+            start_frames,
+            end_frames,
+            note_pitches,
+            phonemizer,
+            word_phonemes,
+        )
 
     if not ph_result["phoneme_ids"]:
         raise ValueError("No phonemes found after processing the selected notes.")
@@ -1082,33 +1306,56 @@ def align_phonemes_to_notes(
     pitch_note_rests = [computed_note_rests[idx] for idx in pitch_indices]
     pitch_index_map = {note_idx: pitch_idx for pitch_idx, note_idx in enumerate(pitch_indices)}
     slur_groups: List[List[int]] = []
-    for group in word_groups:
-        if group.get("is_rest"):
-            continue
-        note_indices = group.get("note_indices") or []
-        if len(note_indices) <= 1:
-            continue
-        pitch_group = [
-            pitch_index_map[note_idx]
-            for note_idx in note_indices
-            if note_idx in pitch_index_map
-        ]
-        if len(pitch_group) > 1:
-            slur_groups.append(pitch_group)
+    if use_v2_aligner:
+        for note_indices in ph_result.get("slur_note_groups", []):
+            pitch_group = [
+                pitch_index_map[note_idx]
+                for note_idx in note_indices
+                if note_idx in pitch_index_map
+            ]
+            if len(pitch_group) > 1:
+                slur_groups.append(pitch_group)
+    else:
+        for group in word_groups:
+            if group.get("is_rest"):
+                continue
+            note_indices = group.get("note_indices") or []
+            if len(note_indices) <= 1:
+                continue
+            pitch_group = [
+                pitch_index_map[note_idx]
+                for note_idx in note_indices
+                if note_idx in pitch_index_map
+            ]
+            if len(pitch_group) > 1:
+                slur_groups.append(pitch_group)
     result = {
         "phoneme_ids": ph_result["phoneme_ids"],
         "language_ids": ph_result["language_ids"],
         "word_boundaries": ph_result["word_boundaries"],
         "word_durations": ph_result["word_durations"],
         "word_pitches": ph_result["word_pitches"],
+        "group_anchor_frames": ph_result.get("group_anchor_frames", []),
+        "group_note_indices": ph_result.get("group_note_indices", []),
         "note_durations": pitch_note_durations,
         "note_pitches": pitch_note_pitches,
         "note_rests": pitch_note_rests,
         "slur_groups": slur_groups,
         "coda_tails": ph_result.get("coda_tails", []),
     }
+    # Debug contract fields from V2 aligner.
+    if "durations" in ph_result:
+        result["durations"] = ph_result["durations"]
+    if "positions" in ph_result:
+        result["positions"] = ph_result["positions"]
+    if "durations_debug" in ph_result:
+        result["durations_debug"] = ph_result["durations_debug"]
+    if "positions_debug" in ph_result:
+        result["positions_debug"] = ph_result["positions_debug"]
+    if "note_slur" in ph_result:
+        result["note_slur"] = ph_result["note_slur"]
     if include_phonemes:
-        result["phonemes"] = ph_result["phonemes"]
+        result["phonemes"] = ph_result.get("phonemes", [])
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("align_phonemes_to_notes output=%s", summarize_payload(result))
     return result
@@ -1269,6 +1516,15 @@ def synthesize(
     phoneme_ids = alignment["phoneme_ids"]
     language_ids = alignment["language_ids"]
     durations = dur_result["durations"]
+    use_timing_v2 = _env_flag_enabled("SYLLABLE_TIMING_V2")
+    if use_timing_v2:
+        anchor_frames = alignment.get("group_anchor_frames") or []
+        if anchor_frames:
+            durations = _apply_anchor_constrained_timing(
+                durations=durations,
+                word_boundaries=alignment["word_boundaries"],
+                group_anchor_frames=anchor_frames,
+            )
     coda_tails = alignment.get("coda_tails") or []
     if coda_tails:
         durations = _apply_coda_tail_durations(
