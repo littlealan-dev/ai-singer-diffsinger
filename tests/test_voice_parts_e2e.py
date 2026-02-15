@@ -3,6 +3,7 @@ import os
 import shutil
 import unittest
 from pathlib import Path
+from typing import Any
 
 from src.api import parse_score, save_audio, synthesize
 from src.api.voice_parts import preprocess_voice_parts
@@ -15,7 +16,7 @@ class VoicePartEndToEndTests(unittest.TestCase):
         self.voicebank_path = self.root_dir / "assets/voicebanks/Raine_Rena_2.01"
         self.output_dir = self.root_dir / "tests/output/voice_parts_e2e"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "0"
+        os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
         self.skip_synthesis = os.environ.get("VOICE_PART_E2E_SKIP_SYNTHESIS", "0").strip() in {
             "1",
             "true",
@@ -26,6 +27,24 @@ class VoicePartEndToEndTests(unittest.TestCase):
         score = parse_score(self.score_path, verse_number=1)
         score["source_musicxml_path"] = str(self.score_path.resolve())
         return score
+
+    def _load_plan_bundle_from_env(self) -> dict[str, Any]:
+        plan_path = os.environ.get("VOICE_PART_E2E_PLAN_PATH", "").strip()
+        plan_json = os.environ.get("VOICE_PART_E2E_PLAN_JSON", "").strip()
+        if plan_path:
+            payload = json.loads(Path(plan_path).read_text())
+        elif plan_json:
+            payload = json.loads(plan_json)
+        else:
+            self.skipTest(
+                "Provide VOICE_PART_E2E_PLAN_PATH or VOICE_PART_E2E_PLAN_JSON for external plan input."
+            )
+        if not isinstance(payload, dict):
+            self.fail("Plan bundle must be a JSON object.")
+        targets = payload.get("targets")
+        if not isinstance(targets, list) or not targets:
+            self.fail("Plan bundle must include a non-empty 'targets' list.")
+        return payload
 
     def _build_plan(
         self,
@@ -103,14 +122,18 @@ class VoicePartEndToEndTests(unittest.TestCase):
         if self.skip_synthesis:
             return
 
+        derived_score = parse_score(musicxml_path, verse_number=1)
+        derived_part_index = len(derived_score.get("parts", [])) - 1
+        self.assertGreaterEqual(
+            derived_part_index,
+            0,
+            msg=f"{label}: unable to resolve derived part index for synthesis.",
+        )
         synth_result = synthesize(
-            score,
+            derived_score,
             self.voicebank_path,
-            part_index=part_index,
-            voice_part_id=voice_part_id,
-            allow_lyric_propagation=bool(source_ref),
-            source_part_index=(source_ref or {}).get("part_index"),
-            source_voice_part_id=(source_ref or {}).get("voice_part_id"),
+            part_index=derived_part_index,
+            skip_voice_part_preprocess=True,
         )
         if synth_result.get("status") == "action_required":
             self.fail(f"Unexpected action_required for {label}: {synth_result}")
@@ -226,323 +249,44 @@ class VoicePartEndToEndTests(unittest.TestCase):
         try:
             self.score_path = tribute_path
             score_snapshot = self._load_full_score()
-            max_measure = max(
-                int(note.get("measure_number") or 0)
-                for part in score_snapshot.get("parts", [])
-                for note in (part.get("notes") or [])
-                if int(note.get("measure_number") or 0) > 0
-            )
             snapshot_path = self.output_dir / "my_tribute_full_score.json"
             snapshot_path.write_text(
                 json.dumps(score_snapshot, indent=2, sort_keys=True, default=str)
             )
-            plans = [
-                {
-                    "label": "my_tribute_women_voice_part_1",
-                    "part_index": 0,
-                    "voice_part_id": "voice part 1",
-                    "source_ref": {"part_index": 0, "voice_part_id": "voice part 1"},
-                    "plan": {
-                        "targets": [
-                            {
-                                "target": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                "sections": [
-                                    {"start_measure": 1, "end_measure": 4, "mode": "rest"},
-                                    {
-                                        "start_measure": 5,
-                                        "end_measure": 24,
-                                        "mode": "derive",
-                                        "melody_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 25,
-                                        "end_measure": max_measure,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                ],
-                                "verse_number": "1",
-                                "copy_all_verses": False,
-                                "split_shared_note_policy": "duplicate_to_all",
-                                "confidence": 0.9,
-                                "notes": "Timeline sections: women voice part 1",
-                            }
-                        ]
-                    },
-                },
-                {
-                    "label": "my_tribute_women_voice_part_2",
-                    "part_index": 0,
-                    "voice_part_id": "voice part 2",
-                    "source_ref": {"part_index": 0, "voice_part_id": "voice part 2"},
-                    "plan": {
-                        "targets": [
-                            {
-                                "target": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                "sections": [
-                                    {"start_measure": 1, "end_measure": 4, "mode": "rest"},
-                                    {
-                                        "start_measure": 5,
-                                        "end_measure": 24,
-                                        "mode": "derive",
-                                        "melody_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 25,
-                                        "end_measure": 30,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 31,
-                                        "end_measure": 36,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 37,
-                                        "end_measure": 41,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 42,
-                                        "end_measure": 49,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 50,
-                                        "end_measure": 51,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 52,
-                                        "end_measure": max_measure,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                ],
-                                "verse_number": "1",
-                                "copy_all_verses": False,
-                                "split_shared_note_policy": "duplicate_to_all",
-                                "confidence": 0.9,
-                                "notes": "Timeline sections: women voice part 2",
-                            }
-                        ]
-                    },
-                },
-                {
-                    "label": "my_tribute_men_voice_part_1",
-                    "part_index": 1,
-                    "voice_part_id": "voice part 1",
-                    "source_ref": {"part_index": 0, "voice_part_id": "voice part 1"},
-                    "plan": {
-                        "targets": [
-                            {
-                                "target": {"part_index": 1, "voice_part_id": "voice part 1"},
-                                "sections": [
-                                    {"start_measure": 1, "end_measure": 18, "mode": "rest"},
-                                    {
-                                        "start_measure": 19,
-                                        "end_measure": 24,
-                                        "mode": "derive",
-                                        "melody_source": {"part_index": 1, "voice_part_id": "voice part 2"},
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 25,
-                                        "end_measure": 30,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 31,
-                                        "end_measure": 36,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 37,
-                                        "end_measure": 41,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 42,
-                                        "end_measure": 49,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 50,
-                                        "end_measure": 51,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 52,
-                                        "end_measure": max_measure,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                ],
-                                "verse_number": "1",
-                                "copy_all_verses": False,
-                                "split_shared_note_policy": "duplicate_to_all",
-                                "confidence": 0.7,
-                                "notes": "Timeline sections: men voice part 1",
-                            }
-                        ]
-                    },
-                },
-                {
-                    "label": "my_tribute_men_voice_part_3",
-                    "part_index": 1,
-                    "voice_part_id": "voice part 3",
-                    "source_ref": {"part_index": 0, "voice_part_id": "voice part 3"},
-                    "plan": {
-                        "targets": [
-                            {
-                                "target": {"part_index": 1, "voice_part_id": "voice part 3"},
-                                "sections": [
-                                    {"start_measure": 1, "end_measure": 18, "mode": "rest"},
-                                    {
-                                        "start_measure": 19,
-                                        "end_measure": 24,
-                                        "mode": "derive",
-                                        "melody_source": {"part_index": 1, "voice_part_id": "voice part 2"},
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 3"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 25,
-                                        "end_measure": 30,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 31,
-                                        "end_measure": 36,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 37,
-                                        "end_measure": 41,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 42,
-                                        "end_measure": 49,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 50,
-                                        "end_measure": 51,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 2"},
-                                        "lyric_strategy": "strict_onset",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                    {
-                                        "start_measure": 52,
-                                        "end_measure": max_measure,
-                                        "mode": "derive",
-                                        "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
-                                        "lyric_strategy": "overlap_best_match",
-                                        "lyric_policy": "replace_all",
-                                    },
-                                ],
-                                "verse_number": "1",
-                                "copy_all_verses": False,
-                                "split_shared_note_policy": "duplicate_to_all",
-                                "confidence": 0.7,
-                                "notes": "Timeline sections: men voice part 3",
-                            }
-                        ]
-                    },
-                },
-            ]
-
-            for entry in plans:
+            plan_bundle = self._load_plan_bundle_from_env()
+            for target in plan_bundle.get("targets", []):
+                if not isinstance(target, dict):
+                    self.fail("Each entry in plan bundle targets must be an object.")
+                label = str(target.get("label") or "").strip()
+                if not label:
+                    self.fail("Each plan target must include a non-empty 'label'.")
+                part_index = int(target.get("part_index"))
+                voice_part_id = str(target.get("voice_part_id"))
+                plan = target.get("plan")
+                if not isinstance(plan, dict):
+                    self.fail(f"{label}: target.plan must be a JSON object.")
                 self._run_flow(
-                    label=entry["label"],
-                    part_index=entry["part_index"],
-                    voice_part_id=entry["voice_part_id"],
-                    source_ref=entry.get("source_ref"),
-                    plan_override=entry["plan"],
+                    label=label,
+                    part_index=part_index,
+                    voice_part_id=voice_part_id,
+                    source_ref=None,
+                    plan_override=plan,
                 )
-            self._assert_derived_output(
-                label="my_tribute_women_voice_part_1",
-                min_sung_measure=5,
-                max_sung_measure=54,
-                lyric_presence_ranges=[(5, 24), (25, max_measure)],
-            )
-            self._assert_derived_output(
-                label="my_tribute_women_voice_part_2",
-                min_sung_measure=5,
-                max_sung_measure=max_measure,
-                lyric_presence_ranges=[(5, 24), (25, max_measure)],
-            )
-            self._assert_derived_output(
-                label="my_tribute_men_voice_part_1",
-                min_sung_measure=19,
-                max_sung_measure=54,
-                lyric_presence_ranges=[(19, 24), (25, 35), (42, max_measure)],
-            )
-            self._assert_derived_output(
-                label="my_tribute_men_voice_part_3",
-                min_sung_measure=19,
-                max_sung_measure=max_measure,
-                lyric_presence_ranges=[(19, 24), (25, 35), (42, max_measure)],
-            )
+                expect = target.get("expect")
+                if expect is None:
+                    continue
+                if not isinstance(expect, dict):
+                    self.fail(f"{label}: target.expect must be a JSON object when provided.")
+                ranges = [
+                    (int(row[0]), int(row[1]))
+                    for row in (expect.get("lyric_presence_ranges") or [])
+                ]
+                self._assert_derived_output(
+                    label=label,
+                    min_sung_measure=int(expect.get("min_sung_measure")),
+                    max_sung_measure=int(expect.get("max_sung_measure")),
+                    lyric_presence_ranges=ranges,
+                )
         finally:
             self.score_path = original_score_path
 

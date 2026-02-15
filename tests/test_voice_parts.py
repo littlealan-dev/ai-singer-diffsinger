@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
@@ -76,6 +77,18 @@ class VoicePartFlowTests(unittest.TestCase):
 
 
 class VoicePartAnalysisAndPlanTests(unittest.TestCase):
+    def test_parse_score_note_events_include_extended_fact_fields(self) -> None:
+        score = parse_score(TEST_XML, verse_number=1)
+        note = next(
+            n
+            for p in score["parts"]
+            for n in p.get("notes", [])
+            if not n.get("is_rest")
+        )
+        self.assertIn("staff", note)
+        self.assertIn("chord_group_id", note)
+        self.assertIn("lyric_line_index", note)
+
     def test_analyze_includes_coverage_map_and_verse_metadata(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
         signals = score["voice_part_signals"]
@@ -97,6 +110,54 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         hint = hints[0]
         self.assertIn("target_voice_part_id", hint)
         self.assertIn("ranked_sources", hint)
+
+    def test_parse_score_includes_structured_measure_direction_entries(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Choir</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction placement="above">
+        <direction-type>
+          <words>Choir in Unison</words>
+        </direction-type>
+        <staff>1</staff>
+      </direction>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>4</duration>
+        <type>whole</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xml_path = Path(tmpdir) / "annotation-test.xml"
+            xml_path.write_text(xml, encoding="utf-8")
+            score = parse_score(xml_path, verse_number=1)
+        annotations = score["voice_part_signals"]["measure_annotations"]
+        self.assertTrue(annotations)
+        first_part = annotations[0]
+        self.assertEqual(first_part.get("part_id"), "P1")
+        self.assertTrue(first_part.get("measures"))
+        first_measure = first_part["measures"][0]
+        self.assertIn("Choir in Unison", first_measure.get("directions", []))
+        entries = first_measure.get("direction_entries", [])
+        self.assertTrue(entries)
+        self.assertEqual(entries[0].get("text"), "Choir in Unison")
+        self.assertEqual(entries[0].get("staff"), "1")
+        self.assertEqual(entries[0].get("placement"), "above")
 
     def test_status_taxonomy_alignment(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
@@ -289,6 +350,20 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         plan = {
             "targets": [
                 {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                },
+                {
                     "target": {"part_index": 0, "voice_part_id": "alto"},
                     "sections": [
                         {
@@ -307,6 +382,254 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
         metadata = result.get("metadata", {})
         self.assertEqual(metadata.get("plan_mode"), "timeline_sections")
+
+    def test_preflight_guard_requires_all_same_part_sibling_targets(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(f.get("rule") == "same_part_target_completeness" for f in findings)
+        )
+
+    def test_preflight_lint_flags_rest_on_native_target_notes(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "la",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 65.0,
+                            "lyric": "la",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 2,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 56.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 2,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {"start_measure": 1, "end_measure": 2, "mode": "rest"},
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(f.get("rule") == "no_rest_when_target_has_native_notes" for f in findings)
+        )
+
+    def test_preflight_lint_flags_same_part_claim_coverage(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 2,
+                        },
+                    ],
+                }
+            ]
+        }
+        # voice part 1 has native singing only in measure 1; measure 2 singing is in sibling line.
+        # A rest at measure 2 should not hit rule 2, but should fail group claim coverage.
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        },
+                        {"start_measure": 2, "end_measure": 2, "mode": "rest"},
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(f.get("rule") == "same_clef_claim_coverage" for f in findings)
+        )
+
+    def test_preflight_lint_flags_cross_staff_lyric_source_when_local_available(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Choir A",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "pitch_hz": 261.6,
+                            "pitch_step": "C",
+                            "pitch_alter": 0,
+                            "pitch_octave": 4,
+                            "lyric": "local",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "tie_type": None,
+                            "voice": "1",
+                            "staff": "1",
+                            "chord_group_id": None,
+                            "lyric_line_index": "1",
+                            "measure_number": 1,
+                        }
+                    ],
+                },
+                {
+                    "part_id": "P2",
+                    "part_name": "Choir B",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 65.0,
+                            "pitch_hz": 349.2,
+                            "pitch_step": "F",
+                            "pitch_alter": 0,
+                            "pitch_octave": 4,
+                            "lyric": "cross",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "tie_type": None,
+                            "voice": "1",
+                            "staff": "1",
+                            "chord_group_id": None,
+                            "lyric_line_index": "1",
+                            "measure_number": 1,
+                        }
+                    ],
+                },
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_source": {"part_index": 1, "voice_part_id": "voice part 1"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(
+                f.get("rule") == "cross_staff_lyric_source_when_local_available"
+                for f in findings
+            )
+        )
 
 
 class VoicePartPropagationStrategyTests(unittest.TestCase):

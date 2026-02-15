@@ -249,7 +249,11 @@ def _build_measure_staff_voice_map(path: Path) -> List[Dict[str, Any]]:
 
 
 def _build_measure_annotations(path: Path) -> List[Dict[str, Any]]:
-    """Extract measure-level direction words (annotations) per part."""
+    """Extract measure-level direction words (annotations) per part.
+
+    Returns both legacy `directions: [str, ...]` and structured entries:
+    `direction_entries: [{text, staff, voice, placement, offset_divisions}, ...]`.
+    """
     content = _read_musicxml_content(path)
     try:
         root = ElementTree.fromstring(content)
@@ -283,9 +287,26 @@ def _build_measure_annotations(path: Path) -> List[Dict[str, Any]]:
             measure_index += 1
             measure_number = measure.attrib.get("number") or str(measure_index)
             directions: List[str] = []
+            direction_entries: List[Dict[str, Any]] = []
             for child in measure:
                 if _local_tag(child.tag) != "direction":
                     continue
+                placement = (child.attrib.get("placement") or "").strip() or None
+                direction_staff = None
+                direction_voice = None
+                direction_offset = None
+                for direct_child in child:
+                    direct_tag = _local_tag(direct_child.tag)
+                    if direct_tag == "staff":
+                        value = (direct_child.text or "").strip()
+                        direction_staff = value or None
+                    elif direct_tag == "voice":
+                        value = (direct_child.text or "").strip()
+                        direction_voice = value or None
+                    elif direct_tag == "offset":
+                        value = (direct_child.text or "").strip()
+                        if value:
+                            direction_offset = value
                 for direction_type in child:
                     if _local_tag(direction_type.tag) != "direction-type":
                         continue
@@ -295,9 +316,22 @@ def _build_measure_annotations(path: Path) -> List[Dict[str, Any]]:
                         text = (direction_child.text or "").strip()
                         if text:
                             directions.append(text)
+                            direction_entries.append(
+                                {
+                                    "text": text,
+                                    "staff": direction_staff,
+                                    "voice": direction_voice,
+                                    "placement": placement,
+                                    "offset_divisions": direction_offset,
+                                }
+                            )
             if directions:
                 measures.append(
-                    {"measure_number": measure_number, "directions": directions}
+                    {
+                        "measure_number": measure_number,
+                        "directions": directions,
+                        "direction_entries": direction_entries,
+                    }
                 )
         parts.append(
             {

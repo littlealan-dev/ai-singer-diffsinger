@@ -1,9 +1,9 @@
 {
   "targets": [
     {
-      "confidence": 0.7,
+      "confidence": 0.92,
       "copy_all_verses": false,
-      "notes": "Timeline sections: men voice part 1",
+      "notes": "Fresh plan from parser facts + measure-level word/extension signals",
       "sections": [
         {
           "end_measure": 18,
@@ -11,6 +11,7 @@
           "start_measure": 1
         },
         {
+          "decision_type": "COPY_UNISON_SECTION",
           "end_measure": 24,
           "lyric_policy": "replace_all",
           "lyric_source": {
@@ -22,74 +23,138 @@
             "part_index": 1,
             "voice_part_id": "voice part 2"
           },
+          "method": "trivial",
           "mode": "derive",
+          "split_selector": "upper",
           "start_measure": 19
         },
         {
-          "end_measure": 30,
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+          "end_measure": 27,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 0,
             "voice_part_id": "voice part 2"
           },
-          "lyric_strategy": "strict_onset",
+          "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
+          "split_selector": "upper",
           "start_measure": 25
         },
         {
-          "end_measure": 36,
+          "end_measure": 30,
+          "mode": "rest",
+          "start_measure": 28
+        },
+        {
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+          "end_measure": 35,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 0,
             "voice_part_id": "voice part 1"
           },
           "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
+          "split_selector": "upper",
           "start_measure": 31
         },
         {
-          "end_measure": 41,
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+          "end_measure": 36,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 1,
             "voice_part_id": "voice part 1"
           },
-          "lyric_strategy": "strict_onset",
+          "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
+          "split_selector": "upper",
+          "start_measure": 36
+        },
+        {
+          "end_measure": 44,
+          "mode": "rest",
           "start_measure": 37
         },
         {
-          "end_measure": 49,
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+          "end_measure": 48,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 0,
             "voice_part_id": "voice part 1"
           },
           "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
-          "start_measure": 42
+          "split_selector": "upper",
+          "start_measure": 45
         },
         {
+          "end_measure": 49,
+          "mode": "rest",
+          "start_measure": 49
+        },
+        {
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
           "end_measure": 51,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 0,
             "voice_part_id": "voice part 2"
           },
-          "lyric_strategy": "strict_onset",
+          "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
+          "split_selector": "upper",
           "start_measure": 50
         },
         {
-          "end_measure": 57,
+          "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+          "end_measure": 54,
           "lyric_policy": "replace_all",
           "lyric_source": {
             "part_index": 0,
             "voice_part_id": "voice part 1"
           },
           "lyric_strategy": "overlap_best_match",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 1"
+          },
+          "method": "B",
           "mode": "derive",
+          "split_selector": "upper",
           "start_measure": 52
+        },
+        {
+          "end_measure": 57,
+          "mode": "rest",
+          "start_measure": 55
         }
       ],
       "split_shared_note_policy": "duplicate_to_all",

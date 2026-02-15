@@ -23,12 +23,18 @@ class NoteEvent:
     duration_beats: float
     pitch_midi: Optional[float]
     pitch_hz: Optional[float]
+    pitch_step: Optional[str]
+    pitch_alter: Optional[int]
+    pitch_octave: Optional[int]
     lyric: Optional[str]
     syllabic: Optional[str]
     lyric_is_extended: bool
     is_rest: bool
     tie_type: Optional[str]
     voice: Optional[str]
+    staff: Optional[str]
+    chord_group_id: Optional[str]
+    lyric_line_index: Optional[str]
     measure_number: Optional[int]
 
 
@@ -338,6 +344,7 @@ def _collect_part_events(
             state = {
                 "lyric": None,
                 "syllabic": None,
+                "lyric_line_index": None,
                 "extend": False,
                 "end_offset": None,
             }
@@ -356,14 +363,18 @@ def _collect_part_events(
                 events.append(_make_rest_event(element, offset_beats=offset))
             state["lyric"] = None
             state["syllabic"] = None
+            state["lyric_line_index"] = None
             state["extend"] = False
             state["end_offset"] = end_offset
             continue
-        lyric_text, syllabic, is_extended = _extract_lyric_text(element, verse_number=verse_number)
+        lyric_text, syllabic, is_extended, lyric_line_index = _extract_lyric_text(
+            element, verse_number=verse_number
+        )
         tie_type = element.tie.type if element.tie is not None else None
         include = True
         lyric_value = lyric_text
         syllabic_value = syllabic
+        lyric_line_value = lyric_line_index
         lyric_extended = False
         contiguous = state["end_offset"] is not None and abs(float(state["end_offset"]) - offset) < 1e-6
         has_active_lyric = state["lyric"] is not None
@@ -374,23 +385,44 @@ def _collect_part_events(
         if lyric_text is None and should_extend:
             lyric_value = "+"
             syllabic_value = None
+            lyric_line_value = (
+                str(state["lyric_line_index"])
+                if state.get("lyric_line_index") is not None
+                else None
+            )
             lyric_extended = True
         if lyrics_only and has_lyric_text:
             if lyric_text is None and not lyric_extended:
                 include = False
         if include:
-            events.append(
-                _make_note_event(
-                    element,
-                    offset_beats=offset,
-                    lyric=lyric_value,
-                    syllabic=syllabic_value,
-                    lyric_extended=lyric_extended,
+            if isinstance(element, chord.Chord):
+                for pitch in list(element.pitches):
+                    events.append(
+                        _make_note_event(
+                            element,
+                            offset_beats=offset,
+                            lyric=lyric_value,
+                            syllabic=syllabic_value,
+                            lyric_extended=lyric_extended,
+                            lyric_line_index=lyric_line_value,
+                            pitch_override=pitch,
+                        )
+                    )
+            else:
+                events.append(
+                    _make_note_event(
+                        element,
+                        offset_beats=offset,
+                        lyric=lyric_value,
+                        syllabic=syllabic_value,
+                        lyric_extended=lyric_extended,
+                        lyric_line_index=lyric_line_value,
+                    )
                 )
-            )
         if lyric_text is not None:
             state["lyric"] = lyric_text
             state["syllabic"] = syllabic
+            state["lyric_line_index"] = lyric_line_index
             state["extend"] = is_extended
         elif lyric_extended or tie_type in ("start", "continue"):
             state["extend"] = True
@@ -406,9 +438,9 @@ def _extract_lyric_text(
     element: note.NotRest,
     *,
     verse_number: Optional[str | int],
-) -> tuple[Optional[str], Optional[str], bool]:
+) -> tuple[Optional[str], Optional[str], bool, Optional[str]]:
     if not element.lyrics:
-        return None, None, False
+        return None, None, False, None
     lyric = None
     if verse_number is None:
         lyric = element.lyrics[0]
@@ -420,18 +452,19 @@ def _extract_lyric_text(
                 lyric = candidate
                 break
     if lyric is None:
-        return None, None, False
+        return None, None, False, None
     text = lyric.text if lyric.text is not None else ""
     text = text.strip()
     if not text:
         text = None
     syllabic = getattr(lyric, "syllabic", None)
+    lyric_line_index = _normalize_verse_number(lyric.number) or "1"
     is_extended = False
     if hasattr(lyric, "isExtended"):
         is_extended = bool(lyric.isExtended)
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
-    return text, syllabic, is_extended
+    return text, syllabic, is_extended, lyric_line_index
 
 
 def _make_note_event(
@@ -441,19 +474,41 @@ def _make_note_event(
     lyric: Optional[str],
     syllabic: Optional[str],
     lyric_extended: bool,
+    lyric_line_index: Optional[str],
+    pitch_override: Optional[Any] = None,
 ) -> NoteEvent:
-    pitch = None
-    if isinstance(element, chord.Chord):
-        pitch = max(element.pitches, key=lambda p: p.midi)
-    elif isinstance(element, note.Note):
-        pitch = element.pitch
+    pitch = pitch_override
+    if pitch is None:
+        if isinstance(element, chord.Chord):
+            pitch = max(element.pitches, key=lambda p: p.midi)
+        elif isinstance(element, note.Note):
+            pitch = element.pitch
     pitch_midi = float(pitch.midi) if pitch is not None else None
     pitch_hz = float(pitch.frequency) if pitch is not None else None
+    pitch_step = str(getattr(pitch, "step", "")).strip() if pitch is not None else None
+    pitch_octave = int(getattr(pitch, "octave")) if pitch is not None and getattr(pitch, "octave", None) is not None else None
+    pitch_alter = None
+    if pitch is not None:
+        accidental = getattr(pitch, "accidental", None)
+        if accidental is not None and getattr(accidental, "alter", None) is not None:
+            pitch_alter = int(round(float(accidental.alter)))
     tie_type = element.tie.type if element.tie is not None else None
     voice = None
     voice_ctx = element.getContextByClass(stream.Voice)
     if voice_ctx is not None:
         voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+    staff = None
+    staff_number = getattr(element, "staffNumber", None)
+    if staff_number is not None:
+        staff = str(staff_number)
+    chord_group_id = None
+    if isinstance(element, chord.Chord) and len(element.pitches) > 1:
+        measure_ctx = element.getContextByClass(stream.Measure)
+        measure_number_raw = measure_ctx.number if measure_ctx is not None else "na"
+        chord_group_id = (
+            f"m{measure_number_raw}:o{offset_beats:.6f}:"
+            f"v{voice or '_default'}:s{staff or '1'}"
+        )
     measure_ctx = element.getContextByClass(stream.Measure)
     measure_number = measure_ctx.number if measure_ctx is not None else None
     return NoteEvent(
@@ -461,12 +516,18 @@ def _make_note_event(
         duration_beats=float(element.duration.quarterLength),
         pitch_midi=pitch_midi,
         pitch_hz=pitch_hz,
+        pitch_step=pitch_step or None,
+        pitch_alter=pitch_alter,
+        pitch_octave=pitch_octave,
         lyric=lyric,
         syllabic=syllabic,
         lyric_is_extended=lyric_extended,
         is_rest=False,
         tie_type=tie_type,
         voice=voice,
+        staff=staff,
+        chord_group_id=chord_group_id,
+        lyric_line_index=lyric_line_index,
         measure_number=measure_number,
     )
 
@@ -482,16 +543,26 @@ def _make_rest_event(
     voice_ctx = element.getContextByClass(stream.Voice)
     if voice_ctx is not None:
         voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+    staff = None
+    staff_number = getattr(element, "staffNumber", None)
+    if staff_number is not None:
+        staff = str(staff_number)
     return NoteEvent(
         offset_beats=offset_beats,
         duration_beats=float(element.duration.quarterLength),
         pitch_midi=None,
         pitch_hz=None,
+        pitch_step=None,
+        pitch_alter=None,
+        pitch_octave=None,
         lyric=None,
         syllabic=None,
         lyric_is_extended=False,
         is_rest=True,
         tie_type=None,
         voice=voice,
+        staff=staff,
+        chord_group_id=None,
+        lyric_line_index=None,
         measure_number=measure_number,
     )

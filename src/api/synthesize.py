@@ -203,6 +203,26 @@ def _phoneme_stress(phoneme: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _resolve_group_lyric(group: Dict[str, Any]) -> str:
+    """Return a phonemizable lyric token for a grouped word section.
+
+    Some MusicXML segments begin with continuation tokens ("+"), especially after
+    transforms. In that case, pick the first concrete syllable in the group.
+    """
+    notes = group.get("notes") or []
+    if not notes:
+        return ""
+    fallback = str(notes[0].get("lyric", "") or "").strip()
+    for note in notes:
+        lyric = str(note.get("lyric", "") or "").strip()
+        if not lyric:
+            continue
+        if lyric.startswith("+"):
+            continue
+        return lyric
+    return "" if fallback.startswith("+") else fallback
+
+
 def _trim_single_note_multisyllable(
     phonemes: List[str],
     ids: List[int],
@@ -1013,7 +1033,7 @@ def align_phonemes_to_notes(
     for group in word_groups:
         if group["is_rest"]:
             continue
-        lyric = group["notes"][0].get("lyric", "") or ""
+        lyric = _resolve_group_lyric(group)
         lyrics.append(lyric)
 
     word_phonemes: List[Dict[str, Any]] = []
@@ -1109,6 +1129,7 @@ def synthesize(
     airiness: float = 1.0,
     intensity: float = 0.5,
     clarity: float = 1.0,
+    skip_voice_part_preprocess: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> Dict[str, Any]:
@@ -1177,19 +1198,23 @@ def synthesize(
                 }
             ),
         )
-    preprocessed = preprocess_voice_parts(
-        score,
-        part_index=part_index,
-        voice_id=voice_id,
-        voice_part_id=voice_part_id,
-        allow_lyric_propagation=allow_lyric_propagation,
-        source_voice_part_id=source_voice_part_id,
-        source_part_index=source_part_index,
-    )
-    if preprocessed.get("status") == "action_required":
-        return preprocessed
-    working_score = preprocessed["score"]
-    effective_part_index = int(preprocessed.get("part_index", part_index))
+    if skip_voice_part_preprocess:
+        working_score = score
+        effective_part_index = int(part_index)
+    else:
+        preprocessed = preprocess_voice_parts(
+            score,
+            part_index=part_index,
+            voice_id=voice_id,
+            voice_part_id=voice_part_id,
+            allow_lyric_propagation=allow_lyric_propagation,
+            source_voice_part_id=source_voice_part_id,
+            source_part_index=source_part_index,
+        )
+        if preprocessed.get("status") == "action_required":
+            return preprocessed
+        working_score = preprocessed["score"]
+        effective_part_index = int(preprocessed.get("part_index", part_index))
     # Legacy compatibility mode for callers that expect input-score mutation.
     if working_score is not score and _env_flag_enabled("VOICE_PART_LEGACY_INPLACE_MUTATION"):
         score.clear()
