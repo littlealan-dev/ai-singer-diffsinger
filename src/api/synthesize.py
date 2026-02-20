@@ -197,6 +197,35 @@ def _phoneme_stress(phoneme: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _resolve_group_lyric(group: Dict[str, Any]) -> str:
+    """Return a phonemizable lyric token for a grouped word section."""
+    notes = group.get("notes") or []
+    if not notes:
+        return ""
+
+    lyric_tokens: List[str] = []
+    syllabic_tokens: List[str] = []
+    fallback = str(notes[0].get("lyric", "") or "").strip()
+    for note in notes:
+        lyric = str(note.get("lyric", "") or "").strip()
+        if not lyric or lyric.startswith("+"):
+            continue
+        lyric_tokens.append(lyric)
+        syllabic = str(note.get("syllabic", "") or "").strip().lower()
+        if syllabic:
+            syllabic_tokens.append(syllabic)
+
+    if not lyric_tokens:
+        return "" if fallback.startswith("+") else fallback
+    if len(lyric_tokens) == 1:
+        return lyric_tokens[0]
+
+    # Rebuild split-word chains (e.g. "voic"+"es" -> "voices").
+    if any(token in {"begin", "middle", "end"} for token in syllabic_tokens):
+        return "".join(token.replace("-", "") for token in lyric_tokens)
+    return lyric_tokens[0]
+
+
 def _trim_single_note_multisyllable(
     phonemes: List[str],
     ids: List[int],
@@ -1007,7 +1036,7 @@ def align_phonemes_to_notes(
     for group in word_groups:
         if group["is_rest"]:
             continue
-        lyric = group["notes"][0].get("lyric", "") or ""
+        lyric = _resolve_group_lyric(group)
         lyrics.append(lyric)
 
     word_phonemes: List[Dict[str, Any]] = []
