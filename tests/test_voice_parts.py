@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import unittest
@@ -956,8 +957,15 @@ class VoicePartRepairLoopTests(unittest.TestCase):
 
 
 class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._output_dir = ROOT_DIR / "tests/output/voice_parts_materialize"
+        cls._output_dir.mkdir(parents=True, exist_ok=True)
+        cls._score_copy = cls._output_dir / TEST_XML.name
+        shutil.copyfile(TEST_XML, cls._score_copy)
+
     def _run_alto_preprocess(self):
-        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        score = parse_score(self._score_copy, part_index=0, verse_number=1)
         return preprocess_voice_parts(
             score,
             part_index=0,

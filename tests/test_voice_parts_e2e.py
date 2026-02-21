@@ -17,6 +17,8 @@ class VoicePartEndToEndTests(unittest.TestCase):
         self.output_dir = self.root_dir / "tests/output/voice_parts_e2e"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
+        os.environ.setdefault("SYLLABLE_ALIGNER_V2", "1")
+        os.environ.setdefault("SYLLABLE_TIMING_V2", "1")
         self.skip_synthesis = os.environ.get("VOICE_PART_E2E_SKIP_SYNTHESIS", "0").strip() in {
             "1",
             "true",
@@ -122,15 +124,26 @@ class VoicePartEndToEndTests(unittest.TestCase):
         if self.skip_synthesis:
             return
 
-        derived_score = parse_score(musicxml_path, verse_number=1)
-        derived_part_index = len(derived_score.get("parts", [])) - 1
+        transformed_score = preprocess_result.get("score")
+        self.assertIsInstance(
+            transformed_score,
+            dict,
+            msg=f"{label}: preprocess did not return an in-memory score payload.",
+        )
+        fallback_index = int(preprocess_result.get("part_index", part_index))
+        derived_part_index = self._resolve_derived_part_index(
+            transformed_score=transformed_score,
+            source_part_index=part_index,
+            voice_part_id=voice_part_id,
+            fallback_index=fallback_index,
+        )
         self.assertGreaterEqual(
             derived_part_index,
             0,
             msg=f"{label}: unable to resolve derived part index for synthesis.",
         )
         synth_result = synthesize(
-            derived_score,
+            transformed_score,
             self.voicebank_path,
             part_index=derived_part_index,
             skip_voice_part_preprocess=True,
@@ -156,6 +169,35 @@ class VoicePartEndToEndTests(unittest.TestCase):
             msg="No derived part found after re-parsing derived MusicXML.",
         )
         return derived_parts[-1]
+
+    def _resolve_derived_part_index(
+        self,
+        *,
+        transformed_score: dict,
+        source_part_index: int,
+        voice_part_id: str,
+        fallback_index: int,
+    ) -> int:
+        parts = transformed_score.get("parts") or []
+        if not isinstance(parts, list) or not parts:
+            return fallback_index
+        source_part_name = ""
+        if 0 <= source_part_index < len(parts):
+            source_part_name = str(parts[source_part_index].get("part_name") or "").strip()
+        expected_suffix = f"{voice_part_id} (Derived)"
+
+        for idx, part in enumerate(parts):
+            name = str(part.get("part_name") or "").strip()
+            if expected_suffix in name and (
+                not source_part_name or name.startswith(f"{source_part_name} - ")
+            ):
+                return idx
+
+        for idx, part in enumerate(parts):
+            name = str(part.get("part_name") or "").strip()
+            if expected_suffix in name:
+                return idx
+        return fallback_index
 
     def _assert_derived_output(
         self,

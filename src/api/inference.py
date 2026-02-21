@@ -130,6 +130,7 @@ def predict_durations(
     *,
     language_ids: Optional[List[int]] = None,
     speaker_name: Optional[str] = None,
+    apply_word_alignment: bool = True,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -143,6 +144,8 @@ def predict_durations(
         voicebank: Voicebank path
         language_ids: Language ID per phoneme (optional)
         speaker_name: Optional speaker embedding name/suffix
+        apply_word_alignment: Whether to apply legacy per-word scaling.
+            Disable in parity timing mode so anchor alignment is the final shaper.
         device: Device to run inference on
         
     Returns:
@@ -162,6 +165,7 @@ def predict_durations(
                     "voicebank": str(voicebank),
                     "language_ids": language_ids,
                     "speaker_name": speaker_name,
+                    "apply_word_alignment": apply_word_alignment,
                     "device": device,
                 }
             ),
@@ -207,11 +211,17 @@ def predict_durations(
     duration_out = duration.forward(encoder_out, x_masks, ph_midi_tensor, spk_embed_tokens)
     ph_dur_pred = duration_out[0]
     
-    # Align durations to match note timing.
-    ph_durations = _align_durations(ph_dur_pred, word_boundaries, [int(d) for d in word_durations])
-    
+    ph_raw = np.maximum(ph_dur_pred, 0.0).astype(np.float32)
+    # Align durations to match note timing (legacy/default path).
+    ph_durations = (
+        _align_durations(ph_raw, word_boundaries, [int(d) for d in word_durations])
+        if apply_word_alignment
+        else np.maximum(np.round(ph_raw).astype(np.int64), 1)
+    )
+
     result = {
         "durations": ph_durations.tolist(),
+        "durations_raw": ph_raw.tolist(),
         "total_frames": int(ph_durations.sum()),
         "encoder_out": encoder_out,  # Pass through for next steps
         "x_masks": x_masks,

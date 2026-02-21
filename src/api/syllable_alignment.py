@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.api.phonemize import phonemize
+from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer
 
 
@@ -113,18 +114,10 @@ def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, An
     return out
 
 
-def _split_phonemes_into_syllable_chunks(
-    *,
-    phonemes: List[str],
-    ids: List[int],
-    lang_ids: List[int],
-    phonemizer: Phonemizer,
-    expected_chunks: int,
-) -> List[Dict[str, List[Any]]]:
-    """Split phoneme sequence into syllable chunks for note-level assignment."""
-    if expected_chunks <= 1 or len(phonemes) <= 1:
-        return [{"phonemes": phonemes, "ids": ids, "lang_ids": lang_ids}]
-
+def _syllable_start_indices(phonemes: List[str], phonemizer: Phonemizer) -> List[int]:
+    """Return phoneme start indices for syllable/note anchor mapping."""
+    if not phonemes:
+        return []
     is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
     is_glide = [phonemizer.is_glide(p) for p in phonemes]
     starts = [False] * len(phonemes)
@@ -136,11 +129,24 @@ def _split_phonemes_into_syllable_chunks(
                 starts[i - 1] = True
             else:
                 starts[i] = True
+    out = [idx for idx, flag in enumerate(starts) if flag]
+    return sorted(set(out)) if out else [0]
 
-    start_indices = [idx for idx, flag in enumerate(starts) if flag]
-    if not start_indices:
-        start_indices = [0]
-    start_indices = sorted(set(start_indices))
+
+def _split_phonemes_into_syllable_chunks(
+    *,
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+    phonemizer: Phonemizer,
+    expected_chunks: int,
+    attach_lead_to_first: bool = True,
+) -> List[Dict[str, List[Any]]]:
+    """Split phoneme sequence into syllable chunks for note-level assignment."""
+    if expected_chunks <= 1 or len(phonemes) <= 1:
+        return [{"phonemes": phonemes, "ids": ids, "lang_ids": lang_ids}]
+
+    start_indices = _syllable_start_indices(phonemes, phonemizer)
 
     chunks: List[Dict[str, List[Any]]] = []
     first_start = start_indices[0]
@@ -152,7 +158,7 @@ def _split_phonemes_into_syllable_chunks(
         chunk_ph = phonemes[start:end]
         chunk_ids = ids[start:end]
         chunk_lang = lang_ids[start:end]
-        if idx == 0 and lead_ph:
+        if idx == 0 and lead_ph and attach_lead_to_first:
             chunk_ph = lead_ph + chunk_ph
             chunk_ids = lead_ids + chunk_ids
             chunk_lang = lead_lang + chunk_lang
@@ -214,6 +220,188 @@ def _trim_single_note_multisyllable(
     return trimmed_ph, trimmed_ids, trimmed_lang
 
 
+def _nearest_vowel_distance(index: int, vowel_indices: List[int]) -> int:
+    if not vowel_indices:
+        return 10**9
+    return min(abs(index - v) for v in vowel_indices)
+
+
+def _compress_group_to_anchor_budget(
+    *,
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+    anchor_total: int,
+    phonemizer: Phonemizer,
+    group_index: int,
+    note_index: int,
+) -> tuple[List[str], List[int], List[int]]:
+    """Fallback-only compression when phoneme count exceeds anchor frame budget."""
+    if len(ids) <= anchor_total:
+        return phonemes, ids, lang_ids
+
+    keep = [True] * len(ids)
+
+    while sum(1 for flag in keep if flag) > anchor_total:
+        kept_indices = [idx for idx, flag in enumerate(keep) if flag]
+        kept_vowels = [idx for idx in kept_indices if phonemizer.is_vowel(phonemes[idx])]
+        kept_vowel_set = set(kept_vowels)
+        kept_consonants = [idx for idx in kept_indices if idx not in kept_vowel_set]
+        if not kept_consonants:
+            break
+
+        # Merge adjacent consonants first, then nearest-to-vowel, then left-to-right.
+        consonant_set = set(kept_consonants)
+        ranked: List[tuple[int, int, int]] = []
+        for idx in kept_consonants:
+            adjacent_consonant = int(
+                (idx - 1 in consonant_set) or (idx + 1 in consonant_set)
+            )
+            rank_adjacent = 0 if adjacent_consonant else 1
+            rank_distance = _nearest_vowel_distance(idx, kept_vowels)
+            ranked.append((rank_adjacent, rank_distance, idx))
+        ranked.sort()
+        drop_idx = ranked[0][2]
+        keep[drop_idx] = False
+
+    filtered_indices = [idx for idx, flag in enumerate(keep) if flag]
+    if len(filtered_indices) > anchor_total:
+        raise InfeasibleAnchorError(
+            stage="aligner_v2_anchor_budget",
+            group_index=int(group_index),
+            note_index=int(note_index),
+            anchor_total=int(anchor_total),
+            phoneme_count=int(len(filtered_indices)),
+            detail="insufficient_anchor_budget_after_fallback",
+        )
+
+    return (
+        [phonemes[idx] for idx in filtered_indices],
+        [ids[idx] for idx in filtered_indices],
+        [lang_ids[idx] for idx in filtered_indices],
+    )
+
+
+def _build_group_anchor_frames(
+    *,
+    phrase_groups: List[Dict[str, Any]],
+    note_durations: List[int],
+    phonemizer: Phonemizer,
+) -> tuple[List[int], List[int], List[Dict[str, int]]]:
+    """Build non-overlapping group anchor windows over note-frame budgets."""
+    seq_starts: List[int] = [0]
+    running_note = 0
+    for note_dur in note_durations:
+        running_note += int(note_dur)
+        seq_starts.append(running_note)
+
+    def _norm_note_index(raw_idx: Any) -> int:
+        try:
+            note_idx = int(raw_idx)
+        except (TypeError, ValueError):
+            note_idx = 0
+        if note_idx < 0:
+            return 0
+        if note_idx >= len(note_durations):
+            return max(0, len(note_durations) - 1)
+        return note_idx
+
+    positions: List[int] = []
+    durations: List[int] = []
+    group_anchor_frames: List[Dict[str, int]] = []
+    i = 0
+    while i < len(phrase_groups):
+        run_start = i
+        note_idx = _norm_note_index(phrase_groups[i].get("note_idx", 0))
+        j = i + 1
+        while j < len(phrase_groups):
+            next_idx = _norm_note_index(phrase_groups[j].get("note_idx", 0))
+            if next_idx != note_idx:
+                break
+            j += 1
+
+        if j < len(phrase_groups):
+            next_note_idx = _norm_note_index(phrase_groups[j].get("note_idx", len(note_durations)))
+            next_note_idx = max(note_idx + 1, min(next_note_idx, len(note_durations)))
+        else:
+            next_note_idx = len(note_durations)
+        span_start = int(seq_starts[note_idx])
+        span_total = int(sum(int(x) for x in note_durations[note_idx:next_note_idx]))
+        if span_total <= 0:
+            span_total = 1
+
+        run_groups = phrase_groups[run_start:j]
+        while True:
+            counts = [len(group.get("ids") or []) for group in run_groups]
+            total_count = int(sum(counts))
+            if total_count <= span_total:
+                break
+
+            candidates: List[tuple[int, int]] = []
+            for local_idx, group in enumerate(run_groups):
+                phs = list(group.get("phonemes") or [])
+                if len(phs) <= 1:
+                    continue
+                consonant_only = all(not phonemizer.is_vowel(ph) for ph in phs)
+                candidates.append((0 if consonant_only else 1, local_idx))
+            candidates.sort(key=lambda item: (item[0], item[1]))
+
+            reduced = False
+            for _, local_idx in candidates:
+                group = run_groups[local_idx]
+                target = len(group.get("ids") or []) - 1
+                if target < 1:
+                    continue
+                compressed = _compress_group_to_anchor_budget(
+                    phonemes=list(group.get("phonemes") or []),
+                    ids=list(group.get("ids") or []),
+                    lang_ids=list(group.get("lang_ids") or []),
+                    anchor_total=target,
+                    phonemizer=phonemizer,
+                    group_index=run_start + local_idx,
+                    note_index=note_idx,
+                )
+                if len(compressed[1]) < len(group.get("ids") or []):
+                    group["phonemes"], group["ids"], group["lang_ids"] = compressed
+                    reduced = True
+                    break
+
+            if not reduced:
+                raise InfeasibleAnchorError(
+                    stage="aligner_v2_anchor_budget",
+                    group_index=int(run_start),
+                    note_index=int(note_idx),
+                    anchor_total=int(span_total),
+                    phoneme_count=int(total_count),
+                    detail="insufficient_anchor_budget",
+                )
+
+        group_counts = [len(group.get("ids") or []) for group in run_groups]
+        budgets = list(group_counts)
+        remaining = span_total - int(sum(budgets))
+        if remaining > 0 and budgets:
+            budgets[-1] += remaining
+
+        cursor = span_start
+        for budget in budgets:
+            start = int(cursor)
+            end = start + int(max(1, budget))
+            positions.append(start)
+            durations.append(end - start)
+            group_anchor_frames.append(
+                {
+                    "start_frame": start,
+                    "end_frame": end,
+                    "note_index": int(note_idx),
+                }
+            )
+            cursor = end
+
+        i = j
+
+    return positions, durations, group_anchor_frames
+
+
 def validate_ds_contract(payload: Dict[str, Any]) -> List[str]:
     """Validate DiffSinger alignment contract invariants."""
     errs: List[str] = []
@@ -222,6 +410,7 @@ def validate_ds_contract(payload: Dict[str, Any]) -> List[str]:
     durations = payload.get("durations", [])
     positions = payload.get("positions", [])
     word_boundaries = payload.get("word_boundaries", [])
+    vowel_flags = payload.get("vowel_flags", [])
     note_slur = payload.get("note_slur", [])
     note_durations = payload.get("note_durations", [])
     group_anchor_frames = payload.get("group_anchor_frames", [])
@@ -229,14 +418,31 @@ def validate_ds_contract(payload: Dict[str, Any]) -> List[str]:
     n = len(phoneme_ids)
     if len(language_ids) != n or len(durations) != n or len(positions) != n:
         errs.append("length_mismatch phoneme_ids/language_ids/durations/positions")
+    if vowel_flags and len(vowel_flags) != n:
+        errs.append("length_mismatch vowel_flags/phoneme_ids")
     if any(int(d) < 1 for d in durations):
         errs.append("invalid_duration_nonpositive")
     if int(sum(int(x) for x in word_boundaries)) != n:
         errs.append("invalid_word_boundaries_sum")
     if note_slur and note_durations and len(note_slur) != len(note_durations):
         errs.append("length_mismatch note_slur/note_durations")
-    if durations and note_durations and int(sum(int(x) for x in durations)) != int(sum(int(x) for x in note_durations)):
-        errs.append("frame_conservation_failed")
+    if durations:
+        sum_durations = int(sum(int(x) for x in durations))
+        if group_anchor_frames:
+            sum_anchor_frames = int(
+                sum(
+                    max(
+                        0,
+                        int(anchor.get("end_frame", 0))
+                        - int(anchor.get("start_frame", 0)),
+                    )
+                    for anchor in group_anchor_frames
+                )
+            )
+            if sum_durations != sum_anchor_frames:
+                errs.append("frame_conservation_failed")
+        elif note_durations and sum_durations != int(sum(int(x) for x in note_durations)):
+            errs.append("frame_conservation_failed")
     if group_anchor_frames:
         if len(group_anchor_frames) != len(word_boundaries):
             errs.append("length_mismatch group_anchor_frames/word_boundaries")
@@ -247,6 +453,33 @@ def validate_ds_contract(payload: Dict[str, Any]) -> List[str]:
                 errs.append("invalid_group_anchor_window")
                 break
     return errs
+
+
+def _contract_diagnostics(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact diagnostics for DS contract validation failures."""
+    phoneme_ids = payload.get("phoneme_ids", [])
+    durations = payload.get("durations", [])
+    word_boundaries = payload.get("word_boundaries", [])
+    note_durations = payload.get("note_durations", [])
+    group_anchor_frames = payload.get("group_anchor_frames", [])
+    return {
+        "phoneme_count": len(phoneme_ids),
+        "duration_count": len(durations),
+        "word_group_count": len(word_boundaries),
+        "note_count": len(note_durations),
+        "sum_durations": int(sum(int(x) for x in durations)) if durations else 0,
+        "sum_note_durations": int(sum(int(x) for x in note_durations)) if note_durations else 0,
+        "anchor_group_count": len(group_anchor_frames),
+        "sum_anchor_frames": int(
+            sum(
+                max(
+                    0,
+                    int(anchor.get("end_frame", 0)) - int(anchor.get("start_frame", 0)),
+                )
+                for anchor in group_anchor_frames
+            )
+        ) if group_anchor_frames else 0,
+    }
 
 
 def align(
@@ -268,7 +501,10 @@ def align(
     for group in groups:
         if group["is_rest"]:
             continue
-        lyrics.append(_resolve_group_lyric(group))
+        lyric = _resolve_group_lyric(group)
+        # Mirror DiffSingerBasePhonemizer defaultPause behavior: missing lyrics still
+        # contribute a silence token so timing budgets remain conserved.
+        lyrics.append(lyric if lyric else "SP")
 
     word_phonemes: List[Dict[str, Any]] = []
     if lyrics:
@@ -327,13 +563,46 @@ def align(
                 phonemizer=phonemizer,
             )
 
+        start_indices = _syllable_start_indices(phonemes, phonemizer)
+        first_start = start_indices[0] if start_indices else 0
+        lead_ph = phonemes[:first_start] if first_start > 0 else []
+        lead_ids = ids[:first_start] if first_start > 0 else []
+        lead_lang = lang_ids[:first_start] if first_start > 0 else []
+        core_ph = phonemes[first_start:] if first_start > 0 else phonemes
+        core_ids = ids[first_start:] if first_start > 0 else ids
+        core_lang = lang_ids[first_start:] if first_start > 0 else lang_ids
+
         chunks = _split_phonemes_into_syllable_chunks(
-            phonemes=phonemes,
-            ids=ids,
-            lang_ids=lang_ids,
+            phonemes=core_ph,
+            ids=core_ids,
+            lang_ids=core_lang,
             phonemizer=phonemizer,
             expected_chunks=max(1, len(carrier_indices)),
+            attach_lead_to_first=False,
         )
+
+        # OpenUtau parity: carry pre-vowel prefix to previous anchor group when possible.
+        if lead_ph:
+            if phrase_groups:
+                prev_note_idx = int(phrase_groups[-1].get("note_idx", -1))
+                phrase_groups[-1].setdefault("phonemes", []).extend(lead_ph)
+                phrase_groups[-1].setdefault("ids", []).extend(lead_ids)
+                phrase_groups[-1].setdefault("lang_ids", []).extend(lead_lang)
+                if prev_note_idx >= 0:
+                    note_phonemes.setdefault(prev_note_idx, []).extend(lead_ph)
+            else:
+                first_note_idx = int(carrier_indices[0]) if carrier_indices else int(note_indices[0])
+                phrase_groups.append(
+                    {
+                        "position": start_frames[first_note_idx],
+                        "phonemes": list(lead_ph),
+                        "ids": list(lead_ids),
+                        "lang_ids": list(lead_lang),
+                        "tone": float(timing_midi[first_note_idx]),
+                        "note_idx": first_note_idx,
+                    }
+                )
+                note_phonemes.setdefault(first_note_idx, []).extend(lead_ph)
 
         for idx, note_idx in enumerate(carrier_indices):
             chunk = chunks[idx] if idx < len(chunks) else {"phonemes": [], "ids": [], "lang_ids": []}
@@ -386,9 +655,17 @@ def align(
     if not phrase_groups:
         raise ValueError("No phoneme groups produced by aligner.")
 
-    phrase_groups.sort(key=lambda g: (int(g["position"]), int(g.get("note_idx", 0))))
+    phrase_groups.sort(key=lambda g: (int(g.get("note_idx", 0)), int(g["position"])))
 
-    # Resolve coda-tail indices after sort so global phoneme offsets are stable.
+    # Build per-group anchor windows on note-order frame budgets, including
+    # repeated note-index runs (e.g. phrase-initial prefix clusters).
+    positions, durations, group_anchor_frames = _build_group_anchor_frames(
+        phrase_groups=phrase_groups,
+        note_durations=note_durations,
+        phonemizer=phonemizer,
+    )
+
+    # Resolve coda-tail indices after anchor-budget compression so global offsets stay valid.
     running = 0
     group_offsets: List[int] = []
     for group in phrase_groups:
@@ -399,7 +676,6 @@ def align(
         matches = [idx for idx, group in enumerate(phrase_groups) if int(group.get("note_idx", -1)) == note_idx]
         if not matches:
             continue
-        # Use latest entry for that note in sorted order.
         target_i = matches[-1]
         group_len = len(phrase_groups[target_i]["ids"])
         coda_len = int(spec["coda_len"])
@@ -415,24 +691,22 @@ def align(
                 "tail_frames": int(spec["tail_frames"]),
             }
         )
-    positions = [int(group["position"]) for group in phrase_groups]
-    positions_next = positions + [int(end_frames[-1])]
-    durations = [max(1, positions_next[i + 1] - positions_next[i]) for i in range(len(positions))]
+
+    # Recompute note_phonemes from finalized phrase_groups after compression/fallback.
+    note_phonemes = {}
+    for group in phrase_groups:
+        note_idx = int(group.get("note_idx", -1))
+        if note_idx < 0:
+            continue
+        note_phonemes.setdefault(note_idx, []).extend(list(group.get("phonemes") or []))
+
     word_boundaries = [len(group["ids"]) for group in phrase_groups]
     group_note_indices = [int(group.get("note_idx", -1)) for group in phrase_groups]
-    group_anchor_frames = []
-    for idx, start in enumerate(positions):
-        end = positions_next[idx + 1]
-        group_anchor_frames.append(
-            {
-                "start_frame": int(start),
-                "end_frame": int(end),
-            }
-        )
     phoneme_ids = [pid for group in phrase_groups for pid in group["ids"]]
     language_ids = [lid for group in phrase_groups for lid in group["lang_ids"]]
     tones = [float(group["tone"]) for group in phrase_groups]
     phonemes_flat = [ph for group in phrase_groups for ph in group["phonemes"]]
+    vowel_flags = [bool(phonemizer.is_vowel(ph)) for ph in phonemes_flat]
 
     # Expand per-group positions/durations to per-phoneme axis.
     ph_positions: List[int] = []
@@ -468,6 +742,7 @@ def align(
         "group_note_indices": group_note_indices,
         "group_anchor_frames": group_anchor_frames,
         "tones": ph_tones,
+        "vowel_flags": vowel_flags,
         "note_phonemes": note_phonemes,
         "note_slur": note_slur,
         "note_durations": note_durations,
@@ -481,5 +756,8 @@ def align(
 
     errors = validate_ds_contract(payload)
     if errors:
-        raise ValueError(f"DS contract validation failed: {errors}")
+        raise ValueError(
+            f"DS contract validation failed: {errors}; "
+            f"diagnostics={_contract_diagnostics(payload)}"
+        )
     return payload

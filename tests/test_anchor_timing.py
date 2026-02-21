@@ -98,5 +98,21 @@ class TestAnchorTiming(unittest.TestCase):
             durations=[], word_boundaries=[], group_anchor_frames=[]
         ), [])
 
+    def test_partitioned_scaling_keeps_onset_consonant_stiff_on_long_note(self) -> None:
+        durations = [8.0, 12.0]  # consonant, vowel raw prediction
+        word_boundaries = [2]
+        anchors = [{"start_frame": 0, "end_frame": 200}]
+        vowel_flags = [False, True]
+
+        out = _apply_anchor_constrained_timing(
+            durations=durations,
+            word_boundaries=word_boundaries,
+            group_anchor_frames=anchors,
+            vowel_flags=vowel_flags,
+        )
+        self.assertEqual(sum(out), 200)
+        self.assertLessEqual(out[0], 12)  # onset consonant should stay short
+        self.assertGreater(out[1], 180)  # vowel absorbs long-note elasticity
+
 if __name__ == "__main__":
     unittest.main()

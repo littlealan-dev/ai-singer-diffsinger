@@ -289,16 +289,30 @@ def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:
         bpm = _metronome_bpm(mark)
         if bpm is None:
             continue
+        try:
+            offset_beats = float(mark.getOffsetInHierarchy(score))
+        except Exception:
+            # Fallback for unusual music21 contexts.
+            offset_beats = float(mark.offset)
         tempo_events.append(
             TempoEvent(
-                offset_beats=float(mark.offset),
+                offset_beats=offset_beats,
                 bpm=float(bpm),
             )
         )
     if not tempo_events:
         tempo_events = [TempoEvent(offset_beats=0.0, bpm=120.0)]
     tempo_events.sort(key=lambda event: event.offset_beats)
-    return tempo_events
+    deduped: List[TempoEvent] = []
+    for event in tempo_events:
+        if (
+            deduped
+            and abs(event.offset_beats - deduped[-1].offset_beats) < 1e-9
+            and abs(event.bpm - deduped[-1].bpm) < 1e-9
+        ):
+            continue
+        deduped.append(event)
+    return deduped
 
 
 def _metronome_bpm(mark: tempo.MetronomeMark) -> Optional[float]:

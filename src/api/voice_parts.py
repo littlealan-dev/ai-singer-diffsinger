@@ -47,7 +47,6 @@ VALID_TIMELINE_DECISION_TYPES = {
     "DROP_NOTES_IF_NEEDED",
 }
 VALID_TIMELINE_METHODS = {"A", "B", "trivial"}
-DEFAULT_REPAIR_MAX_RETRIES = 2
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
 _TRANSFORM_ARTIFACT_INDEX: Dict[str, Dict[str, Any]] = {}
@@ -1061,6 +1060,44 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         part_index = int(target.get("part_index", -1))
         target_voice_part_id = str(target.get("voice_part_id") or "")
         sections = target_entry.get("sections") or []
+        
+        # Guard: Complex scores (chords or mixed regions) require sections.
+        if not sections and 0 <= part_index < len(score.get("parts", [])):
+            part = score["parts"][part_index]
+            analysis = _analyze_part_voice_parts(part, part_index)
+            regions = _build_part_region_indices(part, analysis["voice_parts"])
+            
+            # Aggregate statuses across all regions in this part to detect complexity.
+            all_statuses = set()
+            for vp_regions_list in regions.get("target_resolution_by_voice_part", {}).values():
+                for r in vp_regions_list:
+                    all_statuses.add(r["status"])
+            
+            has_chords = len(regions.get("chord_regions", [])) > 0
+            has_split_need = "NEEDS_SPLIT" in all_statuses
+            has_unassigned = "UNASSIGNED_SOURCE" in all_statuses or len(regions.get("default_voice_regions", [])) > 0
+            
+            # Rule 1: Chords or explicit SPLIT needs require sections.
+            if has_chords or has_split_need:
+                findings.append({
+                    "rule": "plan_requires_sections",
+                    "severity": "error",
+                    "target_index": target_idx,
+                    "part_index": part_index,
+                    "target_voice_part_id": target_voice_part_id,
+                    "details": "Score complexity (chords or multi-voice segments) requires a section-by-section plan instead of the simple action path.",
+                })
+            # Rule 2: Mixed region qualities (some resolved, some unassigned) require sections to explicitly handle transitions.
+            elif "RESOLVED" in all_statuses and has_unassigned:
+                findings.append({
+                    "rule": "mixed_region_requires_sections",
+                    "severity": "error",
+                    "target_index": target_idx,
+                    "part_index": part_index,
+                    "target_voice_part_id": target_voice_part_id,
+                    "details": f"Part contains mixed region qualities {sorted(all_statuses)} which require explicit sectional handling.",
+                })
+
         if not sections:
             continue
         by_part_has_timeline_targets[part_index] = True
@@ -1127,6 +1164,80 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             "source_part_index": lyric_source_part,
                         }
                     )
+                if (
+                    isinstance(lyric_source_part, int)
+                    and lyric_source_part == part_index
+                    and isinstance(lyric_source.get("voice_part_id"), str)
+                ):
+                    chosen_voice_part_id = str(lyric_source["voice_part_id"]).strip()
+                    chosen_stats = _lyric_stats_for_voice_part_range(
+                        score=score,
+                        part_index=part_index,
+                        voice_part_id=chosen_voice_part_id,
+                        start_measure=start,
+                        end_measure=end,
+                    )
+                    if (
+                        chosen_stats["word_lyric_note_count"] == 0
+                        and chosen_stats["extension_lyric_note_count"] > 0
+                    ):
+                        alternative = _best_same_part_word_lyric_source_for_range(
+                            score=score,
+                            part_index=part_index,
+                            start_measure=start,
+                            end_measure=end,
+                            exclude_voice_part_id=chosen_voice_part_id,
+                        )
+                        if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
+                            findings.append(
+                                {
+                                    "rule": "extension_only_lyric_source_with_word_alternative",
+                                    "severity": "error",
+                                    "target_index": target_idx,
+                                    "part_index": part_index,
+                                    "target_voice_part_id": target_voice_part_id,
+                                    "section": {"start_measure": start, "end_measure": end},
+                                    "selected_lyric_source": {
+                                        "part_index": part_index,
+                                        "voice_part_id": chosen_voice_part_id,
+                                        "stats": chosen_stats,
+                                    },
+                                    "suggested_lyric_source": {
+                                        "part_index": part_index,
+                                        "voice_part_id": alternative["voice_part_id"],
+                                        "stats": alternative["stats"],
+                                    },
+                                }
+                            )
+                    if chosen_stats["lyric_note_count"] == 0:
+                        alternative = _best_same_part_word_lyric_source_for_range(
+                            score=score,
+                            part_index=part_index,
+                            start_measure=start,
+                            end_measure=end,
+                            exclude_voice_part_id=chosen_voice_part_id,
+                        )
+                        if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
+                            findings.append(
+                                {
+                                    "rule": "empty_lyric_source_with_word_alternative",
+                                    "severity": "error",
+                                    "target_index": target_idx,
+                                    "part_index": part_index,
+                                    "target_voice_part_id": target_voice_part_id,
+                                    "section": {"start_measure": start, "end_measure": end},
+                                    "selected_lyric_source": {
+                                        "part_index": part_index,
+                                        "voice_part_id": chosen_voice_part_id,
+                                        "stats": chosen_stats,
+                                    },
+                                    "suggested_lyric_source": {
+                                        "part_index": part_index,
+                                        "voice_part_id": alternative["voice_part_id"],
+                                        "stats": alternative["stats"],
+                                    },
+                                }
+                            )
             if section.get("mode") != "derive":
                 rest_hit = [m for m in range(start, end + 1) if m in native_sung_measures]
                 if rest_hit:
@@ -1377,8 +1488,9 @@ def _execute_single_preprocess_target(
             for strategy_name in ["overlap_best_match", "syllable_flow", "strict_onset"]
             if strategy_name != propagation_strategy
         ]
+        max_retries = _env_int("VOICE_PART_REPAIR_MAX_RETRIES", 2)
         for attempt_index, strategy_name in enumerate(
-            candidate_strategies[:DEFAULT_REPAIR_MAX_RETRIES], start=1
+            candidate_strategies[:max_retries], start=1
         ):
             retry_result = _prepare_score_for_voice_part_legacy(
                 score,
@@ -1582,6 +1694,7 @@ def _execute_timeline_sections(
     )
     source_notes_for_validation: List[Dict[str, Any]] = []
     section_results: List[Dict[str, Any]] = []
+    section_quality_issues: List[Dict[str, Any]] = []
     propagated = False
     first_source_ref: Optional[Dict[str, Any]] = None
 
@@ -1592,6 +1705,12 @@ def _execute_timeline_sections(
         decision_type = str(section.get("decision_type") or "EXTRACT_FROM_VOICE")
         method = str(section.get("method") or "trivial")
         before_lyric_count = _count_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        before_word_lyric_count = _count_word_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        before_extension_lyric_count = _count_extension_lyric_sung_notes_in_range(
             working_notes, start_measure, end_measure
         )
         copied_note_count = 0
@@ -1674,8 +1793,18 @@ def _execute_timeline_sections(
         after_lyric_count = _count_lyric_sung_notes_in_range(
             working_notes, start_measure, end_measure
         )
+        after_word_lyric_count = _count_word_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
+        after_extension_lyric_count = _count_extension_lyric_sung_notes_in_range(
+            working_notes, start_measure, end_measure
+        )
         section_missing = _count_missing_lyric_sung_notes_in_range(
             working_notes, start_measure, end_measure
+        )
+        copied_word_lyric_count = max(0, after_word_lyric_count - before_word_lyric_count)
+        copied_extension_lyric_count = max(
+            0, after_extension_lyric_count - before_extension_lyric_count
         )
         section_results.append(
             {
@@ -1686,8 +1815,60 @@ def _execute_timeline_sections(
                 "end_measure": end_measure,
                 "copied_note_count": copied_note_count,
                 "copied_lyric_count": max(0, after_lyric_count - before_lyric_count),
+                "copied_word_lyric_count": copied_word_lyric_count,
+                "copied_extension_lyric_count": copied_extension_lyric_count,
                 "missing_lyric_sung_note_count": section_missing,
             }
+        )
+        lyric_source = section.get("lyric_source")
+        if (
+            mode == "derive"
+            and copied_note_count > 0
+            and isinstance(lyric_source, dict)
+            and isinstance(lyric_source.get("part_index"), int)
+            and isinstance(lyric_source.get("voice_part_id"), str)
+        ):
+            source_stats = _lyric_stats_for_voice_part_range(
+                score=source_score,
+                part_index=int(lyric_source["part_index"]),
+                voice_part_id=str(lyric_source["voice_part_id"]),
+                start_measure=start_measure,
+                end_measure=end_measure,
+            )
+            target_stats = _lyric_stats_for_notes_range(
+                working_notes,
+                start_measure=start_measure,
+                end_measure=end_measure,
+            )
+            if (
+                source_stats["word_lyric_note_count"] > 0
+                and target_stats["word_lyric_note_count"] == 0
+                and target_stats["extension_lyric_note_count"] > 0
+            ):
+                section_quality_issues.append(
+                    {
+                        "code": "extension_only_output_with_word_source_available",
+                        "start_measure": start_measure,
+                        "end_measure": end_measure,
+                        "decision_type": decision_type,
+                        "method": method,
+                        "lyric_source": {
+                            "part_index": int(lyric_source["part_index"]),
+                            "voice_part_id": str(lyric_source["voice_part_id"]),
+                        },
+                        "source_stats": source_stats,
+                        "target_stats": target_stats,
+                    }
+                )
+
+    if section_quality_issues:
+        return _action_required(
+            "section_lyric_quality_failed",
+            "Section-level lyric quality check failed. Selected lyric sources produced extension-only output where words are available.",
+            part_index=part_index,
+            target_voice_part=target_voice_part_id,
+            section_quality_issues=section_quality_issues,
+            section_results=section_results,
         )
 
     working_notes.sort(
@@ -1790,6 +1971,32 @@ def _execute_timeline_sections(
                 failing_ranges=_collapse_measure_ranges(
                     validation.get("unresolved_measures") or []
                 ),
+            )
+    min_word_ratio = _env_float("VOICE_PART_MIN_WORD_LYRIC_COVERAGE_RATIO", 0.15)
+    warn_floor_ratio = _env_float("VOICE_PART_MIN_WORD_LYRIC_WARN_FLOOR_RATIO", 0.75)
+    if (
+        validation["source_word_lyric_note_count"] > 0
+        and validation["word_lyric_coverage_ratio"] < min_word_ratio
+    ):
+        if validation["word_lyric_coverage_ratio"] >= max(0.0, min_word_ratio * warn_floor_ratio):
+            status = "ready_with_warnings"
+            warnings.append(
+                {
+                    "code": "low_word_lyric_coverage",
+                    "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
+                    "min_required_word_lyric_coverage_ratio": min_word_ratio,
+                    "extension_lyric_ratio": validation["extension_lyric_ratio"],
+                }
+            )
+        else:
+            return _action_required(
+                "word_lyric_coverage_too_low",
+                "Word-lyric coverage is too low. Output is dominated by extension-only lyrics.",
+                part_index=part_index,
+                target_voice_part=target_voice_part_id,
+                validation=validation,
+                min_required_word_lyric_coverage_ratio=min_word_ratio,
+                section_results=section_results,
             )
 
     result = _finalize_transform_result(
@@ -2145,6 +2352,140 @@ def _count_lyric_sung_notes_in_range(
     )
 
 
+def _lyric_stats_for_notes_range(
+    notes: Sequence[Dict[str, Any]],
+    *,
+    start_measure: int,
+    end_measure: int,
+) -> Dict[str, float | int]:
+    sung = [
+        note
+        for note in notes
+        if (not note.get("is_rest")) and _note_in_measure_range(note, (start_measure, end_measure))
+    ]
+    word = sum(1 for note in sung if _lyric_kind(note) == "word")
+    extension = sum(1 for note in sung if _lyric_kind(note) == "extension")
+    empty = sum(1 for note in sung if _lyric_kind(note) == "empty")
+    lyric = word + extension
+    total = max(1, len(sung))
+    return {
+        "sung_note_count": len(sung),
+        "lyric_note_count": lyric,
+        "word_lyric_note_count": word,
+        "extension_lyric_note_count": extension,
+        "empty_lyric_note_count": empty,
+        "word_lyric_coverage_ratio": round(float(word) / float(total), 4),
+        "extension_lyric_ratio": round(float(extension) / float(total), 4),
+    }
+
+
+def _lyric_stats_for_voice_part_range(
+    *,
+    score: Dict[str, Any],
+    part_index: int,
+    voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+) -> Dict[str, float | int]:
+    source_notes = _resolve_source_notes_allow_lyricless(
+        score,
+        source_part_index=part_index,
+        source_voice_part_id=voice_part_id,
+    )
+    if source_notes is None:
+        return {
+            "sung_note_count": 0,
+            "lyric_note_count": 0,
+            "word_lyric_note_count": 0,
+            "extension_lyric_note_count": 0,
+            "empty_lyric_note_count": 0,
+            "word_lyric_coverage_ratio": 0.0,
+            "extension_lyric_ratio": 0.0,
+        }
+    return _lyric_stats_for_notes_range(
+        source_notes,
+        start_measure=start_measure,
+        end_measure=end_measure,
+    )
+
+
+def _best_same_part_word_lyric_source_for_range(
+    *,
+    score: Dict[str, Any],
+    part_index: int,
+    start_measure: int,
+    end_measure: int,
+    exclude_voice_part_id: str,
+) -> Optional[Dict[str, Any]]:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return None
+    analysis = _analyze_part_voice_parts(parts[part_index], part_index)
+    candidates = analysis.get("voice_parts") or []
+    best: Optional[Dict[str, Any]] = None
+    for candidate in candidates:
+        voice_part_id = str(candidate.get("voice_part_id") or "").strip()
+        source_voice_id = str(candidate.get("source_voice_id") or "").strip()
+        if (
+            not voice_part_id
+            or voice_part_id == exclude_voice_part_id
+            or source_voice_id == "_default"
+        ):
+            continue
+        stats = _lyric_stats_for_voice_part_range(
+            score=score,
+            part_index=part_index,
+            voice_part_id=voice_part_id,
+            start_measure=start_measure,
+            end_measure=end_measure,
+        )
+        if best is None:
+            best = {"voice_part_id": voice_part_id, "stats": stats}
+            continue
+        best_stats = best["stats"]
+        current_rank = (
+            int(stats["word_lyric_note_count"]),
+            float(stats["word_lyric_coverage_ratio"]),
+            -int(stats["extension_lyric_note_count"]),
+        )
+        best_rank = (
+            int(best_stats["word_lyric_note_count"]),
+            float(best_stats["word_lyric_coverage_ratio"]),
+            -int(best_stats["extension_lyric_note_count"]),
+        )
+        if current_rank > best_rank:
+            best = {"voice_part_id": voice_part_id, "stats": stats}
+    return best
+
+
+def _count_word_lyric_sung_notes_in_range(
+    notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
+) -> int:
+    return sum(
+        1
+        for note in notes
+        if (
+            not note.get("is_rest")
+            and _note_in_measure_range(note, (start_measure, end_measure))
+            and _lyric_kind(note) == "word"
+        )
+    )
+
+
+def _count_extension_lyric_sung_notes_in_range(
+    notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
+) -> int:
+    return sum(
+        1
+        for note in notes
+        if (
+            not note.get("is_rest")
+            and _note_in_measure_range(note, (start_measure, end_measure))
+            and _lyric_kind(note) == "extension"
+        )
+    )
+
+
 def _count_missing_lyric_sung_notes_in_range(
     notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
 ) -> int:
@@ -2380,15 +2721,24 @@ def _validate_transformed_notes(
     sung_notes = [note for note in transformed_notes if not note.get("is_rest")]
     exempt_notes = [note for note in sung_notes if bool(note.get("lyric_exempt"))]
     missing_notes = [note for note in sung_notes if not _has_lyric(note) and note not in exempt_notes]
+    word_notes = [note for note in sung_notes if _lyric_kind(note) == "word" and note not in exempt_notes]
+    extension_notes = [
+        note for note in sung_notes if _lyric_kind(note) == "extension" and note not in exempt_notes
+    ]
     effective_total = max(1, len(sung_notes) - len(exempt_notes))
     lyric_coverage_ratio = round(
         float(effective_total - len(missing_notes)) / float(effective_total), 4
     )
+    word_lyric_coverage_ratio = round(float(len(word_notes)) / float(effective_total), 4)
+    extension_lyric_ratio = round(float(len(extension_notes)) / float(effective_total), 4)
     source_offsets = {
         round(float(note.get("offset_beats") or 0.0), 6)
         for note in source_notes
         if not note.get("is_rest") and _has_lyric(note)
     }
+    source_word_note_count = sum(
+        1 for note in source_notes if not note.get("is_rest") and _lyric_kind(note) == "word"
+    )
     aligned_notes = 0
     lyric_notes = 0
     for note in sung_notes:
@@ -2411,6 +2761,11 @@ def _validate_transformed_notes(
     structural = _validate_structural_singability(transformed_notes)
     return {
         "lyric_coverage_ratio": lyric_coverage_ratio,
+        "word_lyric_coverage_ratio": word_lyric_coverage_ratio,
+        "extension_lyric_ratio": extension_lyric_ratio,
+        "word_lyric_note_count": len(word_notes),
+        "extension_lyric_note_count": len(extension_notes),
+        "source_word_lyric_note_count": source_word_note_count,
         "source_alignment_ratio": source_alignment_ratio,
         "missing_lyric_sung_note_count": len(missing_notes),
         "lyric_exempt_note_count": len(exempt_notes),
@@ -2608,6 +2963,32 @@ def _note_signature(note: Dict[str, Any]) -> Tuple[float, float, float]:
 def _feature_flag_enabled(name: str) -> bool:
     raw_value = str(os.environ.get(name, "")).strip().lower()
     return raw_value in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return float(default)
+    try:
+        parsed = float(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return float(default)
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return int(default)
+    try:
+        parsed = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return int(default)
+    return max(0, parsed)
 
 
 def _lyric_matches_requested_verse(
@@ -3701,6 +4082,37 @@ def _action_required(action: str, message: str, **extra: Any) -> Dict[str, Any]:
     }
     payload.update(extra)
     return payload
+
+
+def build_infeasible_anchor_action_required(
+    *,
+    error: Exception,
+    part_index: Optional[int] = None,
+    voice_id: Optional[str] = None,
+    voice_part_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a user-facing action_required payload for timing infeasibility."""
+    details: Dict[str, Any] = {"raw_error": str(error)}
+    to_payload = getattr(error, "to_payload", None)
+    if callable(to_payload):
+        payload = to_payload()
+        if isinstance(payload, dict):
+            details.update(payload)
+    if part_index is not None:
+        details["part_index"] = int(part_index)
+    if voice_id:
+        details["voice_id"] = str(voice_id)
+    if voice_part_id:
+        details["voice_part_id"] = str(voice_part_id)
+    return _action_required(
+        "infeasible_anchor_budget",
+        (
+            "Timing allocation is infeasible for at least one lyric group "
+            "(phoneme count exceeds available anchor frames)."
+        ),
+        code="infeasible_anchor_budget",
+        **details,
+    )
 
 
 def _normalize_voice_part_id(

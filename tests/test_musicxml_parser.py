@@ -12,6 +12,12 @@ TEST_XML = (
     / "test_data"
     / "amazing-grace-satb-verse1.xml"
 )
+TEST_CHRISTMAS_MXL = (
+    Path(__file__).resolve().parents[1]
+    / "assets"
+    / "test_data"
+    / "all-i-want-for-christmas-is-you-mariah-carey.mxl"
+)
 
 
 class MusicXmlParserTests(unittest.TestCase):
@@ -83,6 +89,16 @@ class MusicXmlParserTests(unittest.TestCase):
         score = parse_musicxml(TEST_XML, keep_rests=False)
         part = score.parts[0]
         self.assertFalse(any(event.is_rest for event in part.notes))
+
+    def test_tempo_offsets_use_absolute_beats_in_mxl(self) -> None:
+        score = parse_musicxml(TEST_CHRISTMAS_MXL)
+        tempos = list(score.tempos)
+        self.assertGreaterEqual(len(tempos), 2)
+        self.assertAlmostEqual(tempos[0].offset_beats, 0.0, places=6)
+        self.assertAlmostEqual(tempos[0].bpm, 69.0, places=6)
+        tempo_148 = [event for event in tempos if abs(event.bpm - 148.0) < 1e-6]
+        self.assertTrue(tempo_148, "Expected a 148 BPM tempo event.")
+        self.assertAlmostEqual(tempo_148[0].offset_beats, 40.0, places=6)
 
 
 if __name__ == "__main__":
