@@ -1,0 +1,64 @@
+SVS Score-Transform Lessons (Planner Guidance)
+
+Purpose
+- Improve reliability of voice-part preprocessing plans for multi-voice MusicXML.
+- Keep planning deterministic, fact-driven, and section-complete.
+
+Scope
+- This file provides planning guardrails only.
+- It does not replace MCP tool schemas or runtime validation.
+
+Hard Rules
+1. Voice identity must be explicit as `(part_index, voice_part_id)`.
+2. Use parser facts only. Do not invent score structure:
+   - `voice_part_measure_spans`
+   - `voice_part_id_to_source_voice_id`
+   - `measure_lyric_coverage`
+   - `measure_staff_voice_map`
+   - `measure_annotations`
+3. Never assume `voice part 1` is globally melody.
+4. Treat unison as evidence-driven:
+   - Use unison duplication only when facts support it (for example direction text + active voice pattern).
+5. Source selection is section-local, not global by default.
+6. If behavior changes at a measure boundary (action/source/strategy/policy), split section at that boundary.
+7. Strategy choice:
+   - `strict_onset`: only when onset/rhythm alignment is tight.
+   - `overlap_best_match`: default for cross-part or rhythm-shifted ranges.
+   - `syllable_flow`: only when phrase continuity is clear and alignment methods are weak.
+8. For clear two-note vertical chord splits (upper/lower intent), prefer deterministic extreme-note split.
+9. Every non-rest target section must have an explicit source path.
+10. If a target already has some lyrics, still fill missing sections.
+11. Duplicating notes for unison does not guarantee lyrics; plan lyric propagation explicitly.
+12. Build an internal per-measure action table first; no gaps, no overlaps.
+13. Emit sections only by merging contiguous identical actions from that table.
+14. Re-expand sections to per-measure and verify exact round-trip (no missing/duplicated bars).
+15. Use `mode=rest` only when target should truly be silent or user requested silence.
+16. If facts are insufficient, request clarification instead of guessing.
+17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
+18. Keep melody/lyric sourcing local when local material exists; use cross-part sourcing only when local sources are unsuitable.
+19. Reject extension-only lyric sources when same-part word-bearing alternatives exist in the range.
+20. Optimize for word-lyric coverage, not just non-empty lyric coverage.
+21. Lyric policy:
+   - `replace_all` only when target has no native lyrics in range.
+   - `fill_missing_only` when target has any native lyrics in range.
+22. Never plan lyric-only propagation onto empty target ranges:
+   - If a derive section has `lyric_source` but no `melody_source`, confirm the target lane already has sung notes in that measure range.
+   - If target lane has zero sung notes in the section, you must include `melody_source` (or select a different target/range).
+   - Do not emit lyric-only sections where lyrics have no target notes to attach to.
+
+Plan Self-Check (Before Final Output)
+- Targets use `part_index` + `voice_part_id`.
+- Section ranges are explicit and complete.
+- No section is source-less.
+- Strategy/policy matches section evidence.
+- Unison duplication ranges also have lyric propagation path.
+- Word-bearing sources are preferred over extension-only sources when available.
+- Coverage is expected to satisfy post-flight word-coverage checks.
+
+Common Failure Modes to Avoid
+- Global source reuse across sections without evidence.
+- Missing early `_default`/unison sections.
+- Overusing `strict_onset` when rhythms differ.
+- Broad mixed-behavior sections that hide boundary changes.
+- Passing superficial lyric coverage via `+` while missing real word lyrics.
+- Overwriting correct native target lyrics by using `replace_all` unnecessarily.

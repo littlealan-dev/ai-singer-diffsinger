@@ -799,7 +799,7 @@ def _prepare_score_for_voice_part_legacy(
             source_voice_part_options=source_options,
         )
 
-    propagated_notes = _propagate_lyrics(
+    propagated_notes, _ = _propagate_lyrics(
         target_notes=selected_notes,
         source_notes=source_notes,
         strategy=propagation_strategy,
@@ -828,7 +828,7 @@ def _prepare_score_for_voice_part_legacy(
         )
         if override_source_notes is None:
             continue
-        propagated_notes = _propagate_lyrics(
+        propagated_notes, _ = _propagate_lyrics(
             target_notes=propagated_notes,
             source_notes=override_source_notes,
             strategy=str(override.get("strategy") or propagation_strategy),
@@ -1238,6 +1238,25 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                                     },
                                 }
                             )
+                has_lyric_source = isinstance(lyric_source_part, int)
+                has_melody_source = isinstance(melody_source_part, int)
+                if has_lyric_source and not has_melody_source:
+                    target_measures = set(range(start, end + 1))
+                    if not (target_measures & native_sung_measures):
+                        findings.append(
+                            {
+                                "rule": "lyric_source_without_target_notes",
+                                "severity": "error",
+                                "target_index": target_idx,
+                                "part_index": part_index,
+                                "target_voice_part_id": target_voice_part_id,
+                                "section": {"start_measure": start, "end_measure": end},
+                                "details": (
+                                    "Section uses lyric_source without melody_source, but target "
+                                    "lane has no native sung notes in this range."
+                                ),
+                            }
+                        )
             if section.get("mode") != "derive":
                 rest_hit = [m for m in range(start, end + 1) if m in native_sung_measures]
                 if rest_hit:
@@ -1714,6 +1733,7 @@ def _execute_timeline_sections(
             working_notes, start_measure, end_measure
         )
         copied_note_count = 0
+        propagation_diag: Optional[Dict[str, Any]] = None
 
         if mode == "rest":
             working_notes = [
@@ -1757,6 +1777,25 @@ def _execute_timeline_sections(
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
+                if (
+                    not isinstance(melody_source, dict)
+                    and not _has_sung_note_in_measure_range(
+                        working_notes,
+                        start_measure=start_measure,
+                        end_measure=end_measure,
+                    )
+                ):
+                    return _action_required(
+                        "lyric_source_without_target_notes",
+                        (
+                            "Section uses lyric_source without melody_source, but target lane "
+                            "has no notes in this range."
+                        ),
+                        part_index=part_index,
+                        target_voice_part=target_voice_part_id,
+                        section_start_measure=start_measure,
+                        section_end_measure=end_measure,
+                    )
                 override_source_notes = _resolve_source_notes(
                     source_score,
                     source_part_index=int(lyric_source["part_index"]),
@@ -1780,7 +1819,7 @@ def _execute_timeline_sections(
                     }
                 source_notes_for_validation.extend(override_source_notes)
                 propagated = True
-                working_notes = _propagate_lyrics(
+                working_notes, propagation_diag = _propagate_lyrics(
                     target_notes=working_notes,
                     source_notes=override_source_notes,
                     strategy=str(section.get("lyric_strategy") or "strict_onset"),
@@ -1818,6 +1857,26 @@ def _execute_timeline_sections(
                 "copied_word_lyric_count": copied_word_lyric_count,
                 "copied_extension_lyric_count": copied_extension_lyric_count,
                 "missing_lyric_sung_note_count": section_missing,
+                "source_lyric_candidates_count": (
+                    int(propagation_diag.get("source_lyric_candidates_count", 0))
+                    if isinstance(propagation_diag, dict)
+                    else 0
+                ),
+                "mapped_source_lyrics_count": (
+                    int(propagation_diag.get("mapped_source_lyrics_count", 0))
+                    if isinstance(propagation_diag, dict)
+                    else 0
+                ),
+                "dropped_source_lyrics_count": (
+                    int(propagation_diag.get("dropped_source_lyrics_count", 0))
+                    if isinstance(propagation_diag, dict)
+                    else 0
+                ),
+                "dropped_source_lyrics": (
+                    list(propagation_diag.get("dropped_source_lyrics") or [])
+                    if isinstance(propagation_diag, dict)
+                    else []
+                ),
             }
         )
         lyric_source = section.get("lyric_source")
@@ -2500,6 +2559,19 @@ def _count_missing_lyric_sung_notes_in_range(
     )
 
 
+def _has_sung_note_in_measure_range(
+    notes: Sequence[Dict[str, Any]],
+    *,
+    start_measure: int,
+    end_measure: int,
+) -> bool:
+    return any(
+        not note.get("is_rest")
+        and _note_in_measure_range(note, (start_measure, end_measure))
+        for note in notes
+    )
+
+
 def _duplicate_section_to_all_voice_parts(
     score: Dict[str, Any],
     *,
@@ -2638,7 +2710,7 @@ def _propagate_lyrics(
     verse_number: Optional[str],
     copy_all_verses: bool,
     measure_range: Optional[Tuple[int, int]],
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_strategy = strategy
     if strategy == "syllable_flow" and not _feature_flag_enabled(
         "VOICE_PART_SYLLABLE_FLOW_ENABLED"
@@ -2650,6 +2722,13 @@ def _propagate_lyrics(
         verse_number=verse_number,
         copy_all_verses=copy_all_verses,
     )
+    if measure_range is not None:
+        source_timeline = [
+            item
+            for item in source_timeline
+            if _note_in_measure_range(item["note"], measure_range)
+        ]
+
     source_by_offset: Dict[float, List[Dict[str, Any]]] = {}
     for item in source_timeline:
         source_by_offset.setdefault(item["start"], []).append(item)
@@ -2657,6 +2736,10 @@ def _propagate_lyrics(
     syllable_tokens = source_timeline
     syllable_index = 0
     phrase_boundaries = _detect_phrase_boundaries(target_notes)
+    matched_source_indices: set[int] = set()
+    target_note_count_in_range = 0
+    target_note_attempted_count = 0
+    target_note_matched_count = 0
 
     out: List[Dict[str, Any]] = []
     for note_idx, note in enumerate(target_notes):
@@ -2667,9 +2750,11 @@ def _propagate_lyrics(
         if not _note_in_measure_range(copied, measure_range):
             out.append(copied)
             continue
+        target_note_count_in_range += 1
         if not _should_apply_policy(copied, policy):
             out.append(copied)
             continue
+        target_note_attempted_count += 1
 
         source_item: Optional[Dict[str, Any]] = None
         if effective_strategy == "strict_onset":
@@ -2687,8 +2772,39 @@ def _propagate_lyrics(
                     syllable_index += 1
         if source_item is not None:
             _copy_lyric_fields(copied, source_item["note"])
+            matched_source_indices.add(int(source_item.get("source_index", -1)))
+            target_note_matched_count += 1
         out.append(copied)
-    return out
+
+    dropped_source_lyrics: List[Dict[str, Any]] = []
+    for item in source_timeline:
+        source_index = int(item.get("source_index", -1))
+        if source_index in matched_source_indices:
+            continue
+        src_note = item.get("note") or {}
+        dropped_source_lyrics.append(
+            {
+                "source_index": source_index,
+                "measure_number": int(src_note.get("measure_number") or 0),
+                "offset_beats": float(src_note.get("offset_beats") or 0.0),
+                "duration_beats": float(src_note.get("duration_beats") or 0.0),
+                "lyric": src_note.get("lyric"),
+                "syllabic": src_note.get("syllabic"),
+                "lyric_is_extended": bool(src_note.get("lyric_is_extended")),
+            }
+        )
+
+    diagnostics = {
+        "strategy": effective_strategy,
+        "source_lyric_candidates_count": len(source_timeline),
+        "target_note_count_in_range": target_note_count_in_range,
+        "target_note_attempted_count": target_note_attempted_count,
+        "target_note_matched_count": target_note_matched_count,
+        "mapped_source_lyrics_count": len(matched_source_indices),
+        "dropped_source_lyrics_count": len(dropped_source_lyrics),
+        "dropped_source_lyrics": dropped_source_lyrics,
+    }
+    return out, diagnostics
 
 
 def _resolve_source_notes(
@@ -4112,6 +4228,163 @@ def build_infeasible_anchor_action_required(
         ),
         code="infeasible_anchor_budget",
         **details,
+    )
+
+
+def build_preprocessing_required_action(
+    *,
+    part_index: int,
+    reason: str,
+    failed_validation_rules: Optional[List[str]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a user-facing action_required payload for preprocessing requirements."""
+    payload = _action_required(
+        "preprocessing_required",
+        (
+            "This part requires voice-part preprocessing before synthesis. "
+            "Run preprocess_voice_parts first, then synthesize the derived target."
+        ),
+        code="preprocessing_required",
+        part_index=int(part_index),
+        reason=reason,
+    )
+    if failed_validation_rules:
+        payload["failed_validation_rules"] = list(failed_validation_rules)
+    if diagnostics:
+        payload["diagnostics"] = dict(diagnostics)
+    return payload
+
+
+def synthesize_preflight_action_required(
+    score: Dict[str, Any],
+    *,
+    part_index: int,
+) -> Optional[Dict[str, Any]]:
+    """Return action_required when a complex raw part is synthesized without preprocessing."""
+    parts = score.get("parts") or []
+    diagnostics: Dict[str, Any] = {
+        "input_part_index": int(part_index),
+        "parts_count": len(parts),
+    }
+    if part_index < 0 or part_index >= len(parts):
+        diagnostics["part_index_in_range"] = False
+        return build_preprocessing_required_action(
+            part_index=part_index,
+            reason="target_part_not_found_for_preflight",
+            failed_validation_rules=["input_validation.part_index_out_of_range"],
+            diagnostics=diagnostics,
+        )
+    diagnostics["part_index_in_range"] = True
+
+    part = parts[part_index]
+    diagnostics["part_type"] = type(part).__name__
+    part_id = str(part.get("part_id") or "").strip()
+    part_name = str(part.get("part_name") or "").strip()
+    derived_by_marker = part_id.startswith("P_DERIVED_") or "(Derived)" in part_name
+    diagnostics["part_id"] = part_id
+    diagnostics["part_name"] = part_name
+    diagnostics["derived_by_marker"] = bool(derived_by_marker)
+    if derived_by_marker:
+        return None
+
+    score_summary = score.get("score_summary") if isinstance(score.get("score_summary"), dict) else {}
+    summary_parts = score_summary.get("parts") if isinstance(score_summary, dict) else None
+    original_part_count = len(summary_parts) if isinstance(summary_parts, list) and summary_parts else len(parts)
+    diagnostics["score_summary_present"] = isinstance(score_summary, dict) and bool(score_summary)
+    diagnostics["summary_parts_present"] = isinstance(summary_parts, list)
+    diagnostics["summary_parts_count"] = len(summary_parts) if isinstance(summary_parts, list) else 0
+    diagnostics["original_part_count"] = int(original_part_count)
+
+    transforms = score.get("voice_part_transforms") if isinstance(score.get("voice_part_transforms"), dict) else {}
+    derived_by_transform = False
+    diagnostics["voice_part_transforms_present"] = isinstance(transforms, dict)
+    diagnostics["voice_part_transforms_count"] = len(transforms) if isinstance(transforms, dict) else 0
+    if isinstance(transforms, dict):
+        for value in transforms.values():
+            if not isinstance(value, dict):
+                continue
+            appended_ref = value.get("appended_part_ref")
+            if not isinstance(appended_ref, dict):
+                continue
+            appended_part_index = appended_ref.get("part_index")
+            appended_part_id = str(appended_ref.get("part_id") or "").strip()
+            if (isinstance(appended_part_index, int) and appended_part_index == part_index) or (
+                part_id and appended_part_id and appended_part_id == part_id
+            ):
+                derived_by_transform = True
+                break
+
+    derived_by_index_delta = part_index >= original_part_count
+    is_derived_target = derived_by_index_delta or derived_by_transform or derived_by_marker
+    diagnostics["derived_by_index_delta"] = bool(derived_by_index_delta)
+    diagnostics["derived_by_transform_metadata"] = bool(derived_by_transform)
+    diagnostics["is_derived_target"] = bool(is_derived_target)
+    if is_derived_target:
+        return None
+
+    signals = score.get("voice_part_signals") if isinstance(score.get("voice_part_signals"), dict) else {}
+    signal_parts = signals.get("parts") if isinstance(signals, dict) else None
+    diagnostics["voice_part_signals_present"] = isinstance(signals, dict) and bool(signals)
+    diagnostics["signal_parts_present"] = isinstance(signal_parts, list)
+    diagnostics["signal_parts_count"] = len(signal_parts) if isinstance(signal_parts, list) else 0
+    if not isinstance(signal_parts, list):
+        return build_preprocessing_required_action(
+            part_index=part_index,
+            reason="complexity_signal_unavailable_without_derived_target",
+            failed_validation_rules=["complexity_signal.parts_missing"],
+            diagnostics=diagnostics,
+        )
+
+    signal = None
+    for item in signal_parts:
+        if isinstance(item, dict) and int(item.get("part_index", -1)) == part_index:
+            signal = item
+            break
+    if not isinstance(signal, dict):
+        return build_preprocessing_required_action(
+            part_index=part_index,
+            reason="complexity_signal_unavailable_without_derived_target",
+            failed_validation_rules=["complexity_signal.target_part_signal_missing"],
+            diagnostics=diagnostics,
+        )
+    diagnostics["target_signal_found"] = True
+
+    missing = signal.get("missing_lyric_voice_parts")
+    has_multi_voice = bool(signal.get("multi_voice_part"))
+    has_missing_lyric_voice_parts = isinstance(missing, list) and len(missing) > 0
+    diagnostics["missing_lyric_voice_parts"] = (
+        list(missing) if isinstance(missing, list) else missing
+    )
+    diagnostics["has_multi_voice_part_signal"] = bool(has_multi_voice)
+    diagnostics["has_missing_lyric_voice_parts_signal"] = bool(has_missing_lyric_voice_parts)
+    preprocess_required = has_multi_voice or has_missing_lyric_voice_parts
+    diagnostics["preprocess_required"] = bool(preprocess_required)
+    if not preprocess_required:
+        return None
+
+    failed_rules: List[str] = []
+    if has_multi_voice:
+        failed_rules.append("complexity_signal.multi_voice_part")
+    if has_missing_lyric_voice_parts:
+        failed_rules.append("complexity_signal.missing_lyric_voice_parts")
+    if not derived_by_index_delta:
+        failed_rules.append("derived_detection.index_delta_not_met")
+    if not derived_by_transform:
+        failed_rules.append("derived_detection.transform_metadata_not_found")
+
+    if has_multi_voice and has_missing_lyric_voice_parts:
+        reason = "complex_score_multi_voice_and_missing_lyrics_without_derived_target"
+    elif has_multi_voice:
+        reason = "complex_score_multi_voice_without_derived_target"
+    else:
+        reason = "complex_score_missing_lyrics_without_derived_target"
+
+    return build_preprocessing_required_action(
+        part_index=part_index,
+        reason=reason,
+        failed_validation_rules=failed_rules,
+        diagnostics=diagnostics,
     )
 
 

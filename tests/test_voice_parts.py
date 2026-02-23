@@ -7,7 +7,6 @@ import threading
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from pprint import pformat
 
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
@@ -23,7 +22,7 @@ TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
 
 
 class VoicePartFlowTests(unittest.TestCase):
-    def test_synthesize_returns_action_required_for_missing_lyrics(self) -> None:
+    def test_synthesize_returns_action_required_for_complex_raw_part(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
         result = synthesize(
             score,
@@ -31,21 +30,29 @@ class VoicePartFlowTests(unittest.TestCase):
             part_index=0,
             voice_part_id="alto",
         )
-        if result.get("status") == "action_required":
-            print("\n[action_required] test_synthesize_returns_action_required_for_missing_lyrics")
-            print(pformat(result, width=120))
         self.assertEqual(result.get("status"), "action_required")
-        self.assertEqual(result.get("action"), "confirm_lyric_propagation")
-        options = result.get("source_voice_part_options", [])
-        self.assertTrue(
-            any(
-                opt.get("source_part_index") == 0 and opt.get("source_voice_part_id") == "soprano"
-                for opt in options
-                if isinstance(opt, dict)
-            )
+        self.assertEqual(result.get("action"), "preprocessing_required")
+        self.assertEqual(result.get("code"), "preprocessing_required")
+        self.assertEqual(
+            result.get("reason"),
+            "complex_score_multi_voice_and_missing_lyrics_without_derived_target",
         )
+        failed_rules = result.get("failed_validation_rules") or []
+        self.assertIn("complexity_signal.multi_voice_part", failed_rules)
+        self.assertIn("complexity_signal.missing_lyric_voice_parts", failed_rules)
+        self.assertIn("derived_detection.index_delta_not_met", failed_rules)
+        self.assertIn("derived_detection.transform_metadata_not_found", failed_rules)
+        diagnostics = result.get("diagnostics") or {}
+        self.assertEqual(diagnostics.get("input_part_index"), 0)
+        self.assertTrue(diagnostics.get("part_index_in_range"))
+        self.assertFalse(diagnostics.get("is_derived_target"))
+        self.assertTrue(diagnostics.get("voice_part_signals_present"))
+        self.assertTrue(diagnostics.get("signal_parts_present"))
+        self.assertTrue(diagnostics.get("target_signal_found"))
+        self.assertTrue(diagnostics.get("has_multi_voice_part_signal"))
+        self.assertTrue(diagnostics.get("has_missing_lyric_voice_parts_signal"))
 
-    def test_synthesize_requires_source_voice_part_when_enabled(self) -> None:
+    def test_synthesize_requires_preprocess_even_when_propagation_enabled(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
         result = synthesize(
             score,
@@ -54,11 +61,24 @@ class VoicePartFlowTests(unittest.TestCase):
             voice_part_id="alto",
             allow_lyric_propagation=True,
         )
-        if result.get("status") == "action_required":
-            print("\n[action_required] test_synthesize_requires_source_voice_part_when_enabled")
-            print(pformat(result, width=120))
         self.assertEqual(result.get("status"), "action_required")
-        self.assertEqual(result.get("action"), "select_source_voice_part")
+        self.assertEqual(result.get("action"), "preprocessing_required")
+
+    def test_synthesize_preflight_reports_invalid_part_index(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        result = synthesize(
+            score,
+            "missing_voicebank_path",
+            part_index=999,
+            voice_part_id="alto",
+        )
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "preprocessing_required")
+        self.assertEqual(result.get("reason"), "target_part_not_found_for_preflight")
+        self.assertIn(
+            "input_validation.part_index_out_of_range",
+            result.get("failed_validation_rules") or [],
+        )
 
     def test_prepare_score_propagates_lyrics_when_confirmed(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
@@ -380,7 +400,11 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ]
         }
         result = preprocess_voice_parts(score, plan=plan)
-        self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
+        self.assertNotEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertFalse(
+            any(f.get("rule") == "lyric_source_without_target_notes" for f in findings)
+        )
         metadata = result.get("metadata", {})
         self.assertEqual(metadata.get("plan_mode"), "timeline_sections")
 
@@ -631,6 +655,281 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
                 for f in findings
             )
         )
+
+    def test_preflight_lint_flags_lyric_source_without_target_notes(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 2,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": "src",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "alto"},
+                            "lyric_strategy": "overlap_best_match",
+                            "lyric_policy": "fill_missing_only",
+                        },
+                        {
+                            "start_measure": 2,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        },
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "alto"},
+                        }
+                    ],
+                },
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(f.get("rule") == "lyric_source_without_target_notes" for f in findings)
+        )
+
+    def test_preflight_allows_lyric_only_when_target_notes_exist(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": "src",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "alto"},
+                            "lyric_strategy": "overlap_best_match",
+                            "lyric_policy": "fill_missing_only",
+                        },
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "alto"},
+                        }
+                    ],
+                },
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertNotEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertFalse(
+            any(f.get("rule") == "lyric_source_without_target_notes" for f in findings)
+        )
+
+    def test_section_results_include_dropped_source_lyrics_diagnostics(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Lead",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": "God",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": None,
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "be",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": None,
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "fill_missing_only",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
+        section_results = (result.get("metadata") or {}).get("section_results") or []
+        self.assertTrue(section_results)
+        first = section_results[0]
+        self.assertEqual(first.get("source_lyric_candidates_count"), 2)
+        self.assertEqual(first.get("mapped_source_lyrics_count"), 1)
+        self.assertEqual(first.get("dropped_source_lyrics_count"), 1)
+        dropped = first.get("dropped_source_lyrics") or []
+        self.assertTrue(any(item.get("lyric") == "be" for item in dropped))
+
+    def test_section_results_include_zero_dropped_when_fully_mapped(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Lead",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": "God",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": None,
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "fill_missing_only",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
+        section_results = (result.get("metadata") or {}).get("section_results") or []
+        self.assertTrue(section_results)
+        first = section_results[0]
+        self.assertEqual(first.get("source_lyric_candidates_count"), 1)
+        self.assertEqual(first.get("mapped_source_lyrics_count"), 1)
+        self.assertEqual(first.get("dropped_source_lyrics_count"), 0)
+        self.assertEqual(first.get("dropped_source_lyrics"), [])
 
 
 class VoicePartPropagationStrategyTests(unittest.TestCase):
