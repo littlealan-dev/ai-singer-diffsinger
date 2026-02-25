@@ -104,33 +104,44 @@ class TestMcpEndToEnd(unittest.TestCase):
             "parse_score",
             {"file_path": self.score_path, "expand_repeats": False},
         )
-        score = self._call_tool(
-            "modify_score",
-            {
-                "score": score,
-                "code": (
-                    "notes = score['parts'][0]['notes']\n"
-                    "cut_index = None\n"
-                    "for idx in range(len(notes)):\n"
-                    "    note = notes[idx]\n"
-                    "    lyric = note.get('lyric')\n"
-                    "    if lyric and 'me' in lyric.lower():\n"
-                    "        cut_index = idx\n"
-                    "        break\n"
-                    "half_index = max(0, (len(notes) // 2) - 1)\n"
-                    "if cut_index is None:\n"
-                    "    cut_index = half_index\n"
-                    "else:\n"
-                    "    cut_index = max(cut_index, half_index)\n"
-                    "score['parts'][0]['notes'] = notes[:cut_index + 1]\n"
-                ),
-            },
+        preprocess_plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "actions": [
+                        {
+                            "type": "split_voice_part",
+                            "split_shared_note_policy": "duplicate_to_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        preprocess_result = self._call_tool(
+            "preprocess_voice_parts",
+            {"score": score, "request": {"plan": preprocess_plan}},
         )
+        self.assertIn("status", preprocess_result)
+        self.assertIn(preprocess_result["status"], {"ready", "ready_with_warnings"})
+        score = preprocess_result.get("score", score)
+        synth_part_index = preprocess_result.get("part_index", 0)
+        notes = score["parts"][synth_part_index].get("notes", [])
+        if notes:
+            cut_index = None
+            for idx, note in enumerate(notes):
+                lyric = note.get("lyric")
+                if lyric and "me" in lyric.lower():
+                    cut_index = idx
+                    break
+            half_index = max(0, (len(notes) // 2) - 1)
+            cut_index = max(cut_index, half_index) if cut_index is not None else half_index
+            score["parts"][synth_part_index]["notes"] = notes[: cut_index + 1]
         synth_result = self._call_tool(
             "synthesize",
             {
                 "score": score,
                 "voicebank": self.voicebank_id,
+                "part_index": synth_part_index,
                 "voice_id": "soprano",
             },
         )

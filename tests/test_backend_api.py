@@ -2,6 +2,7 @@ import os
 import shutil
 import time
 import uuid
+import json
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,12 @@ def _make_router_call_tool():
                     "available_verses": [],
                 },
             }
-        if name == "modify_score":
-            return arguments.get("score", {})
+        if name == "preprocess_voice_parts":
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+            }
         if name == "synthesize":
             return {"waveform": [0.0, 0.1, 0.0], "sample_rate": 44100}
         if name == "save_audio":
@@ -234,6 +239,38 @@ def test_upload_returns_score_summary_with_verses(client):
     assert "2" in summary.get("available_verses", [])
 
 
+def test_orchestrator_selection_matches_current_uses_selected_verse(client):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    score = {
+        "parts": [{"part_id": "P1"}],
+        "selected_verse_number": "1",
+    }
+    assert orchestrator._selection_matches_current(score, None, None, "1") is True
+    assert orchestrator._selection_matches_current(score, None, None, "2") is False
+
+
+def test_orchestrator_builds_verse_change_action_required(client):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    action = orchestrator._build_verse_change_requires_repreprocess_action(
+        score={},
+        requested_verse_number="2",
+        selected_verse_number="1",
+        part_index=0,
+        reparse_applied=True,
+        reparsed_selected_verse_number="2",
+    )
+    assert action.get("status") == "action_required"
+    assert action.get("action") == "preprocessing_required"
+    assert action.get("reason") == "verse_change_requires_repreprocess"
+    diagnostics = action.get("diagnostics") or {}
+    assert diagnostics.get("requested_verse_number") == "2"
+    assert diagnostics.get("selected_verse_number") == "1"
+    assert diagnostics.get("reparse_applied") is True
+    assert diagnostics.get("reparsed_selected_verse_number") == "2"
+
+
 def test_upload_parses_zipped_musicxml(client):
     test_client, app = client
     mxl_path = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-zipped.mxl"
@@ -345,6 +382,149 @@ def test_chat_returns_error_when_llm_fails(client):
     payload = response.json()
     assert payload["type"] == "chat_text"
     assert payload["message"] == "LLM request failed. Please try again."
+
+
+def test_chat_executes_followup_tool_calls_same_turn(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    preprocess_attempts = {"count": 0}
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            return _make_router_call_tool()(name, arguments)
+        if name == "preprocess_voice_parts":
+            preprocess_attempts["count"] += 1
+            if preprocess_attempts["count"] == 1:
+                return {
+                    "status": "action_required",
+                    "action": "plan_lint_failed",
+                    "code": "plan_lint_failed",
+                    "message": "Preflight plan lint failed.",
+                    "lint_findings": [{"rule": "dummy"}],
+                }
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    class RepairThenSynthesizeClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "preprocess_voice_parts",
+                                "arguments": {
+                                    "request": {
+                                        "plan": {
+                                            "targets": [
+                                                {
+                                                    "target": {
+                                                        "part_index": 0,
+                                                        "voice_part_id": "soprano",
+                                                    },
+                                                    "sections": [
+                                                        {
+                                                            "start_measure": 1,
+                                                            "end_measure": 1,
+                                                            "mode": "derive",
+                                                            "melody_source": {
+                                                                "part_index": 0,
+                                                                "voice_part_id": "soprano",
+                                                            },
+                                                        }
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    }
+                                },
+                            },
+                            {
+                                "name": "synthesize",
+                                "arguments": {"voicebank": "Dummy"},
+                            },
+                        ],
+                        "final_message": "Plan repaired; rendering now.",
+                        "include_score": True,
+                    }
+                )
+            if isinstance(last, str) and "proceed" in last.lower():
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "synthesize",
+                                "arguments": {"voicebank": "Dummy"},
+                            }
+                        ],
+                        "final_message": "Rendering now.",
+                        "include_score": True,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {
+                                                    "part_index": 0,
+                                                    "voice_part_id": "soprano",
+                                                },
+                                                "sections": [
+                                                    {
+                                                        "start_measure": 1,
+                                                        "end_measure": 1,
+                                                        "mode": "derive",
+                                                        "melody_source": {
+                                                            "part_index": 0,
+                                                            "voice_part_id": "soprano",
+                                                        },
+                                                    }
+                                                ],
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Preparing render.",
+                    "include_score": True,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    llm_client = RepairThenSynthesizeClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_text"
+    assert bool(payload.get("review_required")) is True
+    assert preprocess_attempts["count"] == 2
+
+    proceed = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "Looks good, proceed."}
+    )
+    assert proceed.status_code == 200
+    proceed_payload = proceed.json()
+    assert proceed_payload["type"] == "chat_progress"
 
 
 def test_get_audio_returns_404_without_audio(client):

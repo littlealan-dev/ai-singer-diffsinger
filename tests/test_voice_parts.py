@@ -10,6 +10,8 @@ from pathlib import Path
 
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
+    _choose_notes_trivial_ranked,
+    _run_preflight_plan_lint,
     parse_voice_part_plan,
     prepare_score_for_voice_part,
     preprocess_voice_parts,
@@ -96,8 +98,251 @@ class VoicePartFlowTests(unittest.TestCase):
         self.assertTrue(any(note.get("lyric") for note in notes if not note.get("is_rest")))
         self.assertIn("voice_part_transforms", transformed)
 
+    def test_synthesize_preflight_guides_derived_target_when_preprocessed(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        prep = prepare_score_for_voice_part(
+            score,
+            part_index=0,
+            voice_part_id="alto",
+            allow_lyric_propagation=True,
+            source_part_index=0,
+            source_voice_part_id="soprano",
+        )
+        self.assertEqual(prep.get("status"), "ready")
+        transformed = prep["score"]
+
+        result = synthesize(
+            transformed,
+            "missing_voicebank_path",
+            part_index=0,  # Intentionally raw/original part.
+            voice_part_id="alto",
+        )
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "preprocessing_required")
+        self.assertEqual(
+            result.get("reason"),
+            "preprocessed_score_without_derived_target_selection",
+        )
+        failed_rules = result.get("failed_validation_rules") or []
+        self.assertIn(
+            "derived_detection.derived_target_not_selected_after_preprocess",
+            failed_rules,
+        )
+        diagnostics = result.get("diagnostics") or {}
+        self.assertTrue(diagnostics.get("preprocessed_score_detected"))
+        suggested = diagnostics.get("suggested_derived_targets_for_input_part") or []
+        self.assertTrue(suggested)
+        self.assertTrue(any(isinstance(item.get("part_index"), int) for item in suggested))
+        self.assertIn("targeted an original complex part", str(result.get("message") or ""))
+
 
 class VoicePartAnalysisAndPlanTests(unittest.TestCase):
+    def test_trivial_chord_split_maps_rank_to_rank_when_counts_match(self) -> None:
+        grouped = {
+            (1, 0.0): [
+                {"pitch_midi": 60.0},
+                {"pitch_midi": 67.0},
+            ],
+            (1, 1.0): [
+                {"pitch_midi": 62.0},
+                {"pitch_midi": 69.0},
+            ],
+        }
+        upper = _choose_notes_trivial_ranked(
+            grouped,
+            target_voice_rank=0,
+            target_voice_part_count=2,
+            split_selector="upper",
+        )
+        lower = _choose_notes_trivial_ranked(
+            grouped,
+            target_voice_rank=1,
+            target_voice_part_count=2,
+            split_selector="lower",
+        )
+        self.assertEqual([int(n["pitch_midi"]) for n in upper], [67, 69])
+        self.assertEqual([int(n["pitch_midi"]) for n in lower], [60, 62])
+
+    def test_trivial_chord_split_falls_back_when_counts_mismatch(self) -> None:
+        grouped = {
+            (1, 0.0): [
+                {"pitch_midi": 52.0},
+                {"pitch_midi": 60.0},
+                {"pitch_midi": 67.0},
+            ],
+        }
+        picked_upper = _choose_notes_trivial_ranked(
+            grouped,
+            target_voice_rank=0,
+            target_voice_part_count=2,
+            split_selector="upper",
+        )
+        picked_lower = _choose_notes_trivial_ranked(
+            grouped,
+            target_voice_rank=0,
+            target_voice_part_count=2,
+            split_selector="lower",
+        )
+        self.assertEqual(int(picked_upper[0]["pitch_midi"]), 67)
+        self.assertEqual(int(picked_lower[0]["pitch_midi"]), 52)
+
+    def test_preflight_rejects_trivial_method_when_chord_size_mismatch(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 72.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 69.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 65.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "2",
+                            "pitch_midi": 55.0,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+            ]
+        }
+        lint_result = _run_preflight_plan_lint(score, plan)
+        self.assertFalse(lint_result.get("ok"))
+        self.assertTrue(
+            any(
+                finding.get("rule")
+                == "trivial_method_requires_equal_chord_voice_part_count"
+                for finding in (lint_result.get("findings") or [])
+            )
+        )
+
+    def test_preflight_allows_trivial_method_when_chord_size_matches(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 72.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 69.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "2",
+                            "pitch_midi": 55.0,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+            ]
+        }
+        lint_result = _run_preflight_plan_lint(score, plan)
+        failing_rules = {
+            finding.get("rule") for finding in (lint_result.get("findings") or [])
+        }
+        self.assertNotIn(
+            "trivial_method_requires_equal_chord_voice_part_count",
+            failing_rules,
+        )
+
     def test_parse_score_note_events_include_extended_fact_fields(self) -> None:
         score = parse_score(TEST_XML, verse_number=1)
         note = next(

@@ -25,6 +25,7 @@ from src.api.voice_parts import preprocess_voice_parts
 ROOT_DIR = Path(__file__).parent.parent
 VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
 TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
+TEST_MULTI_VERSE_XML = ROOT_DIR / "assets/test_data/o-holy-night.xml"
 OUTPUT_DIR = ROOT_DIR / "tests/output"
 
 
@@ -92,6 +93,36 @@ class TestParseScore(unittest.TestCase):
         part_signal = signals["parts"][0]
         self.assertIn("measure_lyric_coverage", part_signal)
         self.assertIn("source_candidate_hints", part_signal)
+
+    def test_parse_persists_selected_verse_number_default(self):
+        """parse_score should persist deterministic selected_verse_number."""
+        if not TEST_MULTI_VERSE_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_MULTI_VERSE_XML}")
+        score = parse_score(TEST_MULTI_VERSE_XML)
+        self.assertEqual(score.get("selected_verse_number"), "1")
+        self.assertEqual(
+            (score.get("score_summary") or {}).get("selected_verse_number"),
+            "1",
+        )
+        self.assertEqual(
+            (score.get("voice_part_signals") or {}).get("requested_verse_number"),
+            "1",
+        )
+
+    def test_parse_persists_selected_verse_number_explicit(self):
+        """parse_score should persist explicitly requested verse selection."""
+        if not TEST_MULTI_VERSE_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_MULTI_VERSE_XML}")
+        score = parse_score(TEST_MULTI_VERSE_XML, verse_number=2)
+        self.assertEqual(score.get("selected_verse_number"), "2")
+        self.assertEqual(
+            (score.get("score_summary") or {}).get("selected_verse_number"),
+            "2",
+        )
+        self.assertEqual(
+            (score.get("voice_part_signals") or {}).get("requested_verse_number"),
+            "2",
+        )
 
     def test_preprocess_invalid_plan_returns_action_required(self):
         """Invalid preprocessing plan should produce action_required payload."""
