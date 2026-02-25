@@ -24,8 +24,8 @@ from src.api.voicebank import (
     resolve_default_voice_color,
     resolve_voice_color_speaker,
 )
-from src.api.voice_parts import preprocess_voice_parts
 from src.api.voice_parts import build_infeasible_anchor_action_required
+from src.api.voice_parts import synthesize_preflight_action_required
 from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -1488,23 +1488,14 @@ def synthesize(
                 }
             ),
         )
-    if skip_voice_part_preprocess:
-        working_score = score
-        effective_part_index = int(part_index)
-    else:
-        preprocessed = preprocess_voice_parts(
-            score,
-            part_index=part_index,
-            voice_id=voice_id,
-            voice_part_id=voice_part_id,
-            allow_lyric_propagation=allow_lyric_propagation,
-            source_voice_part_id=source_voice_part_id,
-            source_part_index=source_part_index,
-        )
-        if preprocessed.get("status") == "action_required":
-            return preprocessed
-        working_score = preprocessed["score"]
-        effective_part_index = int(preprocessed.get("part_index", part_index))
+    working_score = score
+    effective_part_index = int(part_index)
+    preflight = synthesize_preflight_action_required(
+        working_score,
+        part_index=effective_part_index,
+    )
+    if preflight is not None:
+        return preflight
     # Legacy compatibility mode for callers that expect input-score mutation.
     if working_score is not score and _env_flag_enabled("VOICE_PART_LEGACY_INPLACE_MUTATION"):
         score.clear()

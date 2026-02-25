@@ -79,6 +79,11 @@ def parse_score(
         keep_rests=True,
     )
     
+    selected_verse_number = _resolve_selected_verse_number(
+        requested_verse_number=verse_number,
+        score_summary=score_summary,
+    )
+
     # Convert dataclass to dict for JSON serialization.
     score_dict = dataclasses.asdict(score_data)
     
@@ -89,13 +94,16 @@ def parse_score(
         "jumps": [],
     }
     score_dict["score_summary"] = score_summary
+    score_dict["selected_verse_number"] = selected_verse_number
     score_dict["source_musicxml_path"] = str(Path(file_path).resolve())
     if part_id is not None or part_index is not None:
         score_dict["requested_part_id"] = part_id
         score_dict["requested_part_index"] = part_index
+    if isinstance(score_summary, dict):
+        score_summary["selected_verse_number"] = selected_verse_number
     score_dict["voice_part_signals"] = analyze_score_voice_parts(
         score_dict,
-        verse_number=verse_number,
+        verse_number=selected_verse_number,
     )
     score_dict["voice_part_signals"]["measure_staff_voice_map"] = _build_measure_staff_voice_map(
         Path(file_path)
@@ -107,6 +115,24 @@ def parse_score(
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(score_dict))
     return score_dict
+
+
+def _resolve_selected_verse_number(
+    *, requested_verse_number: Optional[str | int], score_summary: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """Resolve deterministic selected verse number for parse output."""
+    if requested_verse_number is not None:
+        requested = str(requested_verse_number).strip()
+        if requested:
+            return requested
+    if isinstance(score_summary, dict):
+        available_verses = score_summary.get("available_verses")
+        if isinstance(available_verses, list):
+            for candidate in available_verses:
+                text = str(candidate).strip()
+                if text:
+                    return text
+    return None
 
 
 def _read_musicxml_content(path: Path) -> str:

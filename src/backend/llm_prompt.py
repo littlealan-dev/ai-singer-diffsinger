@@ -10,6 +10,9 @@ import json
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
+_SYSTEM_PROMPT_LESSONS_PATH = (
+    Path(__file__).resolve().parent / "config" / "system_prompt_lessons.txt"
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,8 @@ def build_system_prompt(
     score_available: bool,
     voicebank_ids: Optional[List[str]] = None,
     score_summary: Optional[Dict[str, Any]] = None,
+    voice_part_signals: Optional[Dict[str, Any]] = None,
+    preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Build the system prompt with tool specs and context metadata."""
@@ -53,6 +58,14 @@ def build_system_prompt(
     score_summary_text = "none"
     if score_summary:
         score_summary_text = json.dumps(score_summary, indent=2, sort_keys=True)
+    voice_part_signals_text = "none"
+    if voice_part_signals:
+        voice_part_signals_text = json.dumps(voice_part_signals, indent=2, sort_keys=True)
+    preprocess_mapping_context_text = "none"
+    if preprocess_mapping_context:
+        preprocess_mapping_context_text = json.dumps(
+            preprocess_mapping_context, indent=2, sort_keys=True
+        )
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
@@ -62,15 +75,21 @@ def build_system_prompt(
         .replace("{tool_json}", tool_json)
         .replace("{voicebanks}", voicebanks_text)
         .replace("{score_summary}", score_summary_text)
+        .replace("{voice_part_signals}", voice_part_signals_text)
+        .replace("{preprocess_mapping_context}", preprocess_mapping_context_text)
         .replace("{voicebank_details}", voicebank_details_text)
     )
 
 
 def _load_system_prompt() -> str:
-    """Load the system prompt template from disk."""
+    """Load and combine system prompt templates from disk."""
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
-    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    if _SYSTEM_PROMPT_LESSONS_PATH.exists():
+        lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
+        return f"{base_prompt}\n\n---\n\n{lessons_prompt}"
+    return base_prompt
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:

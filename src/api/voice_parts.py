@@ -290,6 +290,22 @@ def preprocess_voice_parts(
             "request must be an object.",
             code="invalid_plan_payload",
         )
+    if request is not None:
+        if "voice_id" in request_payload:
+            return _action_required(
+                "deprecated_voice_id_input",
+                (
+                    "Deprecated request.voice_id is not accepted. "
+                    "Use request.plan.targets[].target.voice_part_id."
+                ),
+                code="deprecated_voice_id_input",
+            )
+        if "plan" not in request_payload and plan is None:
+            return _action_required(
+                "preprocessing_plan_required",
+                "preprocess_voice_parts requires request.plan as an object.",
+                code="preprocessing_plan_required",
+            )
 
     if request_payload:
         if "part_index" in request_payload:
@@ -1124,10 +1140,40 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             start = int(section["start_measure"])
             end = int(section["end_measure"])
             if section.get("mode") == "derive":
+                decision_type = str(section.get("decision_type") or "EXTRACT_FROM_VOICE")
+                method = str(section.get("method") or "trivial")
                 melody_source = section.get("melody_source") or {}
                 lyric_source = section.get("lyric_source") or {}
                 melody_source_part = melody_source.get("part_index")
                 lyric_source_part = lyric_source.get("part_index")
+                if (
+                    decision_type == "SPLIT_CHORDS_SELECT_NOTES"
+                    and method == "trivial"
+                    and isinstance(melody_source_part, int)
+                    and isinstance(melody_source.get("voice_part_id"), str)
+                ):
+                    mismatch = _trivial_method_chord_size_mismatch_details(
+                        score,
+                        source_part_index=melody_source_part,
+                        source_voice_part_id=str(melody_source["voice_part_id"]),
+                        start_measure=start,
+                        end_measure=end,
+                    )
+                    if mismatch["mismatch_count"] > 0:
+                        findings.append(
+                            {
+                                "rule": "trivial_method_requires_equal_chord_voice_part_count",
+                                "severity": "error",
+                                "target_index": target_idx,
+                                "part_index": part_index,
+                                "target_voice_part_id": target_voice_part_id,
+                                "section": {
+                                    "start_measure": start,
+                                    "end_measure": end,
+                                },
+                                "details": mismatch,
+                            }
+                        )
                 if (
                     isinstance(melody_source_part, int)
                     and melody_source_part != part_index
@@ -1365,6 +1411,77 @@ def _lint_sections_contiguous_no_gaps(
             }
         prev_end = end
     return None
+
+
+def _trivial_method_chord_size_mismatch_details(
+    score: Dict[str, Any],
+    *,
+    source_part_index: int,
+    source_voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+) -> Dict[str, Any]:
+    parts = score.get("parts") or []
+    if source_part_index < 0 or source_part_index >= len(parts):
+        return {
+            "reason": "source_part_out_of_range",
+            "source_part_index": source_part_index,
+            "source_voice_part_id": source_voice_part_id,
+            "expected_voice_part_count": 0,
+            "mismatch_count": 0,
+            "mismatch_examples": [],
+        }
+    source_part = parts[source_part_index]
+    source_analysis = _analyze_part_voice_parts(source_part, source_part_index)
+    expected_voice_part_count = len(source_analysis.get("voice_parts") or [])
+    source_notes = _resolve_source_notes_allow_lyricless(
+        score,
+        source_part_index=source_part_index,
+        source_voice_part_id=source_voice_part_id,
+    )
+    if source_notes is None:
+        return {
+            "reason": "source_voice_part_not_found",
+            "source_part_index": source_part_index,
+            "source_voice_part_id": source_voice_part_id,
+            "expected_voice_part_count": expected_voice_part_count,
+            "mismatch_count": 0,
+            "mismatch_examples": [],
+        }
+
+    grouped: Dict[Tuple[int, float], int] = {}
+    for note in source_notes:
+        if note.get("is_rest") or not _note_in_measure_range(note, (start_measure, end_measure)):
+            continue
+        measure = int(note.get("measure_number") or 0)
+        offset = round(float(note.get("offset_beats") or 0.0), 6)
+        key = (measure, offset)
+        grouped[key] = grouped.get(key, 0) + 1
+
+    mismatches: List[Dict[str, Any]] = []
+    for (measure, offset), chord_note_count in sorted(grouped.items()):
+        if chord_note_count <= 1:
+            continue
+        if chord_note_count != expected_voice_part_count:
+            mismatches.append(
+                {
+                    "measure_number": measure,
+                    "offset_beats": offset,
+                    "chord_note_count": chord_note_count,
+                    "expected_voice_part_count": expected_voice_part_count,
+                }
+            )
+
+    mismatch_measures = sorted({int(item["measure_number"]) for item in mismatches})
+    return {
+        "reason": "trivial_method_chord_size_mismatch",
+        "source_part_index": source_part_index,
+        "source_voice_part_id": source_voice_part_id,
+        "expected_voice_part_count": expected_voice_part_count,
+        "mismatch_count": len(mismatches),
+        "mismatch_ranges": _collapse_measure_ranges(mismatch_measures),
+        "mismatch_examples": mismatches[:8],
+    }
 
 
 def _native_sung_measures_for_target(
@@ -1758,6 +1875,8 @@ def _execute_timeline_sections(
                         working_notes=working_notes,
                         source_score=source_score,
                         target_voice=target_voice,
+                        target_voice_rank=int(voice_priority.get(target_voice, 0)),
+                        target_voice_part_count=len(voice_parts),
                         source_part_index=int(melody_source["part_index"]),
                         source_voice_part_id=str(melody_source["voice_part_id"]),
                         start_measure=start_measure,
@@ -2091,6 +2210,8 @@ def _split_chords_select_notes_into_target(
     working_notes: List[Dict[str, Any]],
     source_score: Dict[str, Any],
     target_voice: str,
+    target_voice_rank: int,
+    target_voice_part_count: int,
     source_part_index: int,
     source_voice_part_id: str,
     start_measure: int,
@@ -2127,6 +2248,13 @@ def _split_chords_select_notes_into_target(
     previous_pitch: Optional[float] = None
     if method == "B":
         chosen = _choose_notes_dp(grouped, split_selector=split_selector)
+    elif method == "trivial":
+        chosen = _choose_notes_trivial_ranked(
+            grouped,
+            target_voice_rank=target_voice_rank,
+            target_voice_part_count=target_voice_part_count,
+            split_selector=split_selector,
+        )
     else:
         for key in sorted(grouped):
             candidates = grouped[key]
@@ -2223,6 +2351,41 @@ def _choose_notes_dp(
         out_indices.append(0 if parent is None else parent)
     out_indices.reverse()
     return [dict(candidates_per_slot[t][idx]) for t, idx in enumerate(out_indices)]
+
+
+def _choose_notes_trivial_ranked(
+    grouped: Dict[Tuple[int, float], List[Dict[str, Any]]],
+    *,
+    target_voice_rank: int,
+    target_voice_part_count: int,
+    split_selector: str,
+) -> List[Dict[str, Any]]:
+    """Use direct rank mapping when chord size equals voice-part count; otherwise fallback."""
+    chosen: List[Dict[str, Any]] = []
+    previous_pitch: Optional[float] = None
+    rank = max(0, int(target_voice_rank))
+    voice_count = max(1, int(target_voice_part_count))
+    for key in sorted(grouped):
+        candidates = grouped[key]
+        if len(candidates) == voice_count:
+            ordered = sorted(
+                candidates,
+                key=lambda n: float(n.get("pitch_midi") or 0.0),
+                reverse=True,
+            )
+            idx = min(rank, len(ordered) - 1)
+            selected = dict(ordered[idx])
+        else:
+            selected = _choose_note_rule_based(
+                candidates,
+                split_selector=split_selector,
+                previous_pitch=previous_pitch,
+            )
+            if selected is None:
+                continue
+        chosen.append(selected)
+        previous_pitch = float(selected.get("pitch_midi") or 0.0)
+    return chosen
 
 
 def _enforce_non_overlapping_sequence(
@@ -4237,11 +4400,13 @@ def build_preprocessing_required_action(
     reason: str,
     failed_validation_rules: Optional[List[str]] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
+    message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a user-facing action_required payload for preprocessing requirements."""
     payload = _action_required(
         "preprocessing_required",
-        (
+        message
+        or (
             "This part requires voice-part preprocessing before synthesis. "
             "Run preprocess_voice_parts first, then synthesize the derived target."
         ),
@@ -4254,6 +4419,66 @@ def build_preprocessing_required_action(
     if diagnostics:
         payload["diagnostics"] = dict(diagnostics)
     return payload
+
+
+def _collect_derived_target_candidates(score: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collect derived target refs from persisted transform metadata."""
+    transforms = score.get("voice_part_transforms")
+    if not isinstance(transforms, dict) or not transforms:
+        return []
+    parts = score.get("parts") or []
+    candidates: List[Dict[str, Any]] = []
+    seen: set[Tuple[Any, ...]] = set()
+    for value in transforms.values():
+        if not isinstance(value, dict):
+            continue
+        appended_ref = value.get("appended_part_ref")
+        if not isinstance(appended_ref, dict):
+            continue
+        part_index = appended_ref.get("part_index")
+        if not isinstance(part_index, int):
+            continue
+        part_id = str(appended_ref.get("part_id") or "").strip()
+        part_name = str(appended_ref.get("part_name") or "").strip()
+        if (not part_id or not part_name) and 0 <= part_index < len(parts):
+            part = parts[part_index]
+            if not part_id:
+                part_id = str(part.get("part_id") or "").strip()
+            if not part_name:
+                part_name = str(part.get("part_name") or "").strip()
+        target_voice_part_id = str(value.get("target_voice_part_id") or "").strip()
+        source_part_index = value.get("source_part_index")
+        source_voice_part_id = str(value.get("source_voice_part_id") or "").strip()
+        key = (
+            part_index,
+            part_id,
+            part_name,
+            target_voice_part_id,
+            source_part_index if isinstance(source_part_index, int) else None,
+            source_voice_part_id,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate: Dict[str, Any] = {
+            "part_index": part_index,
+            "part_id": part_id or None,
+            "part_name": part_name or None,
+            "target_voice_part_id": target_voice_part_id or None,
+        }
+        if isinstance(source_part_index, int):
+            candidate["source_part_index"] = source_part_index
+        if source_voice_part_id:
+            candidate["source_voice_part_id"] = source_voice_part_id
+        candidates.append(candidate)
+    candidates.sort(
+        key=lambda c: (
+            int(c.get("part_index", -1)),
+            str(c.get("target_voice_part_id") or ""),
+            str(c.get("part_id") or ""),
+        )
+    )
+    return candidates
 
 
 def synthesize_preflight_action_required(
@@ -4300,6 +4525,14 @@ def synthesize_preflight_action_required(
     derived_by_transform = False
     diagnostics["voice_part_transforms_present"] = isinstance(transforms, dict)
     diagnostics["voice_part_transforms_count"] = len(transforms) if isinstance(transforms, dict) else 0
+    derived_target_candidates = _collect_derived_target_candidates(score)
+    diagnostics["derived_target_candidates"] = derived_target_candidates
+    suggested_for_input_part = [
+        candidate
+        for candidate in derived_target_candidates
+        if candidate.get("source_part_index") == int(part_index)
+    ]
+    diagnostics["suggested_derived_targets_for_input_part"] = suggested_for_input_part
     if isinstance(transforms, dict):
         for value in transforms.values():
             if not isinstance(value, dict):
@@ -4359,6 +4592,11 @@ def synthesize_preflight_action_required(
     diagnostics["has_multi_voice_part_signal"] = bool(has_multi_voice)
     diagnostics["has_missing_lyric_voice_parts_signal"] = bool(has_missing_lyric_voice_parts)
     preprocess_required = has_multi_voice or has_missing_lyric_voice_parts
+    preprocessed_score_detected = bool(
+        (isinstance(transforms, dict) and len(transforms) > 0)
+        or len(parts) > int(original_part_count)
+    )
+    diagnostics["preprocessed_score_detected"] = preprocessed_score_detected
     diagnostics["preprocess_required"] = bool(preprocess_required)
     if not preprocess_required:
         return None
@@ -4372,6 +4610,8 @@ def synthesize_preflight_action_required(
         failed_rules.append("derived_detection.index_delta_not_met")
     if not derived_by_transform:
         failed_rules.append("derived_detection.transform_metadata_not_found")
+    if preprocessed_score_detected and suggested_for_input_part:
+        failed_rules.append("derived_detection.derived_target_not_selected_after_preprocess")
 
     if has_multi_voice and has_missing_lyric_voice_parts:
         reason = "complex_score_multi_voice_and_missing_lyrics_without_derived_target"
@@ -4379,12 +4619,24 @@ def synthesize_preflight_action_required(
         reason = "complex_score_multi_voice_without_derived_target"
     else:
         reason = "complex_score_missing_lyrics_without_derived_target"
+    message = (
+        "This part requires voice-part preprocessing before synthesis. "
+        "Run preprocess_voice_parts first, then synthesize the derived target."
+    )
+    if preprocessed_score_detected and suggested_for_input_part:
+        reason = "preprocessed_score_without_derived_target_selection"
+        message = (
+            "Preprocessing already exists for this score, but synthesize targeted an original "
+            "complex part. Retry synthesize using a derived part selection. "
+            "Only rerun preprocess_voice_parts if the user asked for plan revisions."
+        )
 
     return build_preprocessing_required_action(
         part_index=part_index,
         reason=reason,
         failed_validation_rules=failed_rules,
         diagnostics=diagnostics,
+        message=message,
     )
 
 

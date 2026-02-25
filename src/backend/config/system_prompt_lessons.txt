@@ -7,9 +7,11 @@ Purpose
 Scope
 - This file provides planning guardrails only.
 - It does not replace MCP tool schemas or runtime validation.
+- Assume parser facts are already available in session context (`score_summary` and `voice_part_signals`).
 
 Hard Rules
 1. Voice identity must be explicit as `(part_index, voice_part_id)`.
+1a. Follow the preprocess tool schema exactly (sections-based plan contract).
 2. Use parser facts only. Do not invent score structure:
    - `voice_part_measure_spans`
    - `voice_part_id_to_source_voice_id`
@@ -35,6 +37,7 @@ Hard Rules
 15. Use `mode=rest` only when target should truly be silent or user requested silence.
 16. If facts are insufficient, request clarification instead of guessing.
 17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
+17a. Treat sibling completeness as mandatory for preflight: if one non-`_default` sibling is targeted in a part, include all non-`_default` siblings in that part.
 18. Keep melody/lyric sourcing local when local material exists; use cross-part sourcing only when local sources are unsuitable.
 19. Reject extension-only lyric sources when same-part word-bearing alternatives exist in the range.
 20. Optimize for word-lyric coverage, not just non-empty lyric coverage.
@@ -45,7 +48,14 @@ Hard Rules
    - If a derive section has `lyric_source` but no `melody_source`, confirm the target lane already has sung notes in that measure range.
    - If target lane has zero sung notes in the section, you must include `melody_source` (or select a different target/range).
    - Do not emit lyric-only sections where lyrics have no target notes to attach to.
-
+23. `SPLIT_CHORDS_SELECT_NOTES` method behavior:
+   - If `method` is omitted, runtime uses `trivial`.
+   - If `trivial` fails preflight, runtime will not auto-switch methods.
+   - In repair, set `method` explicitly to `A` or `B` for the failing section.
+24. Repair-loop recommendation (soft guidance):
+   - Preserve section settings that already satisfy previous lint checks.
+   - When new lint findings appear, change only the fields that directly address those failed rules.
+   - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.
 Plan Self-Check (Before Final Output)
 - Targets use `part_index` + `voice_part_id`.
 - Section ranges are explicit and complete.
