@@ -69,6 +69,8 @@ Module placement:
 Rules:
 1. All references must include both `part_index` and `voice_part_id`.
 2. `voice_id` can be accepted as compatibility input but normalized internally to `voice_part_id`.
+3. Refinement reference for explicit preprocess-first workflow:
+   - `docs/tasks/SIG-6-preprocess-workflow-refinement.md`
 
 ### 5.2 Section Range
 ```json
@@ -221,8 +223,11 @@ Add score write-back API:
 ### 6.4 Synthesize integration
 Synthesize flow:
 1. Resolve requested target ref or appended derived part ref.
+   - Validation uses Index Delta: compare requested `part_index` vs original part count from `score_summary.parts`.
+   - If `requested_part_index >= len(score_summary.parts)`, treat as derived candidate.
+   - Also verify derived metadata via `voice_part_transforms` key presence for the target.
 2. If transformed score artifact exists, reuse.
-3. Else execute preprocess + materialize append.
+3. Else return `action_required` with `preprocessing_required` code.
 4. Continue existing phonemize/inference pipeline unchanged by targeting appended part.
 5. Avoid mutating caller-owned input score in-place; return updated score snapshot separately.
 
@@ -386,6 +391,7 @@ Action codes:
 5. `validation_failed_needs_review`
 6. `musicxml_append_failed`
 7. `deprecated_voice_id_input`
+8. `preprocessing_required`
 
 ## 13. Security and Guardrails
 1. AI plan is data-only JSON, never executable code.
