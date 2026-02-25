@@ -36,20 +36,28 @@ def _result_response(request_id: Optional[Any], result: Any) -> Dict[str, Any]:
 _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
     "cpu": {
         "parse_score",
-        "modify_score",
+        "reparse",
+        "preprocess_voice_parts",
         "list_voicebanks",
         "get_voicebank_info",
         "estimate_credits",
     },
     "gpu": {"synthesize", "save_audio"},
-    "all": set(),
+    "all": {
+        "parse_score",
+        "reparse",
+        "preprocess_voice_parts",
+        "list_voicebanks",
+        "get_voicebank_info",
+        "estimate_credits",
+        "synthesize",
+        "save_audio",
+    },
 }
 
 
 def _get_allowlist(mode: str) -> Optional[Set[str]]:
     """Return the tool allowlist for a given mode, or None for unrestricted."""
-    if mode == "all":
-        return None
     return _MODE_TOOL_ALLOWLIST.get(mode, set())
 
 

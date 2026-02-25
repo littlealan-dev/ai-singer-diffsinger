@@ -44,6 +44,8 @@ class TestMcpServer(unittest.TestCase):
         self.assertIn("result", response)
         tools = response["result"]["tools"]
         self.assertTrue(any(tool["name"] == "parse_score" for tool in tools))
+        self.assertTrue(any(tool["name"] == "reparse" for tool in tools))
+        self.assertFalse(any(tool["name"] == "modify_score" for tool in tools))
 
     def test_parse_score(self):
         with mock.patch("src.mcp.handlers.parse_score") as mock_parse:
@@ -56,14 +58,53 @@ class TestMcpServer(unittest.TestCase):
             args, kwargs = mock_parse.call_args
             self.assertTrue(isinstance(args[0], Path))
 
-    def test_modify_score(self):
-        with mock.patch("src.mcp.handlers.modify_score") as mock_modify:
-            mock_modify.return_value = {"modified": True}
+    def test_reparse(self):
+        with mock.patch("src.mcp.handlers.parse_score") as mock_parse:
+            mock_parse.return_value = {"title": "ok"}
             result = self._call_tool(
-                "modify_score",
-                {"score": {"parts": []}, "code": "score['parts']"},
+                "reparse",
+                {"file_path": self.score_path, "part_index": 0, "verse_number": 2},
             )
-            self.assertEqual(result, {"modified": True})
+            self.assertEqual(result, {"title": "ok"})
+            args, kwargs = mock_parse.call_args
+            self.assertTrue(isinstance(args[0], Path))
+
+    def test_preprocess_voice_parts(self):
+        with mock.patch("src.mcp.handlers.preprocess_voice_parts") as mock_preprocess:
+            mock_preprocess.return_value = {"status": "ready", "score": {"parts": []}, "part_index": 0}
+            result = self._call_tool(
+                "preprocess_voice_parts",
+                {"score": {"parts": []}, "request": {"plan": {"targets": []}}},
+            )
+            self.assertEqual(result.get("status"), "ready")
+
+    def test_preprocess_voice_parts_requires_plan(self):
+        result = self._call_tool(
+            "preprocess_voice_parts",
+            {"score": {"parts": []}, "request": {}},
+        )
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("code"), "preprocessing_plan_required")
+
+    def test_preprocess_voice_parts_rejects_legacy_voice_id(self):
+        result = self._call_tool(
+            "preprocess_voice_parts",
+            {"score": {"parts": []}, "request": {"plan": {"targets": []}, "voice_id": "soprano"}},
+        )
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("code"), "deprecated_voice_id_input")
+
+    def test_modify_score_not_available_publicly(self):
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "modify_score", "arguments": {"score": {}, "code": "pass"}},
+        }
+        response = _handle_request(request, self.device, "all")
+        self.assertIn("result", response)
+        self.assertIn("error", response["result"])
+        self.assertIn("Tool not available in mode", response["result"]["error"]["message"])
 
     def test_save_audio(self):
         output_rel = "tests/output/mcp_audio.wav"

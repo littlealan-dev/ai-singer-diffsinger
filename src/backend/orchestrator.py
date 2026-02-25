@@ -19,12 +19,17 @@ from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
-from src.api.voice_parts import preprocess_voice_parts
+from src.api.voice_parts import (
+    build_preprocessing_required_action,
+    synthesize_preflight_action_required,
+)
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
+MAX_INTERNAL_TOOL_REPAIRS = 3
+REVIEW_PENDING_KEY = "_preprocess_review_pending"
 
 
 class Orchestrator:
@@ -46,9 +51,11 @@ class Orchestrator:
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
-        self._llm_tool_allowlist = {"modify_score", "synthesize"}
+        self._llm_tool_allowlist = {"reparse", "preprocess_voice_parts", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
+        self._chat_locks_guard = asyncio.Lock()
+        self._chat_locks: Dict[str, asyncio.Lock] = {}
 
     async def handle_chat(
         self,
@@ -59,95 +66,179 @@ class Orchestrator:
         user_email: str,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
-        if len(message) > self._settings.llm_max_message_chars:
+        chat_lock = await self._get_chat_lock(session_id)
+        if chat_lock.locked():
             return {
                 "type": "chat_text",
                 "message": (
-                    "Message too long. Please keep instructions under "
-                    f"{self._settings.llm_max_message_chars} characters."
+                    "I am still processing your previous request. "
+                    "Please wait for it to complete before sending another message."
                 ),
             }
-        if message.strip().startswith(TOOL_RESULT_PREFIX):
-            return {
-                "type": "chat_text",
-                "message": "That request is not allowed.",
-            }
-        self._logger.debug("chat_user session=%s message=%s", session_id, message)
-        await self._sessions.append_history(session_id, "user", message)
-        snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        current_score = snapshot.get("current_score")
-        response_message = "Acknowledged."
-        include_score = self._should_include_score(message)
+        async with chat_lock:
+            if len(message) > self._settings.llm_max_message_chars:
+                return {
+                    "type": "chat_text",
+                    "message": (
+                        "Message too long. Please keep instructions under "
+                        f"{self._settings.llm_max_message_chars} characters."
+                    ),
+                }
+            if message.strip().startswith(TOOL_RESULT_PREFIX):
+                return {
+                    "type": "chat_text",
+                    "message": "That request is not allowed.",
+                }
+            self._logger.debug("chat_user session=%s message=%s", session_id, message)
+            await self._sessions.append_history(session_id, "user", message)
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_score = snapshot.get("current_score")
+            response_message = "Acknowledged."
+            include_score = self._should_include_score(message)
 
-        if current_score is None:
-            # Require a score before any synthesis steps.
-            response_message = "Please upload a MusicXML file first."
-            await self._sessions.append_history(session_id, "assistant", response_message)
-            return {"type": "chat_text", "message": response_message}
+            if current_score is None:
+                # Require a score before any synthesis steps.
+                response_message = "Please upload a MusicXML file first."
+                await self._sessions.append_history(session_id, "assistant", response_message)
+                return {"type": "chat_text", "message": response_message}
 
-        llm_response, llm_error = await self._decide_with_llm(snapshot, score_available=True)
-        if llm_error:
-            response_message = llm_error
-            await self._sessions.append_history(session_id, "assistant", response_message)
-            return {"type": "chat_error", "message": response_message}
-        if llm_response is not None:
-            self._logger.debug(
-                "chat_llm session=%s response=%s",
-                session_id,
-                {
-                    "tool_calls": [
+            llm_response, llm_error = await self._decide_with_llm(snapshot, score_available=True)
+            if llm_error:
+                response_message = llm_error
+                await self._sessions.append_history(session_id, "assistant", response_message)
+                return {"type": "chat_error", "message": response_message}
+            if llm_response is not None:
+                self._logger.debug(
+                    "chat_llm session=%s response=%s",
+                    session_id,
+                    {
+                        "tool_calls": [
+                            {
+                                "name": call.name,
+                                "arguments": summarize_payload(call.arguments),
+                            }
+                            for call in llm_response.tool_calls
+                        ],
+                        "final_message": llm_response.final_message,
+                        "include_score": llm_response.include_score,
+                    },
+                )
+            if llm_response is not None:
+                # Execute tool calls and allow bounded internal repair loops.
+                include_score = llm_response.include_score
+                response_message = llm_response.final_message or response_message
+                pending_calls = list(llm_response.tool_calls)
+                working_score = current_score["score"]
+                score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
+                followup_prompt: Optional[str] = None
+                repairs_used = 0
+                response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
+
+                while True:
+                    tool_result = await self._execute_tool_calls(
+                        session_id,
+                        working_score,
+                        pending_calls,
+                        user_id=user_id,
+                        score_summary=score_summary,
+                        user_email=user_email,
+                    )
+                    working_score = tool_result.score
+                    followup_prompt = tool_result.followup_prompt
+                    response = tool_result.audio_response or {
+                        "type": "chat_text",
+                        "message": response_message,
+                    }
+                    if followup_prompt is None:
+                        if response.get("review_required"):
+                            response["message"] = response.get("message") or (
+                                "Preprocessing completed. Please review the derived score and "
+                                "reply 'proceed' to start audio generation, or describe revisions."
+                            )
+                        elif response_message:
+                            response["message"] = response_message
+                        break
+
+                    if self._tool_payload_has_error(followup_prompt):
+                        response["suppress_selector"] = True
+
+                    followup_response, followup_error = await self._decide_followup_with_llm(
+                        snapshot, followup_prompt, working_score
+                    )
+                    if followup_error:
+                        await self._sessions.append_history(session_id, "assistant", followup_error)
+                        return {"type": "chat_error", "message": followup_error}
+
+                    if followup_response is None:
+                        response["message"] = followup_prompt
+                        break
+
+                    self._logger.debug(
+                        "chat_llm_followup session=%s response=%s",
+                        session_id,
                         {
-                            "name": call.name,
-                            "arguments": summarize_payload(call.arguments),
-                        }
-                        for call in llm_response.tool_calls
-                    ],
-                    "final_message": llm_response.final_message,
-                    "include_score": llm_response.include_score,
-                },
-            )
-        if llm_response is not None:
-            # Execute tool calls and package response.
-            include_score = llm_response.include_score
-            tool_result = await self._execute_tool_calls(
-                session_id,
-                current_score["score"],
-                llm_response.tool_calls,
-                user_id=user_id,
-                score_summary=snapshot.get("score_summary") if isinstance(snapshot, dict) else None,
-                user_email=user_email,
-            )
-            response_message = llm_response.final_message or response_message
-            response = tool_result.audio_response or {"type": "chat_text", "message": response_message}
-            if tool_result.followup_prompt:
-                followup_message = await self._render_tool_followup(snapshot, tool_result.followup_prompt)
-                if self._is_llm_error_message(followup_message):
-                    await self._sessions.append_history(session_id, "assistant", followup_message)
-                    return {"type": "chat_error", "message": followup_message}
-                if self._tool_payload_has_error(tool_result.followup_prompt):
-                    response["suppress_selector"] = True
-                response["message"] = followup_message
-            elif response_message:
-                response["message"] = response_message
+                            "tool_calls": [
+                                {
+                                    "name": call.name,
+                                    "arguments": summarize_payload(call.arguments),
+                                }
+                                for call in followup_response.tool_calls
+                            ],
+                            "final_message": followup_response.final_message,
+                            "include_score": followup_response.include_score,
+                        },
+                    )
+                    include_score = include_score or followup_response.include_score
+                    response_message = (
+                        followup_response.final_message or response_message
+                    )
+
+                    if not followup_response.tool_calls:
+                        response["message"] = self._format_followup_message_text(
+                            response_message
+                        )
+                        break
+
+                    if repairs_used >= MAX_INTERNAL_TOOL_REPAIRS:
+                        response["message"] = (
+                            f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
+                            "Please revise the request or plan details."
+                        )
+                        break
+
+                    repairs_used += 1
+                    pending_calls = list(followup_response.tool_calls)
+
+                if include_score or response.get("review_required"):
+                    updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                    updated_score = updated_snapshot.get("current_score")
+                    if updated_score is not None:
+                        response["current_score"] = updated_score
+                await self._sessions.append_history(
+                    session_id, "assistant", str(response.get("message", ""))
+                )
+                return response
+
             if include_score:
-                updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
-                updated_score = updated_snapshot.get("current_score")
-                if updated_score is not None:
-                    response["current_score"] = updated_score
-            await self._sessions.append_history(session_id, "assistant", response["message"])
+                response = {
+                    "type": "chat_text",
+                    "message": response_message,
+                    "current_score": current_score,
+                }
+            else:
+                response = {"type": "chat_text", "message": response_message}
+
+            await self._sessions.append_history(session_id, "assistant", response_message)
             return response
 
-        if include_score:
-            response = {
-                "type": "chat_text",
-                "message": response_message,
-                "current_score": current_score,
-            }
-        else:
-            response = {"type": "chat_text", "message": response_message}
-
-        await self._sessions.append_history(session_id, "assistant", response_message)
-        return response
+    async def _get_chat_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session chat lock, creating it lazily."""
+        async with self._chat_locks_guard:
+            lock = self._chat_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._chat_locks[session_id] = lock
+            return lock
 
     async def _synthesize(
         self,
@@ -161,24 +252,8 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         """Run the synthesize + save_audio flow for a session."""
         synth_args = dict(arguments)
-        part_id = synth_args.get("part_id")
-        part_index = synth_args.get("part_index")
-        verse_number = synth_args.get("verse_number")
-        if self._selection_requested(part_id, part_index, verse_number):
-            if not self._selection_matches_current(score, part_id, part_index, verse_number):
-                # Re-parse the score to honor updated selection parameters.
-                updated_score = await self._reparse_score(
-                    session_id,
-                    part_id=part_id,
-                    part_index=part_index,
-                    verse_number=verse_number,
-                    user_id=user_id,
-                )
-                if updated_score is not None:
-                    score = updated_score
-                    synth_args.pop("part_id", None)
-                    synth_args.pop("part_index", None)
-                    synth_args.pop("verse_number", None)
+        # Verse selection is resolved at parse/reparse stage.
+        synth_args.pop("verse_number", None)
         synth_args["score"] = score
         if "voicebank" not in synth_args:
             synth_args["voicebank"] = await self._resolve_voicebank()
@@ -192,6 +267,28 @@ class Orchestrator:
         synth_result = await asyncio.to_thread(
             self._router.call_tool, "synthesize", synth_args
         )
+        if not isinstance(synth_result, dict):
+            raise RuntimeError(
+                f"Synthesize returned non-object result: {type(synth_result).__name__}"
+            )
+        if "waveform" not in synth_result or "sample_rate" not in synth_result:
+            self._logger.warning(
+                "synthesize_non_audio_result session=%s result=%s",
+                session_id,
+                summarize_payload(synth_result),
+            )
+            status = str(synth_result.get("status") or "").strip()
+            reason = str(synth_result.get("reason") or "").strip()
+            message = str(synth_result.get("message") or "").strip()
+            hint = f" status={status}" if status else ""
+            if reason:
+                hint += f" reason={reason}"
+            if message:
+                hint += f" message={message}"
+            raise RuntimeError(
+                "Synthesize did not return audio waveform."
+                + (hint if hint else f" result={summarize_payload(synth_result)}")
+            )
         waveform = synth_result["waveform"]
         sample_rate = synth_result["sample_rate"]
         audio_format = (self._settings.audio_format or "wav").lower()
@@ -423,8 +520,11 @@ class Orchestrator:
         verse_number: Optional[object],
     ) -> bool:
         """Return True if the current score already matches the selection."""
-        if verse_number is not None:
-            return False
+        requested_verse = self._normalize_verse_number(verse_number)
+        if requested_verse is not None:
+            selected_verse = self._score_selected_verse_number(score)
+            if selected_verse != requested_verse:
+                return False
         parts = score.get("parts") or []
         if part_id is not None:
             if not parts:
@@ -436,6 +536,71 @@ class Orchestrator:
             return 0 <= part_index < len(parts)
         return True
 
+    def _normalize_verse_number(self, raw_value: Optional[object]) -> Optional[str]:
+        """Normalize optional verse selection to a non-empty string."""
+        if raw_value is None:
+            return None
+        text = str(raw_value).strip()
+        return text or None
+
+    def _score_selected_verse_number(self, score: Dict[str, Any]) -> Optional[str]:
+        """Return selected verse stored on score payload, if present."""
+        selected = score.get("selected_verse_number")
+        return self._normalize_verse_number(selected)
+
+    def _score_has_preprocessed_context(self, score: Dict[str, Any]) -> bool:
+        """Return True when score already contains preprocess-derived context."""
+        if self._score_has_review_pending(score):
+            return True
+        transforms = score.get("voice_part_transforms")
+        if isinstance(transforms, dict) and bool(transforms):
+            return True
+        parts = score.get("parts")
+        summary = score.get("score_summary")
+        summary_parts = summary.get("parts") if isinstance(summary, dict) else None
+        if isinstance(parts, list) and isinstance(summary_parts, list):
+            return len(parts) > len(summary_parts)
+        return False
+
+    def _build_verse_change_requires_repreprocess_action(
+        self,
+        *,
+        score: Dict[str, Any],
+        requested_verse_number: str,
+        selected_verse_number: Optional[str],
+        part_index: int,
+        reparse_applied: bool,
+        reparsed_selected_verse_number: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build action_required payload when verse changed after preprocess."""
+        diagnostics = {
+            "requested_verse_number": requested_verse_number,
+            "selected_verse_number": selected_verse_number,
+            "preprocessed_score_detected": self._score_has_preprocessed_context(score),
+            "review_pending": self._score_has_review_pending(score),
+            "reparse_applied": bool(reparse_applied),
+            "reparsed_selected_verse_number": reparsed_selected_verse_number,
+            "preprocessed_for_score_fingerprint": (
+                score.get(REVIEW_PENDING_KEY, {}).get("preprocessed_for_score_fingerprint")
+                if isinstance(score.get(REVIEW_PENDING_KEY), dict)
+                else None
+            ),
+        }
+        return build_preprocessing_required_action(
+            part_index=part_index,
+            reason="verse_change_requires_repreprocess",
+            failed_validation_rules=[
+                "verse_lock.requested_verse_differs_from_selected_verse",
+                "workflow_restart.reparse_and_repreprocess_required",
+            ],
+            diagnostics=diagnostics,
+            message=(
+                "The requested verse differs from the currently loaded score verse. "
+                "Call reparse with the requested verse first. If the target requires derived "
+                "voice-part preprocessing, run preprocess_voice_parts before synthesis."
+            ),
+        )
+
     async def _reparse_score(
         self,
         session_id: str,
@@ -443,6 +608,7 @@ class Orchestrator:
         part_id: Optional[str],
         part_index: Optional[int],
         verse_number: Optional[object],
+        expand_repeats: bool = False,
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         """Re-parse the current MusicXML file with new selection filters."""
@@ -451,7 +617,7 @@ class Orchestrator:
         file_path = files.get("musicxml_path")
         if not isinstance(file_path, str) or not file_path:
             return None
-        parse_args: Dict[str, Any] = {"file_path": file_path, "expand_repeats": False}
+        parse_args: Dict[str, Any] = {"file_path": file_path, "expand_repeats": bool(expand_repeats)}
         if part_id is not None:
             parse_args["part_id"] = part_id
         elif part_index is not None:
@@ -461,8 +627,12 @@ class Orchestrator:
         result = await asyncio.to_thread(self._router.call_tool, "parse_score", parse_args)
         if not isinstance(result, dict):
             return None
+        score_summary = result.get("score_summary") if isinstance(result, dict) else None
         score = dict(result)
         score.pop("score_summary", None)
+        await self._sessions.set_score_summary(
+            session_id, score_summary if isinstance(score_summary, dict) else None
+        )
         await self._sessions.set_score(session_id, score)
         return score
 
@@ -532,11 +702,24 @@ class Orchestrator:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            current_score = snapshot.get("current_score")
+            voice_part_signals = None
+            preprocess_mapping_context = None
+            if isinstance(current_score, dict):
+                score_payload = current_score.get("score")
+                if isinstance(score_payload, dict):
+                    voice_part_signals = score_payload.get("voice_part_signals")
+                    preprocess_mapping_context = self._build_preprocess_mapping_context(
+                        score_payload,
+                        score_summary=snapshot.get("score_summary"),
+                    )
             system_prompt = build_system_prompt(
                 llm_tools,
                 score_available,
                 voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
+                voice_part_signals=voice_part_signals,
+                preprocess_mapping_context=preprocess_mapping_context,
                 voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(
@@ -545,6 +728,9 @@ class Orchestrator:
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
             return None, self._format_llm_error(exc)
+        except Exception as exc:
+            self._logger.exception("llm_call_unexpected error=%s", exc)
+            return None, LLM_ERROR_FALLBACK
         response = parse_llm_response(text)
         if response is None:
             return None, "LLM returned an invalid response. Please try again."
@@ -554,8 +740,22 @@ class Orchestrator:
         self, snapshot: Dict[str, Any], tool_summary: str
     ) -> str:
         """Ask the LLM to turn a tool summary into a user-facing response."""
-        if self._llm_client is None:
+        response, error = await self._decide_followup_with_llm(snapshot, tool_summary)
+        if error:
+            return error
+        if response is None or not response.final_message:
             return tool_summary
+        return self._format_followup_message_text(response.final_message)
+
+    async def _decide_followup_with_llm(
+        self,
+        snapshot: Dict[str, Any],
+        tool_summary: str,
+        current_score: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[LlmResponse], Optional[str]]:
+        """Ask the LLM to interpret tool output and optionally produce further tool calls."""
+        if self._llm_client is None:
+            return None, tool_summary
         history = list(snapshot.get("history", []))
         history.append(
             {
@@ -567,26 +767,48 @@ class Orchestrator:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            voice_part_signals = (
+                current_score.get("voice_part_signals")
+                if isinstance(current_score, dict)
+                else None
+            )
+            preprocess_mapping_context = (
+                self._build_preprocess_mapping_context(
+                    current_score,
+                    score_summary=snapshot.get("score_summary"),
+                )
+                if isinstance(current_score, dict)
+                else None
+            )
             system_prompt = build_system_prompt(
                 llm_tools,
                 score_available=True,
                 voicebank_ids=voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
+                voice_part_signals=voice_part_signals,
+                preprocess_mapping_context=preprocess_mapping_context,
                 voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
         except RuntimeError as exc:
             self._logger.warning("llm_followup_failed error=%s", exc)
-            return self._format_llm_error(exc)
+            return None, self._format_llm_error(exc)
+        except Exception as exc:
+            self._logger.exception("llm_followup_unexpected error=%s", exc)
+            return None, LLM_ERROR_FALLBACK
         response = parse_llm_response(text)
-        if response is None or not response.final_message:
-            return tool_summary
-        cleaned = response.final_message.strip()
+        if response is None:
+            return None, tool_summary
+        return response, None
+
+    def _format_followup_message_text(self, message: str) -> str:
+        """Format followup text payloads into a user-facing string."""
+        cleaned = message.strip()
         if cleaned.startswith("{") and cleaned.endswith("}"):
             try:
                 payload = json.loads(cleaned)
             except json.JSONDecodeError:
-                return response.final_message
+                return message
             estimated_credits = payload.get("estimated_credits")
             estimated_seconds = payload.get("estimated_seconds")
             current_balance = payload.get("current_balance")
@@ -599,7 +821,7 @@ class Orchestrator:
                     f"Balance after generation: {balance_after} credits\n\n"
                     "Would you like me to proceed?"
                 )
-        return response.final_message
+        return message
 
     async def _get_voicebank_ids(self) -> List[str]:
         """Return cached voicebank IDs or fetch them from the MCP server."""
@@ -698,6 +920,7 @@ class Orchestrator:
         """Execute allowed tool calls and update session state."""
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
+        preprocess_completed_this_batch = False
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
@@ -708,22 +931,99 @@ class Orchestrator:
             if call.name not in self._llm_tool_allowlist:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
-            if call.name == "modify_score":
-                # Apply score edits and persist updated score.
-                code = call.arguments.get("code")
-                if not isinstance(code, str) or not code.strip():
-                    self._logger.warning("modify_score_missing_code")
-                    continue
-                arguments = {"score": current_score, "code": code}
-                self._logger.info("mcp_call tool=modify_score session=%s", session_id)
-                result = await asyncio.to_thread(
-                    self._router.call_tool, "modify_score", arguments
+            if call.name == "reparse":
+                reparsed_score = await self._reparse_score(
+                    session_id,
+                    part_id=call.arguments.get("part_id"),
+                    part_index=call.arguments.get("part_index"),
+                    verse_number=call.arguments.get("verse_number"),
+                    expand_repeats=bool(call.arguments.get("expand_repeats", False)),
+                    user_id=user_id,
                 )
-                if isinstance(result, dict):
-                    current_score = result
+                if isinstance(reparsed_score, dict):
+                    current_score = reparsed_score
+                    self._logger.info(
+                        "reparse_ready session=%s selected_verse=%s",
+                        session_id,
+                        self._score_selected_verse_number(current_score),
+                    )
+                else:
+                    followup_prompt = json.dumps(
+                        {
+                            "error": {
+                                "type": "reparse_failed",
+                                "message": (
+                                    "Unable to reparse the current score context. "
+                                    "Please retry reparse with a valid part/verse selection."
+                                ),
+                            }
+                        },
+                        sort_keys=True,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=followup_prompt,
+                    )
+                continue
+            if call.name == "preprocess_voice_parts":
+                preprocess_args = dict(call.arguments)
+                preprocess_args["score"] = current_score
+                self._logger.info("mcp_call tool=preprocess_voice_parts session=%s", session_id)
+                result = await asyncio.to_thread(
+                    self._router.call_tool, "preprocess_voice_parts", preprocess_args
+                )
+                if not isinstance(result, dict):
+                    continue
+                self._logger.debug(
+                    "preprocess_result session=%s result=%s",
+                    session_id,
+                    summarize_payload(result),
+                )
+                if result.get("status") in {"ready", "ready_with_warnings"} and isinstance(
+                    result.get("score"), dict
+                ):
+                    current_score = self._mark_review_pending(result["score"], result)
                     await self._sessions.set_score(session_id, current_score)
+                    mapping_context = self._build_preprocess_mapping_context(
+                        current_score,
+                        score_summary=score_summary,
+                    )
+                    self._logger.info(
+                        "preprocess_ready session=%s status=%s derived_targets=%s",
+                        session_id,
+                        result.get("status"),
+                        self._summarize_derived_targets(mapping_context),
+                    )
+                    audio_response = self._build_review_required_response(result)
+                    preprocess_completed_this_batch = True
+                    continue
+                if result.get("status") == "action_required":
+                    self._logger.info(
+                        "preprocess_action_required session=%s reason=%s failed_rules=%s diagnostics=%s",
+                        session_id,
+                        result.get("reason"),
+                        result.get("failed_validation_rules"),
+                        summarize_payload(result.get("diagnostics")),
+                    )
+                    followup_prompt = json.dumps(result, sort_keys=True)
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=followup_prompt,
+                    )
                 continue
             if call.name == "synthesize":
+                if self._score_has_review_pending(current_score):
+                    if preprocess_completed_this_batch:
+                        # Review gate: do not allow synth in same tool batch where preprocess just succeeded.
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response=self._build_review_required_response(None),
+                        )
+                    # Review progression is LLM-driven; synth tool call implies user-approved proceed.
+                    current_score = self._clear_review_pending(current_score)
+                    await self._sessions.set_score(session_id, current_score)
                 # Check for overdraft before even starting
                 from src.backend.credits import get_or_create_credits, reserve_credits
                 user_credits = get_or_create_credits(user_id, user_email)
@@ -747,39 +1047,74 @@ class Orchestrator:
                 # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
                 synth_args.pop("score", None)
+                requested_verse_number = self._normalize_verse_number(
+                    synth_args.get("verse_number")
+                )
+                synth_args.pop("verse_number", None)
+                selected_verse_number = self._score_selected_verse_number(current_score)
+                if (
+                    requested_verse_number is not None
+                    and requested_verse_number != selected_verse_number
+                ):
+                    action_required = self._build_verse_change_requires_repreprocess_action(
+                        score=current_score,
+                        requested_verse_number=requested_verse_number,
+                        selected_verse_number=selected_verse_number,
+                        part_index=self._resolve_synthesize_part_index(
+                            current_score,
+                            part_id=synth_args.get("part_id"),
+                            part_index=synth_args.get("part_index"),
+                        ),
+                        reparse_applied=False,
+                        reparsed_selected_verse_number=selected_verse_number,
+                    )
+                    self._logger.info(
+                        "synthesize_action_required_verse_change session=%s reason=%s diagnostics=%s",
+                        session_id,
+                        action_required.get("reason"),
+                        summarize_payload(action_required.get("diagnostics")),
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                    )
+                mapping_context = self._build_preprocess_mapping_context(
+                    current_score,
+                    score_summary=score_summary,
+                )
+                self._logger.info(
+                    "synthesize_request session=%s args=%s derived_targets=%s",
+                    session_id,
+                    summarize_payload(synth_args),
+                    self._summarize_derived_targets(mapping_context),
+                )
 
-                # Precheck voice-part requirements before reserving credits/spawning a job.
+                # Stateless precheck: block complex raw parts before reserving credits.
                 precheck_part_index = self._resolve_synthesize_part_index(
                     current_score,
                     part_id=synth_args.get("part_id"),
                     part_index=synth_args.get("part_index"),
                 )
-                part_notes = []
-                parts = current_score.get("parts") or []
-                if 0 <= precheck_part_index < len(parts):
-                    part_notes = parts[precheck_part_index].get("notes") or []
-                if part_notes:
-                    precheck = preprocess_voice_parts(
-                        current_score,
-                        part_index=precheck_part_index,
-                        voice_id=synth_args.get("voice_id"),
-                        voice_part_id=synth_args.get("voice_part_id"),
-                        allow_lyric_propagation=bool(
-                            synth_args.get("allow_lyric_propagation", False)
-                        ),
-                        source_voice_part_id=synth_args.get("source_voice_part_id"),
-                        source_part_index=synth_args.get("source_part_index"),
+                precheck = synthesize_preflight_action_required(
+                    current_score,
+                    part_index=precheck_part_index,
+                )
+                if precheck is not None:
+                    self._logger.info(
+                        "synthesize_precheck_action_required session=%s part_index=%s reason=%s failed_rules=%s diagnostics=%s",
+                        session_id,
+                        precheck_part_index,
+                        precheck.get("reason"),
+                        precheck.get("failed_validation_rules"),
+                        summarize_payload(precheck.get("diagnostics")),
                     )
-                    if precheck.get("status") == "action_required":
-                        followup_prompt = json.dumps(precheck, sort_keys=True)
-                        return ToolExecutionResult(
-                            score=current_score,
-                            audio_response={"type": "chat_text", "message": ""},
-                            followup_prompt=followup_prompt,
-                        )
-                    if precheck.get("status") == "ready":
-                        current_score = precheck["score"]
-                        await self._sessions.set_score(session_id, current_score)
+                    followup_prompt = json.dumps(precheck, sort_keys=True)
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=followup_prompt,
+                    )
                 
                 from src.mcp.handlers import _calculate_score_duration
                 from src.backend.credits import estimate_credits
@@ -826,6 +1161,67 @@ class Orchestrator:
                 )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
+    def _build_review_required_response(
+        self, preprocess_result: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Build chat response payload when user review is required before synthesis."""
+        payload: Dict[str, Any] = {
+            "type": "chat_text",
+            "review_required": True,
+            "message": (
+                "Preprocessing completed. Please review the derived score. "
+                "Reply 'proceed' to start audio generation, or describe revisions."
+            ),
+        }
+        if isinstance(preprocess_result, dict):
+            payload["preprocess_status"] = preprocess_result.get("status")
+            if isinstance(preprocess_result.get("modified_musicxml_path"), str):
+                payload["modified_musicxml_path"] = preprocess_result.get(
+                    "modified_musicxml_path"
+                )
+        return payload
+
+    def _mark_review_pending(
+        self, score: Dict[str, Any], preprocess_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Return score payload with review-pending marker after successful preprocess."""
+        updated = dict(score)
+        selected_verse_number = self._score_selected_verse_number(score)
+        updated[REVIEW_PENDING_KEY] = {
+            "status": preprocess_result.get("status"),
+            "modified_musicxml_path": preprocess_result.get("modified_musicxml_path"),
+            "preprocessed_for_verse_number": selected_verse_number,
+            "preprocessed_for_score_fingerprint": self._score_fingerprint(score),
+        }
+        return updated
+
+    def _score_fingerprint(self, score: Dict[str, Any]) -> str:
+        """Return stable fingerprint for current score selection context."""
+        parts = score.get("parts")
+        payload = {
+            "source_musicxml_path": score.get("source_musicxml_path"),
+            "selected_verse_number": self._score_selected_verse_number(score),
+            "parts_count": len(parts) if isinstance(parts, list) else None,
+            "part_ids": [
+                str(part.get("part_id") or "")
+                for part in parts
+                if isinstance(part, dict)
+            ]
+            if isinstance(parts, list)
+            else [],
+        }
+        return uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(payload, sort_keys=True)).hex
+
+    def _score_has_review_pending(self, score: Dict[str, Any]) -> bool:
+        """Return True when score has pending preprocess review marker."""
+        return isinstance(score.get(REVIEW_PENDING_KEY), dict)
+
+    def _clear_review_pending(self, score: Dict[str, Any]) -> Dict[str, Any]:
+        """Return score payload without review-pending marker."""
+        updated = dict(score)
+        updated.pop(REVIEW_PENDING_KEY, None)
+        return updated
+
     def _resolve_synthesize_part_index(
         self,
         score: Dict[str, Any],
@@ -842,6 +1238,126 @@ class Orchestrator:
         if isinstance(part_index, int):
             return part_index
         return 0
+
+    def _build_preprocess_mapping_context(
+        self,
+        score: Dict[str, Any],
+        *,
+        score_summary: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Build compact preprocess mapping context for LLM planning."""
+        transforms = score.get("voice_part_transforms")
+        review = score.get(REVIEW_PENDING_KEY)
+        has_transforms = isinstance(transforms, dict) and bool(transforms)
+        has_review = isinstance(review, dict) and bool(review)
+        if not has_transforms and not has_review:
+            return None
+
+        summary_parts = []
+        if isinstance(score_summary, dict):
+            raw_parts = score_summary.get("parts")
+            if isinstance(raw_parts, list):
+                summary_parts = [part for part in raw_parts if isinstance(part, dict)]
+
+        def _lookup_source_part(part_index: Optional[int]) -> Dict[str, Any]:
+            if not isinstance(part_index, int):
+                return {}
+            for part in summary_parts:
+                if int(part.get("part_index", -1)) == part_index:
+                    return {
+                        "source_part_index": part_index,
+                        "source_part_id": part.get("part_id"),
+                        "source_part_name": part.get("part_name"),
+                    }
+            return {"source_part_index": part_index}
+
+        targets: List[Dict[str, Any]] = []
+        seen = set()
+        if isinstance(transforms, dict):
+            for value in transforms.values():
+                if not isinstance(value, dict):
+                    continue
+                appended_ref = value.get("appended_part_ref")
+                if not isinstance(appended_ref, dict):
+                    continue
+                derived_part_index = appended_ref.get("part_index")
+                if not isinstance(derived_part_index, int):
+                    continue
+                derived_part_id = str(appended_ref.get("part_id") or "").strip()
+                derived_part_name = str(appended_ref.get("part_name") or "").strip()
+                target_voice_part_id = str(value.get("target_voice_part_id") or "").strip()
+                source_part_index = value.get("source_part_index")
+                source_voice_part_id = str(value.get("source_voice_part_id") or "").strip()
+                key = (
+                    derived_part_index,
+                    derived_part_id,
+                    target_voice_part_id,
+                    source_part_index if isinstance(source_part_index, int) else None,
+                    source_voice_part_id,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                entry: Dict[str, Any] = {
+                    "derived_part_index": derived_part_index,
+                    "derived_part_id": derived_part_id or None,
+                    "derived_part_name": derived_part_name or None,
+                    "target_voice_part_id": target_voice_part_id or None,
+                }
+                entry.update(_lookup_source_part(source_part_index if isinstance(source_part_index, int) else None))
+                if source_voice_part_id:
+                    entry["source_voice_part_id"] = source_voice_part_id
+                targets.append(entry)
+
+        targets.sort(
+            key=lambda item: (
+                int(item.get("derived_part_index", -1)),
+                str(item.get("target_voice_part_id") or ""),
+                str(item.get("derived_part_id") or ""),
+            )
+        )
+        context: Dict[str, Any] = {
+            "original_parse": {
+                "score_summary": score_summary if isinstance(score_summary, dict) else None,
+                "selected_verse_number": self._score_selected_verse_number(score),
+            }
+        }
+        if has_review:
+            context["preprocess"] = {
+                "status": review.get("status"),
+                "modified_musicxml_path": review.get("modified_musicxml_path"),
+                "preprocessed_for_verse_number": review.get("preprocessed_for_verse_number"),
+            }
+        if targets:
+            context["derived_mapping"] = {"targets": targets}
+        return context
+
+    def _summarize_derived_targets(
+        self, mapping_context: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return compact derived mapping summary for logs."""
+        if not isinstance(mapping_context, dict):
+            return []
+        derived_mapping = mapping_context.get("derived_mapping")
+        if not isinstance(derived_mapping, dict):
+            return []
+        targets = derived_mapping.get("targets")
+        if not isinstance(targets, list):
+            return []
+        summary: List[Dict[str, Any]] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            summary.append(
+                {
+                    "derived_part_index": target.get("derived_part_index"),
+                    "derived_part_id": target.get("derived_part_id"),
+                    "target_voice_part_id": target.get("target_voice_part_id"),
+                    "source_part_index": target.get("source_part_index"),
+                    "source_voice_part_id": target.get("source_voice_part_id"),
+                }
+            )
+        return summary
 
 
 @dataclass(frozen=True)

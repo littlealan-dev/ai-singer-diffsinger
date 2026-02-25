@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional
 from src.api import (
     get_voicebank_info,
     list_voicebanks,
-    modify_score,
     parse_score,
+    preprocess_voice_parts,
     save_audio,
     synthesize,
 )
@@ -39,9 +39,56 @@ def handle_parse_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     )
 
 
-def handle_modify_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
-    """Handle modify_score tool calls."""
-    return modify_score(params["score"], params["code"])
+def handle_reparse(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle reparse tool calls for direct MCP usage."""
+    file_path_param = params.get("file_path")
+    if not isinstance(file_path_param, str) or not file_path_param.strip():
+        raise ValueError("reparse requires file_path for direct MCP calls.")
+    file_path = resolve_project_path(file_path_param)
+    return parse_score(
+        file_path,
+        part_id=params.get("part_id"),
+        part_index=params.get("part_index"),
+        verse_number=params.get("verse_number"),
+        expand_repeats=params.get("expand_repeats", False),
+    )
+
+
+def handle_preprocess_voice_parts(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle preprocess_voice_parts tool calls."""
+    score = params.get("score")
+    if not isinstance(score, dict):
+        raise ValueError("score is required and must be an object")
+    request = params.get("request")
+    if not isinstance(request, dict):
+        return {
+            "status": "action_required",
+            "action": "preprocessing_plan_required",
+            "code": "preprocessing_plan_required",
+            "message": "preprocess_voice_parts requires request.plan as an object.",
+        }
+
+    if "voice_id" in params or "voice_id" in request:
+        return {
+            "status": "action_required",
+            "action": "deprecated_voice_id_input",
+            "code": "deprecated_voice_id_input",
+            "message": (
+                "Deprecated voice_id is not accepted for preprocess_voice_parts. "
+                "Use request.plan.targets[].target.voice_part_id."
+            ),
+        }
+
+    plan = request.get("plan")
+    if not isinstance(plan, dict):
+        return {
+            "status": "action_required",
+            "action": "preprocessing_plan_required",
+            "code": "preprocessing_plan_required",
+            "message": "preprocess_voice_parts requires request.plan as an object.",
+        }
+
+    return preprocess_voice_parts(score, request={"plan": plan})
 
 
 def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
@@ -107,7 +154,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
                 userId=progress_user_id,
             )
 
-    return synthesize(
+    result = synthesize(
         params["score"],
         voicebank_path,
         part_index=part_index,
@@ -124,6 +171,11 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         device=device,
         progress_callback=progress_callback,
     )
+    waveform = result.get("waveform")
+    if hasattr(waveform, "tolist"):
+        result = dict(result)
+        result["waveform"] = waveform.tolist()
+    return result
 
 
 def _resolve_part_index(
@@ -250,7 +302,8 @@ def _calculate_score_duration(score: Dict[str, Any]) -> float:
 
 HANDLERS = {
     "parse_score": handle_parse_score,
-    "modify_score": handle_modify_score,
+    "reparse": handle_reparse,
+    "preprocess_voice_parts": handle_preprocess_voice_parts,
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,
     "list_voicebanks": handle_list_voicebanks,
