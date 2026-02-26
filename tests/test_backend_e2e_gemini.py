@@ -23,6 +23,9 @@ from src.mcp.resolve import PROJECT_ROOT
 VOICEBANK_ID = "Raine_Rena_2.01"
 SCORE_PATH = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-verse1.xml"
 MULTI_VERSE_SCORE_PATH = PROJECT_ROOT / "assets/test_data/o-holy-night.xml"
+VERSE_CHANGE_SCORE_PATH = (
+    PROJECT_ROOT / "assets/test_data/amazing-grace-satb-zipped/lg-21486226.xml"
+)
 MY_TRIBUTE_SLICE_PATH = PROJECT_ROOT / "assets/test_data/my-tribute-bars19-36.xml"
 
 
@@ -628,6 +631,160 @@ def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client
     assert len(preprocess_before_synth) <= 4, (
         "LLM exceeded max repair budget: expected at most 4 preprocess attempts "
         "(initial + three repairs) before synthesize. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+
+
+def test_backend_e2e_gemini_verse_change_reparse_preprocess_review_synthesize(gemini_client):
+    test_client, data_dir, startup_id, logger = gemini_client
+    if not VERSE_CHANGE_SCORE_PATH.exists():
+        pytest.skip(f"Test score not found at {VERSE_CHANGE_SCORE_PATH}")
+
+    response = test_client.post("/sessions")
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    logger.info(
+        "backend_e2e_verse_change_start startup_id=%s session_id=%s data_dir=%s",
+        startup_id,
+        session_id,
+        data_dir,
+    )
+
+    files = {
+        "file": (
+            "lg-21486226.xml",
+            VERSE_CHANGE_SCORE_PATH.read_bytes(),
+            "application/xml",
+        )
+    }
+    upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    assert upload_payload.get("parsed") is True
+    available_verses = (
+        ((upload_payload.get("score_summary") or {}).get("available_verses")) or []
+    )
+    assert "2" in [str(v) for v in available_verses], (
+        "Expected verse-change fixture to expose multiple verses. "
+        f"available_verses={available_verses}"
+    )
+
+    # Turn 1: verse 1 -> preprocess -> review gate
+    verse1_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Sing the soprano part of verse 1."},
+    )
+    assert verse1_response.status_code == 200
+    verse1_payload = verse1_response.json()
+    assert verse1_payload.get("type") == "chat_text", (
+        "Expected preprocess-review response for verse 1 request. "
+        f"response={verse1_payload}"
+    )
+    assert bool(verse1_payload.get("review_required")) is True, (
+        "Expected review_required=true after first preprocess. "
+        f"response={verse1_payload}"
+    )
+
+    # Turn 2: user changes verse -> reparse -> preprocess -> review gate
+    verse2_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={
+            "message": (
+                "Change to verse 2 instead. Rebuild the part split and let me review "
+                "before audio generation."
+            )
+        },
+    )
+    assert verse2_response.status_code == 200
+    verse2_payload = verse2_response.json()
+    assert verse2_payload.get("type") == "chat_text", (
+        "Expected preprocess-review response after verse change. "
+        f"response={verse2_payload}"
+    )
+    assert bool(verse2_payload.get("review_required")) is True, (
+        "Expected review_required=true after verse-change reparse/preprocess. "
+        f"response={verse2_payload}"
+    )
+
+    # Turn 3: confirm review -> synth
+    proceed_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Looks good now. Proceed to synthesis."},
+    )
+    assert proceed_response.status_code == 200
+    proceed_payload = proceed_response.json()
+    if proceed_payload.get("type") != "chat_progress":
+        pytest.fail(
+            "Expected synthesize to start after verse-change review confirmation. "
+            f"response={proceed_payload}"
+        )
+
+    progress_payload = _wait_for_progress(test_client, proceed_payload["progress_url"])
+    assert progress_payload.get("status") == "done", (
+        "Synthesis job failed or aborted after verse-change flow. "
+        f"progress={progress_payload}"
+    )
+    audio_url = progress_payload.get("audio_url", "")
+    assert audio_url.startswith(f"/sessions/{session_id}/audio")
+    audio_response = test_client.get(audio_url)
+    assert audio_response.status_code == 200
+    assert len(audio_response.content) > 0
+
+    # Verify LLM tool-call sequence explicitly includes reparse -> preprocess -> synth.
+    llm_log_path = data_dir / "llm_responses.jsonl"
+    entries = _read_llm_log_entries(llm_log_path)
+    assert entries, f"No LLM responses logged at {llm_log_path}"
+
+    tool_call_sequence: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        response_text = str(entry.get("response_text", ""))
+        logger.info("verse_change_llm_response_%d %s", index, response_text)
+        parsed = parse_llm_response(response_text)
+        if parsed is None:
+            continue
+        for call in parsed.tool_calls:
+            tool_call_sequence.append(call.name)
+
+    preprocess_indices = [
+        idx for idx, name in enumerate(tool_call_sequence) if name == "preprocess_voice_parts"
+    ]
+    reparse_indices = [idx for idx, name in enumerate(tool_call_sequence) if name == "reparse"]
+    synth_indices = [idx for idx, name in enumerate(tool_call_sequence) if name == "synthesize"]
+
+    assert preprocess_indices, (
+        "Expected preprocess_voice_parts call(s) in verse-change workflow. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+    assert reparse_indices, (
+        "Expected reparse call after verse change. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+    assert synth_indices, (
+        "Expected synthesize call after review confirmation. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+
+    assert len(preprocess_indices) >= 2, (
+        "Expected at least two preprocess calls (initial + after verse change). "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+    reparsed_with_preprocess_before_and_after = any(
+        any(p < r for p in preprocess_indices) and any(p > r for p in preprocess_indices)
+        for r in reparse_indices
+    )
+    assert reparsed_with_preprocess_before_and_after, (
+        "Expected a reparse positioned between two preprocess calls in verse-change flow. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+    first_synth_idx = synth_indices[0]
+    preprocess_before_synth = [idx for idx in preprocess_indices if idx < first_synth_idx]
+    assert preprocess_before_synth, (
+        "Expected at least one preprocess call before synthesize. "
+        f"tool_call_sequence={tool_call_sequence}"
+    )
+    latest_preprocess_before_synth = max(preprocess_before_synth)
+    assert latest_preprocess_before_synth < first_synth_idx, (
+        "Expected synthesize only after reparse+preprocess and review. "
         f"tool_call_sequence={tool_call_sequence}"
     )
 

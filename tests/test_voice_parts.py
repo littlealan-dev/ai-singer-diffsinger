@@ -11,6 +11,7 @@ from pathlib import Path
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
     _choose_notes_trivial_ranked,
+    _normalize_materialized_musicxml_stem,
     _run_preflight_plan_lint,
     parse_voice_part_plan,
     prepare_score_for_voice_part,
@@ -137,6 +138,19 @@ class VoicePartFlowTests(unittest.TestCase):
 
 
 class VoicePartAnalysisAndPlanTests(unittest.TestCase):
+    def test_normalize_materialized_musicxml_stem_strips_trailing_derived_suffixes(self) -> None:
+        self.assertEqual(_normalize_materialized_musicxml_stem("score"), "score")
+        self.assertEqual(
+            _normalize_materialized_musicxml_stem("score.derived_b97c72611a"),
+            "score",
+        )
+        self.assertEqual(
+            _normalize_materialized_musicxml_stem(
+                "score.derived_b97c72611a.derived_9fe0c01f3e"
+            ),
+            "score",
+        )
+
     def test_trivial_chord_split_maps_rank_to_rank_when_counts_match(self) -> None:
         grouped = {
             (1, 0.0): [

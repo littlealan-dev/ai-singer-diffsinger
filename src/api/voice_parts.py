@@ -50,6 +50,7 @@ VALID_TIMELINE_METHODS = {"A", "B", "trivial"}
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
 _TRANSFORM_ARTIFACT_INDEX: Dict[str, Dict[str, Any]] = {}
+_DERIVED_STEM_SUFFIX_RE = re.compile(r"\.derived_[0-9a-f]{10}$")
 
 
 def analyze_score_voice_parts(
@@ -3620,9 +3621,8 @@ def _materialize_transformed_part(
         q=q,
     )
 
-    output_path = source_path.with_name(
-        f"{source_path.stem}.derived_{transform_hash[:10]}.xml"
-    )
+    output_stem = _normalize_materialized_musicxml_stem(source_path.stem)
+    output_path = source_path.with_name(f"{output_stem}.derived_{transform_hash[:10]}.xml")
     try:
         tree.write(output_path, encoding="utf-8", xml_declaration=True)
     except Exception:
@@ -3638,6 +3638,16 @@ def _materialize_transformed_part(
             "part_name": part_name,
         },
     }
+
+
+def _normalize_materialized_musicxml_stem(stem: str) -> str:
+    """Strip trailing .derived_<hash> segments to avoid double-derived filenames."""
+    normalized = stem
+    while True:
+        updated = _DERIVED_STEM_SUFFIX_RE.sub("", normalized)
+        if updated == normalized:
+            return normalized
+        normalized = updated
 
 
 def _resolve_reference_part_for_transformed(

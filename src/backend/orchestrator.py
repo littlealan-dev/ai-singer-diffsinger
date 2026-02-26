@@ -548,6 +548,26 @@ class Orchestrator:
         selected = score.get("selected_verse_number")
         return self._normalize_verse_number(selected)
 
+    def _is_reparse_noop(
+        self,
+        score: Dict[str, Any],
+        *,
+        part_id: Optional[str],
+        part_index: Optional[int],
+        verse_number: Optional[object],
+        expand_repeats: bool,
+    ) -> bool:
+        """Return True when reparse request would not change current score context."""
+        if expand_repeats:
+            return False
+        if part_id is not None or part_index is not None:
+            return False
+        requested_verse = self._normalize_verse_number(verse_number)
+        selected_verse = self._score_selected_verse_number(score)
+        if requested_verse is None or selected_verse is None:
+            return False
+        return requested_verse == selected_verse
+
     def _score_has_preprocessed_context(self, score: Dict[str, Any]) -> bool:
         """Return True when score already contains preprocess-derived context."""
         if self._score_has_review_pending(score):
@@ -921,6 +941,9 @@ class Orchestrator:
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
         preprocess_completed_this_batch = False
+        reparse_completed_this_batch = False
+        reparse_selected_verse: Optional[str] = None
+        reparse_noop_this_batch = False
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
@@ -932,20 +955,43 @@ class Orchestrator:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
             if call.name == "reparse":
+                reparse_part_id = call.arguments.get("part_id")
+                reparse_part_index = call.arguments.get("part_index")
+                reparse_verse_number = call.arguments.get("verse_number")
+                reparse_expand_repeats = bool(call.arguments.get("expand_repeats", False))
+                if self._is_reparse_noop(
+                    current_score,
+                    part_id=reparse_part_id,
+                    part_index=reparse_part_index,
+                    verse_number=reparse_verse_number,
+                    expand_repeats=reparse_expand_repeats,
+                ):
+                    reparse_completed_this_batch = True
+                    reparse_noop_this_batch = True
+                    reparse_selected_verse = self._score_selected_verse_number(current_score)
+                    self._logger.info(
+                        "reparse_noop session=%s selected_verse=%s requested_verse=%s",
+                        session_id,
+                        reparse_selected_verse,
+                        self._normalize_verse_number(reparse_verse_number),
+                    )
+                    continue
                 reparsed_score = await self._reparse_score(
                     session_id,
-                    part_id=call.arguments.get("part_id"),
-                    part_index=call.arguments.get("part_index"),
-                    verse_number=call.arguments.get("verse_number"),
-                    expand_repeats=bool(call.arguments.get("expand_repeats", False)),
+                    part_id=reparse_part_id,
+                    part_index=reparse_part_index,
+                    verse_number=reparse_verse_number,
+                    expand_repeats=reparse_expand_repeats,
                     user_id=user_id,
                 )
                 if isinstance(reparsed_score, dict):
                     current_score = reparsed_score
+                    reparse_completed_this_batch = True
+                    reparse_selected_verse = self._score_selected_verse_number(current_score)
                     self._logger.info(
                         "reparse_ready session=%s selected_verse=%s",
                         session_id,
-                        self._score_selected_verse_number(current_score),
+                        reparse_selected_verse,
                     )
                 else:
                     followup_prompt = json.dumps(
@@ -1159,6 +1205,32 @@ class Orchestrator:
                 audio_response = await self._start_synthesis_job(
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                 )
+        # If a reparse succeeded but no downstream tool produced a terminal response in this
+        # batch, force one internal follow-up LLM turn so it can continue with preprocess.
+        if reparse_completed_this_batch and audio_response is None:
+            reparse_prompt = json.dumps(
+                {
+                    "status": "reparse_ready",
+                    "message": (
+                        (
+                            "Requested verse already matches current score context. "
+                            "Reparse was skipped. "
+                        )
+                        if reparse_noop_this_batch
+                        else "Score context has been reparsed for the requested verse. "
+                    )
+                    + (
+                        "Continue with preprocess_voice_parts for this verse before synthesis."
+                    ),
+                    "selected_verse_number": reparse_selected_verse,
+                },
+                sort_keys=True,
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=reparse_prompt,
+            )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
 
     def _build_review_required_response(
