@@ -212,6 +212,7 @@ def create_app() -> FastAPI:
             score = dict(score)
             score.pop("score_summary", None)
         await sessions.set_score_summary(session_id, score_summary)
+        await sessions.set_original_score(session_id, score)
         version = await sessions.set_score(session_id, score)
         return {
             "session_id": session_id,
@@ -359,11 +360,14 @@ def create_app() -> FastAPI:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
-        session = await _get_session_or_404(sessions, session_id, user_id)
-        rel_path = session.files.get("musicxml_path")
-        if not rel_path:
-            raise HTTPException(status_code=404, detail="Score not found.")
-        score_path = settings.project_root / rel_path
+        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        score_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
+        if score_path is None:
+            session = await _get_session_or_404(sessions, session_id, user_id)
+            rel_path = session.files.get("musicxml_path")
+            if not rel_path:
+                raise HTTPException(status_code=404, detail="Score not found.")
+            score_path = settings.project_root / rel_path
         if not score_path.exists():
             raise HTTPException(status_code=404, detail="Score file not found.")
         content = _read_musicxml_content(score_path)
@@ -545,6 +549,24 @@ def _read_musicxml_content(path: Path) -> str:
         xml_name = _find_mxl_xml(archive)
         xml_bytes = archive.read(xml_name)
     return xml_bytes.decode("utf-8", errors="replace")
+
+
+def _resolve_session_score_path(
+    settings: Settings, current_score: Any
+) -> Optional[Path]:
+    """Resolve the current session score artifact path, preferring derived MusicXML."""
+    if not isinstance(current_score, dict):
+        return None
+    score_payload = current_score.get("score")
+    if not isinstance(score_payload, dict):
+        return None
+    source_musicxml_path = score_payload.get("source_musicxml_path")
+    if not isinstance(source_musicxml_path, str) or not source_musicxml_path.strip():
+        return None
+    score_path = Path(source_musicxml_path)
+    if not score_path.is_absolute():
+        score_path = settings.project_root / score_path
+    return score_path
 
 
 def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:

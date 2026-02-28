@@ -284,6 +284,12 @@ export default function MainApp() {
     setMessages((prev) => [...prev, message]);
   };
 
+  const refreshScorePreview = async () => {
+    if (!sessionId || !score) return;
+    const data = await fetchScoreXml(sessionId);
+    setScore({ name: score.name, data });
+  };
+
   const handleUpload = async (file: File) => {
     if (!sessionId || creditsLocked) return;
     setUploading(true);
@@ -350,6 +356,9 @@ export default function MainApp() {
         if (pendingSelection) {
           setPendingSelection(false);
         }
+      }
+      if ("current_score" in response && response.current_score) {
+        await refreshScorePreview();
       }
       appendMessage(assistantMessage);
       if (response.type === "chat_progress") {

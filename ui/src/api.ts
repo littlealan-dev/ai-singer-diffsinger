@@ -76,12 +76,6 @@ function withApiBase(url: string): string {
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
-function withStream(url: string): string {
-  if (!url) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}stream=1`;
-}
-
 async function withAppCheckParam(url: string): Promise<string> {
   if (!url) return url;
   const token = await getAppCheckToken();
@@ -191,9 +185,7 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
     return {
       ...response,
       // TODO: Replace query-param auth with short-lived signed URLs from the backend.
-      audio_url: await withAuthParam(
-        await withAppCheckParam(withStream(withApiBase(response.audio_url)))
-      ),
+      audio_url: await withAuthParam(await withAppCheckParam(withApiBase(response.audio_url))),
     };
   }
   if (response.type === "chat_progress") {
@@ -217,7 +209,7 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
   if (payload.audio_url) {
     // TODO: Replace query-param auth with short-lived signed URLs from the backend.
     payload.audio_url = await withAuthParam(
-      await withAppCheckParam(withStream(withApiBase(payload.audio_url)))
+      await withAppCheckParam(withApiBase(payload.audio_url))
     );
   }
   return payload;

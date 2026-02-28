@@ -28,6 +28,7 @@ class LlmResponse:
     tool_calls: List[ToolCall]
     final_message: str
     include_score: bool
+    thought_summary: str = ""
 
 
 def build_system_prompt(
@@ -129,8 +130,13 @@ def parse_llm_response(text: str) -> Optional[LlmResponse]:
     raw_message = payload.get("final_message")
     final_message = str(raw_message).strip() if raw_message is not None else ""
     include_score = bool(payload.get("include_score", False))
+    raw_thought_summary = payload.get("thought_summary")
+    thought_summary = (
+        str(raw_thought_summary).strip() if raw_thought_summary is not None else ""
+    )
     return LlmResponse(
         tool_calls=tool_calls,
         final_message=final_message,
         include_score=include_score,
+        thought_summary=thought_summary,
     )

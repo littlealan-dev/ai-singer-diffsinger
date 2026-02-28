@@ -30,6 +30,10 @@ TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
 MAX_INTERNAL_TOOL_REPAIRS = 3
 REVIEW_PENDING_KEY = "_preprocess_review_pending"
+MISSING_ORIGINAL_SCORE_MESSAGE = (
+    "Session is missing the original parsed score baseline required for preprocessing. "
+    "Please re-upload the MusicXML file."
+)
 
 
 class Orchestrator:
@@ -108,6 +112,11 @@ class Orchestrator:
                 await self._sessions.append_history(session_id, "assistant", response_message)
                 return {"type": "chat_error", "message": response_message}
             if llm_response is not None:
+                response_message = self._merge_thought_summary(
+                    llm_response.final_message or response_message,
+                    llm_response.thought_summary,
+                    llm_response.tool_calls,
+                )
                 self._logger.debug(
                     "chat_llm session=%s response=%s",
                     session_id,
@@ -121,12 +130,29 @@ class Orchestrator:
                         ],
                         "final_message": llm_response.final_message,
                         "include_score": llm_response.include_score,
+                        "thought_summary": summarize_payload(llm_response.thought_summary),
                     },
                 )
+                if llm_response.thought_summary and any(
+                    call.name == "preprocess_voice_parts" for call in llm_response.tool_calls
+                ):
+                    self._logger.debug(
+                        "chat_llm_preprocess_thought_summary session=%s thought_summary=%s",
+                        session_id,
+                        llm_response.thought_summary,
+                    )
             if llm_response is not None:
                 # Execute tool calls and allow bounded internal repair loops.
                 include_score = llm_response.include_score
-                response_message = llm_response.final_message or response_message
+                response_message = self._merge_thought_summary(
+                    llm_response.final_message or response_message,
+                    llm_response.thought_summary,
+                    llm_response.tool_calls,
+                )
+                thought_block_for_response = self._format_thought_summary_block(
+                    llm_response.thought_summary,
+                    llm_response.tool_calls,
+                )
                 pending_calls = list(llm_response.tool_calls)
                 working_score = current_score["score"]
                 score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
@@ -151,10 +177,17 @@ class Orchestrator:
                     }
                     if followup_prompt is None:
                         if response.get("review_required"):
-                            response["message"] = response.get("message") or (
+                            review_message = response.get("message") or (
                                 "Preprocessing completed. Please review the derived score and "
                                 "reply 'proceed' to start audio generation, or describe revisions."
                             )
+                            thought_block = thought_block_for_response or self._extract_thought_summary_block(
+                                response_message
+                            )
+                            if thought_block:
+                                response["message"] = f"{review_message}\n\n{thought_block}"
+                            else:
+                                response["message"] = review_message
                         elif response_message:
                             response["message"] = response_message
                         break
@@ -186,12 +219,28 @@ class Orchestrator:
                             ],
                             "final_message": followup_response.final_message,
                             "include_score": followup_response.include_score,
+                            "thought_summary": summarize_payload(followup_response.thought_summary),
                         },
                     )
+                    if followup_response.thought_summary and any(
+                        call.name == "preprocess_voice_parts"
+                        for call in followup_response.tool_calls
+                    ):
+                        self._logger.debug(
+                            "chat_llm_followup_preprocess_thought_summary session=%s thought_summary=%s",
+                            session_id,
+                            followup_response.thought_summary,
+                        )
                     include_score = include_score or followup_response.include_score
-                    response_message = (
-                        followup_response.final_message or response_message
+                    response_message = self._merge_thought_summary(
+                        followup_response.final_message or response_message,
+                        followup_response.thought_summary,
+                        followup_response.tool_calls,
                     )
+                    thought_block_for_response = self._format_thought_summary_block(
+                        followup_response.thought_summary,
+                        followup_response.tool_calls,
+                    ) or thought_block_for_response
 
                     if not followup_response.tool_calls:
                         response["message"] = self._format_followup_message_text(
@@ -653,8 +702,41 @@ class Orchestrator:
         await self._sessions.set_score_summary(
             session_id, score_summary if isinstance(score_summary, dict) else None
         )
+        await self._sessions.set_original_score(session_id, score)
         await self._sessions.set_score(session_id, score)
         return score
+
+    def _resolve_llm_planning_score(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the score context the LLM should use for preprocess planning."""
+        if not isinstance(current_score, dict):
+            return current_score
+        original_score = snapshot.get("original_score")
+        if isinstance(original_score, dict):
+            return original_score
+        raise ValueError(MISSING_ORIGINAL_SCORE_MESSAGE)
+
+    async def _resolve_preprocess_score(
+        self,
+        session_id: str,
+        *,
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Return the score baseline to use for preprocess execution."""
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        original_score = snapshot.get("original_score")
+        if isinstance(original_score, dict):
+            self._logger.info(
+                "preprocess_baseline_ready session=%s source_musicxml_path=%s selected_verse=%s",
+                session_id,
+                original_score.get("source_musicxml_path"),
+                original_score.get("selected_verse_number"),
+            )
+            return original_score
+        raise ValueError(MISSING_ORIGINAL_SCORE_MESSAGE)
 
     async def _resolve_voicebank(self) -> str:
         """Resolve a default voicebank ID, using cached data when possible."""
@@ -723,12 +805,14 @@ class Orchestrator:
             voicebank_details = await self._get_voicebank_details()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
             current_score = snapshot.get("current_score")
+            planning_score = None
             voice_part_signals = None
             preprocess_mapping_context = None
             if isinstance(current_score, dict):
                 score_payload = current_score.get("score")
-                if isinstance(score_payload, dict):
-                    voice_part_signals = score_payload.get("voice_part_signals")
+                planning_score = self._resolve_llm_planning_score(snapshot, score_payload)
+                if isinstance(planning_score, dict):
+                    voice_part_signals = planning_score.get("voice_part_signals")
                     preprocess_mapping_context = self._build_preprocess_mapping_context(
                         score_payload,
                         score_summary=snapshot.get("score_summary"),
@@ -745,6 +829,9 @@ class Orchestrator:
             text = await asyncio.to_thread(
                 self._llm_client.generate, system_prompt, history
             )
+        except ValueError as exc:
+            self._logger.warning("llm_planning_context_failed error=%s", exc)
+            return None, str(exc)
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -787,9 +874,10 @@ class Orchestrator:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
             llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            planning_score = self._resolve_llm_planning_score(snapshot, current_score)
             voice_part_signals = (
-                current_score.get("voice_part_signals")
-                if isinstance(current_score, dict)
+                planning_score.get("voice_part_signals")
+                if isinstance(planning_score, dict)
                 else None
             )
             preprocess_mapping_context = (
@@ -810,6 +898,9 @@ class Orchestrator:
                 voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
+        except ValueError as exc:
+            self._logger.warning("llm_followup_context_failed error=%s", exc)
+            return None, str(exc)
         except RuntimeError as exc:
             self._logger.warning("llm_followup_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -842,6 +933,42 @@ class Orchestrator:
                     "Would you like me to proceed?"
                 )
         return message
+
+    def _merge_thought_summary(
+        self, message: str, thought_summary: str, tool_calls: List[ToolCall]
+    ) -> str:
+        """Append Gemini thought summary to preprocess messages for dev inspection."""
+        if not thought_summary:
+            return message
+        if not any(call.name == "preprocess_voice_parts" for call in tool_calls):
+            return message
+        cleaned_message = message.strip()
+        cleaned_summary = thought_summary.strip()
+        if not cleaned_summary:
+            return message
+        if not cleaned_message:
+            return f"Thought summary:\n{cleaned_summary}"
+        return f"{cleaned_message}\n\nThought summary:\n{cleaned_summary}"
+
+    def _extract_thought_summary_block(self, message: str) -> str:
+        """Return the appended thought summary block when present."""
+        marker = "\n\nThought summary:\n"
+        if marker in message:
+            return "Thought summary:\n" + message.split(marker, 1)[1].strip()
+        if message.startswith("Thought summary:\n"):
+            return message.strip()
+        return ""
+
+    def _format_thought_summary_block(self, thought_summary: str, tool_calls: List[ToolCall]) -> str:
+        """Return a standalone thought-summary block for preprocess messages."""
+        if not thought_summary:
+            return ""
+        if not any(call.name == "preprocess_voice_parts" for call in tool_calls):
+            return ""
+        cleaned_summary = thought_summary.strip()
+        if not cleaned_summary:
+            return ""
+        return f"Thought summary:\n{cleaned_summary}"
 
     async def _get_voicebank_ids(self) -> List[str]:
         """Return cached voicebank IDs or fetch them from the MCP server."""
@@ -1014,7 +1141,17 @@ class Orchestrator:
                 continue
             if call.name == "preprocess_voice_parts":
                 preprocess_args = dict(call.arguments)
-                preprocess_args["score"] = current_score
+                try:
+                    preprocess_score = await self._resolve_preprocess_score(
+                        session_id,
+                        user_id=user_id,
+                    )
+                except ValueError as exc:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": str(exc)},
+                    )
+                preprocess_args["score"] = preprocess_score
                 self._logger.info("mcp_call tool=preprocess_voice_parts session=%s", session_id)
                 result = await asyncio.to_thread(
                     self._router.call_tool, "preprocess_voice_parts", preprocess_args
@@ -1052,6 +1189,12 @@ class Orchestrator:
                         result.get("failed_validation_rules"),
                         summarize_payload(result.get("diagnostics")),
                     )
+                    if result.get("action") == "plan_lint_failed":
+                        self._logger.debug(
+                            "preprocess_plan_lint_failed session=%s lint_findings=%s",
+                            session_id,
+                            json.dumps(result.get("lint_findings", []), ensure_ascii=True, sort_keys=True),
+                        )
                     followup_prompt = json.dumps(result, sort_keys=True)
                     return ToolExecutionResult(
                         score=current_score,

@@ -20,8 +20,8 @@ class GeminiRestClient:
         self._base_url = settings.gemini_base_url
         self._model = settings.gemini_model
         self._timeout = settings.gemini_timeout_seconds
-        self._thinking_enabled = bool(settings.gemini_thinking_enabled)
-        self._thinking_budget = int(settings.gemini_thinking_budget)
+        self._thinking_level = settings.gemini_thinking_level.strip()
+        self._include_thought_summary = bool(settings.gemini_include_thought_summary)
         self._logger = logging.getLogger(__name__)
 
     def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
@@ -31,10 +31,12 @@ class GeminiRestClient:
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": self._history_to_contents(history),
         }
-        if self._thinking_enabled:
-            thinking_config: Dict[str, Any] = {"includeThoughts": True}
-            if self._thinking_budget > 0:
-                thinking_config["thinkingBudget"] = self._thinking_budget
+        thinking_config: Dict[str, Any] = {}
+        if self._thinking_level:
+            thinking_config["thinkingLevel"] = self._thinking_level
+        if self._include_thought_summary:
+            thinking_config["includeThoughts"] = True
+        if thinking_config:
             payload["generationConfig"] = {"thinkingConfig": thinking_config}
         # Encode payload as JSON for the HTTP request body.
         data = json.dumps(payload).encode("utf-8")
@@ -80,22 +82,40 @@ class GeminiRestClient:
                 thinking_parts.append(stripped)
             else:
                 response_text_parts.append(stripped)
-        if self._thinking_enabled and thinking_parts:
+        if thinking_parts:
             self._logger.debug(
-                "gemini_thinking model=%s parts=%s thought=%s",
+                "gemini_thinking model=%s level=%s parts=%s thought=%s",
                 self._model,
+                self._thinking_level,
                 len(thinking_parts),
                 summarize_payload("\n".join(thinking_parts)),
             )
-        if response_text_parts:
-            return "\n".join(response_text_parts)
+        response_text = "\n".join(response_text_parts)
+        if response_text:
+            return self._inject_thought_summary(response_text, thinking_parts)
         # Fallback for models that return text-only parts without thought tags.
         for part in parts:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 text = part["text"].strip()
                 if text:
-                    return text
+                    return self._inject_thought_summary(text, thinking_parts)
         raise RuntimeError("Gemini returned no text content.")
+
+    def _inject_thought_summary(self, text: str, thinking_parts: List[str]) -> str:
+        """Attach optional thought summary to JSON responses without changing schema shape."""
+        if not self._include_thought_summary or not thinking_parts:
+            return text
+        summary = "\n".join(part for part in thinking_parts if part.strip()).strip()
+        if not summary:
+            return text
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if not isinstance(payload, dict):
+            return text
+        payload["thought_summary"] = summary
+        return json.dumps(payload)
 
     def _history_to_contents(self, history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """Convert chat history into Gemini content payloads."""

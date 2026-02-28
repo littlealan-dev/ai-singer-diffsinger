@@ -28,6 +28,7 @@ class SessionState:
     last_active_at: datetime
     history: List[Dict[str, str]] = field(default_factory=list)
     files: Dict[str, str] = field(default_factory=dict)
+    original_score: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
@@ -42,6 +43,7 @@ class SessionState:
             "last_active_at": self.last_active_at.isoformat(),
             "history": list(self.history),
             "files": dict(self.files),
+            "original_score": dict(self.original_score) if self.original_score else None,
             "current_score": self._score_snapshot(),
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "current_audio": dict(self.current_audio) if self.current_audio else None,
@@ -166,6 +168,15 @@ class SessionStore:
             state.current_score_version += 1
             state.last_active_at = _utcnow()
             return state.current_score_version
+
+    async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
+        """Persist the original parsed score baseline for future replanning."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.original_score = score
+            state.last_active_at = _utcnow()
 
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Attach a score summary to the session."""
@@ -314,6 +325,7 @@ class FirestoreSessionStore:
             last_active_at=last_active,
             history=list(data.get("history") or []),
             files=dict(data.get("files") or {}),
+            original_score=data.get("originalScore"),
             current_score=data.get("currentScore"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
@@ -331,6 +343,7 @@ class FirestoreSessionStore:
                 "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 "history": [],
                 "files": {},
+                "originalScore": None,
                 "currentScore": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
@@ -415,6 +428,13 @@ class FirestoreSessionStore:
                 }
             )
             return version
+
+    async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
+        """Persist the original parsed score baseline in Firestore."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {"originalScore": score, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
 
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Update the score summary in Firestore."""

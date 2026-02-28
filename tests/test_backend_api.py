@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import time
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from src.api.score import parse_score
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
+from src.backend.orchestrator import MISSING_ORIGINAL_SCORE_MESSAGE
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 
 
@@ -192,6 +194,196 @@ def test_upload_musicxml_parses_and_saves(client):
     assert "score" in current_score
     score_path = app.state.settings.data_dir / "sessions" / session_id / "score.xml"
     assert score_path.exists()
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["original_score"] == current_score["score"]
+
+
+def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    derived_path = app.state.settings.data_dir / "sessions" / session_id / "derived.xml"
+    derived_xml = "<score-partwise version=\"4.0\"><part-list/></score-partwise>"
+    derived_path.write_text(derived_xml, encoding="utf-8")
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            score = dict(arguments.get("score", {}))
+            score["source_musicxml_path"] = str(derived_path)
+            return {
+                "status": "ready",
+                "score": score,
+                "part_index": 0,
+                "modified_musicxml_path": str(derived_path),
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
+            '"final_message":"Please review the derived score.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.json()
+    assert bool(chat_payload.get("review_required")) is True
+
+    score_response = test_client.get(f"/sessions/{session_id}/score")
+    assert score_response.status_code == 200
+    assert score_response.text == derived_xml
+
+
+def test_repreprocess_uses_original_uploaded_score_context(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    original_path = app.state.settings.data_dir / "sessions" / session_id / "score.xml"
+    derived_path = app.state.settings.data_dir / "sessions" / session_id / "derived.xml"
+    derived_path.write_text("<score-partwise version=\"4.0\"><part-list/></score-partwise>", encoding="utf-8")
+    preprocess_score_sources = []
+    parse_score_calls = []
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            parse_score_calls.append(dict(arguments))
+            verse_number = arguments.get("verse_number", "1")
+            return {
+                "title": "Test",
+                "tempos": [],
+                "parts": [{"notes": []}],
+                "structure": {},
+                "score_summary": {
+                    "title": "Test",
+                    "composer": None,
+                    "lyricist": None,
+                    "parts": [],
+                    "available_verses": ["1"],
+                },
+                "selected_verse_number": str(verse_number),
+                "source_musicxml_path": str(original_path),
+            }
+        if name == "preprocess_voice_parts":
+            score = dict(arguments.get("score", {}))
+            preprocess_score_sources.append(score.get("source_musicxml_path"))
+            derived_score = dict(score)
+            derived_score["source_musicxml_path"] = str(derived_path)
+            return {
+                "status": "ready",
+                "score": derived_score,
+                "part_index": 0,
+                "modified_musicxml_path": str(derived_path),
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
+            '"final_message":"Please review the derived score.","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    first_chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert first_chat_response.status_code == 200
+    assert first_chat_response.json().get("review_required") is True
+
+    second_chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "regenerate soprano with revised lyrics"}
+    )
+    assert second_chat_response.status_code == 200
+    assert second_chat_response.json().get("review_required") is True
+
+    assert preprocess_score_sources == [str(original_path), str(original_path)]
+    assert len(parse_score_calls) == 1
+
+
+def test_orchestrator_uses_original_score_for_preprocess_planning(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    original_score = {
+        "source_musicxml_path": "/tmp/original.xml",
+        "voice_part_signals": {"source": "original"},
+    }
+    current_score = {
+        "source_musicxml_path": "/tmp/derived.xml",
+        "voice_part_signals": {"source": "derived"},
+        "voice_part_transforms": {"x": {}},
+    }
+    snapshot = {
+        "original_score": original_score,
+        "current_score": {"score": current_score, "version": 2},
+    }
+
+    planning_score = orchestrator._resolve_llm_planning_score(snapshot, current_score)
+
+    assert planning_score == original_score
+
+
+def test_orchestrator_errors_when_original_score_missing_for_preprocess_planning(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    current_score = {
+        "source_musicxml_path": "/tmp/derived.xml",
+        "voice_part_signals": {"source": "derived"},
+    }
+    snapshot = {
+        "current_score": {"score": current_score, "version": 2},
+    }
+
+    with pytest.raises(ValueError, match="original parsed score baseline"):
+        orchestrator._resolve_llm_planning_score(snapshot, current_score)
+
+
+def test_chat_returns_explicit_error_when_original_score_missing_for_repreprocess(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    asyncio.run(app.state.sessions.set_original_score(session_id, None))
+    asyncio.run(
+        app.state.sessions.set_score(
+            session_id,
+            {
+                "title": "Derived",
+                "parts": [{"notes": []}],
+                "voice_part_transforms": {"x": {}},
+                "source_musicxml_path": "/tmp/derived.xml",
+            },
+        )
+    )
+
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
+            '"final_message":"Please review the derived score.","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "regenerate soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_text"
+    assert payload["message"] == MISSING_ORIGINAL_SCORE_MESSAGE
 
 
 def test_upload_rejects_invalid_extension(client):

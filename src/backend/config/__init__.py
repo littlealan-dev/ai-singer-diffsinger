@@ -68,8 +68,8 @@ class Settings:
     gemini_base_url: str
     gemini_model: str
     gemini_timeout_seconds: float
-    gemini_thinking_enabled: bool
-    gemini_thinking_budget: int
+    gemini_thinking_level: str
+    gemini_include_thought_summary: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
     llm_max_history_items: int
@@ -120,8 +120,8 @@ class Settings:
         )
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
-        gemini_thinking_enabled = _env_bool("GEMINI_THINKING_ENABLED", False)
-        gemini_thinking_budget = _env_int("GEMINI_THINKING_BUDGET", 0)
+        gemini_thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").strip()
+        gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
         llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
@@ -174,8 +174,8 @@ class Settings:
             gemini_base_url=gemini_base_url,
             gemini_model=gemini_model,
             gemini_timeout_seconds=gemini_timeout_seconds,
-            gemini_thinking_enabled=gemini_thinking_enabled,
-            gemini_thinking_budget=gemini_thinking_budget,
+            gemini_thinking_level=gemini_thinking_level,
+            gemini_include_thought_summary=gemini_include_thought_summary,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
             llm_max_history_items=llm_max_history_items,
