@@ -51,7 +51,9 @@ Hard Rules
    - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
 21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
+   - When a lint finding includes `section.start_measure/end_measure`, treat that reported measure span as the repair scope.
    - When new lint findings appear, change only the fields that directly address those failed rules.
+   - Do not rewrite unrelated ranges outside the reported failing span unless another lint finding or a completeness rule requires it.
    - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.
 Plan Self-Check (Before Final Output)
 - Targets use `part_index` + `voice_part_id`.

@@ -10,6 +10,7 @@ import asyncio
 import logging
 import copy
 import json
+import re
 import uuid
 
 from src.backend.config import Settings
@@ -59,6 +60,7 @@ class Orchestrator:
         self._llm_tool_allowlist = {"reparse", "preprocess_voice_parts", "synthesize"}
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
+        self._preprocess_tasks: Dict[str, asyncio.Task] = {}
         self._chat_locks_guard = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
 
@@ -81,6 +83,15 @@ class Orchestrator:
                 ),
             }
         async with chat_lock:
+            existing_preprocess = self._preprocess_tasks.get(session_id)
+            if existing_preprocess and not existing_preprocess.done():
+                return {
+                    "type": "chat_text",
+                    "message": (
+                        "I am still preparing the derived score from your previous request. "
+                        "Please wait for it to finish before sending another message."
+                    ),
+                }
             if len(message) > self._settings.llm_max_message_chars:
                 return {
                     "type": "chat_text",
@@ -143,127 +154,36 @@ class Orchestrator:
                         llm_response.thought_summary,
                     )
             if llm_response is not None:
-                # Execute tool calls and allow bounded internal repair loops.
-                include_score = llm_response.include_score
                 response_message = self._merge_thought_summary(
                     llm_response.final_message or response_message,
                     llm_response.thought_summary,
                     llm_response.tool_calls,
                 )
-                thought_block_for_response = self._format_thought_summary_block(
-                    llm_response.thought_summary,
-                    llm_response.tool_calls,
-                )
-                pending_calls = list(llm_response.tool_calls)
-                working_score = current_score["score"]
-                score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
-                followup_prompt: Optional[str] = None
-                repairs_used = 0
-                response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
-
-                while True:
-                    tool_result = await self._execute_tool_calls(
+                if self._should_start_preprocess_job(llm_response.tool_calls):
+                    await self._sessions.append_history(session_id, "assistant", response_message)
+                    return await self._start_preprocess_job(
                         session_id,
-                        working_score,
-                        pending_calls,
+                        current_score["score"],
+                        llm_response.tool_calls,
+                        initial_message=response_message,
                         user_id=user_id,
-                        score_summary=score_summary,
                         user_email=user_email,
                     )
-                    working_score = tool_result.score
-                    followup_prompt = tool_result.followup_prompt
-                    response = tool_result.audio_response or {
-                        "type": "chat_text",
-                        "message": response_message,
-                    }
-                    if followup_prompt is None:
-                        if response.get("review_required"):
-                            review_message = response.get("message") or (
-                                "Preprocessing completed. Please review the derived score and "
-                                "reply 'proceed' to start audio generation, or describe revisions."
-                            )
-                            thought_block = thought_block_for_response or self._extract_thought_summary_block(
-                                response_message
-                            )
-                            if thought_block:
-                                response["message"] = f"{review_message}\n\n{thought_block}"
-                            else:
-                                response["message"] = review_message
-                        elif response_message:
-                            response["message"] = response_message
-                        break
 
-                    if self._tool_payload_has_error(followup_prompt):
-                        response["suppress_selector"] = True
-
-                    followup_response, followup_error = await self._decide_followup_with_llm(
-                        snapshot, followup_prompt, working_score
-                    )
-                    if followup_error:
-                        await self._sessions.append_history(session_id, "assistant", followup_error)
-                        return {"type": "chat_error", "message": followup_error}
-
-                    if followup_response is None:
-                        response["message"] = followup_prompt
-                        break
-
-                    self._logger.debug(
-                        "chat_llm_followup session=%s response=%s",
-                        session_id,
-                        {
-                            "tool_calls": [
-                                {
-                                    "name": call.name,
-                                    "arguments": summarize_payload(call.arguments),
-                                }
-                                for call in followup_response.tool_calls
-                            ],
-                            "final_message": followup_response.final_message,
-                            "include_score": followup_response.include_score,
-                            "thought_summary": summarize_payload(followup_response.thought_summary),
-                        },
-                    )
-                    if followup_response.thought_summary and any(
-                        call.name == "preprocess_voice_parts"
-                        for call in followup_response.tool_calls
-                    ):
-                        self._logger.debug(
-                            "chat_llm_followup_preprocess_thought_summary session=%s thought_summary=%s",
-                            session_id,
-                            followup_response.thought_summary,
-                        )
-                    include_score = include_score or followup_response.include_score
-                    response_message = self._merge_thought_summary(
-                        followup_response.final_message or response_message,
-                        followup_response.thought_summary,
-                        followup_response.tool_calls,
-                    )
-                    thought_block_for_response = self._format_thought_summary_block(
-                        followup_response.thought_summary,
-                        followup_response.tool_calls,
-                    ) or thought_block_for_response
-
-                    if not followup_response.tool_calls:
-                        response["message"] = self._format_followup_message_text(
-                            response_message
-                        )
-                        break
-
-                    if repairs_used >= MAX_INTERNAL_TOOL_REPAIRS:
-                        response["message"] = (
-                            f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
-                            "Please revise the request or plan details."
-                        )
-                        break
-
-                    repairs_used += 1
-                    pending_calls = list(followup_response.tool_calls)
-
-                if include_score or response.get("review_required"):
-                    updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
-                    updated_score = updated_snapshot.get("current_score")
-                    if updated_score is not None:
-                        response["current_score"] = updated_score
+                response = await self._run_llm_tool_workflow(
+                    session_id,
+                    snapshot,
+                    current_score["score"],
+                    llm_response.tool_calls,
+                    initial_response_message=response_message,
+                    initial_include_score=llm_response.include_score,
+                    initial_thought_block=self._format_thought_summary_block(
+                        llm_response.thought_summary,
+                        llm_response.tool_calls,
+                    ),
+                    user_id=user_id,
+                    user_email=user_email,
+                )
                 await self._sessions.append_history(
                     session_id, "assistant", str(response.get("message", ""))
                 )
@@ -466,6 +386,68 @@ class Orchestrator:
             "job_id": job_id,
         }
 
+    async def _start_preprocess_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        tool_calls: List[ToolCall],
+        *,
+        initial_message: str,
+        user_id: str,
+        user_email: str,
+    ) -> Dict[str, Any]:
+        """Create a background preprocess job and return a pollable response."""
+        existing = self._preprocess_tasks.get(session_id)
+        if existing and not existing.done():
+            return {
+                "type": "chat_text",
+                "message": (
+                    "I am still preparing the derived score from your previous request. "
+                    "Please wait for it to finish before sending another message."
+                ),
+            }
+        job_id = uuid.uuid4().hex
+        await asyncio.to_thread(
+            self._job_store.create_job,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+            status="queued",
+            render_type="preprocess",
+        )
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            status="queued",
+            step="preprocess",
+            message=initial_message,
+            progress=0.0,
+            jobKind="preprocess",
+        )
+        task = asyncio.create_task(
+            self._run_preprocess_job(
+                session_id,
+                copy.deepcopy(score),
+                list(tool_calls),
+                job_id,
+                user_id,
+                user_email,
+                initial_message=initial_message,
+            )
+        )
+        self._preprocess_tasks[session_id] = task
+
+        def _cleanup(_: asyncio.Task) -> None:
+            self._preprocess_tasks.pop(session_id, None)
+
+        task.add_done_callback(_cleanup)
+        return {
+            "type": "chat_progress",
+            "message": initial_message,
+            "progress_url": f"/sessions/{session_id}/progress",
+            "job_id": job_id,
+        }
+
     async def _run_synthesis_job(
         self,
         session_id: str,
@@ -552,6 +534,216 @@ class Orchestrator:
             )
         finally:
             clear_log_context()
+
+    async def _run_preprocess_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        tool_calls: List[ToolCall],
+        job_id: str,
+        user_id: str,
+        user_email: str,
+        *,
+        initial_message: str,
+    ) -> None:
+        """Execute preprocess workflow in the background and publish completion message."""
+        try:
+            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="preprocess",
+                message=initial_message,
+                progress=0.05,
+                jobKind="preprocess",
+            )
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            response = await self._run_llm_tool_workflow(
+                session_id,
+                snapshot,
+                score,
+                tool_calls,
+                initial_response_message=initial_message,
+                initial_include_score=False,
+                initial_thought_block=None,
+                user_id=user_id,
+                user_email=user_email,
+            )
+            message = str(response.get("message") or "").strip() or "Preprocess finished."
+            await self._sessions.append_history(session_id, "assistant", message)
+            if response.get("type") == "chat_error":
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="failed",
+                    step="error",
+                    message=message,
+                    errorMessage=message,
+                    progress=1.0,
+                    jobKind="preprocess",
+                )
+            else:
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="completed",
+                    step="review" if response.get("review_required") else "done",
+                    message=message,
+                    progress=1.0,
+                    jobKind="preprocess",
+                    reviewRequired=bool(response.get("review_required")),
+                )
+        except Exception as exc:
+            self._logger.exception("preprocess_job_failed session=%s error=%s", session_id, exc)
+            safe_message = "Couldn't finish preprocessing."
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="failed",
+                step="error",
+                message=safe_message,
+                errorMessage=safe_message,
+                progress=1.0,
+                jobKind="preprocess",
+            )
+        finally:
+            clear_log_context()
+
+    async def _run_llm_tool_workflow(
+        self,
+        session_id: str,
+        snapshot: Dict[str, Any],
+        current_score: Dict[str, Any],
+        tool_calls: List[ToolCall],
+        *,
+        initial_response_message: str,
+        initial_include_score: bool,
+        initial_thought_block: Optional[str],
+        user_id: str,
+        user_email: str,
+    ) -> Dict[str, Any]:
+        """Execute an LLM-driven tool workflow with bounded repair turns."""
+        include_score = initial_include_score
+        response_message = initial_response_message
+        thought_block_for_response = initial_thought_block
+        pending_calls = list(tool_calls)
+        working_score = current_score
+        score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
+        repairs_used = 0
+        review_required_pending = False
+        response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
+
+        while True:
+            tool_result = await self._execute_tool_calls(
+                session_id,
+                working_score,
+                pending_calls,
+                user_id=user_id,
+                score_summary=score_summary,
+                user_email=user_email,
+            )
+            working_score = tool_result.score
+            review_required_pending = review_required_pending or tool_result.review_required
+            response = tool_result.audio_response or {
+                "type": "chat_text",
+                "message": response_message,
+            }
+            followup_prompt = tool_result.followup_prompt
+            if followup_prompt is None:
+                if response_message:
+                    response["message"] = response_message
+                if review_required_pending:
+                    response["review_required"] = True
+                break
+
+            if self._tool_payload_has_error(followup_prompt):
+                response["suppress_selector"] = True
+
+            latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            followup_response, followup_error = await self._decide_followup_with_llm(
+                latest_snapshot, followup_prompt, working_score
+            )
+            if followup_error:
+                return {"type": "chat_error", "message": followup_error}
+
+            if followup_response is None:
+                response["message"] = followup_prompt
+                if review_required_pending:
+                    response["review_required"] = True
+                break
+
+            self._logger.debug(
+                "chat_llm_followup session=%s response=%s",
+                session_id,
+                {
+                    "tool_calls": [
+                        {
+                            "name": call.name,
+                            "arguments": summarize_payload(call.arguments),
+                        }
+                        for call in followup_response.tool_calls
+                    ],
+                    "final_message": followup_response.final_message,
+                    "include_score": followup_response.include_score,
+                    "thought_summary": summarize_payload(followup_response.thought_summary),
+                },
+            )
+            if followup_response.thought_summary and any(
+                call.name == "preprocess_voice_parts"
+                for call in followup_response.tool_calls
+            ):
+                self._logger.debug(
+                    "chat_llm_followup_preprocess_thought_summary session=%s thought_summary=%s",
+                    session_id,
+                    followup_response.thought_summary,
+                )
+            include_score = include_score or followup_response.include_score
+            response_message = self._merge_thought_summary(
+                followup_response.final_message or response_message,
+                followup_response.thought_summary,
+                followup_response.tool_calls,
+            )
+            thought_block_for_response = self._format_thought_summary_block(
+                followup_response.thought_summary,
+                followup_response.tool_calls,
+            ) or thought_block_for_response
+
+            if not followup_response.tool_calls:
+                response = {
+                    "type": "chat_text",
+                    "message": self._format_followup_message_text(response_message),
+                }
+                if review_required_pending:
+                    response["review_required"] = True
+                break
+
+            if repairs_used >= MAX_INTERNAL_TOOL_REPAIRS:
+                response = {
+                    "type": "chat_text",
+                    "message": (
+                        f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
+                        "Please revise the request or plan details."
+                    ),
+                }
+                break
+
+            repairs_used += 1
+            pending_calls = list(followup_response.tool_calls)
+
+        if include_score or response.get("review_required"):
+            updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            updated_score = updated_snapshot.get("current_score")
+            if updated_score is not None:
+                response["current_score"] = updated_score
+        return response
+
+    def _should_start_preprocess_job(self, tool_calls: List[ToolCall]) -> bool:
+        """Return True when the turn should switch to background preprocess progress."""
+        if not tool_calls:
+            return False
+        tool_names = {call.name for call in tool_calls}
+        return "preprocess_voice_parts" in tool_names and "synthesize" not in tool_names
 
     def _selection_requested(
         self,
@@ -930,8 +1122,40 @@ class Orchestrator:
                 "llm_followup_parse_failed raw_text=%s",
                 summarize_payload(text),
             )
+            prose_fallback = self._extract_followup_prose_fallback(text)
+            if prose_fallback:
+                return (
+                    LlmResponse(
+                        tool_calls=[],
+                        final_message=prose_fallback,
+                        include_score=False,
+                    ),
+                    None,
+                )
             return None, tool_summary
         return response, None
+
+    def _extract_followup_prose_fallback(self, text: str) -> str:
+        """Extract a safe user-facing followup message from malformed LLM output."""
+        cleaned = text.strip()
+        if not cleaned:
+            return ""
+        final_message_match = re.search(
+            r'"final_message"\s*:\s*"((?:\\.|[^"\\])*)"',
+            cleaned,
+            flags=re.DOTALL,
+        )
+        if final_message_match:
+            encoded_message = f"\"{final_message_match.group(1)}\""
+            try:
+                parsed_message = json.loads(encoded_message)
+            except json.JSONDecodeError:
+                parsed_message = final_message_match.group(1)
+            if isinstance(parsed_message, str) and parsed_message.strip():
+                return parsed_message.strip()
+        if cleaned.startswith("{") and '"tool_calls"' in cleaned:
+            return "Preprocessing is still being adjusted. Please try again."
+        return cleaned
 
     def _format_followup_message_text(self, message: str) -> str:
         """Format followup text payloads into a user-facing string."""
@@ -1088,7 +1312,6 @@ class Orchestrator:
         """Execute allowed tool calls and update session state."""
         current_score = score
         audio_response: Optional[Dict[str, Any]] = None
-        preprocess_completed_this_batch = False
         reparse_completed_this_batch = False
         reparse_selected_verse: Optional[str] = None
         reparse_noop_this_batch = False
@@ -1213,9 +1436,12 @@ class Orchestrator:
                         result.get("status"),
                         self._summarize_derived_targets(mapping_context),
                     )
-                    audio_response = self._build_review_required_response(result)
-                    preprocess_completed_this_batch = True
-                    continue
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response=None,
+                        followup_prompt=json.dumps(result, sort_keys=True),
+                        review_required=True,
+                    )
                 if result.get("status") == "action_required":
                     self._logger.info(
                         "preprocess_action_required session=%s reason=%s failed_rules=%s diagnostics=%s",
@@ -1239,12 +1465,6 @@ class Orchestrator:
                 continue
             if call.name == "synthesize":
                 if self._score_has_review_pending(current_score):
-                    if preprocess_completed_this_batch:
-                        # Review gate: do not allow synth in same tool batch where preprocess just succeeded.
-                        return ToolExecutionResult(
-                            score=current_score,
-                            audio_response=self._build_review_required_response(None),
-                        )
                     # Review progression is LLM-driven; synth tool call implies user-approved proceed.
                     current_score = self._clear_review_pending(current_score)
                     await self._sessions.set_score(session_id, current_score)
@@ -1420,26 +1640,6 @@ class Orchestrator:
         if not isinstance(plan, dict):
             return None
         return copy.deepcopy(plan)
-
-    def _build_review_required_response(
-        self, preprocess_result: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Build chat response payload when user review is required before synthesis."""
-        payload: Dict[str, Any] = {
-            "type": "chat_text",
-            "review_required": True,
-            "message": (
-                "Preprocessing completed. Please review the derived score. "
-                "Reply 'proceed' to start audio generation, or describe revisions."
-            ),
-        }
-        if isinstance(preprocess_result, dict):
-            payload["preprocess_status"] = preprocess_result.get("status")
-            if isinstance(preprocess_result.get("modified_musicxml_path"), str):
-                payload["modified_musicxml_path"] = preprocess_result.get(
-                    "modified_musicxml_path"
-                )
-        return payload
 
     def _mark_review_pending(
         self, score: Dict[str, Any], preprocess_result: Dict[str, Any]
@@ -1626,6 +1826,7 @@ class ToolExecutionResult:
     score: Dict[str, Any]
     audio_response: Optional[Dict[str, Any]]
     followup_prompt: Optional[str] = None
+    review_required: bool = False
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

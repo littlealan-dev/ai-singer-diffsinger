@@ -31,3 +31,18 @@ def test_build_progress_payload_maps_error_status():
     )
     assert payload["status"] == "error"
     assert payload["error"] == "boom"
+
+
+def test_build_progress_payload_includes_preprocess_review_fields():
+    payload = build_progress_payload(
+        "job-pre",
+        {
+            "status": "completed",
+            "message": "Please review the derived score.",
+            "jobKind": "preprocess",
+            "reviewRequired": True,
+        },
+    )
+    assert payload["status"] == "done"
+    assert payload["job_kind"] == "preprocess"
+    assert payload["review_required"] is True

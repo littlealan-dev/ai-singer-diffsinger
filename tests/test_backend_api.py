@@ -242,6 +242,31 @@ def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
     assert score_response.text == derived_xml
 
 
+def test_chat_returns_progress_immediately_for_preprocess(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
+            '"final_message":"I\\u0027m splitting the requested part now and will let you know when the derived score is ready to review.","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.json()
+    assert chat_payload["type"] == "chat_progress"
+    assert "splitting the requested part" in chat_payload["message"].lower()
+    assert chat_payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
+
+
 def test_repreprocess_uses_original_uploaded_score_context(client):
     test_client, app = client
     session_id = _create_session(test_client)

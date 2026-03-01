@@ -709,6 +709,48 @@ body.legal-active #root {
   font-weight: 600;
 }
 
+.thought-summary {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.thought-summary-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: start;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: rgba(220, 210, 255, 0.82);
+  font: inherit;
+  font-size: 0.98rem;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.thought-summary-caret {
+  display: inline-block;
+  font-size: 1.1rem;
+  line-height: 1;
+  transform: rotate(-90deg);
+  transition: transform 140ms ease;
+}
+
+.thought-summary-caret.expanded {
+  transform: rotate(0deg);
+}
+
+.thought-summary-content {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .thinking-bubble {
   align-self: flex-start;
   padding: 12px 16px;

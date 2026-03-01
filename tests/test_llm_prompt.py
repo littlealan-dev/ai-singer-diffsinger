@@ -99,3 +99,20 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
     assert "SVS Voice-Part Lint Rules (Canonical Runtime Validation)" in prompt
     assert "- Rule code: same_part_target_completeness" in prompt
     assert "Suggested fix: Include all required same-part sibling targets" in prompt
+
+
+def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert (
+        "When you call preprocess_voice_parts, set final_message to a short preprocess-in-progress confirmation"
+        in prompt
+    )

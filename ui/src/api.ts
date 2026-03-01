@@ -47,6 +47,8 @@ export type ProgressResponse = {
   progress?: number;
   audio_url?: string;
   job_id?: string;
+  job_kind?: string;
+  review_required?: boolean;
   error?: string;
 };
 

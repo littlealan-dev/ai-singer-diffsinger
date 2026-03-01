@@ -107,6 +107,7 @@ export default function MainApp() {
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
   const [showCreditsModal, setShowCreditsModal] = useState(false);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
+  const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -220,12 +221,17 @@ export default function MainApp() {
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
+      const appendTerminalPreprocessMessage =
+        payload.job_kind === "preprocess" &&
+        (payload.status === "done" || payload.status === "error");
       setMessages((prev) =>
         prev.map((msg) => {
           if (msg.id !== activeProgress.messageId) return msg;
           return {
             ...msg,
-            content: appendProgressMessage(msg.content, nextMessage),
+            content: appendTerminalPreprocessMessage
+              ? appendPreprocessTerminalMessage(msg.content, nextMessage)
+              : appendProgressMessage(msg.content, nextMessage),
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
             audioUrl: nextAudioUrl || msg.audioUrl,
             isProgress: payload.status !== "done" && payload.status !== "error",
@@ -241,13 +247,27 @@ export default function MainApp() {
       try {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled) return;
-        applyProgress(payload);
+        const shouldUpdateProgressBubble =
+          payload.job_kind !== "preprocess" ||
+          payload.status === "done" ||
+          payload.status === "error";
+        if (shouldUpdateProgressBubble) {
+          applyProgress(payload);
+        }
+        if (payload.status === "done" && payload.review_required) {
+          await refreshScorePreview();
+        }
         if (payload.status === "done") {
           setActiveProgress(null);
         }
         if (payload.status === "error") {
           setActiveProgress(null);
-          setError(payload.error || payload.message || "Synthesis failed.");
+          setError(
+            payload.message ||
+              (payload.job_kind === "preprocess"
+                ? "Preprocess failed."
+                : "Synthesis failed.")
+          );
         }
       } catch (err: any) {
         if (!cancelled) {
@@ -282,6 +302,13 @@ export default function MainApp() {
 
   const appendMessage = (message: Message) => {
     setMessages((prev) => [...prev, message]);
+  };
+
+  const toggleThoughtSummary = (messageId: string) => {
+    setExpandedThoughts((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
   };
 
   const refreshScorePreview = async () => {
@@ -527,9 +554,55 @@ export default function MainApp() {
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 {msg.role === "assistant" ? (
-                  <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
-                    {msg.content}
-                  </ReactMarkdown>
+                  (() => {
+                    const { mainContent, thoughtSummary, trailingContent } = splitThoughtSummary(
+                      msg.content
+                    );
+                    const isExpanded = Boolean(expandedThoughts[msg.id]);
+                    return (
+                      <>
+                        {mainContent ? (
+                          <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                            {mainContent}
+                          </ReactMarkdown>
+                        ) : null}
+                        {thoughtSummary ? (
+                          <div className="thought-summary">
+                            <button
+                              type="button"
+                              className="thought-summary-toggle"
+                              onClick={() => toggleThoughtSummary(msg.id)}
+                              aria-expanded={isExpanded}
+                            >
+                              <span
+                                className={clsx(
+                                  "thought-summary-caret",
+                                  isExpanded && "expanded"
+                                )}
+                                aria-hidden="true"
+                              >
+                                ▾
+                              </span>
+                              <span>Thought summary</span>
+                            </button>
+                            {isExpanded ? (
+                              <ReactMarkdown
+                                className="chat-markdown thought-summary-content"
+                                remarkPlugins={[remarkGfm]}
+                              >
+                                {thoughtSummary}
+                              </ReactMarkdown>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {trailingContent ? (
+                          <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                            {trailingContent}
+                          </ReactMarkdown>
+                        ) : null}
+                      </>
+                    );
+                  })()
                 ) : (
                   <p>{msg.content}</p>
                 )}
@@ -709,4 +782,77 @@ function formatDuration(totalSeconds: number): string {
     return `${minutes}:${String(seconds).padStart(2, "0")}`;
   }
   return `${seconds}s`;
+}
+
+function splitThoughtSummary(content: string): {
+  mainContent: string;
+  thoughtSummary: string;
+  trailingContent: string;
+} {
+  const marker = "\n\nThought summary:\n";
+  if (content.includes(marker)) {
+    const [main, remainder] = content.split(marker, 2);
+    const trailingMarker = "\n\nPost-update:\n";
+    if (remainder.includes(trailingMarker)) {
+      const [thought, trailing] = remainder.split(trailingMarker, 2);
+      return {
+        mainContent: main.trim(),
+        thoughtSummary: thought.trim(),
+        trailingContent: trailing.trim(),
+      };
+    }
+    return {
+      mainContent: main.trim(),
+      thoughtSummary: remainder.trim(),
+      trailingContent: "",
+    };
+  }
+  const prefix = "Thought summary:\n";
+  if (content.startsWith(prefix)) {
+    const remainder = content.slice(prefix.length);
+    const trailingMarker = "\n\nPost-update:\n";
+    if (remainder.includes(trailingMarker)) {
+      const [thought, trailing] = remainder.split(trailingMarker, 2);
+      return {
+        mainContent: "",
+        thoughtSummary: thought.trim(),
+        trailingContent: trailing.trim(),
+      };
+    }
+    return {
+      mainContent: "",
+      thoughtSummary: remainder.trim(),
+      trailingContent: "",
+    };
+  }
+  return {
+    mainContent: content,
+    thoughtSummary: "",
+    trailingContent: "",
+  };
+}
+
+function appendPreprocessTerminalMessage(current: string, incoming?: string | null): string {
+  const trimmedIncoming = incoming?.trim();
+  if (!trimmedIncoming) return current;
+  const { mainContent, thoughtSummary, trailingContent } = splitThoughtSummary(current);
+  if (
+    mainContent.includes(trimmedIncoming) ||
+    trailingContent.includes(trimmedIncoming)
+  ) {
+    return current;
+  }
+  const nextTrailingContent = trailingContent
+    ? `${trailingContent.trimEnd()}\n\n${trimmedIncoming}`
+    : trimmedIncoming;
+  if (!thoughtSummary) {
+    const nextMainContent = mainContent
+      ? `${mainContent.trimEnd()}\n\n${trimmedIncoming}`
+      : trimmedIncoming;
+    return nextMainContent;
+  }
+  const baseContent = mainContent
+    ? `${mainContent}\n\nThought summary:\n${thoughtSummary}`
+    : `Thought summary:\n${thoughtSummary}`;
+  return `${baseContent}\n\nPost-update:\n${nextTrailingContent}`;
 }
