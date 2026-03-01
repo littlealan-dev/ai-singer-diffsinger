@@ -108,6 +108,9 @@ def parse_score(
     score_dict["voice_part_signals"]["measure_staff_voice_map"] = _build_measure_staff_voice_map(
         Path(file_path)
     )
+    score_dict["voice_part_signals"]["measure_chord_density"] = _build_measure_chord_density(
+        Path(file_path)
+    )
     score_dict["voice_part_signals"]["measure_annotations"] = _build_measure_annotations(
         Path(file_path)
     )
@@ -359,6 +362,120 @@ def _build_measure_annotations(path: Path) -> List[Dict[str, Any]]:
                         "direction_entries": direction_entries,
                     }
                 )
+        parts.append(
+            {
+                "part_id": part_id,
+                "part_name": part_name_by_id.get(part_id),
+                "measures": measures,
+            }
+        )
+    return parts
+
+
+def _build_measure_chord_density(path: Path) -> List[Dict[str, Any]]:
+    """Build per-measure maximum simultaneous note counts per part."""
+    content = _read_musicxml_content(path)
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError as exc:
+        raise ValueError(f"Invalid MusicXML: {exc}") from exc
+
+    part_name_by_id: Dict[str, Optional[str]] = {}
+    for elem in root.iter():
+        if _local_tag(elem.tag) != "score-part":
+            continue
+        part_id = elem.attrib.get("id")
+        if not part_id:
+            continue
+        part_name = None
+        for child in elem:
+            if _local_tag(child.tag) == "part-name":
+                part_name = (child.text or "").strip() or None
+                break
+        part_name_by_id[part_id] = part_name
+
+    parts: List[Dict[str, Any]] = []
+    for part in root.iter():
+        if _local_tag(part.tag) != "part":
+            continue
+        part_id = part.attrib.get("id")
+        measures: List[Dict[str, Any]] = []
+        measure_index = 0
+        current_divisions = 1
+        absolute_divisions = 0.0
+        for measure in part:
+            if _local_tag(measure.tag) != "measure":
+                continue
+            measure_index += 1
+            measure_number = measure.attrib.get("number") or str(measure_index)
+            measure_start = absolute_divisions
+            offset_in_measure = 0.0
+            last_note_start = 0.0
+            max_simultaneous_notes = 0
+            note_counts_by_start: Dict[float, int] = {}
+            for child in measure:
+                tag = _local_tag(child.tag)
+                if tag == "attributes":
+                    for attr_child in child:
+                        if _local_tag(attr_child.tag) == "divisions":
+                            value = (attr_child.text or "").strip()
+                            if value:
+                                try:
+                                    current_divisions = max(1, int(value))
+                                except ValueError:
+                                    current_divisions = current_divisions or 1
+                    continue
+                if tag == "backup":
+                    duration = 0.0
+                    for backup_child in child:
+                        if _local_tag(backup_child.tag) == "duration":
+                            value = (backup_child.text or "").strip()
+                            if value:
+                                duration = float(value)
+                                break
+                    offset_in_measure = max(0.0, offset_in_measure - duration / current_divisions)
+                    continue
+                if tag == "forward":
+                    duration = 0.0
+                    for forward_child in child:
+                        if _local_tag(forward_child.tag) == "duration":
+                            value = (forward_child.text or "").strip()
+                            if value:
+                                duration = float(value)
+                                break
+                    offset_in_measure += duration / current_divisions
+                    continue
+                if tag != "note":
+                    continue
+                is_chord = False
+                is_rest = False
+                duration = 0.0
+                for note_child in child:
+                    note_tag = _local_tag(note_child.tag)
+                    if note_tag == "chord":
+                        is_chord = True
+                    elif note_tag == "rest":
+                        is_rest = True
+                    elif note_tag == "duration":
+                        value = (note_child.text or "").strip()
+                        if value:
+                            duration = float(value)
+                note_start = last_note_start if is_chord else offset_in_measure
+                if not is_rest:
+                    absolute_start = round(measure_start + note_start, 6)
+                    note_counts_by_start[absolute_start] = note_counts_by_start.get(absolute_start, 0) + 1
+                    if note_counts_by_start[absolute_start] > max_simultaneous_notes:
+                        max_simultaneous_notes = note_counts_by_start[absolute_start]
+                if not is_chord:
+                    last_note_start = note_start
+                    offset_in_measure += duration / current_divisions
+            absolute_divisions = measure_start + offset_in_measure
+            measures.append(
+                {
+                    "measure_number": measure_number,
+                    "max_simultaneous_notes": max_simultaneous_notes,
+                }
+            )
         parts.append(
             {
                 "part_id": part_id,

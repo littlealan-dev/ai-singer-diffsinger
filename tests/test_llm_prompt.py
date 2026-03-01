@@ -58,3 +58,44 @@ def test_build_system_prompt_includes_preprocess_mapping_context() -> None:
     )
     assert "Preprocess-derived mapping context (if available):" in prompt
     assert '"derived_part_id": "P_DERIVED_ABC"' in prompt
+
+
+def test_build_system_prompt_includes_latest_successful_preprocess_plan() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Raine_Rena_2.01"],
+        score_summary={"title": "My Tribute"},
+        voice_part_signals={"parts": []},
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan={
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {"start_measure": 7, "end_measure": 11, "mode": "derive"},
+                    ],
+                }
+            ]
+        },
+        voicebank_details=None,
+    )
+    assert "Latest successful preprocess plan (if available):" in prompt
+    assert '"voice_part_id": "voice part 1"' in prompt
+    assert '"start_measure": 7' in prompt
+
+
+def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "SVS Voice-Part Lint Rules (Canonical Runtime Validation)" in prompt
+    assert "- Rule code: same_part_target_completeness" in prompt
+    assert "Suggested fix: Include all required same-part sibling targets" in prompt

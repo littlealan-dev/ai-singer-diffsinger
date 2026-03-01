@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
+from src.api.voice_part_lint_rules import get_lint_rule_spec
 
 VOICE_PART_STATUSES = {
     "ready",
@@ -46,11 +47,44 @@ VALID_TIMELINE_DECISION_TYPES = {
     "INSERT_RESTS",
     "DROP_NOTES_IF_NEEDED",
 }
-VALID_TIMELINE_METHODS = {"A", "B", "trivial"}
+PUBLIC_TIMELINE_METHODS = {"trivial", "ranked"}
+# Deprecated internal-only methods kept for compatibility with repair paths.
+INTERNAL_TIMELINE_METHODS = {"A", "B"}
+VALID_TIMELINE_METHODS = PUBLIC_TIMELINE_METHODS | INTERNAL_TIMELINE_METHODS
+VALID_RANK_FALLBACKS = {"greedy", "skip"}
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
 _TRANSFORM_ARTIFACT_INDEX: Dict[str, Dict[str, Any]] = {}
 _DERIVED_STEM_SUFFIX_RE = re.compile(r"\.derived_[0-9a-f]{10}$")
+
+
+def _lint_finding(
+    rule: str,
+    *,
+    severity: str = "error",
+    failing_attributes: Optional[Dict[str, Any]] = None,
+    **payload: Any,
+) -> Dict[str, Any]:
+    spec = get_lint_rule_spec(rule)
+    rendered_message = spec.message_template
+    if spec.message_template:
+        try:
+            rendered_message = spec.message_template.format(**(failing_attributes or {}))
+        except Exception:
+            rendered_message = spec.message_template
+    finding: Dict[str, Any] = {
+        "rule": spec.code,
+        "rule_name": spec.name,
+        "rule_definition": spec.definition,
+        "fail_condition": spec.fail_condition,
+        "suggestion": spec.suggestion,
+        "severity": severity,
+        "message": rendered_message,
+    }
+    if failing_attributes:
+        finding["failing_attributes"] = failing_attributes
+    finding.update(payload)
+    return finding
 
 
 def analyze_score_voice_parts(
@@ -1096,24 +1130,42 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             
             # Rule 1: Chords or explicit SPLIT needs require sections.
             if has_chords or has_split_need:
-                findings.append({
-                    "rule": "plan_requires_sections",
-                    "severity": "error",
-                    "target_index": target_idx,
-                    "part_index": part_index,
-                    "target_voice_part_id": target_voice_part_id,
-                    "details": "Score complexity (chords or multi-voice segments) requires a section-by-section plan instead of the simple action path.",
-                })
+                findings.append(
+                    _lint_finding(
+                        "plan_requires_sections",
+                        target_index=target_idx,
+                        part_index=part_index,
+                        target_voice_part_id=target_voice_part_id,
+                        details={
+                            "has_chords": has_chords,
+                            "has_split_need": has_split_need,
+                            "reason": "complexity_requires_sections",
+                        },
+                        failing_attributes={
+                            "has_chords": has_chords,
+                            "has_split_need": has_split_need,
+                        },
+                    )
+                )
             # Rule 2: Mixed region qualities (some resolved, some unassigned) require sections to explicitly handle transitions.
             elif "RESOLVED" in all_statuses and has_unassigned:
-                findings.append({
-                    "rule": "mixed_region_requires_sections",
-                    "severity": "error",
-                    "target_index": target_idx,
-                    "part_index": part_index,
-                    "target_voice_part_id": target_voice_part_id,
-                    "details": f"Part contains mixed region qualities {sorted(all_statuses)} which require explicit sectional handling.",
-                })
+                findings.append(
+                    _lint_finding(
+                        "mixed_region_requires_sections",
+                        target_index=target_idx,
+                        part_index=part_index,
+                        target_voice_part_id=target_voice_part_id,
+                        details={
+                            "region_statuses": sorted(all_statuses),
+                            "has_unassigned": has_unassigned,
+                            "reason": "mixed_region_qualities_require_sections",
+                        },
+                        failing_attributes={
+                            "region_statuses": sorted(all_statuses),
+                            "has_unassigned": has_unassigned,
+                        },
+                    )
+                )
 
         if not sections:
             continue
@@ -1122,14 +1174,14 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         contiguous_error = _lint_sections_contiguous_no_gaps(sections)
         if contiguous_error is not None:
             findings.append(
-                {
-                    "rule": "section_timeline_contiguous_no_gaps",
-                    "severity": "error",
-                    "target_index": target_idx,
-                    "part_index": part_index,
-                    "target_voice_part_id": target_voice_part_id,
-                    "details": contiguous_error,
-                }
+                _lint_finding(
+                    "section_timeline_contiguous_no_gaps",
+                    target_index=target_idx,
+                    part_index=part_index,
+                    target_voice_part_id=target_voice_part_id,
+                    details=contiguous_error,
+                    failing_attributes=contiguous_error,
+                )
             )
 
         native_sung_measures = _native_sung_measures_for_target(
@@ -1153,27 +1205,40 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     and isinstance(melody_source_part, int)
                     and isinstance(melody_source.get("voice_part_id"), str)
                 ):
+                    target_lane_count = _count_trivial_split_target_lanes_for_section(
+                        targets,
+                        part_index=part_index,
+                        start_measure=start,
+                        end_measure=end,
+                        source_part_index=melody_source_part,
+                        source_voice_part_id=str(melody_source["voice_part_id"]),
+                    )
                     mismatch = _trivial_method_chord_size_mismatch_details(
                         score,
                         source_part_index=melody_source_part,
                         source_voice_part_id=str(melody_source["voice_part_id"]),
                         start_measure=start,
                         end_measure=end,
+                        target_lane_count=target_lane_count,
                     )
                     if mismatch["mismatch_count"] > 0:
                         findings.append(
-                            {
-                                "rule": "trivial_method_requires_equal_chord_voice_part_count",
-                                "severity": "error",
-                                "target_index": target_idx,
-                                "part_index": part_index,
-                                "target_voice_part_id": target_voice_part_id,
-                                "section": {
-                                    "start_measure": start,
-                                    "end_measure": end,
+                            _lint_finding(
+                                "trivial_method_requires_equal_chord_voice_part_count",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                details=mismatch,
+                                failing_attributes={
+                                    "method": method,
+                                    "decision_type": decision_type,
+                                    "source_part_index": melody_source_part,
+                                    "source_voice_part_id": str(melody_source["voice_part_id"]),
+                                    "target_lane_count": target_lane_count,
+                                    "expected_simultaneous_note_count": mismatch.get("expected_simultaneous_note_count"),
                                 },
-                                "details": mismatch,
-                            }
+                            )
                         )
                 if (
                     isinstance(melody_source_part, int)
@@ -1183,15 +1248,18 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     )
                 ):
                     findings.append(
-                        {
-                            "rule": "cross_staff_melody_source_when_local_available",
-                            "severity": "error",
-                            "target_index": target_idx,
-                            "part_index": part_index,
-                            "target_voice_part_id": target_voice_part_id,
-                            "section": {"start_measure": start, "end_measure": end},
-                            "source_part_index": melody_source_part,
-                        }
+                        _lint_finding(
+                            "cross_staff_melody_source_when_local_available",
+                            target_index=target_idx,
+                            part_index=part_index,
+                            target_voice_part_id=target_voice_part_id,
+                            section={"start_measure": start, "end_measure": end},
+                            source_part_index=melody_source_part,
+                            failing_attributes={
+                                "source_part_index": melody_source_part,
+                                "target_part_index": part_index,
+                            },
+                        )
                     )
                 if (
                     isinstance(lyric_source_part, int)
@@ -1201,15 +1269,18 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     )
                 ):
                     findings.append(
-                        {
-                            "rule": "cross_staff_lyric_source_when_local_available",
-                            "severity": "error",
-                            "target_index": target_idx,
-                            "part_index": part_index,
-                            "target_voice_part_id": target_voice_part_id,
-                            "section": {"start_measure": start, "end_measure": end},
-                            "source_part_index": lyric_source_part,
-                        }
+                        _lint_finding(
+                            "cross_staff_lyric_source_when_local_available",
+                            target_index=target_idx,
+                            part_index=part_index,
+                            target_voice_part_id=target_voice_part_id,
+                            section={"start_measure": start, "end_measure": end},
+                            source_part_index=lyric_source_part,
+                            failing_attributes={
+                                "source_part_index": lyric_source_part,
+                                "target_part_index": part_index,
+                            },
+                        )
                     )
                 if (
                     isinstance(lyric_source_part, int)
@@ -1237,24 +1308,30 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                         if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
                             findings.append(
-                                {
-                                    "rule": "extension_only_lyric_source_with_word_alternative",
-                                    "severity": "error",
-                                    "target_index": target_idx,
-                                    "part_index": part_index,
-                                    "target_voice_part_id": target_voice_part_id,
-                                    "section": {"start_measure": start, "end_measure": end},
-                                    "selected_lyric_source": {
+                                _lint_finding(
+                                    "extension_only_lyric_source_with_word_alternative",
+                                    target_index=target_idx,
+                                    part_index=part_index,
+                                    target_voice_part_id=target_voice_part_id,
+                                    section={"start_measure": start, "end_measure": end},
+                                    selected_lyric_source={
                                         "part_index": part_index,
                                         "voice_part_id": chosen_voice_part_id,
                                         "stats": chosen_stats,
                                     },
-                                    "suggested_lyric_source": {
+                                    suggested_lyric_source={
                                         "part_index": part_index,
                                         "voice_part_id": alternative["voice_part_id"],
                                         "stats": alternative["stats"],
                                     },
-                                }
+                                    failing_attributes={
+                                        "selected_voice_part_id": chosen_voice_part_id,
+                                        "selected_word_lyric_note_count": chosen_stats.get("word_lyric_note_count"),
+                                        "selected_extension_lyric_note_count": chosen_stats.get("extension_lyric_note_count"),
+                                        "suggested_voice_part_id": alternative["voice_part_id"],
+                                        "suggested_word_lyric_note_count": alternative["stats"].get("word_lyric_note_count"),
+                                    },
+                                )
                             )
                     if chosen_stats["lyric_note_count"] == 0:
                         alternative = _best_same_part_word_lyric_source_for_range(
@@ -1266,57 +1343,112 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                         if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
                             findings.append(
-                                {
-                                    "rule": "empty_lyric_source_with_word_alternative",
-                                    "severity": "error",
-                                    "target_index": target_idx,
-                                    "part_index": part_index,
-                                    "target_voice_part_id": target_voice_part_id,
-                                    "section": {"start_measure": start, "end_measure": end},
-                                    "selected_lyric_source": {
+                                _lint_finding(
+                                    "empty_lyric_source_with_word_alternative",
+                                    target_index=target_idx,
+                                    part_index=part_index,
+                                    target_voice_part_id=target_voice_part_id,
+                                    section={"start_measure": start, "end_measure": end},
+                                    selected_lyric_source={
                                         "part_index": part_index,
                                         "voice_part_id": chosen_voice_part_id,
                                         "stats": chosen_stats,
                                     },
-                                    "suggested_lyric_source": {
+                                    suggested_lyric_source={
                                         "part_index": part_index,
                                         "voice_part_id": alternative["voice_part_id"],
                                         "stats": alternative["stats"],
                                     },
-                                }
+                                    failing_attributes={
+                                        "selected_voice_part_id": chosen_voice_part_id,
+                                        "selected_lyric_note_count": chosen_stats.get("lyric_note_count"),
+                                        "suggested_voice_part_id": alternative["voice_part_id"],
+                                        "suggested_word_lyric_note_count": alternative["stats"].get("word_lyric_note_count"),
+                                    },
+                                )
                             )
+                    alternative = _best_same_part_word_lyric_source_for_range(
+                        score=score,
+                        part_index=part_index,
+                        start_measure=start,
+                        end_measure=end,
+                        exclude_voice_part_id=chosen_voice_part_id,
+                    )
+                    if (
+                        alternative is not None
+                        and _is_weak_word_lyric_source_with_better_alternative(
+                            selected_stats=chosen_stats,
+                            alternative_stats=alternative["stats"],
+                        )
+                    ):
+                        findings.append(
+                            _lint_finding(
+                                "weak_lyric_source_with_better_alternative",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                selected_lyric_source={
+                                    "part_index": part_index,
+                                    "voice_part_id": chosen_voice_part_id,
+                                    "stats": chosen_stats,
+                                },
+                                suggested_lyric_source={
+                                    "part_index": part_index,
+                                    "voice_part_id": alternative["voice_part_id"],
+                                    "stats": alternative["stats"],
+                                },
+                                failing_attributes={
+                                    "selected_voice_part_id": chosen_voice_part_id,
+                                    "selected_word_lyric_note_count": chosen_stats.get("word_lyric_note_count"),
+                                    "selected_word_lyric_coverage_ratio": chosen_stats.get("word_lyric_coverage_ratio"),
+                                    "suggested_voice_part_id": alternative["voice_part_id"],
+                                    "suggested_word_lyric_note_count": alternative["stats"].get("word_lyric_note_count"),
+                                    "suggested_word_lyric_coverage_ratio": alternative["stats"].get("word_lyric_coverage_ratio"),
+                                },
+                            )
+                        )
                 has_lyric_source = isinstance(lyric_source_part, int)
                 has_melody_source = isinstance(melody_source_part, int)
                 if has_lyric_source and not has_melody_source:
                     target_measures = set(range(start, end + 1))
                     if not (target_measures & native_sung_measures):
                         findings.append(
-                            {
-                                "rule": "lyric_source_without_target_notes",
-                                "severity": "error",
-                                "target_index": target_idx,
-                                "part_index": part_index,
-                                "target_voice_part_id": target_voice_part_id,
-                                "section": {"start_measure": start, "end_measure": end},
-                                "details": (
-                                    "Section uses lyric_source without melody_source, but target "
-                                    "lane has no native sung notes in this range."
-                                ),
-                            }
+                        _lint_finding(
+                            "lyric_source_without_target_notes",
+                            target_index=target_idx,
+                            part_index=part_index,
+                            target_voice_part_id=target_voice_part_id,
+                            section={"start_measure": start, "end_measure": end},
+                            details={
+                                "reason": "lyric_source_without_target_notes",
+                                "has_lyric_source": has_lyric_source,
+                                "has_melody_source": has_melody_source,
+                                "native_sung_measure_overlap": False,
+                            },
+                            failing_attributes={
+                                "has_lyric_source": has_lyric_source,
+                                "has_melody_source": has_melody_source,
+                                "native_sung_measure_overlap": False,
+                            },
+                            )
                         )
             if section.get("mode") != "derive":
                 rest_hit = [m for m in range(start, end + 1) if m in native_sung_measures]
                 if rest_hit:
                     findings.append(
-                        {
-                            "rule": "no_rest_when_target_has_native_notes",
-                            "severity": "error",
-                            "target_index": target_idx,
-                            "part_index": part_index,
-                            "target_voice_part_id": target_voice_part_id,
-                            "section": {"start_measure": start, "end_measure": end},
-                            "overlap_ranges": _collapse_measure_ranges(rest_hit),
-                        }
+                        _lint_finding(
+                            "no_rest_when_target_has_native_notes",
+                            target_index=target_idx,
+                            part_index=part_index,
+                            target_voice_part_id=target_voice_part_id,
+                            section={"start_measure": start, "end_measure": end},
+                            overlap_ranges=_collapse_measure_ranges(rest_hit),
+                            failing_attributes={
+                                "mode": section.get("mode"),
+                                "overlap_measure_count": len(rest_hit),
+                            },
+                        )
                     )
             else:
                 claim_set = by_part_claims.setdefault(part_index, set())
@@ -1330,12 +1462,14 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         missing = sorted(m for m in source_measures if m not in claimed)
         if missing:
             findings.append(
-                {
-                    "rule": "same_clef_claim_coverage",
-                    "severity": "error",
-                    "part_index": part_index,
-                    "missing_ranges": _collapse_measure_ranges(missing),
-                }
+                _lint_finding(
+                    "same_clef_claim_coverage",
+                    part_index=part_index,
+                    missing_ranges=_collapse_measure_ranges(missing),
+                    failing_attributes={
+                        "missing_measure_count": len(missing),
+                    },
+                )
             )
 
     return {"ok": len(findings) == 0, "findings": findings}
@@ -1374,14 +1508,17 @@ def _lint_same_part_target_completeness(
         missing = sorted(expected_targets - actual_targets)
         if missing:
             findings.append(
-                {
-                    "rule": "same_part_target_completeness",
-                    "severity": "error",
-                    "part_index": part_index,
-                    "expected_voice_part_ids": sorted(expected_targets),
-                    "actual_voice_part_ids": sorted(actual_targets),
-                    "missing_voice_part_ids": missing,
-                }
+                _lint_finding(
+                    "same_part_target_completeness",
+                    part_index=part_index,
+                    expected_voice_part_ids=sorted(expected_targets),
+                    actual_voice_part_ids=sorted(actual_targets),
+                    missing_voice_part_ids=missing,
+                    failing_attributes={
+                        "expected_voice_part_ids": sorted(expected_targets),
+                        "actual_voice_part_ids": sorted(actual_targets),
+                    },
+                )
             )
     return findings
 
@@ -1421,6 +1558,7 @@ def _trivial_method_chord_size_mismatch_details(
     source_voice_part_id: str,
     start_measure: int,
     end_measure: int,
+    target_lane_count: int,
 ) -> Dict[str, Any]:
     parts = score.get("parts") or []
     if source_part_index < 0 or source_part_index >= len(parts):
@@ -1428,13 +1566,12 @@ def _trivial_method_chord_size_mismatch_details(
             "reason": "source_part_out_of_range",
             "source_part_index": source_part_index,
             "source_voice_part_id": source_voice_part_id,
-            "expected_voice_part_count": 0,
+            "expected_simultaneous_note_count": 0,
+            "target_lane_count": target_lane_count,
             "mismatch_count": 0,
             "mismatch_examples": [],
         }
     source_part = parts[source_part_index]
-    source_analysis = _analyze_part_voice_parts(source_part, source_part_index)
-    expected_voice_part_count = len(source_analysis.get("voice_parts") or [])
     source_notes = _resolve_source_notes_allow_lyricless(
         score,
         source_part_index=source_part_index,
@@ -1445,7 +1582,8 @@ def _trivial_method_chord_size_mismatch_details(
             "reason": "source_voice_part_not_found",
             "source_part_index": source_part_index,
             "source_voice_part_id": source_voice_part_id,
-            "expected_voice_part_count": expected_voice_part_count,
+            "expected_simultaneous_note_count": 0,
+            "target_lane_count": target_lane_count,
             "mismatch_count": 0,
             "mismatch_examples": [],
         }
@@ -1459,30 +1597,72 @@ def _trivial_method_chord_size_mismatch_details(
         key = (measure, offset)
         grouped[key] = grouped.get(key, 0) + 1
 
-    mismatches: List[Dict[str, Any]] = []
-    for (measure, offset), chord_note_count in sorted(grouped.items()):
-        if chord_note_count <= 1:
-            continue
-        if chord_note_count != expected_voice_part_count:
-            mismatches.append(
-                {
-                    "measure_number": measure,
-                    "offset_beats": offset,
-                    "chord_note_count": chord_note_count,
-                    "expected_voice_part_count": expected_voice_part_count,
-                }
-            )
+    expected_simultaneous_note_count = max(grouped.values(), default=0)
+    mismatch_examples: List[Dict[str, Any]] = []
+    if expected_simultaneous_note_count > 1 and target_lane_count != expected_simultaneous_note_count:
+        for (measure, offset), chord_note_count in sorted(grouped.items()):
+            if chord_note_count == expected_simultaneous_note_count:
+                mismatch_examples.append(
+                    {
+                        "measure_number": measure,
+                        "offset_beats": offset,
+                        "chord_note_count": chord_note_count,
+                        "expected_simultaneous_note_count": expected_simultaneous_note_count,
+                        "target_lane_count": target_lane_count,
+                    }
+                )
 
-    mismatch_measures = sorted({int(item["measure_number"]) for item in mismatches})
+    mismatch_measures = sorted({int(item["measure_number"]) for item in mismatch_examples})
     return {
-        "reason": "trivial_method_chord_size_mismatch",
+        "reason": "trivial_method_section_simultaneous_note_mismatch",
         "source_part_index": source_part_index,
         "source_voice_part_id": source_voice_part_id,
-        "expected_voice_part_count": expected_voice_part_count,
-        "mismatch_count": len(mismatches),
+        "expected_simultaneous_note_count": expected_simultaneous_note_count,
+        "target_lane_count": target_lane_count,
+        "message": (
+            "Trivial chord splitting requires the target lane count to match the "
+            "maximum simultaneous note count in the source section."
+        ),
+        "mismatch_count": 1 if mismatch_examples else 0,
         "mismatch_ranges": _collapse_measure_ranges(mismatch_measures),
-        "mismatch_examples": mismatches[:8],
+        "mismatch_examples": mismatch_examples[:8],
     }
+
+
+def _count_trivial_split_target_lanes_for_section(
+    targets: Sequence[Dict[str, Any]],
+    *,
+    part_index: int,
+    start_measure: int,
+    end_measure: int,
+    source_part_index: int,
+    source_voice_part_id: str,
+) -> int:
+    lane_ids: set[str] = set()
+    for target_entry in targets:
+        target = target_entry.get("target") or {}
+        if int(target.get("part_index", -1)) != part_index:
+            continue
+        target_voice_part_id = str(target.get("voice_part_id") or "").strip()
+        if not target_voice_part_id:
+            continue
+        for section in target_entry.get("sections") or []:
+            if section.get("mode") != "derive":
+                continue
+            if str(section.get("decision_type") or "EXTRACT_FROM_VOICE") != "SPLIT_CHORDS_SELECT_NOTES":
+                continue
+            if int(section.get("start_measure", -1)) != start_measure:
+                continue
+            if int(section.get("end_measure", -1)) != end_measure:
+                continue
+            melody_source = section.get("melody_source") or {}
+            if int(melody_source.get("part_index", -1)) != source_part_index:
+                continue
+            if str(melody_source.get("voice_part_id") or "").strip() != source_voice_part_id:
+                continue
+            lane_ids.add(target_voice_part_id)
+            break
+    return len(lane_ids)
 
 
 def _native_sung_measures_for_target(
@@ -1884,6 +2064,8 @@ def _execute_timeline_sections(
                         end_measure=end_measure,
                         method=method,
                         split_selector=str(section.get("split_selector") or "upper"),
+                        rank_index=int(section.get("rank_index") or 0),
+                        rank_fallback=str(section.get("rank_fallback") or "greedy"),
                     )
                 else:
                     copied_note_count = _copy_section_melody_into_target(
@@ -2094,6 +2276,7 @@ def _execute_timeline_sections(
                 )
                 if not overlaps:
                     continue
+                # Deprecated internal-only repair fallback. Public plans cannot request B.
                 section["method"] = "B"
                 section["lyric_policy"] = "replace_all"
                 section["lyric_strategy"] = "syllable_flow"
@@ -2219,6 +2402,8 @@ def _split_chords_select_notes_into_target(
     end_measure: int,
     method: str,
     split_selector: str,
+    rank_index: int,
+    rank_fallback: str,
 ) -> int:
     source_notes = _resolve_source_notes_allow_lyricless(
         source_score,
@@ -2248,7 +2433,14 @@ def _split_chords_select_notes_into_target(
     chosen: List[Dict[str, Any]] = []
     previous_pitch: Optional[float] = None
     if method == "B":
+        # Deprecated internal-only method retained for compatibility with repair paths.
         chosen = _choose_notes_dp(grouped, split_selector=split_selector)
+    elif method == "ranked":
+        chosen = _choose_notes_ranked(
+            grouped,
+            rank_index=rank_index,
+            rank_fallback=rank_fallback,
+        )
     elif method == "trivial":
         chosen = _choose_notes_trivial_ranked(
             grouped,
@@ -2257,6 +2449,7 @@ def _split_chords_select_notes_into_target(
             split_selector=split_selector,
         )
     else:
+        # Deprecated internal-only method retained for compatibility with repair paths.
         for key in sorted(grouped):
             candidates = grouped[key]
             selected = _choose_note_rule_based(
@@ -2288,6 +2481,33 @@ def _split_chords_select_notes_into_target(
     kept.extend(copied)
     working_notes[:] = kept
     return len([note for note in copied if not note.get("is_rest")])
+
+
+def _choose_notes_ranked(
+    grouped: Dict[Tuple[int, float], List[Dict[str, Any]]],
+    *,
+    rank_index: int,
+    rank_fallback: str,
+) -> List[Dict[str, Any]]:
+    """Choose a fixed top-down rank at each onset with deterministic fallback."""
+    chosen: List[Dict[str, Any]] = []
+    rank = max(0, int(rank_index))
+    fallback = str(rank_fallback or "greedy").strip().lower()
+    if fallback not in VALID_RANK_FALLBACKS:
+        fallback = "greedy"
+    for key in sorted(grouped):
+        ordered = sorted(
+            grouped[key],
+            key=lambda n: float(n.get("pitch_midi") or 0.0),
+            reverse=True,
+        )
+        if rank < len(ordered):
+            chosen.append(dict(ordered[rank]))
+            continue
+        if fallback == "skip":
+            continue
+        chosen.append(dict(ordered[-1]))
+    return chosen
 
 
 def _choose_note_rule_based(
@@ -2679,6 +2899,34 @@ def _best_same_part_word_lyric_source_for_range(
         if current_rank > best_rank:
             best = {"voice_part_id": voice_part_id, "stats": stats}
     return best
+
+
+def _is_weak_word_lyric_source_with_better_alternative(
+    *,
+    selected_stats: Dict[str, float | int],
+    alternative_stats: Dict[str, float | int],
+) -> bool:
+    selected_sung = int(selected_stats.get("sung_note_count") or 0)
+    selected_lyric = int(selected_stats.get("lyric_note_count") or 0)
+    selected_word = int(selected_stats.get("word_lyric_note_count") or 0)
+    alternative_word = int(alternative_stats.get("word_lyric_note_count") or 0)
+    selected_ratio = float(selected_stats.get("word_lyric_coverage_ratio") or 0.0)
+    alternative_ratio = float(alternative_stats.get("word_lyric_coverage_ratio") or 0.0)
+
+    if selected_sung <= 0 or selected_lyric <= 0:
+        return False
+    if selected_word <= 0 or alternative_word <= selected_word:
+        return False
+
+    min_ratio = _env_float("VOICE_PART_WEAK_LYRIC_SOURCE_MAX_WORD_RATIO", 0.35)
+    min_ratio_delta = _env_float("VOICE_PART_WEAK_LYRIC_SOURCE_MIN_RATIO_DELTA", 0.25)
+    min_word_delta = _env_int("VOICE_PART_WEAK_LYRIC_SOURCE_MIN_WORD_DELTA", 2)
+
+    return (
+        selected_ratio < min_ratio
+        and alternative_ratio >= (selected_ratio + min_ratio_delta)
+        and alternative_word >= (selected_word + min_word_delta)
+    )
 
 
 def _count_word_lyric_sung_notes_in_range(
@@ -4217,12 +4465,30 @@ def _normalize_timeline_sections(
                 f"{section_name} decision_type is invalid: {decision_type}",
             )["error"]
         method = str(raw_section.get("method") or "trivial").strip()
-        if method not in VALID_TIMELINE_METHODS:
+        if method not in PUBLIC_TIMELINE_METHODS:
             return [], _plan_error(
                 "invalid_section_mode",
-                f"{section_name} method is invalid: {method}",
+                f"{section_name} method is invalid: {method}. Allowed methods: {sorted(PUBLIC_TIMELINE_METHODS)}.",
             )["error"]
-        split_selector = str(raw_section.get("split_selector") or "upper").strip()
+        raw_rank_index = raw_section.get("rank_index", 0)
+        try:
+            rank_index = int(raw_rank_index)
+        except (TypeError, ValueError):
+            return [], _plan_error(
+                "invalid_plan_enum",
+                f"{section_name} rank_index must be an integer.",
+            )["error"]
+        if rank_index < 0:
+            return [], _plan_error(
+                "invalid_plan_enum",
+                f"{section_name} rank_index must be >= 0.",
+            )["error"]
+        rank_fallback = str(raw_section.get("rank_fallback") or "greedy").strip().lower()
+        if rank_fallback not in VALID_RANK_FALLBACKS:
+            return [], _plan_error(
+                "invalid_plan_enum",
+                f"{section_name} rank_fallback is invalid: {rank_fallback}",
+            )["error"]
 
         melody_raw = raw_section.get("melody_source")
         lyric_raw = raw_section.get("lyric_source")
@@ -4283,7 +4549,8 @@ def _normalize_timeline_sections(
                 "mode": mode,
                 "decision_type": decision_type,
                 "method": method,
-                "split_selector": split_selector,
+                "rank_index": rank_index,
+                "rank_fallback": rank_fallback,
                 "melody_source": melody_source,
                 "lyric_source": lyric_source,
                 "lyric_strategy": strategy,

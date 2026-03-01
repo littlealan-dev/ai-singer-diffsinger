@@ -29,6 +29,8 @@ class SessionState:
     history: List[Dict[str, str]] = field(default_factory=list)
     files: Dict[str, str] = field(default_factory=dict)
     original_score: Optional[Dict[str, Any]] = None
+    preprocess_plan_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_successful_preprocess_plan: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
@@ -44,6 +46,12 @@ class SessionState:
             "history": list(self.history),
             "files": dict(self.files),
             "original_score": dict(self.original_score) if self.original_score else None,
+            "preprocess_plan_history": list(self.preprocess_plan_history),
+            "last_successful_preprocess_plan": (
+                dict(self.last_successful_preprocess_plan)
+                if self.last_successful_preprocess_plan
+                else None
+            ),
             "current_score": self._score_snapshot(),
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "current_audio": dict(self.current_audio) if self.current_audio else None,
@@ -187,6 +195,26 @@ class SessionStore:
             state.score_summary = summary
             state.last_active_at = _utcnow()
 
+    async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
+        """Append a generated preprocess plan entry for debugging."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.preprocess_plan_history.append(entry)
+            state.last_active_at = _utcnow()
+
+    async def set_last_successful_preprocess_plan(
+        self, session_id: str, plan: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist the latest successful preprocess plan for prompt context."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.last_successful_preprocess_plan = plan
+            state.last_active_at = _utcnow()
+
     async def set_audio(
         self,
         session_id: str,
@@ -326,6 +354,8 @@ class FirestoreSessionStore:
             history=list(data.get("history") or []),
             files=dict(data.get("files") or {}),
             original_score=data.get("originalScore"),
+            preprocess_plan_history=list(data.get("preprocessPlanHistory") or []),
+            last_successful_preprocess_plan=data.get("lastSuccessfulPreprocessPlan"),
             current_score=data.get("currentScore"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
@@ -344,6 +374,8 @@ class FirestoreSessionStore:
                 "history": [],
                 "files": {},
                 "originalScore": None,
+                "preprocessPlanHistory": [],
+                "lastSuccessfulPreprocessPlan": None,
                 "currentScore": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
@@ -441,6 +473,28 @@ class FirestoreSessionStore:
         async with self._lock:
             self._doc_ref(session_id).update(
                 {"scoreSummary": summary, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
+    async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
+        """Append a generated preprocess plan entry in Firestore for debugging."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "preprocessPlanHistory": firestore.ArrayUnion([entry]),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_last_successful_preprocess_plan(
+        self, session_id: str, plan: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist the latest successful preprocess plan in Firestore."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "lastSuccessfulPreprocessPlan": plan,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
             )
 
     async def set_audio(

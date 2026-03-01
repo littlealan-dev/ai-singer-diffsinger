@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 
+from src.api.voice_part_lint_rules import render_lint_rules_for_prompt
+
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
@@ -38,6 +40,7 @@ def build_system_prompt(
     score_summary: Optional[Dict[str, Any]] = None,
     voice_part_signals: Optional[Dict[str, Any]] = None,
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
+    last_successful_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Build the system prompt with tool specs and context metadata."""
@@ -67,6 +70,11 @@ def build_system_prompt(
         preprocess_mapping_context_text = json.dumps(
             preprocess_mapping_context, indent=2, sort_keys=True
         )
+    last_successful_preprocess_plan_text = "none"
+    if last_successful_preprocess_plan:
+        last_successful_preprocess_plan_text = json.dumps(
+            last_successful_preprocess_plan, indent=2, sort_keys=True
+        )
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
@@ -78,6 +86,7 @@ def build_system_prompt(
         .replace("{score_summary}", score_summary_text)
         .replace("{voice_part_signals}", voice_part_signals_text)
         .replace("{preprocess_mapping_context}", preprocess_mapping_context_text)
+        .replace("{last_successful_preprocess_plan}", last_successful_preprocess_plan_text)
         .replace("{voicebank_details}", voicebank_details_text)
     )
 
@@ -87,10 +96,12 @@ def _load_system_prompt() -> str:
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
     base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt_sections = [base_prompt]
     if _SYSTEM_PROMPT_LESSONS_PATH.exists():
         lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
-        return f"{base_prompt}\n\n---\n\n{lessons_prompt}"
-    return base_prompt
+        prompt_sections.append(lessons_prompt)
+    prompt_sections.append(render_lint_rules_for_prompt())
+    return "\n\n---\n\n".join(prompt_sections)
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:

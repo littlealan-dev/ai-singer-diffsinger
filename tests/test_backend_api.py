@@ -310,6 +310,11 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
 
     assert preprocess_score_sources == [str(original_path), str(original_path)]
     assert len(parse_score_calls) == 1
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert len(snapshot["preprocess_plan_history"]) == 2
+    assert snapshot["last_successful_preprocess_plan"] is not None
+    latest_plan = snapshot["last_successful_preprocess_plan"]
+    assert latest_plan["targets"][0]["target"]["voice_part_id"] == "soprano"
 
 
 def test_orchestrator_uses_original_score_for_preprocess_planning(client):
@@ -384,6 +389,51 @@ def test_chat_returns_explicit_error_when_original_score_missing_for_repreproces
     payload = response.json()
     assert payload["type"] == "chat_text"
     assert payload["message"] == MISSING_ORIGINAL_SCORE_MESSAGE
+
+
+def test_orchestrator_stores_latest_successful_preprocess_plan_in_prompt_context(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    original_score = {
+        "source_musicxml_path": "/tmp/original.xml",
+        "voice_part_signals": {"source": "original"},
+    }
+    current_score = {
+        "source_musicxml_path": "/tmp/derived.xml",
+        "voice_part_signals": {"source": "derived"},
+        "voice_part_transforms": {"x": {}},
+    }
+    snapshot = {
+        "original_score": original_score,
+        "current_score": {"score": current_score, "version": 2},
+        "last_successful_preprocess_plan": {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [{"start_measure": 1, "end_measure": 6, "mode": "derive"}],
+                }
+            ]
+        },
+        "score_summary": {"title": "Test"},
+        "history": [],
+    }
+
+    prompt = None
+
+    class CapturingClient:
+        def generate(self, system_prompt, history):
+            nonlocal prompt
+            prompt = system_prompt
+            return '{"tool_calls":[],"final_message":"ok","include_score":false}'
+
+    orchestrator._llm_client = CapturingClient()
+    response, error = asyncio.run(orchestrator._decide_with_llm(snapshot, score_available=True))
+
+    assert error is None
+    assert response is not None
+    assert prompt is not None
+    assert "Latest successful preprocess plan (if available):" in prompt
+    assert '"voice_part_id": "voice part 1"' in prompt
 
 
 def test_upload_rejects_invalid_extension(client):

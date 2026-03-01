@@ -3,6 +3,7 @@ from __future__ import annotations
 """Chat orchestration layer that bridges LLM decisions and MCP tools."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import asyncio
@@ -808,6 +809,7 @@ class Orchestrator:
             planning_score = None
             voice_part_signals = None
             preprocess_mapping_context = None
+            last_successful_preprocess_plan = snapshot.get("last_successful_preprocess_plan")
             if isinstance(current_score, dict):
                 score_payload = current_score.get("score")
                 planning_score = self._resolve_llm_planning_score(snapshot, score_payload)
@@ -824,6 +826,11 @@ class Orchestrator:
                 score_summary=snapshot.get("score_summary"),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
+                last_successful_preprocess_plan=(
+                    last_successful_preprocess_plan
+                    if isinstance(last_successful_preprocess_plan, dict)
+                    else None
+                ),
                 voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(
@@ -840,6 +847,10 @@ class Orchestrator:
             return None, LLM_ERROR_FALLBACK
         response = parse_llm_response(text)
         if response is None:
+            self._logger.warning(
+                "llm_response_parse_failed raw_text=%s",
+                summarize_payload(text),
+            )
             return None, "LLM returned an invalid response. Please try again."
         return response, None
 
@@ -880,6 +891,7 @@ class Orchestrator:
                 if isinstance(planning_score, dict)
                 else None
             )
+            last_successful_preprocess_plan = snapshot.get("last_successful_preprocess_plan")
             preprocess_mapping_context = (
                 self._build_preprocess_mapping_context(
                     current_score,
@@ -895,6 +907,11 @@ class Orchestrator:
                 score_summary=snapshot.get("score_summary"),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
+                last_successful_preprocess_plan=(
+                    last_successful_preprocess_plan
+                    if isinstance(last_successful_preprocess_plan, dict)
+                    else None
+                ),
                 voicebank_details=voicebank_details,
             )
             text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
@@ -909,6 +926,10 @@ class Orchestrator:
             return None, LLM_ERROR_FALLBACK
         response = parse_llm_response(text)
         if response is None:
+            self._logger.warning(
+                "llm_followup_parse_failed raw_text=%s",
+                summarize_payload(text),
+            )
             return None, tool_summary
         return response, None
 
@@ -1141,6 +1162,16 @@ class Orchestrator:
                 continue
             if call.name == "preprocess_voice_parts":
                 preprocess_args = dict(call.arguments)
+                requested_plan = self._extract_preprocess_plan(preprocess_args)
+                if requested_plan is not None:
+                    await self._sessions.append_preprocess_plan(
+                        session_id,
+                        {
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "generated",
+                            "plan": requested_plan,
+                        },
+                    )
                 try:
                     preprocess_score = await self._resolve_preprocess_score(
                         session_id,
@@ -1168,6 +1199,10 @@ class Orchestrator:
                 ):
                     current_score = self._mark_review_pending(result["score"], result)
                     await self._sessions.set_score(session_id, current_score)
+                    if requested_plan is not None:
+                        await self._sessions.set_last_successful_preprocess_plan(
+                            session_id, requested_plan
+                        )
                     mapping_context = self._build_preprocess_mapping_context(
                         current_score,
                         score_summary=score_summary,
@@ -1375,6 +1410,16 @@ class Orchestrator:
                 followup_prompt=reparse_prompt,
             )
         return ToolExecutionResult(score=current_score, audio_response=audio_response)
+
+    def _extract_preprocess_plan(self, preprocess_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the request.plan object from a preprocess tool call, if present."""
+        request = preprocess_args.get("request")
+        if not isinstance(request, dict):
+            return None
+        plan = request.get("plan")
+        if not isinstance(plan, dict):
+            return None
+        return copy.deepcopy(plan)
 
     def _build_review_required_response(
         self, preprocess_result: Optional[Dict[str, Any]]

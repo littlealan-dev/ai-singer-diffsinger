@@ -313,24 +313,32 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
         },
         "method": {
             "type": "string",
-            "enum": ["A", "B", "trivial"],
+            "enum": ["trivial", "ranked"],
             "default": "trivial",
             "description": (
                 "Chord note selection strategy for SPLIT_CHORDS_SELECT_NOTES. "
-                "A = greedy slot-by-slot melodic continuity. "
-                "B = dynamic-programming global path across the full section. "
+                "ranked = deterministic top-down rank selection using rank_index. "
                 "trivial = deterministic rank mapping when chord note count matches "
                 "detected voice-part count (highest note -> highest voice part, etc.). "
                 "If that equality does not hold, preflight fails and planner must "
                 "explicitly switch method."
             ),
         },
-        "split_selector": {
-            "type": "string",
+        "rank_index": {
+            "type": "integer",
+            "minimum": 0,
             "description": (
-                "Preferred side when splitting vertical chords. "
-                "Use 'upper' for higher notes, 'lower' for lower notes. "
-                "This is ignored for non-splitting decisions."
+                "For method=ranked, 0 means highest note, 1 means second-highest, "
+                "2 means third-highest, and so on."
+            ),
+        },
+        "rank_fallback": {
+            "type": "string",
+            "enum": ["greedy", "skip"],
+            "description": (
+                "For method=ranked, behavior when the requested rank does not exist: "
+                "greedy = use the nearest available lower rank; "
+                "skip = emit no note at that onset."
             ),
         },
         "melody_source": {

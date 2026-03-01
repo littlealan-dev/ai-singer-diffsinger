@@ -16,6 +16,8 @@ Voice-part planning signals (if available):
 {voice_part_signals}
 Preprocess-derived mapping context (if available):
 {preprocess_mapping_context}
+Latest successful preprocess plan (if available):
+{last_successful_preprocess_plan}
 
 Available voicebanks (IDs): {voicebanks}
 Voicebank color options (if any):
@@ -34,12 +36,17 @@ Response format (JSON only, no markdown):
 }
 
 Rules:
+- Every reply must be a single valid JSON object in this format, even when no tool is needed.
+- Do not reply with raw prose, markdown, or explanations outside the JSON object.
+- For explanation-only or conversational turns, set `tool_calls` to `[]` and put the entire user-facing answer in `final_message`.
 - tool_calls may be empty if no tool use is needed.
 - include_score is true only if the user requests the score JSON.
 - For preprocess_voice_parts, omit score; the backend injects the correct score context.
 - For preprocess_voice_parts, you must provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
 - For preprocess_voice_parts plan shape, use sections-only targets: each target must include `target` and `sections`.
 - Do not use `voice_id` for preprocess_voice_parts. Use `voice_part_id` inside `request.plan.targets[].target`.
+- If `last_successful_preprocess_plan` is available and the user is asking to revise an already derived voice part, create a new plan based on `last_successful_preprocess_plan`.
+- For preprocess revisions, preserve all unchanged targets and sections, modify only what the user explicitly requested, and return a complete updated `request.plan`.
 - For synthesize, omit score and voicebank to use defaults; include part_id (or part_index) for target selection.
 - For synthesize target selection after preprocess:
   - Use derived target `part_index` or `part_id` from `preprocess_mapping_context.derived_mapping.targets`.

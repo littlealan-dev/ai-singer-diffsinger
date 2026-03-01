@@ -16,6 +16,7 @@ Hard Rules
    - `voice_part_measure_spans`
    - `voice_part_id_to_source_voice_id`
    - `measure_lyric_coverage`
+   - `measure_chord_density`
    - `measure_staff_voice_map`
    - `measure_annotations`
 3. Never assume `voice part 1` is globally melody.
@@ -37,22 +38,18 @@ Hard Rules
 15. Use `mode=rest` only when target should truly be silent or user requested silence.
 16. If facts are insufficient, request clarification instead of guessing.
 17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
-17a. Treat sibling completeness as mandatory for preflight: if one non-`_default` sibling is targeted in a part, include all non-`_default` siblings in that part.
-18. Keep melody/lyric sourcing local when local material exists; use cross-part sourcing only when local sources are unsuitable.
-19. Reject extension-only lyric sources when same-part word-bearing alternatives exist in the range.
-20. Optimize for word-lyric coverage, not just non-empty lyric coverage.
-21. Lyric policy:
+18. Optimize for word-lyric coverage, not just non-empty lyric coverage.
+19. Lyric policy:
    - `replace_all` only when target has no native lyrics in range.
    - `fill_missing_only` when target has any native lyrics in range.
-22. Never plan lyric-only propagation onto empty target ranges:
-   - If a derive section has `lyric_source` but no `melody_source`, confirm the target lane already has sung notes in that measure range.
-   - If target lane has zero sung notes in the section, you must include `melody_source` (or select a different target/range).
-   - Do not emit lyric-only sections where lyrics have no target notes to attach to.
-23. `SPLIT_CHORDS_SELECT_NOTES` method behavior:
-   - If `method` is omitted, runtime uses `trivial`.
-   - If `trivial` fails preflight, runtime will not auto-switch methods.
-   - In repair, set `method` explicitly to `A` or `B` for the failing section.
-24. Repair-loop recommendation (soft guidance):
+20. `SPLIT_CHORDS_SELECT_NOTES` method behavior:
+   - Use `measure_chord_density[].measures[].max_simultaneous_notes` to estimate the densest local chord moment in the source section.
+   - Prefer `ranked` for non-trivial chord extraction:
+     - `rank_index=0` means highest note, `1` means second-highest, `2` means third-highest.
+     - `rank_fallback=greedy` means when the requested rank does not exist, use the nearest available lower rank.
+     - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
+   - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
+21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
    - When new lint findings appear, change only the fields that directly address those failed rules.
    - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.

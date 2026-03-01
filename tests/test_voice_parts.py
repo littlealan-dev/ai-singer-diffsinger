@@ -10,7 +10,9 @@ from pathlib import Path
 
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
+    _choose_notes_ranked,
     _choose_notes_trivial_ranked,
+    _lint_finding,
     _normalize_materialized_musicxml_stem,
     _run_preflight_plan_lint,
     parse_voice_part_plan,
@@ -200,6 +202,145 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertEqual(int(picked_upper[0]["pitch_midi"]), 67)
         self.assertEqual(int(picked_lower[0]["pitch_midi"]), 52)
 
+    def test_ranked_chord_split_selects_requested_top_down_rank(self) -> None:
+        grouped = {
+            (1, 0.0): [
+                {"pitch_midi": 52.0},
+                {"pitch_midi": 60.0},
+                {"pitch_midi": 67.0},
+            ],
+            (1, 1.0): [
+                {"pitch_midi": 55.0},
+                {"pitch_midi": 62.0},
+                {"pitch_midi": 69.0},
+            ],
+        }
+        middle = _choose_notes_ranked(
+            grouped,
+            rank_index=1,
+            rank_fallback="greedy",
+        )
+        self.assertEqual([int(n["pitch_midi"]) for n in middle], [60, 62])
+
+    def test_ranked_chord_split_uses_greedy_fallback_when_rank_missing(self) -> None:
+        grouped = {
+            (1, 0.0): [
+                {"pitch_midi": 52.0},
+                {"pitch_midi": 60.0},
+                {"pitch_midi": 67.0},
+            ],
+            (1, 1.0): [
+                {"pitch_midi": 55.0},
+            ],
+        }
+        picked = _choose_notes_ranked(
+            grouped,
+            rank_index=1,
+            rank_fallback="greedy",
+        )
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60, 55])
+
+    def test_ranked_chord_split_skips_when_rank_missing(self) -> None:
+        grouped = {
+            (1, 0.0): [
+                {"pitch_midi": 52.0},
+                {"pitch_midi": 60.0},
+                {"pitch_midi": 67.0},
+            ],
+            (1, 1.0): [
+                {"pitch_midi": 55.0},
+            ],
+        }
+        picked = _choose_notes_ranked(
+            grouped,
+            rank_index=1,
+            rank_fallback="skip",
+        )
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60])
+
+    def test_preprocess_rejects_deprecated_public_method_b(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "B",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "invalid_section_mode")
+        self.assertEqual(result.get("code"), "invalid_section_mode")
+
+    def test_lint_findings_include_registry_metadata_and_failing_attributes(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        max_measure = max(
+            int(note.get("measure_number") or 0)
+            for note in score["parts"][0]["notes"]
+            if int(note.get("measure_number") or 0) > 0
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": max_measure,
+                            "mode": "derive",
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        finding = next(
+            (f for f in findings if f.get("rule") == "same_part_target_completeness"),
+            None,
+        )
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.get("rule_name"), "Same-Part Target Completeness")
+        self.assertIn("When one non-default sibling lane", finding.get("rule_definition", ""))
+        self.assertIn("Include all required same-part sibling targets", finding.get("suggestion", ""))
+        self.assertIsInstance(finding.get("failing_attributes"), dict)
+
+    def test_lint_findings_use_structured_details_and_templated_message(self) -> None:
+        finding = _lint_finding(
+            "mixed_region_requires_sections",
+            details={
+                "region_statuses": ["RESOLVED", "UNASSIGNED_SOURCE"],
+                "has_unassigned": True,
+            },
+            failing_attributes={
+                "region_statuses": ["RESOLVED", "UNASSIGNED_SOURCE"],
+                "has_unassigned": True,
+            },
+        )
+        self.assertIsInstance(finding.get("details"), dict)
+        self.assertEqual(finding["details"]["region_statuses"], ["RESOLVED", "UNASSIGNED_SOURCE"])
+        self.assertIn("['RESOLVED', 'UNASSIGNED_SOURCE']", finding.get("message", ""))
+
     def test_preflight_rejects_trivial_method_when_chord_size_mismatch(self) -> None:
         score = {
             "parts": [
@@ -357,6 +498,82 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             failing_rules,
         )
 
+    def test_preflight_allows_trivial_method_when_local_chord_size_matches_despite_extra_voice_elsewhere(
+        self,
+    ) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 72.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 1,
+                            "is_rest": False,
+                            "voice": "1",
+                            "pitch_midi": 69.0,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "measure_number": 2,
+                            "is_rest": False,
+                            "voice": "2",
+                            "pitch_midi": 55.0,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "trivial",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                },
+            ]
+        }
+        lint_result = _run_preflight_plan_lint(score, plan)
+        failing_rules = {
+            finding.get("rule") for finding in (lint_result.get("findings") or [])
+        }
+        self.assertNotIn(
+            "trivial_method_requires_equal_chord_voice_part_count",
+            failing_rules,
+        )
+
     def test_parse_score_note_events_include_extended_fact_fields(self) -> None:
         score = parse_score(TEST_XML, verse_number=1)
         note = next(
@@ -438,6 +655,17 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertEqual(entries[0].get("text"), "Choir in Unison")
         self.assertEqual(entries[0].get("staff"), "1")
         self.assertEqual(entries[0].get("placement"), "above")
+
+    def test_parse_score_includes_measure_chord_density(self) -> None:
+        score = parse_score(TEST_XML, verse_number=1)
+        density = score["voice_part_signals"]["measure_chord_density"]
+        self.assertTrue(density)
+        first_part = density[0]
+        self.assertIn("part_id", first_part)
+        self.assertTrue(first_part.get("measures"))
+        first_measure = first_part["measures"][0]
+        self.assertIn("measure_number", first_measure)
+        self.assertIn("max_simultaneous_notes", first_measure)
 
     def test_status_taxonomy_alignment(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
@@ -829,6 +1057,135 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         findings = result.get("lint_findings") or []
         self.assertTrue(
             any(f.get("rule") == "same_clef_claim_coverage" for f in findings)
+        )
+
+    def test_preflight_lint_flags_weak_lyric_source_with_better_alternative(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "be",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "+",
+                            "syllabic": None,
+                            "lyric_is_extended": True,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "+",
+                            "syllabic": None,
+                            "lyric_is_extended": True,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 3.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "+",
+                            "syllabic": None,
+                            "lyric_is_extended": True,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "God",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "the",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "Fa",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 3.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "ther",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        finding = next(
+            (f for f in findings if f.get("rule") == "weak_lyric_source_with_better_alternative"),
+            None,
+        )
+        self.assertIsNotNone(finding)
+        self.assertEqual(
+            finding.get("suggested_lyric_source", {}).get("voice_part_id"),
+            "alto",
         )
 
     def test_preflight_lint_flags_cross_staff_lyric_source_when_local_available(self) -> None:
