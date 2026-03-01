@@ -5,6 +5,7 @@ import time
 import uuid
 import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +15,7 @@ from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
 from src.backend.orchestrator import MISSING_ORIGINAL_SCORE_MESSAGE
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
+from src.backend.credits import UserCredits
 
 
 def _make_router_call_tool():
@@ -86,6 +88,19 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
+    monkeypatch.setattr(
+        "src.backend.main.verify_id_token_claims",
+        lambda token: {"uid": "test-user", "email": "test@example.com"},
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.get_or_create_credits",
+        lambda user_id, user_email: UserCredits(
+            balance=9999,
+            reserved=0,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            overdrafted=False,
+        ),
+    )
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
     if overrides:
@@ -1013,6 +1028,91 @@ def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
     assert bool(payload.get("review_required")) is True
     assert parse_score_calls["count"] == 1, "Same-verse reparse should be treated as no-op."
     assert preprocess_calls["count"] == 1, "No-op reparse should still continue to preprocess."
+
+
+def test_preprocess_returns_last_validation_review_after_repair_cap(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    preprocess_calls = {"count": 0}
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_calls["count"] += 1
+            return {
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Lyric propagation did not meet minimum coverage.",
+                "part_index": 0,
+                "target_voice_part": "soprano",
+                "validation": {
+                    "word_lyric_coverage_ratio": 0.6,
+                    "missing_lyric_sung_note_count": 4,
+                    "unresolved_measures": [7, 18],
+                },
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+
+    class RepairLoopClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, system_prompt, history):
+            self.calls += 1
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {
+                                                    "part_index": 0,
+                                                    "voice_part_id": "soprano",
+                                                },
+                                                "sections": [
+                                                    {
+                                                        "start_measure": 1,
+                                                        "end_measure": 1,
+                                                        "mode": "derive",
+                                                        "melody_source": {
+                                                            "part_index": 0,
+                                                            "voice_part_id": "soprano",
+                                                        },
+                                                    }
+                                                ],
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Trying preprocess again.",
+                    "include_score": False,
+                }
+            )
+
+    llm_client = RepairLoopClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "Sing soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_text"
+    assert payload["message"] == "Lyric propagation did not meet minimum coverage."
+    assert bool(payload.get("review_required")) is True
+    assert "current_score" in payload
+    assert preprocess_calls["count"] == 4
 
 
 def test_get_audio_returns_404_without_audio(client):

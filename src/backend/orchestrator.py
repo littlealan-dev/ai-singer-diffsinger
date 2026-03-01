@@ -633,6 +633,7 @@ class Orchestrator:
         repairs_used = 0
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
+        last_action_required_payload: Optional[Dict[str, Any]] = None
 
         while True:
             tool_result = await self._execute_tool_calls(
@@ -645,6 +646,8 @@ class Orchestrator:
             )
             working_score = tool_result.score
             review_required_pending = review_required_pending or tool_result.review_required
+            if tool_result.action_required_payload:
+                last_action_required_payload = tool_result.action_required_payload
             response = tool_result.audio_response or {
                 "type": "chat_text",
                 "message": response_message,
@@ -665,6 +668,17 @@ class Orchestrator:
                 latest_snapshot, followup_prompt, working_score
             )
             if followup_error:
+                if (
+                    last_action_required_payload
+                    and last_action_required_payload.get("action") == "validation_failed_needs_review"
+                ):
+                    response = {
+                        "type": "chat_text",
+                        "message": str(last_action_required_payload.get("message") or ""),
+                        "review_required": True,
+                    }
+                    include_score = True
+                    break
                 return {"type": "chat_error", "message": followup_error}
 
             if followup_response is None:
@@ -719,13 +733,24 @@ class Orchestrator:
                 break
 
             if repairs_used >= MAX_INTERNAL_TOOL_REPAIRS:
-                response = {
-                    "type": "chat_text",
-                    "message": (
-                        f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
-                        "Please revise the request or plan details."
-                    ),
-                }
+                if (
+                    last_action_required_payload
+                    and last_action_required_payload.get("action") == "validation_failed_needs_review"
+                ):
+                    response = {
+                        "type": "chat_text",
+                        "message": str(last_action_required_payload.get("message") or ""),
+                        "review_required": True,
+                    }
+                    include_score = True
+                else:
+                    response = {
+                        "type": "chat_text",
+                        "message": (
+                            f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
+                            "Please revise the request or plan details."
+                        ),
+                    }
                 break
 
             repairs_used += 1
@@ -1461,6 +1486,7 @@ class Orchestrator:
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=followup_prompt,
+                        action_required_payload=result,
                     )
                 continue
             if call.name == "synthesize":
@@ -1827,6 +1853,7 @@ class ToolExecutionResult:
     audio_response: Optional[Dict[str, Any]]
     followup_prompt: Optional[str] = None
     review_required: bool = False
+    action_required_payload: Optional[Dict[str, Any]] = None
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

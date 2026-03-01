@@ -1261,27 +1261,82 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             },
                         )
                     )
+                melody_source_voice_part_id = (
+                    str(melody_source.get("voice_part_id")).strip()
+                    if isinstance(melody_source.get("voice_part_id"), str)
+                    else None
+                )
+                target_sung_note_count = _target_sung_note_count_for_section(
+                    score=score,
+                    target_part_index=part_index,
+                    target_voice_part_id=target_voice_part_id,
+                    start_measure=start,
+                    end_measure=end,
+                    melody_source_part_index=(
+                        melody_source_part if isinstance(melody_source_part, int) else None
+                    ),
+                    melody_source_voice_part_id=melody_source_voice_part_id,
+                )
                 if (
                     isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
-                    and _part_has_word_lyric_in_range(
-                        score, part_index=part_index, start_measure=start, end_measure=end
-                    )
+                    and isinstance(lyric_source.get("voice_part_id"), str)
                 ):
-                    findings.append(
-                        _lint_finding(
-                            "cross_staff_lyric_source_when_local_available",
-                            target_index=target_idx,
-                            part_index=part_index,
-                            target_voice_part_id=target_voice_part_id,
-                            section={"start_measure": start, "end_measure": end},
-                            source_part_index=lyric_source_part,
-                            failing_attributes={
-                                "source_part_index": lyric_source_part,
-                                "target_part_index": part_index,
-                            },
-                        )
+                    chosen_voice_part_id = str(lyric_source["voice_part_id"]).strip()
+                    chosen_stats = _lyric_stats_for_voice_part_range(
+                        score=score,
+                        part_index=lyric_source_part,
+                        voice_part_id=chosen_voice_part_id,
+                        start_measure=start,
+                        end_measure=end,
+                        target_sung_note_count=target_sung_note_count,
                     )
+                    alternative = _best_same_part_word_lyric_source_for_range(
+                        score=score,
+                        part_index=part_index,
+                        start_measure=start,
+                        end_measure=end,
+                        exclude_voice_part_id="",
+                        target_sung_note_count=target_sung_note_count,
+                    )
+                    if (
+                        alternative is not None
+                        and _is_cross_staff_lyric_source_with_stronger_local_alternative(
+                            selected_stats=chosen_stats,
+                            local_alternative_stats=alternative["stats"],
+                        )
+                    ):
+                        findings.append(
+                            _lint_finding(
+                                "cross_staff_lyric_source_with_stronger_local_alternative",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                source_part_index=lyric_source_part,
+                                selected_lyric_source={
+                                    "part_index": lyric_source_part,
+                                    "voice_part_id": chosen_voice_part_id,
+                                    "stats": chosen_stats,
+                                },
+                                suggested_lyric_source={
+                                    "part_index": part_index,
+                                    "voice_part_id": alternative["voice_part_id"],
+                                    "stats": alternative["stats"],
+                                },
+                                failing_attributes={
+                                    "selected_source_part_index": lyric_source_part,
+                                    "selected_voice_part_id": chosen_voice_part_id,
+                                    "selected_word_lyric_note_count": chosen_stats.get("word_lyric_note_count"),
+                                    "selected_word_lyric_coverage_ratio": chosen_stats.get("word_lyric_coverage_ratio"),
+                                    "suggested_source_part_index": part_index,
+                                    "suggested_voice_part_id": alternative["voice_part_id"],
+                                    "suggested_word_lyric_note_count": alternative["stats"].get("word_lyric_note_count"),
+                                    "suggested_word_lyric_coverage_ratio": alternative["stats"].get("word_lyric_coverage_ratio"),
+                                    "target_sung_note_count": target_sung_note_count,
+                                },
+                            )
+                        )
                 if (
                     isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
@@ -1294,6 +1349,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         voice_part_id=chosen_voice_part_id,
                         start_measure=start,
                         end_measure=end,
+                        target_sung_note_count=target_sung_note_count,
                     )
                     if (
                         chosen_stats["word_lyric_note_count"] == 0
@@ -1305,6 +1361,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             start_measure=start,
                             end_measure=end,
                             exclude_voice_part_id=chosen_voice_part_id,
+                            target_sung_note_count=target_sung_note_count,
                         )
                         if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
                             findings.append(
@@ -1340,6 +1397,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             start_measure=start,
                             end_measure=end,
                             exclude_voice_part_id=chosen_voice_part_id,
+                            target_sung_note_count=target_sung_note_count,
                         )
                         if alternative is not None and alternative["stats"]["word_lyric_note_count"] > 0:
                             findings.append(
@@ -1373,6 +1431,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         start_measure=start,
                         end_measure=end,
                         exclude_voice_part_id=chosen_voice_part_id,
+                        target_sung_note_count=target_sung_note_count,
                     )
                     if (
                         alternative is not None
@@ -2829,6 +2888,7 @@ def _lyric_stats_for_voice_part_range(
     voice_part_id: str,
     start_measure: int,
     end_measure: int,
+    target_sung_note_count: Optional[int] = None,
 ) -> Dict[str, float | int]:
     source_notes = _resolve_source_notes_allow_lyricless(
         score,
@@ -2838,6 +2898,7 @@ def _lyric_stats_for_voice_part_range(
     if source_notes is None:
         return {
             "sung_note_count": 0,
+            "target_sung_note_count": int(target_sung_note_count or 0),
             "lyric_note_count": 0,
             "word_lyric_note_count": 0,
             "extension_lyric_note_count": 0,
@@ -2845,11 +2906,23 @@ def _lyric_stats_for_voice_part_range(
             "word_lyric_coverage_ratio": 0.0,
             "extension_lyric_ratio": 0.0,
         }
-    return _lyric_stats_for_notes_range(
+    stats = _lyric_stats_for_notes_range(
         source_notes,
         start_measure=start_measure,
         end_measure=end_measure,
     )
+    effective_target_sung = max(1, int(target_sung_note_count or 0))
+    stats["target_sung_note_count"] = int(target_sung_note_count or 0)
+    stats["source_sung_note_count"] = int(stats.get("sung_note_count") or 0)
+    stats["word_lyric_coverage_ratio"] = round(
+        float(stats.get("word_lyric_note_count") or 0) / float(effective_target_sung),
+        4,
+    )
+    stats["extension_lyric_ratio"] = round(
+        float(stats.get("extension_lyric_note_count") or 0) / float(effective_target_sung),
+        4,
+    )
+    return stats
 
 
 def _best_same_part_word_lyric_source_for_range(
@@ -2859,6 +2932,7 @@ def _best_same_part_word_lyric_source_for_range(
     start_measure: int,
     end_measure: int,
     exclude_voice_part_id: str,
+    target_sung_note_count: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     parts = score.get("parts") or []
     if part_index < 0 or part_index >= len(parts):
@@ -2881,6 +2955,7 @@ def _best_same_part_word_lyric_source_for_range(
             voice_part_id=voice_part_id,
             start_measure=start_measure,
             end_measure=end_measure,
+            target_sung_note_count=target_sung_note_count,
         )
         if best is None:
             best = {"voice_part_id": voice_part_id, "stats": stats}
@@ -2906,14 +2981,14 @@ def _is_weak_word_lyric_source_with_better_alternative(
     selected_stats: Dict[str, float | int],
     alternative_stats: Dict[str, float | int],
 ) -> bool:
-    selected_sung = int(selected_stats.get("sung_note_count") or 0)
+    selected_target_sung = int(selected_stats.get("target_sung_note_count") or 0)
     selected_lyric = int(selected_stats.get("lyric_note_count") or 0)
     selected_word = int(selected_stats.get("word_lyric_note_count") or 0)
     alternative_word = int(alternative_stats.get("word_lyric_note_count") or 0)
     selected_ratio = float(selected_stats.get("word_lyric_coverage_ratio") or 0.0)
     alternative_ratio = float(alternative_stats.get("word_lyric_coverage_ratio") or 0.0)
 
-    if selected_sung <= 0 or selected_lyric <= 0:
+    if selected_target_sung <= 0 or selected_lyric <= 0:
         return False
     if selected_word <= 0 or alternative_word <= selected_word:
         return False
@@ -2929,6 +3004,33 @@ def _is_weak_word_lyric_source_with_better_alternative(
     )
 
 
+def _is_cross_staff_lyric_source_with_stronger_local_alternative(
+    *,
+    selected_stats: Dict[str, float | int],
+    local_alternative_stats: Dict[str, float | int],
+) -> bool:
+    selected_target_sung = int(selected_stats.get("target_sung_note_count") or 0)
+    selected_word = int(selected_stats.get("word_lyric_note_count") or 0)
+    local_word = int(local_alternative_stats.get("word_lyric_note_count") or 0)
+    selected_ratio = float(selected_stats.get("word_lyric_coverage_ratio") or 0.0)
+    local_ratio = float(local_alternative_stats.get("word_lyric_coverage_ratio") or 0.0)
+
+    if selected_target_sung <= 0:
+        return False
+    if local_word <= selected_word:
+        return False
+
+    min_local_ratio = _env_float("VOICE_PART_CROSS_STAFF_LOCAL_MIN_WORD_RATIO", 0.5)
+    min_ratio_delta = _env_float("VOICE_PART_CROSS_STAFF_LOCAL_MIN_RATIO_DELTA", 0.35)
+    min_word_delta = _env_int("VOICE_PART_CROSS_STAFF_LOCAL_MIN_WORD_DELTA", 3)
+
+    return (
+        local_ratio >= min_local_ratio
+        and local_ratio >= (selected_ratio + min_ratio_delta)
+        and local_word >= (selected_word + min_word_delta)
+    )
+
+
 def _count_word_lyric_sung_notes_in_range(
     notes: Sequence[Dict[str, Any]], start_measure: int, end_measure: int
 ) -> int:
@@ -2939,6 +3041,41 @@ def _count_word_lyric_sung_notes_in_range(
             not note.get("is_rest")
             and _note_in_measure_range(note, (start_measure, end_measure))
             and _lyric_kind(note) == "word"
+        )
+    )
+
+
+def _target_sung_note_count_for_section(
+    *,
+    score: Dict[str, Any],
+    target_part_index: int,
+    target_voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+    melody_source_part_index: Optional[int],
+    melody_source_voice_part_id: Optional[str],
+) -> int:
+    source_part_index = (
+        melody_source_part_index
+        if isinstance(melody_source_part_index, int)
+        else target_part_index
+    )
+    source_voice_part_id = (
+        melody_source_voice_part_id.strip()
+        if isinstance(melody_source_voice_part_id, str) and melody_source_voice_part_id.strip()
+        else target_voice_part_id
+    )
+    source_notes = _resolve_source_notes_allow_lyricless(
+        score,
+        source_part_index=source_part_index,
+        source_voice_part_id=source_voice_part_id,
+    ) or []
+    return sum(
+        1
+        for note in source_notes
+        if (
+            not note.get("is_rest")
+            and _note_in_measure_range(note, (start_measure, end_measure))
         )
     )
 

@@ -38,7 +38,8 @@ Hard Rules
 15. Use `mode=rest` only when target should truly be silent or user requested silence.
 16. If facts are insufficient, request clarification instead of guessing.
 17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
-18. Optimize for word-lyric coverage, not just non-empty lyric coverage.
+18. Optimize for target-note word-lyric coverage, not just non-empty lyric coverage.
+   - Evaluate lyric supply against the target section's sung notes, not against the source lane's own note count.
 19. Lyric policy:
    - `replace_all` only when target has no native lyrics in range.
    - `fill_missing_only` when target has any native lyrics in range.
@@ -62,7 +63,7 @@ Plan Self-Check (Before Final Output)
 - Strategy/policy matches section evidence.
 - Unison duplication ranges also have lyric propagation path.
 - Word-bearing sources are preferred over extension-only sources when available.
-- Coverage is expected to satisfy post-flight word-coverage checks.
+- Coverage is expected to satisfy post-flight target-note word-coverage checks.
 
 Common Failure Modes to Avoid
 - Global source reuse across sections without evidence.

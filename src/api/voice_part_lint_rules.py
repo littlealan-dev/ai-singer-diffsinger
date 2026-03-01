@@ -57,13 +57,13 @@ LINT_RULE_SPECS: Dict[str, LintRuleSpec] = {
         suggestion="Use a same-part melody source for that section unless the user explicitly asked for cross-part sourcing.",
         message_template="Selected melody source crosses parts even though local sung material exists in the target part.",
     ),
-    "cross_staff_lyric_source_when_local_available": LintRuleSpec(
-        code="cross_staff_lyric_source_when_local_available",
-        name="Cross-Staff Lyric Source When Local Word Lyrics Exist",
-        definition="Lyric sourcing should stay local to the target part when the target part already has word lyrics in the section.",
-        fail_condition="A derive section pulls lyrics from another part even though the target part has local word-bearing lyrics in that range.",
-        suggestion="Use a same-part lyric source with local word lyrics unless the user explicitly asked for cross-part lyric sourcing.",
-        message_template="Selected lyric source crosses parts even though local word lyrics exist in the target part.",
+    "cross_staff_lyric_source_with_stronger_local_alternative": LintRuleSpec(
+        code="cross_staff_lyric_source_with_stronger_local_alternative",
+        name="Cross-Staff Lyric Source With Stronger Local Alternative",
+        definition="A cross-staff lyric source is weak when a same-part local lyric source can cover the target lane materially better in the same section.",
+        fail_condition="The selected cross-staff lyric source has weaker target-note word coverage than a same-part local source by the configured stricter cross-staff thresholds.",
+        suggestion="Switch lyric_source to the suggested same-part local source with materially stronger target-note word coverage.",
+        message_template="Selected lyric source crosses parts, but a same-part local source can cover the target lane materially better in this section.",
     ),
     "extension_only_lyric_source_with_word_alternative": LintRuleSpec(
         code="extension_only_lyric_source_with_word_alternative",
@@ -84,10 +84,10 @@ LINT_RULE_SPECS: Dict[str, LintRuleSpec] = {
     "weak_lyric_source_with_better_alternative": LintRuleSpec(
         code="weak_lyric_source_with_better_alternative",
         name="Weak Lyric Source With Better Alternative",
-        definition="A same-part lyric source is weak when its real word coverage is materially worse than another same-part alternative in the same section.",
-        fail_condition="The selected same-part lyric source has low word-lyric coverage and another same-part source exceeds the configured word-count and coverage deltas.",
-        suggestion="Switch lyric_source to the suggested same-part source with materially better real word coverage.",
-        message_template="Selected lyric source has weak word-lyric coverage in this section, while another same-part source has materially better word-lyric coverage.",
+        definition="A same-part lyric source is weak when its target-note word coverage is materially worse than another same-part alternative in the same section.",
+        fail_condition="The selected same-part lyric source has low target-note word coverage and another same-part source exceeds the configured word-count and coverage deltas.",
+        suggestion="Switch lyric_source to the suggested same-part source with materially better target-note word coverage.",
+        message_template="Selected lyric source has weak target-note word coverage in this section, while another same-part source has materially better target-note word coverage.",
     ),
     "lyric_source_without_target_notes": LintRuleSpec(
         code="lyric_source_without_target_notes",

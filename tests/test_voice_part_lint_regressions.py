@@ -72,7 +72,7 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             "section_timeline_contiguous_no_gaps",
             "trivial_method_requires_equal_chord_voice_part_count",
             "cross_staff_melody_source_when_local_available",
-            "cross_staff_lyric_source_when_local_available",
+            "cross_staff_lyric_source_with_stronger_local_alternative",
             "extension_only_lyric_source_with_word_alternative",
             "empty_lyric_source_with_word_alternative",
             "weak_lyric_source_with_better_alternative",
@@ -277,18 +277,28 @@ class VoicePartLintRegressionTests(unittest.TestCase):
         )
         self.assertEqual(finding["source_part_index"], 1)
 
-    def test_cross_staff_lyric_source_when_local_available(self) -> None:
+    def test_cross_staff_lyric_source_with_stronger_local_alternative(self) -> None:
         score = {
             "parts": [
                 _part(
                     "P1",
                     "Choir A",
-                    [_note(measure=1, offset=0.0, pitch=60.0, lyric="local")],
+                    [
+                        _note(measure=1, offset=0.0, pitch=60.0, lyric="local"),
+                        _note(measure=1, offset=1.0, pitch=60.0, lyric="words"),
+                        _note(measure=1, offset=2.0, pitch=60.0, lyric="stay"),
+                        _note(measure=1, offset=3.0, pitch=60.0, lyric="here"),
+                    ],
                 ),
                 _part(
                     "P2",
                     "Choir B",
-                    [_note(measure=1, offset=0.0, pitch=67.0, lyric="cross")],
+                    [
+                        _note(measure=1, offset=0.0, pitch=67.0, lyric="cross"),
+                        _note(measure=1, offset=1.0, pitch=67.0, lyric="+", extended=True),
+                        _note(measure=1, offset=2.0, pitch=67.0),
+                        _note(measure=1, offset=3.0, pitch=67.0),
+                    ],
                 ),
             ]
         }
@@ -309,7 +319,7 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             ]
         }
         finding = self._assert_rule_fires(
-            "cross_staff_lyric_source_when_local_available",
+            "cross_staff_lyric_source_with_stronger_local_alternative",
             score=score,
             plan=plan,
         )
