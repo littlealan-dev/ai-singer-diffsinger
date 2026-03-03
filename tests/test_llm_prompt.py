@@ -26,10 +26,13 @@ def test_build_system_prompt_includes_voice_part_signals() -> None:
         score_available=True,
         voicebank_ids=["Raine_Rena_2.01"],
         score_summary={"title": "My Tribute"},
+        parsed_score_json={"parts": [{"part_index": 0, "notes": [{"measure_number": 7}]}]},
         voice_part_signals=voice_part_signals,
         voicebank_details=None,
     )
     assert "Voice-part planning signals (if available):" in prompt
+    assert "Full parsed score JSON (if available):" in prompt
+    assert '"measure_number": 7' in prompt
     assert '"score_summary": {' not in prompt
     assert '"voice part 1"' in prompt
     assert '"voice part 2"' in prompt
@@ -41,6 +44,7 @@ def test_build_system_prompt_includes_preprocess_mapping_context() -> None:
         score_available=True,
         voicebank_ids=["Raine_Rena_2.01"],
         score_summary={"title": "My Tribute"},
+        parsed_score_json={"parts": []},
         voice_part_signals={"parts": []},
         preprocess_mapping_context={
             "original_parse": {"score_summary": {"title": "My Tribute"}},
@@ -66,6 +70,7 @@ def test_build_system_prompt_includes_latest_successful_preprocess_plan() -> Non
         score_available=True,
         voicebank_ids=["Raine_Rena_2.01"],
         score_summary={"title": "My Tribute"},
+        parsed_score_json={"parts": []},
         voice_part_signals={"parts": []},
         preprocess_mapping_context=None,
         last_successful_preprocess_plan={
@@ -91,6 +96,7 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
         score_available=True,
         voicebank_ids=None,
         score_summary=None,
+        parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
         last_successful_preprocess_plan=None,
@@ -99,6 +105,8 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
     assert "SVS Voice-Part Lint Rules (Canonical Runtime Validation)" in prompt
     assert "- Rule code: same_part_target_completeness" in prompt
     assert "Suggested fix: Include all required same-part sibling targets" in prompt
+    assert "SVS Postflight Validation Rules (Canonical Runtime Validation)" in prompt
+    assert "- Rule code: structural_validation_failed" in prompt
 
 
 def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> None:
@@ -107,6 +115,7 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
         score_available=True,
         voicebank_ids=None,
         score_summary=None,
+        parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
         last_successful_preprocess_plan=None,
@@ -116,3 +125,35 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
         "When you call preprocess_voice_parts, set final_message to a short preprocess-in-progress confirmation"
         in prompt
     )
+
+
+def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert '"phase": "preprocess_repair_planning"' in prompt
+    assert "must return exactly one `preprocess_voice_parts` tool call" in prompt
+
+
+def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json={"parts": [{"part_index": 1}]},
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "Study the full parsed score JSON, score summary, and voice-part planning signals together" in prompt
+    assert "Prefer the full parsed score JSON as the ground truth for note-level planning details" in prompt

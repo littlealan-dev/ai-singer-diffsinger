@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 
-from src.api.voice_part_lint_rules import render_lint_rules_for_prompt
+from src.api.voice_part_lint_rules import (
+    render_lint_rules_for_prompt,
+    render_postflight_validation_rules_for_prompt,
+)
 
 
 LLM_SCHEMA_VERSION = "v1"
@@ -38,6 +41,7 @@ def build_system_prompt(
     score_available: bool,
     voicebank_ids: Optional[List[str]] = None,
     score_summary: Optional[Dict[str, Any]] = None,
+    parsed_score_json: Optional[Dict[str, Any]] = None,
     voice_part_signals: Optional[Dict[str, Any]] = None,
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_successful_preprocess_plan: Optional[Dict[str, Any]] = None,
@@ -62,6 +66,9 @@ def build_system_prompt(
     score_summary_text = "none"
     if score_summary:
         score_summary_text = json.dumps(score_summary, indent=2, sort_keys=True)
+    parsed_score_json_text = "none"
+    if parsed_score_json:
+        parsed_score_json_text = json.dumps(parsed_score_json, indent=2, sort_keys=True)
     voice_part_signals_text = "none"
     if voice_part_signals:
         voice_part_signals_text = json.dumps(voice_part_signals, indent=2, sort_keys=True)
@@ -84,6 +91,7 @@ def build_system_prompt(
         .replace("{tool_json}", tool_json)
         .replace("{voicebanks}", voicebanks_text)
         .replace("{score_summary}", score_summary_text)
+        .replace("{parsed_score_json}", parsed_score_json_text)
         .replace("{voice_part_signals}", voice_part_signals_text)
         .replace("{preprocess_mapping_context}", preprocess_mapping_context_text)
         .replace("{last_successful_preprocess_plan}", last_successful_preprocess_plan_text)
@@ -101,6 +109,7 @@ def _load_system_prompt() -> str:
         lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
         prompt_sections.append(lessons_prompt)
     prompt_sections.append(render_lint_rules_for_prompt())
+    prompt_sections.append(render_postflight_validation_rules_for_prompt())
     return "\n\n---\n\n".join(prompt_sections)
 
 

@@ -12,6 +12,8 @@ Non-capabilities:
 Score status: {score_hint}.
 Score summary (if available):
 {score_summary}
+Full parsed score JSON (if available):
+{parsed_score_json}
 Voice-part planning signals (if available):
 {voice_part_signals}
 Preprocess-derived mapping context (if available):
@@ -48,6 +50,8 @@ Rules:
 - tool_calls may be empty if no tool use is needed.
 - include_score is true only if the user requests the score JSON.
 - For preprocess_voice_parts, omit score; the backend injects the correct score context.
+- Study the full parsed score JSON, score summary, and voice-part planning signals together when preparing a preprocess plan.
+- Prefer the full parsed score JSON as the ground truth for note-level planning details when it is available.
 - For preprocess_voice_parts, you must provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
 - For preprocess_voice_parts plan shape, use sections-only targets: each target must include `target` and `sections`.
 - Do not use `voice_id` for preprocess_voice_parts. Use `voice_part_id` inside `request.plan.targets[].target`.
@@ -56,6 +60,14 @@ Rules:
 - For preprocess repair after a lint/tool failure, treat `lint_findings[].section.start_measure/end_measure` as the problem range when present.
 - On repair, keep every target and section outside the reported problem range unchanged unless another lint finding explicitly points to a different range.
 - If multiple lint findings are returned, modify only the union of those reported failing ranges plus any directly dependent sibling sections needed to satisfy completeness rules.
+- On preprocess repair, try to resolve all reported issues, but never introduce a new `P0 STRUCTURAL` issue to improve lyric quality.
+- If trade-offs remain after repair, preserve STRUCTURAL correctness over LYRIC completeness.
+- The backend uses a bounded multi-attempt repair loop. Do not stop at a structurally valid `quality_class` 1 or 2 candidate before the repair-attempt budget is exhausted.
+- Continue repairing until either:
+  - the candidate reaches `quality_class` 3, or
+  - the repair-attempt budget is exhausted.
+- Only when the repair-attempt budget is exhausted may you stop at the best structurally valid non-perfect candidate and ask the user to review it.
+- When you stop at a non-perfect but structurally valid candidate after exhausting the repair budget, explain the remaining issues concisely in `final_message` and ask the user to review/confirm or request revision.
 - For synthesize, omit score and voicebank to use defaults; include part_id (or part_index) for target selection.
 - For synthesize target selection, provide exactly one selector: either `part_id` or `part_index`, never both.
 - For synthesize target selection after preprocess:
@@ -103,6 +115,10 @@ Rules:
 - When the user content matches exactly the pattern:
   Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>{...}
   interpret the JSON tool output inside the braces and respond concisely.
+- When the internal tool-output JSON contains `"phase": "preprocess_repair_planning"`, this is a mandatory repair-planning turn.
+- In that mandatory repair-planning turn, you must return exactly one `preprocess_voice_parts` tool call in `tool_calls`.
+- In that mandatory repair-planning turn, do not return `tool_calls: []`, do not stop for review, and do not answer with prose-only output.
+- Use the returned structured metadata in that internal JSON, including `tool_result`, `repair_context.attempt_number`, `repair_context.max_attempts`, and `repair_context.quality_class`, to decide the next repair plan.
 - If the tool output contains an "error" object, explain the error in one or two sentences and suggest the next step.
 - If the pattern is seen without a valid JSON tool output, respond with "Unable to interpret tool output."
 - Do not return raw JSON to the user when responding to tool output.

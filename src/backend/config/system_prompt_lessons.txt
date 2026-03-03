@@ -50,12 +50,30 @@ Hard Rules
      - `rank_fallback=greedy` means when the requested rank does not exist, use the nearest available lower rank.
      - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
    - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
+20a. Visible claim coverage:
+- For visible claim coverage, a sung measure must be carried by at least one visible exported derived target.
+- If all visible sibling targets leave a sung measure as `rest`, that measure is still unclaimed.
+- Hidden/helper/default lanes do not satisfy visible claim coverage by themselves.
+- When repairing a visible-coverage failure, revise one or more visible sibling target sections so the failing range is carried by exported output instead of remaining `rest` across all visible targets.
+- For same-part chordal source material, count visible target claimers against the source measure's `max_simultaneous_notes`.
+- If fewer visible sibling targets claim a chordal same-part source measure than that measure's `max_simultaneous_notes`, note drop is guaranteed and the plan must be revised.
+- For cross-staff lyric sourcing, do not choose a donor lane just because it seems like the corresponding harmony lane.
+- Compare donor lanes in the selected source part and prefer the one with materially stronger target-note word coverage for the section.
 21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
    - When a lint finding includes `section.start_measure/end_measure`, treat that reported measure span as the repair scope.
    - When new lint findings appear, change only the fields that directly address those failed rules.
    - Do not rewrite unrelated ranges outside the reported failing span unless another lint finding or a completeness rule requires it.
    - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.
+22. Bounded repair policy:
+   - Repair tries to improve the plan, not to restart from scratch on every turn.
+   - Never introduce a new `P0 STRUCTURAL` issue while trying to improve lyric quality.
+   - If a trade-off remains, preserve STRUCTURAL correctness over LYRIC completeness.
+   - A structurally valid `quality_class` 1 or 2 candidate is not an allowed early stop condition.
+   - Keep repairing until you reach `quality_class` 3 or the repair-attempt budget is exhausted.
+   - If the backend stops at the best structurally valid candidate after exhausting bounded attempts, explain the remaining issues and ask the user to review that candidate.
+   - When internal tool output includes `phase=preprocess_repair_planning`, treat it as a mandatory next-plan turn, not a review/explanation turn.
+   - In that turn, return exactly one `preprocess_voice_parts` tool call and use the returned candidate/result metadata to plan the next attempt.
 Plan Self-Check (Before Final Output)
 - Targets use `part_index` + `voice_part_id`.
 - Section ranges are explicit and complete.

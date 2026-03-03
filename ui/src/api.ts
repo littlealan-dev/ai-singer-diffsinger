@@ -29,16 +29,27 @@ export type ChatResponse =
       message: string;
       current_score?: unknown;
       suppress_selector?: boolean;
+      details?: unknown;
+      warning?: string;
     }
-  | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown }
+  | {
+      type: "chat_audio";
+      message: string;
+      audio_url: string;
+      current_score?: unknown;
+      details?: unknown;
+      warning?: string;
+    }
   | {
       type: "chat_progress";
       message: string;
       progress_url: string;
       job_id?: string;
       current_score?: unknown;
+      details?: unknown;
+      warning?: string;
     }
-  | { type: "chat_error"; message: string };
+  | { type: "chat_error"; message: string; details?: unknown };
 
 export type ProgressResponse = {
   status: "idle" | "queued" | "running" | "done" | "error";
@@ -50,6 +61,8 @@ export type ProgressResponse = {
   job_kind?: string;
   review_required?: boolean;
   error?: string;
+  details?: unknown;
+  warning?: string;
 };
 
 export type WaitlistSubscribeRequest = {

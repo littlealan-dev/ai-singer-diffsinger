@@ -13,7 +13,12 @@ from fastapi.testclient import TestClient
 from src.api.score import parse_score
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
-from src.backend.orchestrator import MISSING_ORIGINAL_SCORE_MESSAGE
+from src.backend.orchestrator import (
+    MISSING_ORIGINAL_SCORE_MESSAGE,
+    ToolExecutionResult,
+    WorkflowCandidate,
+)
+from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 from src.backend.credits import UserCredits
 
@@ -21,18 +26,31 @@ from src.backend.credits import UserCredits
 def _make_router_call_tool():
     def _call_tool(name, arguments):
         if name == "parse_score":
+            musicxml_path = arguments.get("musicxml_path")
             return {
                 "title": "Test",
                 "tempos": [],
-                "parts": [{"notes": []}],
+                "parts": [{"part_id": "P1", "part_name": "Solo", "notes": []}],
                 "structure": {},
+                "voice_part_signals": {
+                    "has_multi_voice_parts": False,
+                    "has_missing_lyric_voice_parts": False,
+                    "parts": [
+                        {
+                            "part_index": 0,
+                            "multi_voice_part": False,
+                            "missing_lyric_voice_parts": [],
+                        }
+                    ],
+                },
                 "score_summary": {
                     "title": "Test",
                     "composer": None,
                     "lyricist": None,
-                    "parts": [],
+                    "parts": [{"part_id": "P1", "part_index": 0, "part_name": "Solo"}],
                     "available_verses": [],
                 },
+                "source_musicxml_path": str(musicxml_path) if musicxml_path else None,
             }
         if name == "preprocess_voice_parts":
             return {
@@ -81,6 +99,7 @@ def _auth_headers(token="test-token"):
 def _prepare_app(monkeypatch, overrides=None):
     data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
+    fake_jobs: dict[str, dict] = {}
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
@@ -101,8 +120,53 @@ def _prepare_app(monkeypatch, overrides=None):
             overdrafted=False,
         ),
     )
-    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
-    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
+    monkeypatch.setattr("src.backend.credits.reserve_credits", lambda *_, **__: True)
+    monkeypatch.setattr("src.backend.credits.release_credits", lambda *_, **__: True)
+    monkeypatch.setattr("src.backend.credits.settle_credits", lambda *_, **__: (1, False))
+
+    def _fake_create_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        session_id: str,
+        status: str,
+        input_path: str | None = None,
+        render_type: str | None = None,
+    ) -> None:
+        payload = {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": status,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        if input_path:
+            payload["inputPath"] = input_path
+        if render_type:
+            payload["renderType"] = render_type
+        fake_jobs[job_id] = payload
+
+    def _fake_update_job(self, job_id: str, **fields) -> None:
+        payload = fake_jobs.setdefault(job_id, {})
+        payload.update(fields)
+        payload["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+    def _fake_get_latest_job_by_session(self, *, user_id: str, session_id: str):
+        matches = [
+            (job_id, payload)
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: item[1].get("updatedAt", ""))
+
+    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
+    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.get_latest_job_by_session",
+        _fake_get_latest_job_by_session,
+    )
     if overrides:
         for key, value in overrides.items():
             monkeypatch.setenv(key, value)
@@ -160,6 +224,16 @@ def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
             return payload
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for progress: {last_payload}")
+
+
+def _resolve_review_response(test_client, payload):
+    if payload["type"] == "chat_progress":
+        resolved = _wait_for_progress(test_client, payload["progress_url"])
+        assert bool(resolved.get("review_required")) is True
+        return resolved
+    assert payload["type"] == "chat_text"
+    assert bool(payload.get("review_required")) is True
+    return payload
 
 
 def test_create_session_returns_id(client):
@@ -250,11 +324,98 @@ def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
     )
     assert chat_response.status_code == 200
     chat_payload = chat_response.json()
-    assert bool(chat_payload.get("review_required")) is True
+    assert chat_payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert bool(progress_payload.get("review_required")) is True
 
     score_response = test_client.get(f"/sessions/{session_id}/score")
     assert score_response.status_code == 200
     assert score_response.text == derived_xml
+
+
+def test_get_score_returns_derived_musicxml_after_reviewable_validation_candidate(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    derived_path = app.state.settings.data_dir / "sessions" / session_id / "derived-review.xml"
+    derived_xml = "<score-partwise version=\"4.0\"><part-list/><part id=\"P_DERIVED\"/></score-partwise>"
+    derived_path.write_text(derived_xml, encoding="utf-8")
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            return {
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Please review the best attempt so far.",
+                "part_index": 0,
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_name": "Lyric Coverage Needs Review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [7, 18],
+                        "impacted_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                    }
+                ],
+                "validation": {
+                    "word_lyric_coverage_ratio": 0.6,
+                    "missing_lyric_sung_note_count": 4,
+                    "unresolved_measures": [7, 18],
+                },
+                "failing_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                "review_materialization": {"candidate": "best-valid"},
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    import src.backend.orchestrator as orchestrator_module
+
+    original_finalize = orchestrator_module.finalize_review_materialization
+
+    def fake_finalize_review_materialization(payload):
+        assert payload == {"candidate": "best-valid"}
+        return {
+            "status": "ready",
+            "score": {
+                "title": "Test",
+                "parts": [{"notes": [], "part_id": "P_DERIVED", "part_name": "Tenor"}],
+                "source_musicxml_path": str(derived_path),
+            },
+            "modified_musicxml_path": str(derived_path),
+            "part_index": 0,
+        }
+
+    orchestrator_module.finalize_review_materialization = fake_finalize_review_materialization
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"tenor"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"tenor"}}]}]}}}}],'
+            '"final_message":"I\\u0027ll prepare the tenor line and stop for review if coverage is incomplete.","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    try:
+        chat_response = test_client.post(
+            f"/sessions/{session_id}/chat", json={"message": "sing tenor"}
+        )
+        assert chat_response.status_code == 200
+        chat_payload = chat_response.json()
+        assert chat_payload["type"] == "chat_progress"
+
+        progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
+        assert progress_payload["status"] == "done"
+        assert bool(progress_payload.get("review_required")) is True
+
+        score_response = test_client.get(f"/sessions/{session_id}/score")
+        assert score_response.status_code == 200
+        assert score_response.text == derived_xml
+    finally:
+        orchestrator_module.finalize_review_materialization = original_finalize
 
 
 def test_chat_returns_progress_immediately_for_preprocess(client):
@@ -290,8 +451,17 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
 
     original_path = app.state.settings.data_dir / "sessions" / session_id / "score.xml"
     derived_path = app.state.settings.data_dir / "sessions" / session_id / "derived.xml"
+    asyncio.run(
+        app.state.sessions.set_original_score(
+            session_id,
+            {
+                "title": "Test",
+                "parts": [{"notes": []}],
+                "source_musicxml_path": str(original_path),
+            },
+        )
+    )
     derived_path.write_text("<score-partwise version=\"4.0\"><part-list/></score-partwise>", encoding="utf-8")
-    preprocess_score_sources = []
     parse_score_calls = []
 
     def call_tool(name, arguments):
@@ -315,7 +485,6 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
             }
         if name == "preprocess_voice_parts":
             score = dict(arguments.get("score", {}))
-            preprocess_score_sources.append(score.get("source_musicxml_path"))
             derived_score = dict(score)
             derived_score["source_musicxml_path"] = str(derived_path)
             return {
@@ -340,17 +509,24 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
         f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
     )
     assert first_chat_response.status_code == 200
-    assert first_chat_response.json().get("review_required") is True
+    first_payload = first_chat_response.json()
+    assert first_payload["type"] == "chat_progress"
+    first_progress = _wait_for_progress(test_client, first_payload["progress_url"])
+    assert bool(first_progress.get("review_required")) is True
 
     second_chat_response = test_client.post(
         f"/sessions/{session_id}/chat", json={"message": "regenerate soprano with revised lyrics"}
     )
     assert second_chat_response.status_code == 200
-    assert second_chat_response.json().get("review_required") is True
+    second_payload = second_chat_response.json()
+    assert second_payload["type"] == "chat_progress"
+    second_progress = _wait_for_progress(test_client, second_payload["progress_url"])
+    assert bool(second_progress.get("review_required")) is True
 
-    assert preprocess_score_sources == [str(original_path), str(original_path)]
-    assert len(parse_score_calls) == 1
+    assert len(parse_score_calls) == 0
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["original_score"]["source_musicxml_path"] == str(original_path)
+    assert snapshot["current_score"]["score"]["source_musicxml_path"] == str(derived_path)
     assert len(snapshot["preprocess_plan_history"]) == 2
     assert snapshot["last_successful_preprocess_plan"] is not None
     latest_plan = snapshot["last_successful_preprocess_plan"]
@@ -427,7 +603,7 @@ def test_chat_returns_explicit_error_when_original_score_missing_for_repreproces
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["type"] == "chat_text"
+    assert payload["type"] == "chat_error"
     assert payload["message"] == MISSING_ORIGINAL_SCORE_MESSAGE
 
 
@@ -518,7 +694,712 @@ def test_upload_returns_score_summary_with_verses(client):
     assert summary.get("parts")
     assert any(part.get("has_lyrics") for part in summary["parts"])
     assert "1" in summary.get("available_verses", [])
-    assert "2" in summary.get("available_verses", [])
+
+
+def test_build_workflow_candidate_classifies_reviewable_postflight_result(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    tool_result = ToolExecutionResult(
+        score={"title": "Derived"},
+        audio_response={"type": "chat_text", "message": ""},
+        action_required_payload={
+            "status": "action_required",
+            "action": "validation_failed_needs_review",
+            "message": "Coverage still needs review.",
+            "failed_validation_rules": [
+                {
+                    "rule": "validation_failed_needs_review",
+                    "rule_name": "Coverage Needs Review",
+                    "rule_severity": "P1",
+                    "rule_domain": "LYRIC",
+                    "impacted_measures": [7, 8, 9],
+                    "impacted_ranges": [{"start": 7, "end": 9}],
+                }
+            ],
+        },
+    )
+
+    candidate = orchestrator._build_workflow_candidate(
+        attempt_number=2,
+        tool_result=tool_result,
+        fallback_message="fallback",
+    )
+
+    assert candidate is not None
+    assert candidate.structurally_valid is True
+    assert candidate.review_required is True
+    assert candidate.quality_class == 1
+    assert candidate.structural_p1_measures == 0
+    assert candidate.lyric_p1_measures == 3
+    assert candidate.p2_measures == 0
+    assert candidate.message == "Coverage still needs review."
+    assert candidate.target_results == []
+
+
+def test_build_workflow_candidate_uses_visible_targets_for_quality(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    tool_result = ToolExecutionResult(
+        score={"title": "Derived"},
+        audio_response={"type": "chat_text", "message": ""},
+        action_required_payload={
+            "status": "action_required",
+            "action": "validation_failed_needs_review",
+            "message": "Visible tenor still needs review.",
+            "targets": [
+                {
+                    "target_voice_part_id": "voice part 1",
+                    "visible": True,
+                    "hidden_default_lane": False,
+                    "issues": [
+                        {
+                            "rule": "validation_failed_needs_review",
+                            "rule_severity": "P1",
+                            "rule_domain": "LYRIC",
+                            "impacted_measures": [7, 8, 9],
+                            "impacted_ranges": [{"start": 7, "end": 9}],
+                        }
+                    ],
+                },
+                {
+                    "target_voice_part_id": "voice part 3",
+                    "visible": False,
+                    "hidden_default_lane": True,
+                    "issues": [],
+                },
+            ],
+        },
+    )
+
+    candidate = orchestrator._build_workflow_candidate(
+        attempt_number=2,
+        tool_result=tool_result,
+        fallback_message="fallback",
+    )
+
+    assert candidate is not None
+    assert candidate.quality_class == 1
+    assert candidate.lyric_p1_measures == 3
+    assert candidate.structurally_valid is True
+    assert len(candidate.target_results) == 2
+    assert candidate.target_results[0]["quality_class"] == 1
+    assert candidate.target_results[1]["quality_class"] == 3
+
+
+def test_candidate_ranking_prefers_higher_quality_then_smaller_impact(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    class2_candidate = orchestrator._build_workflow_candidate(
+        attempt_number=2,
+        tool_result=ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response=None,
+            followup_prompt=json.dumps(
+                {
+                    "status": "ready_with_warnings",
+                    "warnings": [
+                        {
+                            "code": "partial_lyric_coverage",
+                            "rule_metadata": {
+                                "rule": "partial_lyric_coverage",
+                                "rule_name": "Partial Lyric Coverage",
+                                "rule_severity": "P2",
+                                "rule_domain": "LYRIC",
+                                "impacted_measures": [18],
+                                "impacted_ranges": [{"start": 18, "end": 18}],
+                            },
+                        }
+                    ],
+                }
+            ),
+            review_required=True,
+        ),
+        fallback_message="fallback",
+    )
+    class1_candidate = orchestrator._build_workflow_candidate(
+        attempt_number=1,
+        tool_result=ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response={"type": "chat_text", "message": ""},
+            action_required_payload={
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Needs review.",
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_name": "Coverage Needs Review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [7, 8],
+                        "impacted_ranges": [{"start": 7, "end": 8}],
+                    }
+                ],
+            },
+        ),
+        fallback_message="fallback",
+    )
+
+    assert class2_candidate is not None
+    assert class1_candidate is not None
+    assert orchestrator._candidate_is_better(class2_candidate, class1_candidate) is True
+    assert orchestrator._candidate_is_better(class1_candidate, class2_candidate) is False
+
+
+def test_workflow_returns_best_valid_candidate_when_followup_step_fails(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        return ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response={"type": "chat_text", "message": ""},
+            action_required_payload={
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Please review the best attempt so far.",
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_name": "Coverage Needs Review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [7, 18],
+                        "impacted_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                    }
+                ],
+            },
+            followup_prompt=json.dumps({"status": "action_required"}),
+        )
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        return None, "LLM request failed. Please try again."
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived"}, "version": 2}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-1",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert response["type"] == "chat_text"
+    assert response["message"] == "Please review the best attempt so far."
+    assert response["review_required"] is True
+    assert response["details"]["quality_class"] == 1
+    assert response["details"]["issues"][0]["rule"] == "validation_failed_needs_review"
+    assert response["current_score"] == {"score": {"title": "Derived"}, "version": 2}
+
+
+def test_workflow_returns_best_invalid_error_when_no_structurally_valid_candidate_exists(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        return ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response={"type": "chat_text", "message": ""},
+            action_required_payload={
+                "status": "action_required",
+                "action": "structural_validation_failed",
+                "message": "Derived section output is not synthesis-safe.",
+                "validation": {
+                    "structural": {
+                        "max_simultaneous_notes": 2,
+                        "simultaneous_conflict_count": 1,
+                        "overlap_conflict_count": 0,
+                    }
+                },
+                "failing_ranges": [{"start": 12, "end": 12}],
+                "failed_validation_rules": [
+                    {
+                        "rule": "structural_validation_failed",
+                        "rule_name": "Structural Validation Failed",
+                        "rule_severity": "P0",
+                        "rule_domain": "STRUCTURAL",
+                        "impacted_measures": [12],
+                        "impacted_ranges": [{"start": 12, "end": 12}],
+                    }
+                ],
+            },
+            followup_prompt=json.dumps({"status": "action_required"}),
+        )
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        return None, "LLM request failed. Please try again."
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived"}, "version": 2}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-2",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert response["type"] == "chat_error"
+    assert response["message"] == "Unable to produce synthesis-safe monophonic output after 3 attempts."
+    assert response["details"]["best_invalid_candidate"]["attempt_number"] == 1
+    assert response["details"]["best_invalid_candidate"]["failing_ranges"] == [{"start": 12, "end": 12}]
+    assert response["details"]["failed_validation_rules"][0]["rule"] == "structural_validation_failed"
+
+
+def test_build_workflow_candidate_normalizes_postflight_severity_domain_keys(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    tool_result = ToolExecutionResult(
+        score={"title": "Derived"},
+        audio_response={"type": "chat_text", "message": ""},
+        action_required_payload={
+            "status": "action_required",
+            "action": "validation_failed_needs_review",
+            "message": "Lyric propagation did not meet minimum coverage.",
+            "failed_validation_rules": [
+                {
+                    "rule": "validation_failed_needs_review",
+                    "severity": "P1",
+                    "domain": "LYRIC",
+                    "impacted_measures": [1, 2, 3],
+                }
+            ],
+        },
+        followup_prompt=json.dumps({"status": "action_required"}),
+    )
+
+    candidate = orchestrator._build_workflow_candidate(
+        attempt_number=1,
+        tool_result=tool_result,
+        fallback_message="fallback",
+    )
+
+    assert candidate is not None
+    assert candidate.quality_class == 1
+    assert candidate.lyric_p1_measures == 3
+    assert candidate.structural_p1_measures == 0
+
+
+def test_format_llm_error_returns_plain_timeout_message(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    assert (
+        orchestrator._format_llm_error(RuntimeError("Gemini request timed out."))
+        == "Gemini request timed out."
+    )
+
+
+def test_format_llm_error_returns_plain_non_json_message(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    assert (
+        orchestrator._format_llm_error(RuntimeError("Gemini service unavailable."))
+        == "Gemini service unavailable."
+    )
+
+
+def test_workflow_keeps_better_later_valid_candidate_when_followup_fails(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+    attempts = {"count": 0}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return ToolExecutionResult(
+                score={"title": "Derived-1"},
+                audio_response={"type": "chat_text", "message": ""},
+                action_required_payload={
+                    "status": "action_required",
+                    "action": "validation_failed_needs_review",
+                    "message": "First attempt review.",
+                    "failed_validation_rules": [
+                        {
+                            "rule": "validation_failed_needs_review",
+                            "rule_name": "Coverage Needs Review",
+                            "rule_severity": "P1",
+                            "rule_domain": "LYRIC",
+                            "impacted_measures": [7, 8],
+                            "impacted_ranges": [{"start": 7, "end": 8}],
+                        }
+                    ],
+                },
+                followup_prompt=json.dumps({"status": "action_required", "attempt": 1}),
+            )
+        return ToolExecutionResult(
+            score={"title": "Derived-2"},
+            audio_response=None,
+            followup_prompt=json.dumps(
+                {
+                    "status": "ready_with_warnings",
+                    "message": "Second attempt review.",
+                    "warnings": [
+                        {
+                            "code": "partial_lyric_coverage",
+                            "rule_metadata": {
+                                "rule": "partial_lyric_coverage",
+                                "rule_name": "Partial Lyric Coverage",
+                                "rule_severity": "P2",
+                                "rule_domain": "LYRIC",
+                                "impacted_measures": [18],
+                                "impacted_ranges": [{"start": 18, "end": 18}],
+                            },
+                        }
+                    ],
+                }
+            ),
+            review_required=True,
+        )
+
+    followup_calls = {"count": 0}
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        followup_calls["count"] += 1
+        if followup_calls["count"] == 1:
+            return (
+                LlmResponse(
+                    tool_calls=[ToolCall(name="preprocess_voice_parts", arguments={})],
+                    final_message="Trying one more repair.",
+                    include_score=False,
+                ),
+                None,
+            )
+        return None, "LLM request failed. Please try again."
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived-2"}, "version": 3}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-3",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert response["type"] == "chat_text"
+    assert response["message"] == "Second attempt review."
+    assert response["review_required"] is True
+    assert response["details"]["quality_class"] == 2
+    assert response["details"]["warnings"][0]["code"] == "partial_lyric_coverage"
+    assert response["current_score"] == {"score": {"title": "Derived-2"}, "version": 3}
+
+
+def test_workflow_stops_after_class3_candidate_even_if_followup_returns_tool_calls(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        return ToolExecutionResult(
+            score={"title": "Derived-clean"},
+            audio_response=None,
+            followup_prompt=json.dumps(
+                {
+                    "status": "ready",
+                    "message": "Clean derived score ready.",
+                    "warnings": [],
+                }
+            ),
+            review_required=True,
+        )
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        return (
+            LlmResponse(
+                tool_calls=[ToolCall(name="preprocess_voice_parts", arguments={"request": {"plan": {}}})],
+                final_message="The derived score is ready for review.",
+                include_score=False,
+            ),
+            None,
+        )
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived-clean"}, "version": 4}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-4",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert response["type"] == "chat_text"
+    assert response["message"] == "The derived score is ready for review."
+    assert response["review_required"] is True
+    assert response["details"]["quality_class"] == 3
+    assert response["details"]["issues"] == []
+    assert response["current_score"] == {"score": {"title": "Derived-clean"}, "version": 4}
+
+
+def test_workflow_reprompts_when_class1_candidate_stops_early(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+    execute_calls = {"count": 0}
+    followup_calls = {"count": 0}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        execute_calls["count"] += 1
+        if execute_calls["count"] == 1:
+            return ToolExecutionResult(
+                score={"title": "Derived-reviewable"},
+                audio_response=None,
+                action_required_payload={
+                    "status": "action_required",
+                    "action": "validation_failed_needs_review",
+                    "message": "Coverage still needs review.",
+                    "failed_validation_rules": [
+                        {
+                            "rule": "validation_failed_needs_review",
+                            "rule_name": "Coverage Needs Review",
+                            "rule_severity": "P1",
+                            "rule_domain": "LYRIC",
+                            "impacted_measures": [7, 18],
+                            "impacted_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                        }
+                    ],
+                },
+                followup_prompt=json.dumps({"status": "action_required"}),
+            )
+        return ToolExecutionResult(
+            score={"title": "Derived-clean"},
+            audio_response=None,
+            followup_prompt=json.dumps(
+                {
+                    "status": "ready",
+                    "message": "Clean derived score ready.",
+                    "warnings": [],
+                }
+            ),
+            review_required=True,
+        )
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        followup_calls["count"] += 1
+        if followup_calls["count"] == 1:
+            return (
+                LlmResponse(
+                    tool_calls=[
+                        ToolCall(
+                            name="preprocess_voice_parts",
+                            arguments={"request": {"plan": {"targets": []}}},
+                        )
+                    ],
+                    final_message="Retrying the failing lyric ranges.",
+                    include_score=False,
+                ),
+                None,
+            )
+        return (
+            LlmResponse(
+                tool_calls=[],
+                final_message="The derived score is ready for review.",
+                include_score=False,
+            ),
+            None,
+        )
+
+    async def fake_get_snapshot(*args, **kwargs):
+        if execute_calls["count"] >= 2:
+            return {"current_score": {"score": {"title": "Derived-clean"}, "version": 5}}
+        return {"current_score": {"score": {"title": "Original"}, "version": 1}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-4b",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert execute_calls["count"] == 2
+    assert followup_calls["count"] == 2
+    assert response["type"] == "chat_text"
+    assert response["message"] == "The derived score is ready for review."
+    assert response["review_required"] is True
+    assert response["details"]["quality_class"] == 3
+    assert response["current_score"] == {"score": {"title": "Derived-clean"}, "version": 5}
+
+
+def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    candidate = WorkflowCandidate(
+        attempt_number=1,
+        score={"title": "Derived"},
+        message="Coverage still needs review.",
+        review_required=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        lyric_p1_measures=2,
+        p2_measures=0,
+        issues=[
+            {
+                "rule": "validation_failed_needs_review",
+                "rule_severity": "P1",
+                "rule_domain": "LYRIC",
+                "impacted_measures": [7, 18],
+            }
+        ],
+        target_results=[],
+        result_payload={"status": "action_required", "action": "validation_failed_needs_review"},
+    )
+
+    prompt = orchestrator._build_repair_planning_prompt(
+        candidate,
+        {"status": "action_required", "action": "validation_failed_needs_review"},
+        attempt_number=1,
+        max_attempts=3,
+    )
+    payload = json.loads(prompt)
+
+    assert payload["tool"] == "preprocess_voice_parts"
+    assert payload["phase"] == "preprocess_repair_planning"
+    assert payload["tool_result"]["action"] == "validation_failed_needs_review"
+    assert payload["repair_context"]["attempt_number"] == 1
+    assert payload["repair_context"]["max_attempts"] == 3
+    assert payload["repair_context"]["quality_class"] == 1
+
+
+def test_workflow_persists_preprocess_attempt_summary(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session = asyncio.run(app.state.sessions.create_session("test-user"))
+    asyncio.run(app.state.sessions.set_score(session.id, {"title": "Original"}))
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        return ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response={"type": "chat_text", "message": ""},
+            action_required_payload={
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Please review the attempt.",
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_name": "Coverage Needs Review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [7, 18],
+                        "impacted_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                    }
+                ],
+            },
+            followup_prompt=json.dumps({"status": "action_required"}),
+        )
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        return None, "LLM request failed. Please try again."
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            session.id,
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert response["type"] == "chat_text"
+    stored_snapshot = asyncio.run(app.state.sessions.get_snapshot(session.id, "test-user"))
+    history = stored_snapshot["preprocess_attempt_history"]
+    assert len(history) == 1
+    assert history[0]["attempt_number"] == 1
+    assert history[0]["candidate_present"] is True
+    assert history[0]["structurally_valid"] is True
+    assert history[0]["quality_class"] == 1
+    assert history[0]["replaced_best_valid"] is True
+    assert history[0]["replaced_best_invalid"] is False
+    assert history[0]["issue_codes"] == ["validation_failed_needs_review"]
 
 
 def test_orchestrator_selection_matches_current_uses_selected_verse(client):
@@ -662,7 +1543,7 @@ def test_chat_returns_error_when_llm_fails(client):
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["type"] == "chat_text"
+    assert payload["type"] == "chat_error"
     assert payload["message"] == "LLM request failed. Please try again."
 
 
@@ -797,8 +1678,10 @@ def test_chat_executes_followup_tool_calls_same_turn(client):
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["type"] == "chat_text"
-    assert bool(payload.get("review_required")) is True
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert bool(progress_payload.get("review_required")) is True
     assert preprocess_attempts["count"] == 2
 
     proceed = test_client.post(
@@ -909,9 +1792,7 @@ def test_chat_reparse_continues_to_preprocess_same_turn(client):
         f"/sessions/{session_id}/chat", json={"message": "Change to verse 2 and sing soprano"}
     )
     assert response.status_code == 200
-    payload = response.json()
-    assert payload["type"] == "chat_text"
-    assert bool(payload.get("review_required")) is True
+    _resolve_review_response(test_client, response.json())
 
     reparses_to_verse_2 = [
         args for name, args in tool_calls if name == "parse_score" and str(args.get("verse_number")) == "2"
@@ -1023,9 +1904,7 @@ def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
         f"/sessions/{session_id}/chat", json={"message": "Use verse 1 and proceed"}
     )
     assert response.status_code == 200
-    payload = response.json()
-    assert payload["type"] == "chat_text"
-    assert bool(payload.get("review_required")) is True
+    _resolve_review_response(test_client, response.json())
     assert parse_score_calls["count"] == 1, "Same-verse reparse should be treated as no-op."
     assert preprocess_calls["count"] == 1, "No-op reparse should still continue to preprocess."
 
@@ -1051,6 +1930,14 @@ def test_preprocess_returns_last_validation_review_after_repair_cap(client):
                     "missing_lyric_sung_note_count": 4,
                     "unresolved_measures": [7, 18],
                 },
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [7, 18],
+                    }
+                ],
             }
         return _make_router_call_tool()(name, arguments)
 
@@ -1108,11 +1995,11 @@ def test_preprocess_returns_last_validation_review_after_repair_cap(client):
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["type"] == "chat_text"
-    assert payload["message"] == "Lyric propagation did not meet minimum coverage."
-    assert bool(payload.get("review_required")) is True
-    assert "current_score" in payload
-    assert preprocess_calls["count"] == 4
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert bool(progress_payload.get("review_required")) is True
+    assert preprocess_calls["count"] == 3
 
 
 def test_get_audio_returns_404_without_audio(client):

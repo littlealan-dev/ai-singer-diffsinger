@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Chat orchestration layer that bridges LLM decisions and MCP tools."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +23,7 @@ from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
 from src.api.voice_parts import (
     build_preprocessing_required_action,
+    finalize_review_materialization,
     synthesize_preflight_action_required,
 )
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
@@ -30,7 +31,6 @@ from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
-MAX_INTERNAL_TOOL_REPAIRS = 3
 REVIEW_PENDING_KEY = "_preprocess_review_pending"
 MISSING_ORIGINAL_SCORE_MESSAGE = (
     "Session is missing the original parsed score baseline required for preprocessing. "
@@ -166,6 +166,7 @@ class Orchestrator:
                         current_score["score"],
                         llm_response.tool_calls,
                         initial_message=response_message,
+                        initial_thought_summary=llm_response.thought_summary,
                         user_id=user_id,
                         user_email=user_email,
                     )
@@ -181,6 +182,7 @@ class Orchestrator:
                         llm_response.thought_summary,
                         llm_response.tool_calls,
                     ),
+                    initial_thought_summary=llm_response.thought_summary,
                     user_id=user_id,
                     user_email=user_email,
                 )
@@ -393,6 +395,7 @@ class Orchestrator:
         tool_calls: List[ToolCall],
         *,
         initial_message: str,
+        initial_thought_summary: str,
         user_id: str,
         user_email: str,
     ) -> Dict[str, Any]:
@@ -433,6 +436,7 @@ class Orchestrator:
                 user_id,
                 user_email,
                 initial_message=initial_message,
+                initial_thought_summary=initial_thought_summary,
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -545,6 +549,7 @@ class Orchestrator:
         user_email: str,
         *,
         initial_message: str,
+        initial_thought_summary: str,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message."""
         try:
@@ -567,6 +572,7 @@ class Orchestrator:
                 initial_response_message=initial_message,
                 initial_include_score=False,
                 initial_thought_block=None,
+                initial_thought_summary=initial_thought_summary,
                 user_id=user_id,
                 user_email=user_email,
             )
@@ -582,8 +588,10 @@ class Orchestrator:
                     errorMessage=message,
                     progress=1.0,
                     jobKind="preprocess",
+                    details=response.get("details"),
                 )
             else:
+                warning_message = response.get("warning")
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
@@ -593,6 +601,8 @@ class Orchestrator:
                     progress=1.0,
                     jobKind="preprocess",
                     reviewRequired=bool(response.get("review_required")),
+                    details=response.get("details"),
+                    warningMessage=warning_message,
                 )
         except Exception as exc:
             self._logger.exception("preprocess_job_failed session=%s error=%s", session_id, exc)
@@ -620,6 +630,7 @@ class Orchestrator:
         initial_response_message: str,
         initial_include_score: bool,
         initial_thought_block: Optional[str],
+        initial_thought_summary: Optional[str],
         user_id: str,
         user_email: str,
     ) -> Dict[str, Any]:
@@ -630,12 +641,25 @@ class Orchestrator:
         pending_calls = list(tool_calls)
         working_score = current_score
         score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
-        repairs_used = 0
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
+        best_valid_candidate: Optional[WorkflowCandidate] = None
+        best_invalid_candidate: Optional[WorkflowCandidate] = None
+        attempt_number = 0
+        max_attempts = max(1, self._settings.preprocess_max_attempts)
+        attempt_messages: List[Dict[str, Any]] = []
+        if any(call.name == "preprocess_voice_parts" for call in pending_calls):
+            initial_attempt_entry = self._build_attempt_message_entry(
+                attempt_number=1,
+                final_message=initial_response_message,
+                thought_summary=initial_thought_summary or "",
+            )
+            if initial_attempt_entry is not None:
+                attempt_messages.append(initial_attempt_entry)
 
         while True:
+            attempt_number += 1
             tool_result = await self._execute_tool_calls(
                 session_id,
                 working_score,
@@ -648,11 +672,42 @@ class Orchestrator:
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
+            candidate = self._build_workflow_candidate(
+                attempt_number=attempt_number,
+                tool_result=tool_result,
+                fallback_message=response_message,
+            )
+            replaced_best_valid = False
+            replaced_best_invalid = False
+            if candidate is not None:
+                if candidate.structurally_valid:
+                    if self._candidate_is_better(candidate, best_valid_candidate):
+                        best_valid_candidate = candidate
+                        replaced_best_valid = True
+                elif self._candidate_is_better(candidate, best_invalid_candidate):
+                    best_invalid_candidate = candidate
+                    replaced_best_invalid = True
+            if any(call.name == "preprocess_voice_parts" for call in pending_calls) or candidate is not None:
+                await self._sessions.append_preprocess_attempt_summary(
+                    session_id,
+                    self._build_preprocess_attempt_summary(
+                        attempt_number=attempt_number,
+                        tool_calls=pending_calls,
+                        tool_result=tool_result,
+                        candidate=candidate,
+                        replaced_best_valid=replaced_best_valid,
+                        replaced_best_invalid=replaced_best_invalid,
+                    ),
+                )
             response = tool_result.audio_response or {
                 "type": "chat_text",
                 "message": response_message,
             }
             followup_prompt = tool_result.followup_prompt
+            preprocess_iteration = any(
+                call.name == "preprocess_voice_parts" for call in pending_calls
+            ) or candidate is not None
+
             if followup_prompt is None:
                 if response_message:
                     response["message"] = response_message
@@ -663,22 +718,164 @@ class Orchestrator:
             if self._tool_payload_has_error(followup_prompt):
                 response["suppress_selector"] = True
 
+            if preprocess_iteration:
+                if best_valid_candidate is not None and best_valid_candidate.quality_class == 3:
+                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                        session_id, best_valid_candidate
+                    )
+                    response = await self._render_selected_candidate_response(
+                        session_id,
+                        user_id,
+                        working_score,
+                        best_valid_candidate,
+                        stop_reason="quality_class_3",
+                    )
+                    include_score = True
+                    break
+
+                if attempt_number >= max_attempts:
+                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                        session_id, best_valid_candidate
+                    )
+                    candidate_response = await self._render_selected_candidate_response(
+                        session_id,
+                        user_id,
+                        working_score,
+                        best_valid_candidate,
+                        stop_reason="attempt_budget_exhausted",
+                    )
+                    if candidate_response is not None:
+                        response = candidate_response
+                        include_score = True
+                    elif best_invalid_candidate is not None:
+                        response = self._build_invalid_candidate_error(best_invalid_candidate) or {
+                            "type": "chat_error",
+                            "message": (
+                                f"Unable to produce synthesis-safe monophonic output after "
+                                f"{max_attempts} attempts."
+                            ),
+                        }
+                    else:
+                        response = {
+                            "type": "chat_text",
+                            "message": (
+                                f"I couldn't complete preprocessing after {max_attempts} attempts. "
+                                "Please revise the request or plan details."
+                            ),
+                        }
+                    break
+
+                latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                repair_response, repair_error = await self._decide_followup_with_llm(
+                    latest_snapshot,
+                    self._build_repair_planning_prompt(
+                        best_valid_candidate,
+                        last_action_required_payload,
+                        attempt_number=attempt_number,
+                        max_attempts=max_attempts,
+                    ),
+                    working_score,
+                )
+                if repair_error:
+                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                        session_id, best_valid_candidate
+                    )
+                    candidate_response = await self._render_selected_candidate_response(
+                        session_id,
+                        user_id,
+                        working_score,
+                        best_valid_candidate,
+                        stop_reason="repair_planning_failed",
+                    )
+                    if candidate_response is not None:
+                        candidate_response["warning"] = repair_error
+                        response = candidate_response
+                        include_score = True
+                        break
+                    invalid_error = self._build_invalid_candidate_error(best_invalid_candidate)
+                    if invalid_error is not None:
+                        return invalid_error
+                    return {"type": "chat_error", "message": repair_error}
+
+                if repair_response is None or not repair_response.tool_calls:
+                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                        session_id, best_valid_candidate
+                    )
+                    candidate_response = await self._render_selected_candidate_response(
+                        session_id,
+                        user_id,
+                        working_score,
+                        best_valid_candidate,
+                        stop_reason="repair_plan_missing",
+                    )
+                    if candidate_response is not None:
+                        candidate_response["warning"] = (
+                            "LLM did not return a repair preprocess plan."
+                        )
+                        response = candidate_response
+                        include_score = True
+                        break
+                    invalid_error = self._build_invalid_candidate_error(best_invalid_candidate)
+                    if invalid_error is not None:
+                        return invalid_error
+                    return {
+                        "type": "chat_error",
+                        "message": "LLM did not return a repair preprocess plan.",
+                    }
+
+                self._logger.debug(
+                    "chat_llm_followup_repair session=%s response=%s",
+                    session_id,
+                    {
+                        "tool_calls": [
+                            {
+                                "name": call.name,
+                                "arguments": summarize_payload(call.arguments),
+                            }
+                            for call in repair_response.tool_calls
+                        ],
+                        "final_message": repair_response.final_message,
+                        "include_score": repair_response.include_score,
+                        "thought_summary": summarize_payload(repair_response.thought_summary),
+                    },
+                )
+                include_score = include_score or repair_response.include_score
+                response_message = self._merge_thought_summary(
+                    repair_response.final_message or response_message,
+                    repair_response.thought_summary,
+                    repair_response.tool_calls,
+                )
+                thought_block_for_response = self._format_thought_summary_block(
+                    repair_response.thought_summary,
+                    repair_response.tool_calls,
+                ) or thought_block_for_response
+                repair_attempt_entry = self._build_attempt_message_entry(
+                    attempt_number=attempt_number + 1,
+                    final_message=repair_response.final_message or "",
+                    thought_summary=repair_response.thought_summary,
+                )
+                if repair_attempt_entry is not None:
+                    attempt_messages.append(repair_attempt_entry)
+                pending_calls = list(repair_response.tool_calls)
+                continue
+
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             followup_response, followup_error = await self._decide_followup_with_llm(
                 latest_snapshot, followup_prompt, working_score
             )
             if followup_error:
-                if (
-                    last_action_required_payload
-                    and last_action_required_payload.get("action") == "validation_failed_needs_review"
-                ):
-                    response = {
-                        "type": "chat_text",
-                        "message": str(last_action_required_payload.get("message") or ""),
-                        "review_required": True,
-                    }
+                best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                    session_id, best_valid_candidate
+                )
+                candidate_response = self._build_candidate_response(best_valid_candidate)
+                if candidate_response is not None:
+                    candidate_response["warning"] = followup_error
+                    response = candidate_response
                     include_score = True
                     break
+                invalid_error = self._build_invalid_candidate_error(best_invalid_candidate)
+                if invalid_error is not None:
+                    return invalid_error
                 return {"type": "chat_error", "message": followup_error}
 
             if followup_response is None:
@@ -724,44 +921,604 @@ class Orchestrator:
             ) or thought_block_for_response
 
             if not followup_response.tool_calls:
-                response = {
-                    "type": "chat_text",
-                    "message": self._format_followup_message_text(response_message),
-                }
-                if review_required_pending:
+                best_valid_candidate = await self._materialize_review_candidate_if_needed(
+                    session_id, best_valid_candidate
+                )
+                candidate_response = self._build_candidate_response(best_valid_candidate)
+                if candidate_response is not None:
+                    response = candidate_response
+                    response["message"] = self._format_followup_message_text(response_message)
                     response["review_required"] = True
-                break
-
-            if repairs_used >= MAX_INTERNAL_TOOL_REPAIRS:
-                if (
-                    last_action_required_payload
-                    and last_action_required_payload.get("action") == "validation_failed_needs_review"
-                ):
-                    response = {
-                        "type": "chat_text",
-                        "message": str(last_action_required_payload.get("message") or ""),
-                        "review_required": True,
-                    }
                     include_score = True
                 else:
                     response = {
                         "type": "chat_text",
-                        "message": (
-                            f"I couldn't complete preprocessing after {MAX_INTERNAL_TOOL_REPAIRS} repair attempts. "
-                            "Please revise the request or plan details."
-                        ),
+                        "message": self._format_followup_message_text(response_message),
                     }
+                    if review_required_pending:
+                        response["review_required"] = True
                 break
 
-            repairs_used += 1
             pending_calls = list(followup_response.tool_calls)
 
+        response = self._attach_attempt_messages(response, attempt_messages)
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
             if updated_score is not None:
                 response["current_score"] = updated_score
         return response
+
+    def _build_repair_planning_prompt(
+        self,
+        candidate: Optional["WorkflowCandidate"],
+        action_required_payload: Optional[Dict[str, Any]],
+        *,
+        attempt_number: int,
+        max_attempts: int,
+    ) -> str:
+        """Build the next repair-planning prompt for a non-terminal preprocess candidate."""
+        payload = (
+            action_required_payload
+            if isinstance(action_required_payload, dict)
+            else candidate.result_payload if candidate is not None else {}
+        )
+        quality_class = candidate.quality_class if candidate is not None else None
+        envelope = {
+            "tool": "preprocess_voice_parts",
+            "phase": "preprocess_repair_planning",
+            "tool_result": payload,
+            "repair_context": {
+                "attempt_number": attempt_number,
+                "max_attempts": max_attempts,
+                "quality_class": quality_class,
+            },
+        }
+        return json.dumps(envelope, sort_keys=True)
+
+    def _build_workflow_candidate(
+        self,
+        *,
+        attempt_number: int,
+        tool_result: "ToolExecutionResult",
+        fallback_message: str,
+    ) -> Optional["WorkflowCandidate"]:
+        """Build a candidate summary from a preprocess tool result."""
+        payload: Optional[Dict[str, Any]] = None
+        review_required = False
+        if isinstance(tool_result.action_required_payload, dict):
+            payload = tool_result.action_required_payload
+            action = str(payload.get("action") or "").strip()
+            if action == "plan_lint_failed":
+                return None
+            target_results = self._extract_target_results(payload)
+            if not target_results:
+                issue_entries = self._extract_issue_entries(payload)
+            else:
+                issue_entries = self._aggregate_visible_target_issues(target_results)
+            if not issue_entries and not target_results:
+                return None
+            structurally_valid = self._targets_are_structurally_valid(target_results, issue_entries)
+            review_required = structurally_valid
+        elif tool_result.review_required and tool_result.followup_prompt:
+            try:
+                parsed = json.loads(tool_result.followup_prompt)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            payload = parsed
+            target_results = self._extract_target_results(parsed)
+            issue_entries = (
+                self._aggregate_visible_target_issues(target_results)
+                if target_results
+                else self._extract_issue_entries(parsed)
+            )
+            structurally_valid = True
+            review_required = True
+        else:
+            return None
+
+        if target_results:
+            structural_p1_measures = self._aggregate_target_impacted_measures(
+                target_results, severity="P1", domain="STRUCTURAL"
+            )
+            lyric_p1_measures = self._aggregate_target_impacted_measures(
+                target_results, severity="P1", domain="LYRIC"
+            )
+            p2_measures = self._aggregate_target_impacted_measures(
+                target_results, severity="P2"
+            )
+        else:
+            structural_p1_measures = self._count_impacted_measures(
+                issue_entries, severity="P1", domain="STRUCTURAL"
+            )
+            lyric_p1_measures = self._count_impacted_measures(
+                issue_entries, severity="P1", domain="LYRIC"
+            )
+            p2_measures = self._count_impacted_measures(issue_entries, severity="P2")
+        quality_class = self._classify_candidate_quality(
+            structural_p1_measures=structural_p1_measures,
+            lyric_p1_measures=lyric_p1_measures,
+            p2_measures=p2_measures,
+        )
+        return WorkflowCandidate(
+            attempt_number=attempt_number,
+            score=tool_result.score,
+            message=str(payload.get("message") or fallback_message),
+            review_required=review_required,
+            quality_class=quality_class,
+            structurally_valid=structurally_valid,
+            structural_p1_measures=structural_p1_measures,
+            lyric_p1_measures=lyric_p1_measures,
+            p2_measures=p2_measures,
+            issues=issue_entries,
+            target_results=target_results,
+            result_payload=dict(payload),
+            action_required_payload=tool_result.action_required_payload,
+            review_materialization=tool_result.review_materialization,
+        )
+
+    def _extract_issue_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect normalized issue entries from preprocess result payloads."""
+        issue_entries: List[Dict[str, Any]] = []
+        def _normalized_issue(entry: Dict[str, Any]) -> Dict[str, Any]:
+            normalized = dict(entry)
+            if "rule_severity" not in normalized and "severity" in normalized:
+                normalized["rule_severity"] = normalized.get("severity")
+            if "rule_domain" not in normalized and "domain" in normalized:
+                normalized["rule_domain"] = normalized.get("domain")
+            return normalized
+        failed_rules = payload.get("failed_validation_rules")
+        if isinstance(failed_rules, list):
+            for entry in failed_rules:
+                if isinstance(entry, dict):
+                    issue_entries.append(_normalized_issue(entry))
+        warnings = payload.get("warnings")
+        if isinstance(warnings, list):
+            for entry in warnings:
+                if not isinstance(entry, dict):
+                    continue
+                rule_metadata = entry.get("rule_metadata")
+                if isinstance(rule_metadata, dict):
+                    issue_entries.append(_normalized_issue(rule_metadata))
+        lint_findings = payload.get("lint_findings")
+        if isinstance(lint_findings, list):
+            for entry in lint_findings:
+                if isinstance(entry, dict):
+                    issue_entries.append(_normalized_issue(entry))
+        return issue_entries
+
+    def _extract_target_results(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect normalized per-target preprocess results from payload."""
+        raw_targets = payload.get("targets")
+        if not isinstance(raw_targets, list):
+            return []
+        normalized_targets: List[Dict[str, Any]] = []
+        for entry in raw_targets:
+            if not isinstance(entry, dict):
+                continue
+            normalized = dict(entry)
+            issues = normalized.get("issues")
+            if isinstance(issues, list):
+                normalized["issues"] = [
+                    self._normalize_issue_for_candidate(item)
+                    for item in issues
+                    if isinstance(item, dict)
+                ]
+            else:
+                normalized["issues"] = self._extract_issue_entries(normalized)
+            if "visible" not in normalized:
+                normalized["visible"] = not bool(normalized.get("hidden_default_lane"))
+            if "structurally_valid" not in normalized:
+                normalized["structurally_valid"] = not self._has_structural_p0(
+                    normalized["issues"]
+                )
+            if "structural_p1_measures" not in normalized:
+                normalized["structural_p1_measures"] = self._count_impacted_measures(
+                    normalized["issues"], severity="P1", domain="STRUCTURAL"
+                )
+            if "lyric_p1_measures" not in normalized:
+                normalized["lyric_p1_measures"] = self._count_impacted_measures(
+                    normalized["issues"], severity="P1", domain="LYRIC"
+                )
+            if "p2_measures" not in normalized:
+                normalized["p2_measures"] = self._count_impacted_measures(
+                    normalized["issues"], severity="P2"
+                )
+            if "quality_class" not in normalized:
+                normalized["quality_class"] = self._classify_candidate_quality(
+                    structural_p1_measures=int(normalized["structural_p1_measures"]),
+                    lyric_p1_measures=int(normalized["lyric_p1_measures"]),
+                    p2_measures=int(normalized["p2_measures"]),
+                )
+            normalized_targets.append(normalized)
+        return normalized_targets
+
+    def _normalize_issue_for_candidate(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize issue keys for candidate ranking."""
+        normalized = dict(entry)
+        if "rule_severity" not in normalized and "severity" in normalized:
+            normalized["rule_severity"] = normalized.get("severity")
+        if "rule_domain" not in normalized and "domain" in normalized:
+            normalized["rule_domain"] = normalized.get("domain")
+        return normalized
+
+    def _visible_target_results(self, targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return visible targets, or all targets if none are marked visible."""
+        visible = [target for target in targets if bool(target.get("visible", True))]
+        return visible or list(targets)
+
+    def _aggregate_visible_target_issues(self, targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Flatten issues from visible targets only."""
+        aggregated: List[Dict[str, Any]] = []
+        for target in self._visible_target_results(targets):
+            issues = target.get("issues")
+            if isinstance(issues, list):
+                aggregated.extend(
+                    self._normalize_issue_for_candidate(issue)
+                    for issue in issues
+                    if isinstance(issue, dict)
+                )
+        return aggregated
+
+    def _targets_are_structurally_valid(
+        self,
+        targets: List[Dict[str, Any]],
+        fallback_issues: List[Dict[str, Any]],
+    ) -> bool:
+        """Return True if all visible targets are free of structural P0 issues."""
+        if not targets:
+            return not self._has_structural_p0(fallback_issues)
+        return all(
+            not self._has_structural_p0(target.get("issues") or [])
+            for target in self._visible_target_results(targets)
+        )
+
+    def _aggregate_target_impacted_measures(
+        self,
+        targets: List[Dict[str, Any]],
+        *,
+        severity: str,
+        domain: Optional[str] = None,
+    ) -> int:
+        """Return union-count of impacted measures across visible targets."""
+        impacted: set[int] = set()
+        for target in self._visible_target_results(targets):
+            issues = target.get("issues")
+            if not isinstance(issues, list):
+                continue
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                if str(issue.get("rule_severity") or "") != severity:
+                    continue
+                if domain is not None and str(issue.get("rule_domain") or "") != domain:
+                    continue
+                issue_measures = issue.get("impacted_measures")
+                if isinstance(issue_measures, list):
+                    for measure in issue_measures:
+                        if isinstance(measure, int):
+                            impacted.add(measure)
+                issue_ranges = issue.get("impacted_ranges")
+                if isinstance(issue_ranges, list):
+                    for item in issue_ranges:
+                        if not isinstance(item, dict):
+                            continue
+                        start = item.get("start")
+                        end = item.get("end")
+                        if isinstance(start, int) and isinstance(end, int) and start <= end:
+                            impacted.update(range(start, end + 1))
+        return len(impacted)
+
+    def _has_structural_p0(self, issues: List[Dict[str, Any]]) -> bool:
+        """Return True if any issue is P0 STRUCTURAL."""
+        return any(
+            str(issue.get("rule_severity") or "") == "P0"
+            and str(issue.get("rule_domain") or "") == "STRUCTURAL"
+            for issue in issues
+        )
+
+    def _count_impacted_measures(
+        self,
+        issues: List[Dict[str, Any]],
+        *,
+        severity: str,
+        domain: Optional[str] = None,
+    ) -> int:
+        """Return union-count of impacted measures for matching issue bucket."""
+        impacted: set[int] = set()
+        for issue in issues:
+            if str(issue.get("rule_severity") or "") != severity:
+                continue
+            if domain is not None and str(issue.get("rule_domain") or "") != domain:
+                continue
+            issue_measures = issue.get("impacted_measures")
+            if isinstance(issue_measures, list):
+                for measure in issue_measures:
+                    if isinstance(measure, int):
+                        impacted.add(measure)
+            issue_ranges = issue.get("impacted_ranges")
+            if isinstance(issue_ranges, list):
+                for item in issue_ranges:
+                    if not isinstance(item, dict):
+                        continue
+                    start = item.get("start")
+                    end = item.get("end")
+                    if isinstance(start, int) and isinstance(end, int) and start <= end:
+                        impacted.update(range(start, end + 1))
+        return len(impacted)
+
+    def _classify_candidate_quality(
+        self,
+        *,
+        structural_p1_measures: int,
+        lyric_p1_measures: int,
+        p2_measures: int,
+    ) -> int:
+        """Return quality class 3/2/1 for a structurally valid candidate."""
+        if structural_p1_measures > 0 or lyric_p1_measures > 0:
+            return 1
+        if p2_measures > 0:
+            return 2
+        return 3
+
+    def _candidate_is_better(
+        self,
+        candidate: "WorkflowCandidate",
+        incumbent: Optional["WorkflowCandidate"],
+    ) -> bool:
+        """Return True when candidate outranks incumbent."""
+        if incumbent is None:
+            return True
+        candidate_rank = (
+            candidate.quality_class,
+            -candidate.structural_p1_measures,
+            -candidate.lyric_p1_measures,
+            -candidate.p2_measures,
+            -candidate.attempt_number,
+        )
+        incumbent_rank = (
+            incumbent.quality_class,
+            -incumbent.structural_p1_measures,
+            -incumbent.lyric_p1_measures,
+            -incumbent.p2_measures,
+            -incumbent.attempt_number,
+        )
+        return candidate_rank > incumbent_rank
+
+    def _build_candidate_response(
+        self, candidate: Optional["WorkflowCandidate"]
+    ) -> Optional[Dict[str, Any]]:
+        """Convert the selected candidate into a user-facing response payload."""
+        if candidate is None or not candidate.structurally_valid:
+            return None
+        response = {
+            "type": "chat_text",
+            "message": candidate.message,
+            "details": self._build_candidate_details(candidate),
+        }
+        if candidate.review_required:
+            response["review_required"] = True
+        return response
+
+    async def _materialize_review_candidate_if_needed(
+        self,
+        session_id: str,
+        candidate: Optional["WorkflowCandidate"],
+    ) -> Optional["WorkflowCandidate"]:
+        """Materialize and persist the selected review candidate once, on final selection."""
+        if candidate is None or candidate.review_materialization is None:
+            return candidate
+        finalized = finalize_review_materialization(candidate.review_materialization)
+        score = finalized.get("score")
+        if not isinstance(score, dict):
+            return candidate
+        metadata = candidate.review_materialization.get("metadata")
+        if isinstance(metadata, dict):
+            final_metadata = finalized.setdefault("metadata", {})
+            final_metadata.update(metadata)
+        review_score = self._mark_review_pending(score, finalized)
+        await self._sessions.set_score(session_id, review_score)
+        updated_payload = dict(candidate.result_payload)
+        for key in (
+            "score",
+            "part_index",
+            "transform_id",
+            "score_fingerprint",
+            "transform_hash",
+            "appended_part_ref",
+            "modified_musicxml_path",
+            "reused_transform",
+            "hidden_default_lane",
+            "warnings",
+            "validation",
+            "metadata",
+        ):
+            if key in finalized:
+                updated_payload[key] = finalized[key]
+        return replace(
+            candidate,
+            score=review_score,
+            result_payload=updated_payload,
+            review_materialization=None,
+        )
+
+    async def _render_selected_candidate_response(
+        self,
+        session_id: str,
+        user_id: str,
+        current_score: Dict[str, Any],
+        candidate: Optional["WorkflowCandidate"],
+        *,
+        stop_reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Render a selected reviewable candidate with one final LLM explanation step."""
+        if candidate is None or not candidate.structurally_valid:
+            return None
+        candidate_response = self._build_candidate_response(candidate)
+        if candidate_response is None:
+            return None
+        summary_payload = dict(candidate.result_payload)
+        summary_payload["stop_reason"] = stop_reason
+        summary_payload["quality_class"] = candidate.quality_class
+        latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        followup_response, followup_error = await self._decide_followup_with_llm(
+            latest_snapshot,
+            self._build_terminal_candidate_prompt(summary_payload),
+            current_score,
+        )
+        if followup_error:
+            return candidate_response
+        if followup_response is None:
+            return candidate_response
+        candidate_response["message"] = self._format_followup_message_text(
+            followup_response.final_message or candidate_response["message"]
+        )
+        candidate_response["review_required"] = True
+        return candidate_response
+
+    def _build_terminal_candidate_prompt(self, payload: Dict[str, Any]) -> str:
+        """Build the final explanation prompt for the selected candidate."""
+        serialized = json.dumps(payload, sort_keys=True)
+        return (
+            f"{serialized}\n\n"
+            "Explain this selected preprocess candidate to the user. "
+            "Do not call any tools. "
+            "Summarize what remains unresolved, why the workflow is stopping here, "
+            "and ask the user to review the score or request revisions."
+        )
+
+    def _build_invalid_candidate_error(
+        self, candidate: Optional["WorkflowCandidate"]
+    ) -> Optional[Dict[str, Any]]:
+        """Convert the selected best-invalid candidate into a structured error payload."""
+        if candidate is None or candidate.structurally_valid:
+            return None
+        payload = candidate.action_required_payload if isinstance(candidate.action_required_payload, dict) else {}
+        diagnostics: Dict[str, Any] = {
+            "attempt_number": candidate.attempt_number,
+            "quality_class": candidate.quality_class,
+            "structural_p1_measures": candidate.structural_p1_measures,
+            "lyric_p1_measures": candidate.lyric_p1_measures,
+            "p2_measures": candidate.p2_measures,
+            "targets": candidate.target_results,
+        }
+        validation = payload.get("validation")
+        if isinstance(validation, dict):
+            diagnostics["validation"] = validation
+        failing_ranges = payload.get("failing_ranges")
+        if isinstance(failing_ranges, list):
+            diagnostics["failing_ranges"] = failing_ranges
+        return {
+            "type": "chat_error",
+            "message": (
+                f"Unable to produce synthesis-safe monophonic output after "
+                f"{self._settings.preprocess_max_attempts} attempts."
+            ),
+            "details": {
+                "best_invalid_candidate": diagnostics,
+                "failed_validation_rules": candidate.issues,
+            },
+        }
+
+    def _build_candidate_details(self, candidate: "WorkflowCandidate") -> Dict[str, Any]:
+        """Return normalized details for a selected candidate."""
+        payload = candidate.result_payload if isinstance(candidate.result_payload, dict) else {}
+        details: Dict[str, Any] = {
+            "attempt_number": candidate.attempt_number,
+            "quality_class": candidate.quality_class,
+            "structurally_valid": candidate.structurally_valid,
+            "structural_p1_measures": candidate.structural_p1_measures,
+            "lyric_p1_measures": candidate.lyric_p1_measures,
+            "p2_measures": candidate.p2_measures,
+            "issues": candidate.issues,
+            "targets": candidate.target_results,
+        }
+        warnings = payload.get("warnings")
+        if isinstance(warnings, list):
+            details["warnings"] = warnings
+        validation = payload.get("validation")
+        if isinstance(validation, dict):
+            details["validation"] = validation
+        failing_ranges = payload.get("failing_ranges")
+        if isinstance(failing_ranges, list):
+            details["failing_ranges"] = failing_ranges
+        return details
+
+    def _build_preprocess_attempt_summary(
+        self,
+        *,
+        attempt_number: int,
+        tool_calls: List[ToolCall],
+        tool_result: "ToolExecutionResult",
+        candidate: Optional["WorkflowCandidate"],
+        replaced_best_valid: bool,
+        replaced_best_invalid: bool,
+    ) -> Dict[str, Any]:
+        """Build a lightweight persisted summary for one preprocess attempt."""
+        payload = tool_result.action_required_payload if isinstance(tool_result.action_required_payload, dict) else None
+        issue_entries = candidate.issues if candidate is not None else self._extract_issue_entries(payload or {})
+        return {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "attempt_number": attempt_number,
+            "tool_names": [call.name for call in tool_calls],
+            "result_status": (
+                str(payload.get("status") or "")
+                if payload is not None
+                else ("review_required" if tool_result.review_required else "completed")
+            ),
+            "result_action": str(payload.get("action") or "") if payload is not None else "",
+            "candidate_present": candidate is not None,
+            "structurally_valid": candidate.structurally_valid if candidate is not None else False,
+            "quality_class": candidate.quality_class if candidate is not None else None,
+            "structural_p1_measures": candidate.structural_p1_measures if candidate is not None else 0,
+            "lyric_p1_measures": candidate.lyric_p1_measures if candidate is not None else 0,
+            "p2_measures": candidate.p2_measures if candidate is not None else 0,
+            "replaced_best_valid": replaced_best_valid,
+            "replaced_best_invalid": replaced_best_invalid,
+            "issue_codes": [str(issue.get("rule") or issue.get("code") or "") for issue in issue_entries],
+            "issue_severities": [str(issue.get("rule_severity") or "") for issue in issue_entries],
+            "issue_domains": [str(issue.get("rule_domain") or "") for issue in issue_entries],
+        }
+
+    def _build_attempt_message_entry(
+        self,
+        *,
+        attempt_number: int,
+        final_message: str,
+        thought_summary: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Build a UI-facing preprocess attempt entry for the chat bubble."""
+        message = str(final_message or "").strip()
+        thought = str(thought_summary or "").strip()
+        if not message and not thought:
+            return None
+        entry: Dict[str, Any] = {"attempt_number": attempt_number}
+        if message:
+            entry["message"] = message
+        if thought:
+            entry["thought_summary"] = thought
+        return entry
+
+    def _attach_attempt_messages(
+        self,
+        response: Dict[str, Any],
+        attempt_messages: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Attach preprocess attempt display entries to response details."""
+        if not attempt_messages:
+            return response
+        next_response = dict(response)
+        details = next_response.get("details")
+        next_details: Dict[str, Any]
+        if isinstance(details, dict):
+            next_details = dict(details)
+        else:
+            next_details = {}
+        next_details["attempt_messages"] = copy.deepcopy(attempt_messages)
+        next_response["details"] = next_details
+        return next_response
 
     def _should_start_preprocess_job(self, tool_calls: List[ToolCall]) -> bool:
         """Return True when the turn should switch to background preprocess progress."""
@@ -979,14 +1736,16 @@ class Orchestrator:
         message = str(exc).strip()
         if not message:
             return LLM_ERROR_FALLBACK
+        if "timed out" in message.lower():
+            return message
         json_start = message.find("{")
         json_message = message if json_start == 0 else message[json_start:] if json_start != -1 else ""
         if not json_message:
-            return LLM_ERROR_FALLBACK
+            return message
         try:
             payload = json.loads(json_message)
         except json.JSONDecodeError:
-            return LLM_ERROR_FALLBACK
+            return message
         if isinstance(payload, dict):
             error = payload.get("error")
             if isinstance(error, dict):
@@ -994,7 +1753,7 @@ class Orchestrator:
                 detail = error.get("message")
                 if code is not None and detail:
                     return f"LLM error {code}: {detail}"
-        return LLM_ERROR_FALLBACK
+        return message
 
     def _is_llm_error_message(self, message: str) -> bool:
         """Return True if the message is an LLM error string."""
@@ -1041,6 +1800,7 @@ class Orchestrator:
                 score_available,
                 voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
+                parsed_score_json=planning_score if isinstance(planning_score, dict) else None,
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
                 last_successful_preprocess_plan=(
@@ -1122,6 +1882,7 @@ class Orchestrator:
                 score_available=True,
                 voicebank_ids=voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
+                parsed_score_json=planning_score if isinstance(planning_score, dict) else None,
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
                 last_successful_preprocess_plan=(
@@ -1481,12 +2242,14 @@ class Orchestrator:
                             session_id,
                             json.dumps(result.get("lint_findings", []), ensure_ascii=True, sort_keys=True),
                         )
+                    review_materialization = result.pop("review_materialization", None)
                     followup_prompt = json.dumps(result, sort_keys=True)
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=followup_prompt,
                         action_required_payload=result,
+                        review_materialization=review_materialization
                     )
                 continue
             if call.name == "synthesize":
@@ -1854,6 +2617,26 @@ class ToolExecutionResult:
     followup_prompt: Optional[str] = None
     review_required: bool = False
     action_required_payload: Optional[Dict[str, Any]] = None
+    review_materialization: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class WorkflowCandidate:
+    """A preprocess candidate evaluated during bounded repair."""
+    attempt_number: int
+    score: Dict[str, Any]
+    message: str
+    review_required: bool
+    quality_class: int
+    structurally_valid: bool
+    structural_p1_measures: int
+    lyric_p1_measures: int
+    p2_measures: int
+    issues: List[Dict[str, Any]]
+    target_results: List[Dict[str, Any]]
+    result_payload: Dict[str, Any]
+    action_required_payload: Optional[Dict[str, Any]] = None
+    review_materialization: Optional[Dict[str, Any]] = None
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

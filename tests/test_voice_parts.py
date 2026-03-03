@@ -7,14 +7,18 @@ import threading
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
+    _analyze_part_voice_parts,
     _choose_notes_ranked,
     _choose_notes_trivial_ranked,
     _lint_finding,
     _normalize_materialized_musicxml_stem,
+    _reviewable_action_required_from_finalized,
     _run_preflight_plan_lint,
+    finalize_review_materialization,
     parse_voice_part_plan,
     prepare_score_for_voice_part,
     preprocess_voice_parts,
@@ -1059,6 +1063,177 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             any(f.get("rule") == "same_clef_claim_coverage" for f in findings)
         )
 
+    def test_preflight_lint_hidden_default_lane_does_not_satisfy_claim_coverage(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Men",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 2,
+                        },
+                    ],
+                }
+            ]
+        }
+        analysis = _analyze_part_voice_parts(score["parts"][0], 0)
+        voice_parts = analysis.get("voice_parts") or []
+        visible_id = next(
+            vp["voice_part_id"]
+            for vp in voice_parts
+            if str(vp.get("source_voice_id") or "") != "_default"
+        )
+        hidden_id = next(
+            vp["voice_part_id"]
+            for vp in voice_parts
+            if str(vp.get("source_voice_id") or "") == "_default"
+        )
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": visible_id},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": visible_id},
+                        },
+                        {"start_measure": 2, "end_measure": 2, "mode": "rest"},
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": hidden_id},
+                    "sections": [
+                        {"start_measure": 1, "end_measure": 1, "mode": "rest"},
+                        {
+                            "start_measure": 2,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": hidden_id},
+                        }
+                    ],
+                },
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(any(f.get("rule") == "same_clef_claim_coverage" for f in findings))
+
+    def test_preflight_lint_flags_underclaimed_same_part_chord_source(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Men",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 55.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                        }
+                    ],
+                },
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        finding = next(
+            f
+            for f in findings
+            if f.get("rule") == "same_part_chord_source_underclaimed_by_visible_targets"
+        )
+        self.assertEqual(finding["missing_ranges"], [{"start": 1, "end": 1}])
+
     def test_preflight_lint_flags_weak_lyric_source_with_better_alternative(self) -> None:
         score = {
             "parts": [
@@ -1384,6 +1559,191 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
                 f.get("rule") == "cross_staff_lyric_source_with_stronger_local_alternative"
                 for f in findings
             )
+        )
+
+    def test_preflight_lint_flags_cross_staff_weak_lyric_source_with_better_alternative(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Target",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 3.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                    ],
+                },
+                {
+                    "part_id": "P2",
+                    "part_name": "Donor",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "full",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "word",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "lyric",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 3.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "line",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "cross",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "+",
+                            "syllabic": None,
+                            "lyric_is_extended": True,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 3.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 1,
+                        },
+                    ],
+                },
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_source": {"part_index": 1, "voice_part_id": "voice part 2"},
+                            "lyric_strategy": "strict_onset",
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+        result = preprocess_voice_parts(score, plan=plan)
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        finding = next(
+            (
+                f
+                for f in findings
+                if f.get("rule") == "cross_staff_weak_lyric_source_with_better_alternative"
+            ),
+            None,
+        )
+        self.assertIsNotNone(finding)
+        self.assertEqual(
+            finding.get("suggested_lyric_source", {}).get("voice_part_id"),
+            "voice part 1",
         )
 
     def test_preflight_lint_flags_lyric_source_without_target_notes(self) -> None:
@@ -1838,6 +2198,24 @@ class VoicePartPropagationStrategyTests(unittest.TestCase):
         self.assertEqual(verse1_only.get("action"), "validation_failed_needs_review")
         self.assertEqual(copy_all_lyrics, ["1.Hal", "2.le"])
 
+    def test_validation_failed_review_result_preserves_finalized_score_payload(self) -> None:
+        finalized_payload = {
+            "status": "ready",
+            "score": {"title": "Derived", "source_musicxml_path": "/tmp/derived.xml"},
+            "modified_musicxml_path": "/tmp/derived.xml",
+            "part_index": 0,
+        }
+        result = _reviewable_action_required_from_finalized(
+            finalized_payload,
+            action="validation_failed_needs_review",
+            message="Lyric propagation did not meet minimum coverage.",
+            validation={"missing_lyric_sung_note_count": 4},
+        )
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "validation_failed_needs_review")
+        self.assertEqual(result.get("score"), finalized_payload["score"])
+        self.assertEqual(result.get("modified_musicxml_path"), "/tmp/derived.xml")
+
     def test_validate_ready_with_warnings_coverage_threshold(self) -> None:
         notes = []
         for idx in range(10):
@@ -2068,6 +2446,67 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["transform_id"], results[1]["transform_id"])
         self.assertTrue(Path(results[0]["modified_musicxml_path"]).exists())
+
+    def test_finalize_review_materialization_bundle_materializes_all_steps(self) -> None:
+        score = parse_score(self._score_copy, part_index=0, verse_number=1)
+        women_part = score["parts"][0]
+        women_notes = women_part.get("notes") or []
+        soprano_notes = [dict(note) for note in women_notes if str(note.get("voice")) == "1"]
+        alto_notes = [dict(note) for note in women_notes if str(note.get("voice")) == "2"]
+
+        bundle = {
+            "base_score": score,
+            "steps": [
+                {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 1",
+                    "source_voice_part_id": "voice part 1",
+                    "source_part_index": 0,
+                    "transformed_part": {
+                        **dict(women_part),
+                        "part_name": "voice part 1",
+                        "notes": soprano_notes,
+                    },
+                    "propagated": True,
+                    "status": "ready",
+                    "validation": {},
+                    "source_musicxml_path": str(self._score_copy),
+                    "target_source_voice_id": "1",
+                },
+                {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 2",
+                    "source_voice_part_id": "voice part 2",
+                    "source_part_index": 0,
+                    "transformed_part": {
+                        **dict(women_part),
+                        "part_name": "voice part 2",
+                        "notes": alto_notes,
+                    },
+                    "propagated": True,
+                    "status": "ready",
+                    "validation": {},
+                    "source_musicxml_path": str(self._score_copy),
+                    "target_source_voice_id": "2",
+                },
+            ],
+        }
+
+        result = finalize_review_materialization(bundle)
+        self.assertEqual(result.get("status"), "ready")
+        score_after = result.get("score") or {}
+        derived_names = [str(part.get("part_name") or "") for part in score_after.get("parts") or []]
+        self.assertTrue(any(name.endswith("voice part 1 (Derived)") for name in derived_names))
+        self.assertTrue(any(name.endswith("voice part 2 (Derived)") for name in derived_names))
+        appended_refs = result.get("appended_part_refs") or []
+        self.assertEqual(len(appended_refs), 2)
+        modified_musicxml_path = result.get("modified_musicxml_path")
+        self.assertTrue(isinstance(modified_musicxml_path, str) and modified_musicxml_path)
+        root = ET.parse(str(modified_musicxml_path)).getroot()
+        score_parts = root.findall("./part-list/score-part")
+        score_part_names = [sp.findtext("part-name") or "" for sp in score_parts]
+        self.assertTrue(any(name.endswith("voice part 1 (Derived)") for name in score_part_names))
+        self.assertTrue(any(name.endswith("voice part 2 (Derived)") for name in score_part_names))
 
 
 if __name__ == "__main__":

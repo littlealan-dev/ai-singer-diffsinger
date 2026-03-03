@@ -12,7 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
-from src.api.voice_part_lint_rules import get_lint_rule_spec
+from src.api.voice_part_lint_rules import get_lint_rule_spec, get_postflight_validation_spec
 
 VOICE_PART_STATUSES = {
     "ready",
@@ -75,10 +75,41 @@ def _lint_finding(
     finding: Dict[str, Any] = {
         "rule": spec.code,
         "rule_name": spec.name,
+        "rule_severity": spec.severity,
+        "rule_domain": spec.domain,
         "rule_definition": spec.definition,
         "fail_condition": spec.fail_condition,
         "suggestion": spec.suggestion,
         "severity": severity,
+        "message": rendered_message,
+    }
+    if failing_attributes:
+        finding["failing_attributes"] = failing_attributes
+    finding.update(payload)
+    return finding
+
+
+def _postflight_finding(
+    rule: str,
+    *,
+    failing_attributes: Optional[Dict[str, Any]] = None,
+    **payload: Any,
+) -> Dict[str, Any]:
+    spec = get_postflight_validation_spec(rule)
+    rendered_message = spec.message_template
+    if spec.message_template:
+        try:
+            rendered_message = spec.message_template.format(**(failing_attributes or {}))
+        except Exception:
+            rendered_message = spec.message_template
+    finding: Dict[str, Any] = {
+        "rule": spec.code,
+        "rule_name": spec.name,
+        "rule_definition": spec.definition,
+        "fail_condition": spec.fail_condition,
+        "suggestion": spec.suggestion,
+        "severity": spec.severity,
+        "domain": spec.domain,
         "message": rendered_message,
     }
     if failing_attributes:
@@ -901,22 +932,62 @@ def _prepare_score_for_voice_part_legacy(
     warnings: List[Dict[str, Any]] = []
     if validation["missing_lyric_sung_note_count"] > 0:
         if validation["lyric_coverage_ratio"] >= 0.90:
+            impacted_ranges = _collapse_measure_ranges(validation["unresolved_measures"][:10])
             status = "ready_with_warnings"
             warnings.append(
                 {
                     "code": "partial_lyric_coverage",
+                    "rule_name": get_postflight_validation_spec("partial_lyric_coverage").name,
                     "missing_note_count": validation["missing_lyric_sung_note_count"],
                     "lyric_coverage_ratio": validation["lyric_coverage_ratio"],
                     "unresolved_measures": validation["unresolved_measures"][:10],
+                    "impacted_ranges": impacted_ranges,
+                    "rule_metadata": _postflight_finding(
+                        "partial_lyric_coverage",
+                        failing_attributes={
+                            "missing_lyric_sung_note_count": validation["missing_lyric_sung_note_count"],
+                            "lyric_coverage_ratio": validation["lyric_coverage_ratio"],
+                        },
+                        impacted_measures=validation["unresolved_measures"][:10],
+                        impacted_ranges=impacted_ranges,
+                    ),
                 }
             )
         else:
+            impacted_ranges = _collapse_measure_ranges(validation.get("unresolved_measures") or [])
+            transformed_part["notes"] = propagated_notes
+            source_score["parts"][part_index] = transformed_part
             return _action_required(
                 "validation_failed_needs_review",
                 "Lyric propagation did not meet minimum coverage.",
                 part_index=part_index,
                 target_voice_part=target["voice_part_id"],
                 validation=validation,
+                failed_validation_rules=[
+                    _postflight_finding(
+                        "validation_failed_needs_review",
+                        failing_attributes={
+                            "missing_lyric_sung_note_count": validation["missing_lyric_sung_note_count"],
+                            "lyric_coverage_ratio": validation["lyric_coverage_ratio"],
+                            "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
+                        },
+                        impacted_measures=validation.get("unresolved_measures") or [],
+                        impacted_ranges=impacted_ranges,
+                    )
+                ],
+                review_materialization=_build_review_materialization_payload(
+                    score=source_score,
+                    part_index=part_index,
+                    target_voice_part_id=target["voice_part_id"],
+                    source_voice_part_id=source_meta["voice_part_id"],
+                    source_part_index=source_part_used,
+                    transformed_part=transformed_part,
+                    propagated=True,
+                    validation=validation,
+                    warnings=warnings,
+                    source_musicxml_path=_resolve_source_musicxml_path(score),
+                    target_source_voice_id=target_voice,
+                ),
             )
     transformed_part["notes"] = propagated_notes
     source_score["parts"][part_index] = transformed_part
@@ -1037,6 +1108,14 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     original_score = deepcopy(score)
     working_score = deepcopy(score)
     last_result: Optional[Dict[str, Any]] = None
+    materialization_steps: List[Dict[str, Any]] = []
+    target_outputs: List[Dict[str, Any]] = []
+    pending_review_steps: List[Dict[str, Any]] = []
+    pending_review_warnings: List[Dict[str, Any]] = []
+    pending_review_validations: List[Dict[str, Any]] = []
+    pending_review_failed_rules: List[Dict[str, Any]] = []
+    pending_review_messages: List[str] = []
+    pending_review_section_results: List[Dict[str, Any]] = []
     original_parts = deepcopy(original_score.get("parts") or [])
     explicit_targets_by_part: Dict[int, set[str]] = {}
     for target_entry in targets:
@@ -1058,11 +1137,45 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         # still reference original lyric/melody sources from the same input score.
         target_input_score["parts"] = [deepcopy(part) for part in original_parts] + extra_parts
         result = _execute_single_preprocess_target(target_input_score, target_entry)
+        target_outputs.append(_build_preprocess_target_output(result))
         if result.get("status") not in {"ready", "ready_with_warnings"}:
+            if (
+                result.get("status") == "action_required"
+                and result.get("action") == "validation_failed_needs_review"
+                and isinstance(result.get("review_materialization"), dict)
+            ):
+                review_payload = dict(result["review_materialization"])
+                if isinstance(review_payload.get("steps"), list):
+                    for step in review_payload.get("steps") or []:
+                        if isinstance(step, dict):
+                            materialization_steps.append(dict(step))
+                            pending_review_steps.append(dict(step))
+                else:
+                    materialization_steps.append(review_payload)
+                    pending_review_steps.append(review_payload)
+                pending_review_warnings.extend(
+                    [dict(item) for item in (result.get("warnings") or []) if isinstance(item, dict)]
+                )
+                validation = result.get("validation")
+                if isinstance(validation, dict):
+                    pending_review_validations.append(validation)
+                pending_review_failed_rules.extend(
+                    [dict(item) for item in (result.get("failed_validation_rules") or []) if isinstance(item, dict)]
+                )
+                if isinstance(result.get("message"), str) and result["message"].strip():
+                    pending_review_messages.append(result["message"].strip())
+                pending_review_section_results.extend(
+                    [dict(item) for item in (result.get("section_results") or []) if isinstance(item, dict)]
+                )
+                last_result = result
+                continue
             return result
         target_ref = target_entry["target"]
         working_score = result.get("score", working_score)
         last_result = result
+        ready_materialization = _build_review_materialization_payload_from_result(result)
+        if isinstance(ready_materialization, dict):
+            materialization_steps.append(ready_materialization)
 
         # Also generate sibling derived parts from the same part (same staff/clef
         # scope in current model) so downstream tools can reason across sibling
@@ -1088,6 +1201,12 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 )
             metadata = last_result.setdefault("metadata", {})
             metadata["generated_same_part_voice_parts"] = True
+            target_outputs.append(_build_preprocess_target_output(sibling_result))
+            sibling_materialization = _build_review_materialization_payload_from_result(
+                sibling_result
+            )
+            if isinstance(sibling_materialization, dict):
+                materialization_steps.append(sibling_materialization)
 
     if last_result is None:
         return _action_required(
@@ -1096,7 +1215,62 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             code="invalid_plan_payload",
         )
 
-    return last_result
+    if pending_review_steps:
+        merged_validation = _merge_target_output_validations(target_outputs)
+        merged_unresolved = sorted(
+            {
+                int(measure)
+                for target_output in target_outputs
+                for validation in [target_output.get("validation")]
+                if isinstance(validation, dict)
+                for measure in (validation.get("unresolved_measures") or [])
+            }
+        )
+        merged_failed_rules = _merge_target_output_issues(target_outputs)
+        merged_warnings = _merge_target_output_warnings(target_outputs)
+        action_required_result = _action_required(
+            "validation_failed_needs_review",
+            pending_review_messages[-1]
+            if pending_review_messages
+            else "Lyric propagation did not meet minimum coverage.",
+            part_index=last_result.get("part_index"),
+            target_voice_part=last_result.get("target_voice_part"),
+            validation=merged_validation,
+            section_results=pending_review_section_results,
+            failing_ranges=_collapse_measure_ranges(merged_unresolved),
+            failed_validation_rules=merged_failed_rules or pending_review_failed_rules,
+            review_materialization=_build_review_materialization_bundle(
+                base_score=working_score,
+                steps=materialization_steps or pending_review_steps,
+                warnings=merged_warnings or pending_review_warnings,
+                validation=merged_validation,
+                metadata={
+                    "plan_applied": True,
+                    "plan_mode": "timeline_sections",
+                    "target_count": len(targets),
+                    "section_results": pending_review_section_results,
+                },
+            ),
+        )
+        action_required_result["targets"] = target_outputs
+        if merged_warnings:
+            action_required_result["warnings"] = merged_warnings
+        if isinstance(last_result, dict) and isinstance(last_result.get("repair_loop"), dict):
+            action_required_result["repair_loop"] = dict(last_result["repair_loop"])
+        return action_required_result
+
+    final_result = dict(last_result)
+    final_result["targets"] = target_outputs
+    merged_validation = _merge_target_output_validations(target_outputs)
+    if merged_validation:
+        final_result["validation"] = merged_validation
+    merged_warnings = _merge_target_output_warnings(target_outputs)
+    if merged_warnings:
+        final_result["warnings"] = merged_warnings
+    merged_failed_rules = _merge_target_output_issues(target_outputs)
+    if merged_failed_rules:
+        final_result["failed_validation_rules"] = merged_failed_rules
+    return final_result
 
 
 def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1105,6 +1279,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     findings.extend(_lint_same_part_target_completeness(score, targets))
     by_part_claims: Dict[int, set[int]] = {}
     by_part_has_timeline_targets: Dict[int, bool] = {}
+    visible_same_part_source_claims: Dict[tuple[int, str, int], set[str]] = {}
 
     for target_idx, target_entry in enumerate(targets):
         target = target_entry.get("target") or {}
@@ -1170,6 +1345,11 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         if not sections:
             continue
         by_part_has_timeline_targets[part_index] = True
+        target_is_visible = not _is_hidden_default_lane(
+            score=score,
+            part_index=part_index,
+            target_voice_part_id=target_voice_part_id,
+        )
 
         contiguous_error = _lint_sections_contiguous_no_gaps(sections)
         if contiguous_error is not None:
@@ -1240,6 +1420,22 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                                 },
                             )
                         )
+                melody_source_voice_part_id = (
+                    str(melody_source.get("voice_part_id")).strip()
+                    if isinstance(melody_source.get("voice_part_id"), str)
+                    else None
+                )
+                if (
+                    target_is_visible
+                    and isinstance(melody_source_part, int)
+                    and melody_source_part == part_index
+                    and melody_source_voice_part_id
+                ):
+                    for measure in range(start, end + 1):
+                        claim_key = (part_index, melody_source_voice_part_id, measure)
+                        visible_same_part_source_claims.setdefault(claim_key, set()).add(
+                            target_voice_part_id
+                        )
                 if (
                     isinstance(melody_source_part, int)
                     and melody_source_part != part_index
@@ -1261,11 +1457,6 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             },
                         )
                     )
-                melody_source_voice_part_id = (
-                    str(melody_source.get("voice_part_id")).strip()
-                    if isinstance(melody_source.get("voice_part_id"), str)
-                    else None
-                )
                 target_sung_note_count = _target_sung_note_count_for_section(
                     score=score,
                     target_part_index=part_index,
@@ -1333,6 +1524,52 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                                     "suggested_voice_part_id": alternative["voice_part_id"],
                                     "suggested_word_lyric_note_count": alternative["stats"].get("word_lyric_note_count"),
                                     "suggested_word_lyric_coverage_ratio": alternative["stats"].get("word_lyric_coverage_ratio"),
+                                    "target_sung_note_count": target_sung_note_count,
+                                },
+                            )
+                        )
+                    donor_alternative = _best_same_part_word_lyric_source_for_range(
+                        score=score,
+                        part_index=lyric_source_part,
+                        start_measure=start,
+                        end_measure=end,
+                        exclude_voice_part_id=chosen_voice_part_id,
+                        target_sung_note_count=target_sung_note_count,
+                    )
+                    if (
+                        donor_alternative is not None
+                        and _is_cross_staff_weak_lyric_source_with_better_alternative(
+                            selected_stats=chosen_stats,
+                            donor_alternative_stats=donor_alternative["stats"],
+                        )
+                    ):
+                        findings.append(
+                            _lint_finding(
+                                "cross_staff_weak_lyric_source_with_better_alternative",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                source_part_index=lyric_source_part,
+                                selected_lyric_source={
+                                    "part_index": lyric_source_part,
+                                    "voice_part_id": chosen_voice_part_id,
+                                    "stats": chosen_stats,
+                                },
+                                suggested_lyric_source={
+                                    "part_index": lyric_source_part,
+                                    "voice_part_id": donor_alternative["voice_part_id"],
+                                    "stats": donor_alternative["stats"],
+                                },
+                                failing_attributes={
+                                    "selected_source_part_index": lyric_source_part,
+                                    "selected_source_voice_part_id": chosen_voice_part_id,
+                                    "selected_word_lyric_note_count": chosen_stats.get("word_lyric_note_count"),
+                                    "selected_word_lyric_coverage_ratio": chosen_stats.get("word_lyric_coverage_ratio"),
+                                    "suggested_source_part_index": lyric_source_part,
+                                    "suggested_source_voice_part_id": donor_alternative["voice_part_id"],
+                                    "suggested_word_lyric_note_count": donor_alternative["stats"].get("word_lyric_note_count"),
+                                    "suggested_word_lyric_coverage_ratio": donor_alternative["stats"].get("word_lyric_coverage_ratio"),
                                     "target_sung_note_count": target_sung_note_count,
                                 },
                             )
@@ -1510,9 +1747,10 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                     )
             else:
-                claim_set = by_part_claims.setdefault(part_index, set())
-                for measure in range(start, end + 1):
-                    claim_set.add(measure)
+                if target_is_visible:
+                    claim_set = by_part_claims.setdefault(part_index, set())
+                    for measure in range(start, end + 1):
+                        claim_set.add(measure)
 
     # Group-level claim coverage for each part with timeline targets.
     for part_index in sorted(by_part_has_timeline_targets.keys()):
@@ -1530,6 +1768,53 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     },
                 )
             )
+
+    for part_index in sorted(by_part_has_timeline_targets.keys()):
+        parts = score.get("parts") or []
+        if part_index < 0 or part_index >= len(parts):
+            continue
+        analysis = _analyze_part_voice_parts(parts[part_index], part_index)
+        for source_meta in analysis.get("voice_parts") or []:
+            source_voice_part_id = str(source_meta.get("voice_part_id") or "")
+            if not source_voice_part_id:
+                continue
+            source_density_by_measure = _source_voice_measure_max_simultaneous_notes(
+                score,
+                part_index=part_index,
+                source_voice_part_id=source_voice_part_id,
+            )
+            failing_measures: List[int] = []
+            source_density_details: Dict[int, int] = {}
+            visible_claim_details: Dict[int, int] = {}
+            visible_target_ids: set[str] = set()
+            for measure, required_count in sorted(source_density_by_measure.items()):
+                if required_count <= 1:
+                    continue
+                claimers = visible_same_part_source_claims.get(
+                    (part_index, source_voice_part_id, measure), set()
+                )
+                claim_count = len(claimers)
+                if claim_count < required_count:
+                    failing_measures.append(measure)
+                    source_density_details[measure] = required_count
+                    visible_claim_details[measure] = claim_count
+                    visible_target_ids.update(claimers)
+            if failing_measures:
+                findings.append(
+                    _lint_finding(
+                        "same_part_chord_source_underclaimed_by_visible_targets",
+                        part_index=part_index,
+                        source_voice_part_id=source_voice_part_id,
+                        missing_ranges=_collapse_measure_ranges(failing_measures),
+                        failing_attributes={
+                            "source_voice_part_id": source_voice_part_id,
+                            "source_max_simultaneous_notes_by_measure": source_density_details,
+                            "visible_target_claim_count_by_measure": visible_claim_details,
+                            "visible_target_voice_part_ids": sorted(visible_target_ids),
+                            "failing_measure_count": len(failing_measures),
+                        },
+                    )
+                )
 
     return {"ok": len(findings) == 0, "findings": findings}
 
@@ -1781,6 +2066,35 @@ def _part_has_word_lyric_in_range(
         if lyric and not lyric.startswith("+"):
             return True
     return False
+
+
+def _source_voice_measure_max_simultaneous_notes(
+    score: Dict[str, Any], *, part_index: int, source_voice_part_id: str
+) -> Dict[int, int]:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return {}
+    part = parts[part_index]
+    analysis = _analyze_part_voice_parts(part, part_index)
+    target = _find_voice_part_by_id(analysis.get("voice_parts") or [], source_voice_part_id)
+    if target is None:
+        return {}
+    source_voice = str(target.get("source_voice_id") or "")
+    selected = _select_part_notes_for_voice(part.get("notes") or [], source_voice)
+    grouped: Dict[tuple[int, float], int] = {}
+    for note in selected:
+        if note.get("is_rest"):
+            continue
+        measure = int(note.get("measure_number") or 0)
+        if measure <= 0:
+            continue
+        onset = float(note.get("offset_beats") or 0.0)
+        key = (measure, onset)
+        grouped[key] = grouped.get(key, 0) + 1
+    per_measure: Dict[int, int] = {}
+    for (measure, _onset), count in grouped.items():
+        per_measure[measure] = max(per_measure.get(measure, 0), count)
+    return per_measure
 
 
 def _execute_single_preprocess_target(
@@ -2367,6 +2681,18 @@ def _execute_timeline_sections(
             validation=validation,
             section_results=section_results,
             failing_ranges=failing_ranges,
+            failed_validation_rules=[
+                _postflight_finding(
+                    "structural_validation_failed",
+                    failing_attributes={
+                        "max_simultaneous_notes": structural.get("max_simultaneous_notes"),
+                        "simultaneous_conflict_count": structural.get("simultaneous_conflict_count"),
+                        "overlap_conflict_count": structural.get("overlap_conflict_count"),
+                    },
+                    impacted_measures=structural.get("structural_unresolved_measures") or [],
+                    impacted_ranges=failing_ranges,
+                )
+            ],
         )
     status = "ready"
     warnings: List[Dict[str, Any]] = []
@@ -2382,6 +2708,7 @@ def _execute_timeline_sections(
                 }
             )
         else:
+            failing_ranges = _collapse_measure_ranges(validation.get("unresolved_measures") or [])
             return _action_required(
                 "validation_failed_needs_review",
                 "Lyric propagation did not meet minimum coverage.",
@@ -2389,9 +2716,45 @@ def _execute_timeline_sections(
                 target_voice_part=target_voice_part_id,
                 validation=validation,
                 section_results=section_results,
-                failing_ranges=_collapse_measure_ranges(
-                    validation.get("unresolved_measures") or []
-                ),
+                failing_ranges=failing_ranges,
+                failed_validation_rules=[
+                    _postflight_finding(
+                        "validation_failed_needs_review",
+                        failing_attributes={
+                            "missing_lyric_sung_note_count": validation["missing_lyric_sung_note_count"],
+                            "lyric_coverage_ratio": validation["lyric_coverage_ratio"],
+                            "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
+                        },
+                        impacted_measures=validation.get("unresolved_measures") or [],
+                        impacted_ranges=failing_ranges,
+                    )
+                ],
+                review_materialization={
+                    **_build_review_materialization_payload(
+                        score=source_score,
+                        part_index=part_index,
+                        target_voice_part_id=target_voice_part_id,
+                        source_voice_part_id=(
+                            str(first_source_ref["voice_part_id"]) if first_source_ref else None
+                        ),
+                        source_part_index=(
+                            int(first_source_ref["part_index"]) if first_source_ref else part_index
+                        ),
+                        transformed_part=transformed_part,
+                        propagated=propagated,
+                        validation=validation,
+                        warnings=warnings,
+                        source_musicxml_path=_resolve_source_musicxml_path(score),
+                        target_source_voice_id=target_voice,
+                    ),
+                    "metadata": {
+                        "plan_applied": True,
+                        "plan_mode": "timeline_sections",
+                        "section_count": len(target_entry.get("sections") or []),
+                        "split_shared_note_policy": split_shared_note_policy,
+                        "section_results": section_results,
+                    },
+                },
             )
     min_word_ratio = _env_float("VOICE_PART_MIN_WORD_LYRIC_COVERAGE_RATIO", 0.15)
     warn_floor_ratio = _env_float("VOICE_PART_MIN_WORD_LYRIC_WARN_FLOOR_RATIO", 0.75)
@@ -2404,9 +2767,22 @@ def _execute_timeline_sections(
             warnings.append(
                 {
                     "code": "low_word_lyric_coverage",
+                    "rule_name": get_postflight_validation_spec("low_word_lyric_coverage").name,
                     "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
                     "min_required_word_lyric_coverage_ratio": min_word_ratio,
                     "extension_lyric_ratio": validation["extension_lyric_ratio"],
+                    "rule_metadata": _postflight_finding(
+                        "low_word_lyric_coverage",
+                        failing_attributes={
+                            "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
+                            "min_required_word_lyric_coverage_ratio": min_word_ratio,
+                            "extension_lyric_ratio": validation["extension_lyric_ratio"],
+                        },
+                        impacted_measures=validation.get("unresolved_measures") or [],
+                        impacted_ranges=_collapse_measure_ranges(
+                            validation.get("unresolved_measures") or []
+                        ),
+                    ),
                 }
             )
         else:
@@ -2418,6 +2794,20 @@ def _execute_timeline_sections(
                 validation=validation,
                 min_required_word_lyric_coverage_ratio=min_word_ratio,
                 section_results=section_results,
+                failed_validation_rules=[
+                    _postflight_finding(
+                        "word_lyric_coverage_too_low",
+                        failing_attributes={
+                            "word_lyric_coverage_ratio": validation["word_lyric_coverage_ratio"],
+                            "min_required_word_lyric_coverage_ratio": min_word_ratio,
+                            "extension_lyric_ratio": validation["extension_lyric_ratio"],
+                        },
+                        impacted_measures=validation.get("unresolved_measures") or [],
+                        impacted_ranges=_collapse_measure_ranges(
+                            validation.get("unresolved_measures") or []
+                        ),
+                    )
+                ],
             )
 
     result = _finalize_transform_result(
@@ -3028,6 +3418,33 @@ def _is_cross_staff_lyric_source_with_stronger_local_alternative(
         local_ratio >= min_local_ratio
         and local_ratio >= (selected_ratio + min_ratio_delta)
         and local_word >= (selected_word + min_word_delta)
+    )
+
+
+def _is_cross_staff_weak_lyric_source_with_better_alternative(
+    *,
+    selected_stats: Dict[str, float | int],
+    donor_alternative_stats: Dict[str, float | int],
+) -> bool:
+    selected_target_sung = int(selected_stats.get("target_sung_note_count") or 0)
+    selected_word = int(selected_stats.get("word_lyric_note_count") or 0)
+    alternative_word = int(donor_alternative_stats.get("word_lyric_note_count") or 0)
+    selected_ratio = float(selected_stats.get("word_lyric_coverage_ratio") or 0.0)
+    alternative_ratio = float(donor_alternative_stats.get("word_lyric_coverage_ratio") or 0.0)
+
+    if selected_target_sung <= 0:
+        return False
+    if alternative_word <= selected_word:
+        return False
+
+    min_ratio = _env_float("VOICE_PART_CROSS_STAFF_DONOR_MIN_WORD_RATIO", 0.6)
+    min_ratio_delta = _env_float("VOICE_PART_CROSS_STAFF_DONOR_MIN_RATIO_DELTA", 0.3)
+    min_word_delta = _env_int("VOICE_PART_CROSS_STAFF_DONOR_MIN_WORD_DELTA", 3)
+
+    return (
+        alternative_ratio >= min_ratio
+        and alternative_ratio >= (selected_ratio + min_ratio_delta)
+        and alternative_word >= (selected_word + min_word_delta)
     )
 
 
@@ -3725,6 +4142,7 @@ def _finalize_transform_result(
     validation: Optional[Dict[str, Any]] = None,
     source_musicxml_path: Optional[str] = None,
     target_source_voice_id: Optional[str] = None,
+    allow_reuse: bool = True,
 ) -> Dict[str, Any]:
     score_fingerprint = _compute_score_fingerprint(score)
     transform_payload = {
@@ -3765,7 +4183,7 @@ def _finalize_transform_result(
     reused_transform = False
 
     with _get_artifact_lock(lock_key):
-        existing = _TRANSFORM_ARTIFACT_INDEX.get(artifact_key)
+        existing = _TRANSFORM_ARTIFACT_INDEX.get(artifact_key) if allow_reuse else None
         if existing:
             existing_path = existing.get("modified_musicxml_path")
             if isinstance(existing_path, str) and existing_path and Path(existing_path).exists():
@@ -4775,6 +5193,443 @@ def _action_required(action: str, message: str, **extra: Any) -> Dict[str, Any]:
     }
     payload.update(extra)
     return payload
+
+
+def _reviewable_action_required_from_finalized(
+    finalized_result: Dict[str, Any],
+    *,
+    action: str,
+    message: str,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Convert a finalized transform result into an action_required review payload."""
+    payload = _action_required(action, message, **extra)
+    for key in (
+        "score",
+        "part_index",
+        "transform_id",
+        "score_fingerprint",
+        "transform_hash",
+        "appended_part_ref",
+        "modified_musicxml_path",
+        "reused_transform",
+        "hidden_default_lane",
+        "warnings",
+        "validation",
+        "metadata",
+    ):
+        if key in finalized_result:
+            payload[key] = finalized_result[key]
+    return payload
+
+
+def _build_review_materialization_payload(
+    *,
+    score: Dict[str, Any],
+    part_index: int,
+    target_voice_part_id: str,
+    source_voice_part_id: Optional[str],
+    source_part_index: Optional[int],
+    transformed_part: Dict[str, Any],
+    propagated: bool,
+    validation: Optional[Dict[str, Any]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
+    source_musicxml_path: Optional[str] = None,
+    target_source_voice_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Capture the data needed to materialize a reviewable candidate later."""
+    return {
+        "score": score,
+        "part_index": part_index,
+        "target_voice_part_id": target_voice_part_id,
+        "source_voice_part_id": source_voice_part_id,
+        "source_part_index": source_part_index,
+        "transformed_part": transformed_part,
+        "propagated": propagated,
+        "status": "ready",
+        "warnings": warnings or [],
+        "validation": validation or {},
+        "source_musicxml_path": source_musicxml_path,
+        "target_source_voice_id": target_source_voice_id,
+    }
+
+
+def _build_review_materialization_payload_from_result(
+    result: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Reconstruct deferred materialization data from a finalized target result."""
+    score = result.get("score")
+    transform_id = result.get("transform_id")
+    if not isinstance(score, dict) or not isinstance(transform_id, str) or not transform_id:
+        return None
+    transforms = score.get("voice_part_transforms") or {}
+    if not isinstance(transforms, dict):
+        return None
+    for value in transforms.values():
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("transform_id") or "") != transform_id:
+            continue
+        transformed_part = value.get("part")
+        if not isinstance(transformed_part, dict):
+            return None
+        target_source_voice_id = None
+        source_voice_part_id = value.get("source_voice_part_id")
+        source_part_index = value.get("source_part_index")
+        target_voice_part_id = value.get("target_voice_part_id")
+        part_index = value.get("part_index")
+        # Recover the raw source voice id from the transformed part when available.
+        if isinstance(transformed_part.get("_source_voice_id"), str):
+            target_source_voice_id = transformed_part.get("_source_voice_id")
+        return _build_review_materialization_payload(
+            score=score,
+            part_index=int(part_index),
+            target_voice_part_id=str(target_voice_part_id),
+            source_voice_part_id=(
+                str(source_voice_part_id) if isinstance(source_voice_part_id, str) else None
+            ),
+            source_part_index=(
+                int(source_part_index) if isinstance(source_part_index, int) else None
+            ),
+            transformed_part=transformed_part,
+            propagated=bool(value.get("propagated_lyrics")),
+            validation=result.get("validation") if isinstance(result.get("validation"), dict) else {},
+            warnings=[dict(item) for item in (result.get("warnings") or []) if isinstance(item, dict)],
+            source_musicxml_path=result.get("modified_musicxml_path")
+            or score.get("source_musicxml_path"),
+            target_source_voice_id=target_source_voice_id,
+        )
+    return None
+
+
+def _merge_validation_payloads(validations: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-target validation payloads into a candidate-level summary."""
+    if not validations:
+        return {}
+
+    total_word = 0
+    total_extension = 0
+    total_missing = 0
+    total_exempt = 0
+    total_source_word = 0
+    alignment_values: List[float] = []
+    unresolved_measures: set[int] = set()
+    structural_measures: set[int] = set()
+    max_simultaneous = 0
+    simultaneous_conflicts = 0
+    overlap_conflicts = 0
+    hard_fail = False
+
+    for validation in validations:
+        if not isinstance(validation, dict):
+            continue
+        total_word += int(validation.get("word_lyric_note_count") or 0)
+        total_extension += int(validation.get("extension_lyric_note_count") or 0)
+        total_missing += int(validation.get("missing_lyric_sung_note_count") or 0)
+        total_exempt += int(validation.get("lyric_exempt_note_count") or 0)
+        total_source_word += int(validation.get("source_word_lyric_note_count") or 0)
+        if isinstance(validation.get("source_alignment_ratio"), (int, float)):
+            alignment_values.append(float(validation["source_alignment_ratio"]))
+        for measure in validation.get("unresolved_measures") or []:
+            unresolved_measures.add(int(measure))
+        structural = validation.get("structural") or {}
+        if isinstance(structural, dict):
+            hard_fail = hard_fail or bool(structural.get("hard_fail"))
+            max_simultaneous = max(
+                max_simultaneous, int(structural.get("max_simultaneous_notes") or 0)
+            )
+            simultaneous_conflicts += int(structural.get("simultaneous_conflict_count") or 0)
+            overlap_conflicts += int(structural.get("overlap_conflict_count") or 0)
+            for measure in structural.get("structural_unresolved_measures") or []:
+                structural_measures.add(int(measure))
+
+    total_sung = total_word + total_extension + total_missing
+    return {
+        "lyric_coverage_ratio": (
+            float(total_word + total_extension) / float(total_sung) if total_sung else 1.0
+        ),
+        "word_lyric_coverage_ratio": (
+            float(total_word) / float(total_sung) if total_sung else 1.0
+        ),
+        "extension_lyric_ratio": (
+            float(total_extension) / float(total_sung) if total_sung else 0.0
+        ),
+        "word_lyric_note_count": total_word,
+        "extension_lyric_note_count": total_extension,
+        "source_word_lyric_note_count": total_source_word,
+        "source_alignment_ratio": (
+            sum(alignment_values) / len(alignment_values) if alignment_values else 1.0
+        ),
+        "missing_lyric_sung_note_count": total_missing,
+        "lyric_exempt_note_count": total_exempt,
+        "unresolved_measures": sorted(unresolved_measures),
+        "structural": {
+            "hard_fail": hard_fail,
+            "max_simultaneous_notes": max_simultaneous,
+            "simultaneous_conflict_count": simultaneous_conflicts,
+            "overlap_conflict_count": overlap_conflicts,
+            "structural_unresolved_measures": sorted(structural_measures),
+        },
+    }
+
+
+def _normalize_issue_rule_keys(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize mixed rule metadata keys from lint/postflight payloads."""
+    normalized = dict(entry)
+    if "rule_severity" not in normalized and "severity" in normalized:
+        normalized["rule_severity"] = normalized.get("severity")
+    if "rule_domain" not in normalized and "domain" in normalized:
+        normalized["rule_domain"] = normalized.get("domain")
+    return normalized
+
+
+def _extract_issue_entries_from_target_result(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collect normalized issue entries from one target result payload."""
+    issue_entries: List[Dict[str, Any]] = []
+    failed_rules = result.get("failed_validation_rules")
+    if isinstance(failed_rules, list):
+        for entry in failed_rules:
+            if isinstance(entry, dict):
+                issue_entries.append(_normalize_issue_rule_keys(entry))
+    warnings = result.get("warnings")
+    if isinstance(warnings, list):
+        for entry in warnings:
+            if not isinstance(entry, dict):
+                continue
+            rule_metadata = entry.get("rule_metadata")
+            if isinstance(rule_metadata, dict):
+                issue_entries.append(_normalize_issue_rule_keys(rule_metadata))
+    lint_findings = result.get("lint_findings")
+    if isinstance(lint_findings, list):
+        for entry in lint_findings:
+            if isinstance(entry, dict):
+                issue_entries.append(_normalize_issue_rule_keys(entry))
+    return issue_entries
+
+
+def _count_impacted_measures_for_issues(
+    issues: Sequence[Dict[str, Any]],
+    *,
+    severity: str,
+    domain: Optional[str] = None,
+) -> int:
+    """Return union-count of impacted measures for one severity/domain bucket."""
+    impacted: set[int] = set()
+    for issue in issues:
+        if str(issue.get("rule_severity") or "") != severity:
+            continue
+        if domain is not None and str(issue.get("rule_domain") or "") != domain:
+            continue
+        issue_measures = issue.get("impacted_measures")
+        if isinstance(issue_measures, list):
+            for measure in issue_measures:
+                if isinstance(measure, int):
+                    impacted.add(measure)
+        issue_ranges = issue.get("impacted_ranges")
+        if isinstance(issue_ranges, list):
+            for item in issue_ranges:
+                if not isinstance(item, dict):
+                    continue
+                start = item.get("start")
+                end = item.get("end")
+                if isinstance(start, int) and isinstance(end, int) and start <= end:
+                    impacted.update(range(start, end + 1))
+    return len(impacted)
+
+
+def _has_structural_p0_issue(issues: Sequence[Dict[str, Any]]) -> bool:
+    """Return True if any issue is structural P0."""
+    return any(
+        str(issue.get("rule_severity") or "") == "P0"
+        and str(issue.get("rule_domain") or "") == "STRUCTURAL"
+        for issue in issues
+    )
+
+
+def _classify_target_quality_from_issues(issues: Sequence[Dict[str, Any]]) -> int:
+    """Return per-target quality class 3/2/1 from normalized issues."""
+    structural_p1_measures = _count_impacted_measures_for_issues(
+        issues, severity="P1", domain="STRUCTURAL"
+    )
+    lyric_p1_measures = _count_impacted_measures_for_issues(
+        issues, severity="P1", domain="LYRIC"
+    )
+    p2_measures = _count_impacted_measures_for_issues(issues, severity="P2")
+    if structural_p1_measures > 0 or lyric_p1_measures > 0:
+        return 1
+    if p2_measures > 0:
+        return 2
+    return 3
+
+
+def _build_preprocess_target_output(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one target result for multi-target candidate aggregation."""
+    issues = _extract_issue_entries_from_target_result(result)
+    structural_p1_measures = _count_impacted_measures_for_issues(
+        issues, severity="P1", domain="STRUCTURAL"
+    )
+    lyric_p1_measures = _count_impacted_measures_for_issues(
+        issues, severity="P1", domain="LYRIC"
+    )
+    p2_measures = _count_impacted_measures_for_issues(issues, severity="P2")
+    visible = not bool(result.get("hidden_default_lane"))
+    review_required = (
+        str(result.get("status") or "") == "action_required"
+        and str(result.get("action") or "") == "validation_failed_needs_review"
+    )
+    target_output: Dict[str, Any] = {
+        "status": result.get("status"),
+        "action": result.get("action"),
+        "code": result.get("code"),
+        "message": result.get("message"),
+        "part_index": result.get("part_index"),
+        "target_voice_part_id": result.get("target_voice_part"),
+        "transform_id": result.get("transform_id"),
+        "appended_part_ref": result.get("appended_part_ref"),
+        "hidden_default_lane": bool(result.get("hidden_default_lane")),
+        "visible": visible,
+        "review_required": review_required,
+        "structurally_valid": not _has_structural_p0_issue(issues),
+        "quality_class": _classify_target_quality_from_issues(issues),
+        "structural_p1_measures": structural_p1_measures,
+        "lyric_p1_measures": lyric_p1_measures,
+        "p2_measures": p2_measures,
+        "issues": issues,
+    }
+    for key in (
+        "validation",
+        "warnings",
+        "section_results",
+        "failing_ranges",
+        "failed_validation_rules",
+        "modified_musicxml_path",
+    ):
+        value = result.get(key)
+        if value is not None:
+            target_output[key] = value
+    return target_output
+
+
+def _merge_target_output_warnings(target_outputs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collect warnings from visible targets for top-level compatibility."""
+    merged: List[Dict[str, Any]] = []
+    for target in target_outputs:
+        if not bool(target.get("visible", True)):
+            continue
+        warnings = target.get("warnings")
+        if isinstance(warnings, list):
+            merged.extend(dict(item) for item in warnings if isinstance(item, dict))
+    return merged
+
+
+def _merge_target_output_issues(target_outputs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collect issue entries from visible targets for top-level compatibility."""
+    merged: List[Dict[str, Any]] = []
+    for target in target_outputs:
+        if not bool(target.get("visible", True)):
+            continue
+        issues = target.get("issues")
+        if isinstance(issues, list):
+            merged.extend(dict(item) for item in issues if isinstance(item, dict))
+    return merged
+
+
+def _merge_target_output_validations(target_outputs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge visible target validations for top-level compatibility."""
+    validations: List[Dict[str, Any]] = []
+    for target in target_outputs:
+        if not bool(target.get("visible", True)):
+            continue
+        validation = target.get("validation")
+        if isinstance(validation, dict):
+            validations.append(validation)
+    return _merge_validation_payloads(validations)
+
+
+def _build_review_materialization_bundle(
+    *,
+    base_score: Dict[str, Any],
+    steps: Sequence[Dict[str, Any]],
+    warnings: Optional[List[Dict[str, Any]]] = None,
+    validation: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Capture a multi-target review candidate for deferred materialization."""
+    return {
+        "base_score": base_score,
+        "steps": list(steps),
+        "warnings": list(warnings or []),
+        "validation": dict(validation or {}),
+        "metadata": dict(metadata or {}),
+    }
+
+
+def finalize_review_materialization(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Materialize a deferred reviewable candidate into a finalized transform result."""
+    steps = payload.get("steps")
+    if isinstance(steps, list):
+        running_score = deepcopy(payload.get("base_score") or {})
+        last_result: Optional[Dict[str, Any]] = None
+        appended_refs: List[Dict[str, Any]] = []
+        for raw_step in steps:
+            if not isinstance(raw_step, dict):
+                continue
+            step = dict(raw_step)
+            step["score"] = running_score
+            if isinstance(running_score, dict) and running_score.get("source_musicxml_path"):
+                step["source_musicxml_path"] = running_score.get("source_musicxml_path")
+            step_result = _finalize_transform_result(
+                step["score"],
+                part_index=int(step["part_index"]),
+                target_voice_part_id=str(step["target_voice_part_id"]),
+                source_voice_part_id=step.get("source_voice_part_id"),
+                source_part_index=step.get("source_part_index"),
+                transformed_part=dict(step["transformed_part"]),
+                propagated=bool(step.get("propagated")),
+                status=str(step.get("status") or "ready"),
+                warnings=list(step.get("warnings") or []),
+                validation=dict(step.get("validation") or {}),
+                source_musicxml_path=step.get("source_musicxml_path"),
+                target_source_voice_id=step.get("target_source_voice_id"),
+                allow_reuse=False,
+            )
+            running_score = step_result.get("score", running_score)
+            appended_ref = step_result.get("appended_part_ref")
+            if isinstance(appended_ref, dict):
+                appended_refs.append(appended_ref)
+            last_result = step_result
+
+        if last_result is None:
+            return {"score": running_score}
+
+        finalized = dict(last_result)
+        finalized["score"] = running_score
+        if appended_refs:
+            finalized["appended_part_refs"] = appended_refs
+            finalized["appended_part_ref"] = appended_refs[-1]
+        if payload.get("warnings"):
+            finalized["warnings"] = payload.get("warnings")
+        if payload.get("validation"):
+            finalized["validation"] = payload.get("validation")
+        if payload.get("metadata"):
+            metadata = finalized.setdefault("metadata", {})
+            metadata.update(dict(payload["metadata"]))
+        return finalized
+
+    return _finalize_transform_result(
+        payload["score"],
+        part_index=int(payload["part_index"]),
+        target_voice_part_id=str(payload["target_voice_part_id"]),
+        source_voice_part_id=payload.get("source_voice_part_id"),
+        source_part_index=payload.get("source_part_index"),
+        transformed_part=dict(payload["transformed_part"]),
+        propagated=bool(payload.get("propagated")),
+        status=str(payload.get("status") or "ready"),
+        warnings=list(payload.get("warnings") or []),
+        validation=dict(payload.get("validation") or {}),
+        source_musicxml_path=payload.get("source_musicxml_path"),
+        target_source_voice_id=payload.get("target_source_voice_id"),
+    )
 
 
 def build_infeasible_anchor_action_required(

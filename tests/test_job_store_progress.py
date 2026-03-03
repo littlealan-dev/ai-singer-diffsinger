@@ -46,3 +46,20 @@ def test_build_progress_payload_includes_preprocess_review_fields():
     assert payload["status"] == "done"
     assert payload["job_kind"] == "preprocess"
     assert payload["review_required"] is True
+
+
+def test_build_progress_payload_includes_details():
+    payload = build_progress_payload(
+        "job-details",
+        {
+            "status": "completed",
+            "message": "Please review the candidate.",
+            "details": {
+                "quality_class": 2,
+                "issues": [{"rule": "validation_failed_needs_review"}],
+            },
+        },
+    )
+    assert payload["status"] == "done"
+    assert payload["details"]["quality_class"] == 2
+    assert payload["details"]["issues"][0]["rule"] == "validation_failed_needs_review"

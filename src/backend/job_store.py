@@ -87,9 +87,11 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "progress": data.get("progress"),
         "audio_url": data.get("audioUrl"),
         "error": data.get("errorMessage"),
+        "warning": data.get("warningMessage"),
         "job_id": job_id,
         "job_kind": data.get("jobKind"),
         "review_required": data.get("reviewRequired"),
+        "details": data.get("details"),
         "updated_at": data.get("updatedAt"),
     }
     return {key: value for key, value in payload.items() if value is not None}

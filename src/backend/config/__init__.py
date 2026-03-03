@@ -73,6 +73,7 @@ class Settings:
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
     llm_max_history_items: int
+    preprocess_max_attempts: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -125,6 +126,7 @@ class Settings:
         llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
+        preprocess_max_attempts = _env_int("PREPROCESS_MAX_ATTEMPTS", 3)
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
@@ -179,6 +181,7 @@ class Settings:
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
             llm_max_history_items=llm_max_history_items,
+            preprocess_max_attempts=preprocess_max_attempts,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,

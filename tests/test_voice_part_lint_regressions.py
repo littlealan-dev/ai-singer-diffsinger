@@ -4,7 +4,7 @@ from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
 
-from src.api.voice_part_lint_rules import LINT_RULE_SPECS
+from src.api.voice_part_lint_rules import LINT_RULE_SPECS, POSTFLIGHT_VALIDATION_SPECS
 from src.api.voice_parts import _run_preflight_plan_lint
 
 
@@ -73,15 +73,23 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             "trivial_method_requires_equal_chord_voice_part_count",
             "cross_staff_melody_source_when_local_available",
             "cross_staff_lyric_source_with_stronger_local_alternative",
+            "cross_staff_weak_lyric_source_with_better_alternative",
             "extension_only_lyric_source_with_word_alternative",
             "empty_lyric_source_with_word_alternative",
             "weak_lyric_source_with_better_alternative",
             "lyric_source_without_target_notes",
             "no_rest_when_target_has_native_notes",
             "same_clef_claim_coverage",
+            "same_part_chord_source_underclaimed_by_visible_targets",
             "same_part_target_completeness",
         }
         self.assertEqual(set(LINT_RULE_SPECS), expected)
+
+    def test_registry_metadata_includes_severity_and_domain(self) -> None:
+        self.assertEqual(LINT_RULE_SPECS["same_part_target_completeness"].severity, "P0")
+        self.assertEqual(LINT_RULE_SPECS["same_part_target_completeness"].domain, "STRUCTURAL")
+        self.assertEqual(POSTFLIGHT_VALIDATION_SPECS["structural_validation_failed"].severity, "P0")
+        self.assertEqual(POSTFLIGHT_VALIDATION_SPECS["validation_failed_needs_review"].domain, "LYRIC")
 
     def test_plan_requires_sections(self) -> None:
         score = {"parts": [_part("P1", "Lead", [_note(measure=1, offset=0.0, pitch=60.0)])]}
@@ -324,6 +332,65 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             plan=plan,
         )
         self.assertEqual(finding["source_part_index"], 1)
+
+    def test_cross_staff_weak_lyric_source_with_better_alternative(self) -> None:
+        score = {
+            "parts": [
+                _part(
+                    "P1",
+                    "Target",
+                    [
+                        _note(measure=1, offset=0.0, pitch=60.0),
+                        _note(measure=1, offset=1.0, pitch=60.0),
+                        _note(measure=1, offset=2.0, pitch=60.0),
+                        _note(measure=1, offset=3.0, pitch=60.0),
+                    ],
+                ),
+                _part(
+                    "P2",
+                    "Donor",
+                    [
+                        _note(measure=1, offset=0.0, pitch=67.0, voice="1", lyric="full"),
+                        _note(measure=1, offset=1.0, pitch=67.0, voice="1", lyric="word"),
+                        _note(measure=1, offset=2.0, pitch=67.0, voice="1", lyric="lyric"),
+                        _note(measure=1, offset=3.0, pitch=67.0, voice="1", lyric="line"),
+                        _note(measure=1, offset=0.0, pitch=60.0, voice="2", lyric="cross"),
+                        _note(measure=1, offset=1.0, pitch=60.0, voice="2", lyric="+", extended=True),
+                        _note(measure=1, offset=2.0, pitch=60.0, voice="2"),
+                        _note(measure=1, offset=3.0, pitch=60.0, voice="2"),
+                    ],
+                ),
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_source": {"part_index": 1, "voice_part_id": "voice part 2"},
+                        }
+                    ],
+                }
+            ]
+        }
+        finding = self._assert_rule_fires(
+            "cross_staff_weak_lyric_source_with_better_alternative",
+            score=score,
+            plan=plan,
+        )
+        self.assertEqual(
+            finding["selected_lyric_source"]["voice_part_id"],
+            "voice part 2",
+        )
+        self.assertEqual(
+            finding["suggested_lyric_source"]["voice_part_id"],
+            "voice part 1",
+        )
 
     def test_extension_only_lyric_source_with_word_alternative(self) -> None:
         score = {
@@ -600,6 +667,110 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             plan=plan,
         )
         self.assertEqual(finding["missing_ranges"], [{"start": 2, "end": 2}])
+
+    def test_same_clef_claim_coverage_ignores_hidden_default_lane_claims(self) -> None:
+        score = {
+            "parts": [
+                _part(
+                    "P1",
+                    "Men",
+                    [
+                        _note(measure=1, offset=0.0, pitch=64.0, voice="1", lyric="A"),
+                        _note(measure=2, offset=0.0, pitch=55.0, voice="", lyric="B"),
+                    ],
+                )
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                        },
+                        {"start_measure": 2, "end_measure": 2, "mode": "rest"},
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 2,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                        }
+                    ],
+                },
+            ]
+        }
+        finding = self._assert_rule_fires(
+            "same_clef_claim_coverage",
+            score=score,
+            plan=plan,
+        )
+        self.assertEqual(finding["missing_ranges"], [{"start": 2, "end": 2}])
+
+    def test_same_part_chord_source_underclaimed_by_visible_targets(self) -> None:
+        score = {
+            "parts": [
+                _part(
+                    "P1",
+                    "Men",
+                    [
+                        _note(measure=1, offset=0.0, pitch=72.0, voice="1", lyric="hi"),
+                        _note(measure=1, offset=0.0, pitch=67.0, voice="1"),
+                        _note(measure=1, offset=0.0, pitch=60.0, voice="1"),
+                        _note(measure=2, offset=0.0, pitch=69.0, voice="1", lyric="lo"),
+                        _note(measure=1, offset=0.0, pitch=55.0, voice="2", lyric="bass"),
+                    ],
+                )
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 2"},
+                        }
+                    ],
+                },
+            ]
+        }
+        finding = self._assert_rule_fires(
+            "same_part_chord_source_underclaimed_by_visible_targets",
+            score=score,
+            plan=plan,
+        )
+        self.assertEqual(finding["missing_ranges"], [{"start": 1, "end": 1}])
+        self.assertEqual(
+            finding["failing_attributes"]["source_max_simultaneous_notes_by_measure"],
+            {1: 3},
+        )
+        self.assertEqual(
+            finding["failing_attributes"]["visible_target_claim_count_by_measure"],
+            {1: 1},
+        )
 
     def test_same_part_target_completeness(self) -> None:
         score = {

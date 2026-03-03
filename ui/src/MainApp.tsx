@@ -27,10 +27,18 @@ type Message = {
   role: Role;
   content: string;
   audioUrl?: string;
+  details?: unknown;
+  attemptMessages?: AttemptMessage[];
   showSelector?: boolean;
   progressUrl?: string;
   isProgress?: boolean;
   progressValue?: number;
+};
+
+type AttemptMessage = {
+  attempt_number: number;
+  message?: string;
+  thought_summary?: string;
 };
 
 type ScorePayload = {
@@ -108,6 +116,7 @@ export default function MainApp() {
   const [showCreditsModal, setShowCreditsModal] = useState(false);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
+  const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -224,6 +233,7 @@ export default function MainApp() {
       const appendTerminalPreprocessMessage =
         payload.job_kind === "preprocess" &&
         (payload.status === "done" || payload.status === "error");
+      const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) =>
         prev.map((msg) => {
           if (msg.id !== activeProgress.messageId) return msg;
@@ -232,6 +242,8 @@ export default function MainApp() {
             content: appendTerminalPreprocessMessage
               ? appendPreprocessTerminalMessage(msg.content, nextMessage)
               : appendProgressMessage(msg.content, nextMessage),
+            details: payload.details ?? msg.details,
+            attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
             audioUrl: nextAudioUrl || msg.audioUrl,
             isProgress: payload.status !== "done" && payload.status !== "error",
@@ -256,6 +268,9 @@ export default function MainApp() {
         }
         if (payload.status === "done" && payload.review_required) {
           await refreshScorePreview();
+        }
+        if (payload.warning) {
+          setError(payload.warning);
         }
         if (payload.status === "done") {
           setActiveProgress(null);
@@ -311,6 +326,13 @@ export default function MainApp() {
     }));
   };
 
+  const toggleDiagnostics = (messageId: string) => {
+    setExpandedDiagnostics((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
+  };
+
   const refreshScorePreview = async () => {
     if (!sessionId || !score) return;
     const data = await fetchScoreXml(sessionId);
@@ -360,6 +382,10 @@ export default function MainApp() {
         id: crypto.randomUUID(),
         role: "assistant",
         content: response.message,
+        details: "details" in response ? response.details : undefined,
+        attemptMessages: extractAttemptMessages(
+          "details" in response ? response.details : undefined
+        ),
       };
       if (
         response.type === "chat_text" &&
@@ -386,6 +412,9 @@ export default function MainApp() {
       }
       if ("current_score" in response && response.current_score) {
         await refreshScorePreview();
+      }
+      if ("warning" in response && response.warning) {
+        setError(String(response.warning));
       }
       appendMessage(assistantMessage);
       if (response.type === "chat_progress") {
@@ -559,6 +588,11 @@ export default function MainApp() {
                       msg.content
                     );
                     const isExpanded = Boolean(expandedThoughts[msg.id]);
+                    const diagnosticsExpanded = Boolean(expandedDiagnostics[msg.id]);
+                    const diagnosticsText = formatDiagnostics(msg.details);
+                    const followupAttempts = (msg.attemptMessages ?? []).filter(
+                      (attempt) => attempt.attempt_number > 1
+                    );
                     return (
                       <>
                         {mainContent ? (
@@ -595,10 +629,79 @@ export default function MainApp() {
                             ) : null}
                           </div>
                         ) : null}
+                        {followupAttempts.map((attempt) => {
+                          const attemptKey = `${msg.id}:attempt:${attempt.attempt_number}`;
+                          const attemptExpanded = Boolean(expandedThoughts[attemptKey]);
+                          const attemptMessage = attempt.message?.trim() ?? "";
+                          const attemptThought = attempt.thought_summary?.trim() ?? "";
+                          return (
+                            <div key={attemptKey} className="attempt-block">
+                              <div className="attempt-label">Attempt {attempt.attempt_number}</div>
+                              {attemptMessage ? (
+                                <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                                  {attemptMessage}
+                                </ReactMarkdown>
+                              ) : null}
+                              {attemptThought ? (
+                                <div className="thought-summary">
+                                  <button
+                                    type="button"
+                                    className="thought-summary-toggle"
+                                    onClick={() => toggleThoughtSummary(attemptKey)}
+                                    aria-expanded={attemptExpanded}
+                                  >
+                                    <span
+                                      className={clsx(
+                                        "thought-summary-caret",
+                                        attemptExpanded && "expanded"
+                                      )}
+                                      aria-hidden="true"
+                                    >
+                                      ▾
+                                    </span>
+                                    <span>Thought summary</span>
+                                  </button>
+                                  {attemptExpanded ? (
+                                    <ReactMarkdown
+                                      className="chat-markdown thought-summary-content"
+                                      remarkPlugins={[remarkGfm]}
+                                    >
+                                      {attemptThought}
+                                    </ReactMarkdown>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
                         {trailingContent ? (
                           <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
                             {trailingContent}
                           </ReactMarkdown>
+                        ) : null}
+                        {diagnosticsText ? (
+                          <div className="thought-summary diagnostics-panel">
+                            <button
+                              type="button"
+                              className="thought-summary-toggle"
+                              onClick={() => toggleDiagnostics(msg.id)}
+                              aria-expanded={diagnosticsExpanded}
+                            >
+                              <span
+                                className={clsx(
+                                  "thought-summary-caret",
+                                  diagnosticsExpanded && "expanded"
+                                )}
+                                aria-hidden="true"
+                              >
+                                ▾
+                              </span>
+                              <span>Diagnostics</span>
+                            </button>
+                            {diagnosticsExpanded ? (
+                              <pre className="diagnostics-content">{diagnosticsText}</pre>
+                            ) : null}
+                          </div>
                         ) : null}
                       </>
                     );
@@ -855,4 +958,34 @@ function appendPreprocessTerminalMessage(current: string, incoming?: string | nu
     ? `${mainContent}\n\nThought summary:\n${thoughtSummary}`
     : `Thought summary:\n${thoughtSummary}`;
   return `${baseContent}\n\nPost-update:\n${nextTrailingContent}`;
+}
+
+function formatDiagnostics(details: unknown): string {
+  if (details === null || details === undefined) return "";
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
+function extractAttemptMessages(details: unknown): AttemptMessage[] | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const raw = (details as { attempt_messages?: unknown }).attempt_messages;
+  if (!Array.isArray(raw)) return undefined;
+  const entries = raw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const attemptNumber = Number((entry as { attempt_number?: unknown }).attempt_number);
+      if (!Number.isFinite(attemptNumber)) return null;
+      const message = (entry as { message?: unknown }).message;
+      const thought = (entry as { thought_summary?: unknown }).thought_summary;
+      return {
+        attempt_number: attemptNumber,
+        message: typeof message === "string" ? message : undefined,
+        thought_summary: typeof thought === "string" ? thought : undefined,
+      } satisfies AttemptMessage;
+    })
+    .filter((entry): entry is AttemptMessage => entry !== null);
+  return entries.length > 0 ? entries : undefined;
 }

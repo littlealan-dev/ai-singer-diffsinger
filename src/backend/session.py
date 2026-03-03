@@ -30,6 +30,7 @@ class SessionState:
     files: Dict[str, str] = field(default_factory=dict)
     original_score: Optional[Dict[str, Any]] = None
     preprocess_plan_history: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_attempt_history: List[Dict[str, Any]] = field(default_factory=list)
     last_successful_preprocess_plan: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
@@ -47,6 +48,7 @@ class SessionState:
             "files": dict(self.files),
             "original_score": dict(self.original_score) if self.original_score else None,
             "preprocess_plan_history": list(self.preprocess_plan_history),
+            "preprocess_attempt_history": list(self.preprocess_attempt_history),
             "last_successful_preprocess_plan": (
                 dict(self.last_successful_preprocess_plan)
                 if self.last_successful_preprocess_plan
@@ -204,6 +206,17 @@ class SessionStore:
             state.preprocess_plan_history.append(entry)
             state.last_active_at = _utcnow()
 
+    async def append_preprocess_attempt_summary(
+        self, session_id: str, entry: Dict[str, Any]
+    ) -> None:
+        """Append a lightweight preprocess attempt summary for debugging."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.preprocess_attempt_history.append(entry)
+            state.last_active_at = _utcnow()
+
     async def set_last_successful_preprocess_plan(
         self, session_id: str, plan: Optional[Dict[str, Any]]
     ) -> None:
@@ -355,6 +368,7 @@ class FirestoreSessionStore:
             files=dict(data.get("files") or {}),
             original_score=data.get("originalScore"),
             preprocess_plan_history=list(data.get("preprocessPlanHistory") or []),
+            preprocess_attempt_history=list(data.get("preprocessAttemptHistory") or []),
             last_successful_preprocess_plan=data.get("lastSuccessfulPreprocessPlan"),
             current_score=data.get("currentScore"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
@@ -375,6 +389,7 @@ class FirestoreSessionStore:
                 "files": {},
                 "originalScore": None,
                 "preprocessPlanHistory": [],
+                "preprocessAttemptHistory": [],
                 "lastSuccessfulPreprocessPlan": None,
                 "currentScore": None,
                 "currentScoreVersion": 0,
@@ -481,6 +496,18 @@ class FirestoreSessionStore:
             self._doc_ref(session_id).update(
                 {
                     "preprocessPlanHistory": firestore.ArrayUnion([entry]),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def append_preprocess_attempt_summary(
+        self, session_id: str, entry: Dict[str, Any]
+    ) -> None:
+        """Append a preprocess attempt summary in Firestore for debugging."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "preprocessAttemptHistory": firestore.ArrayUnion([entry]),
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
