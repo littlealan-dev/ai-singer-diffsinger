@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import os
 import shutil
 import time
@@ -1192,6 +1193,109 @@ def test_workflow_stops_after_class3_candidate_even_if_followup_returns_tool_cal
     assert response["details"]["quality_class"] == 3
     assert response["details"]["issues"] == []
     assert response["current_score"] == {"score": {"title": "Derived-clean"}, "version": 4}
+
+
+def test_workflow_publishes_attempt_messages_during_preprocess_repairs(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {"score_summary": {"title": "Test"}}
+    current_score = {"title": "Original"}
+    attempts = {"count": 0}
+    published: list[list[dict[str, object]]] = []
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return ToolExecutionResult(
+                score={"title": "Derived-1"},
+                audio_response={"type": "chat_text", "message": ""},
+                action_required_payload={
+                    "status": "action_required",
+                    "action": "validation_failed_needs_review",
+                    "message": "First attempt review.",
+                    "failed_validation_rules": [
+                        {
+                            "rule": "validation_failed_needs_review",
+                            "rule_name": "Coverage Needs Review",
+                            "rule_severity": "P1",
+                            "rule_domain": "LYRIC",
+                            "impacted_measures": [7],
+                            "impacted_ranges": [{"start": 7, "end": 7}],
+                        }
+                    ],
+                },
+                followup_prompt=json.dumps({"status": "action_required", "attempt": 1}),
+            )
+        return ToolExecutionResult(
+            score={"title": "Derived-2"},
+            audio_response={"type": "chat_text", "message": ""},
+            action_required_payload={
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "message": "Second attempt review.",
+                "failed_validation_rules": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_name": "Coverage Needs Review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_measures": [8],
+                        "impacted_ranges": [{"start": 8, "end": 8}],
+                    }
+                ],
+            },
+            followup_prompt=json.dumps({"status": "action_required", "attempt": 2}),
+        )
+
+    followup_calls = {"count": 0}
+
+    async def fake_decide_followup_with_llm(*args, **kwargs):
+        followup_calls["count"] += 1
+        if followup_calls["count"] == 1:
+            return (
+                LlmResponse(
+                    tool_calls=[ToolCall(name="preprocess_voice_parts", arguments={})],
+                    final_message="Trying one more repair.",
+                    include_score=False,
+                    thought_summary="Repair thought summary",
+                ),
+                None,
+            )
+        return None, "Gemini request timed out."
+
+    async def fake_progress_callback(attempt_messages):
+        published.append(copy.deepcopy(attempt_messages))
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived-2"}, "version": 3}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-progress",
+            snapshot,
+            current_score,
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="Initial thought summary",
+            user_id="test-user",
+            user_email="test@example.com",
+            progress_callback=fake_progress_callback,
+        )
+    )
+
+    assert response["type"] == "chat_text"
+    assert published[0][0]["attempt_number"] == 1
+    assert published[0][0]["message"] == "Starting preprocess"
+    assert published[1][1]["attempt_number"] == 2
+    assert published[1][1]["message"] == "Trying one more repair."
+    assert published[1][1]["thought_summary"] == "Repair thought summary"
 
 
 def test_workflow_reprompts_when_class1_candidate_stops_early(client):

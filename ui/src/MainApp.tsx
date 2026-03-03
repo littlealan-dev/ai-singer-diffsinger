@@ -122,6 +122,7 @@ export default function MainApp() {
     url: string;
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -237,11 +238,15 @@ export default function MainApp() {
       setMessages((prev) =>
         prev.map((msg) => {
           if (msg.id !== activeProgress.messageId) return msg;
+          const nextContent =
+            payload.job_kind === "preprocess" && payload.status === "running"
+              ? msg.content
+              : appendTerminalPreprocessMessage
+                ? appendPreprocessTerminalMessage(msg.content, nextMessage)
+                : appendProgressMessage(msg.content, nextMessage);
           return {
             ...msg,
-            content: appendTerminalPreprocessMessage
-              ? appendPreprocessTerminalMessage(msg.content, nextMessage)
-              : appendProgressMessage(msg.content, nextMessage),
+            content: nextContent,
             details: payload.details ?? msg.details,
             attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
@@ -259,13 +264,7 @@ export default function MainApp() {
       try {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled) return;
-        const shouldUpdateProgressBubble =
-          payload.job_kind !== "preprocess" ||
-          payload.status === "done" ||
-          payload.status === "error";
-        if (shouldUpdateProgressBubble) {
-          applyProgress(payload);
-        }
+        applyProgress(payload);
         if (payload.status === "done" && payload.review_required) {
           await refreshScorePreview();
         }
@@ -303,8 +302,17 @@ export default function MainApp() {
   useEffect(() => {
     const container = chatStreamRef.current;
     if (!container) return;
+    if (!shouldAutoScrollRef.current) return;
     container.scrollTop = container.scrollHeight;
   }, [messages, status]);
+
+  const handleChatScroll = () => {
+    const container = chatStreamRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom < 48;
+  };
 
   const headerSubtitle = useMemo(
     () =>
@@ -564,7 +572,7 @@ export default function MainApp() {
             <h2>Studio Chat</h2>
             <span className="chat-subtitle">Natural language takes, no DAW edits</span>
           </div>
-          <div className="chat-stream" ref={chatStreamRef}>
+          <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatScroll}>
             {messages.length === 0 && (
               <div className="empty-state">
                 <p>Drop a MusicXML file here to begin.</p>

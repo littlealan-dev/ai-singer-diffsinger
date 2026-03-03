@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import asyncio
 import logging
 import copy
@@ -552,6 +552,20 @@ class Orchestrator:
         initial_thought_summary: str,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message."""
+        async def publish_attempt_messages(
+            attempt_messages: List[Dict[str, Any]],
+        ) -> None:
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="preprocess",
+                message=initial_message,
+                progress=0.05,
+                jobKind="preprocess",
+                details={"attempt_messages": copy.deepcopy(attempt_messages)},
+            )
+
         try:
             set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
             await asyncio.to_thread(
@@ -575,6 +589,7 @@ class Orchestrator:
                 initial_thought_summary=initial_thought_summary,
                 user_id=user_id,
                 user_email=user_email,
+                progress_callback=publish_attempt_messages,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
@@ -633,6 +648,7 @@ class Orchestrator:
         initial_thought_summary: Optional[str],
         user_id: str,
         user_email: str,
+        progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns."""
         include_score = initial_include_score
@@ -657,6 +673,8 @@ class Orchestrator:
             )
             if initial_attempt_entry is not None:
                 attempt_messages.append(initial_attempt_entry)
+                if progress_callback is not None:
+                    await progress_callback(attempt_messages)
 
         while True:
             attempt_number += 1
@@ -856,6 +874,8 @@ class Orchestrator:
                 )
                 if repair_attempt_entry is not None:
                     attempt_messages.append(repair_attempt_entry)
+                    if progress_callback is not None:
+                        await progress_callback(attempt_messages)
                 pending_calls = list(repair_response.tool_calls)
                 continue
 
