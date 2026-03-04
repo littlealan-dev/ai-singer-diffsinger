@@ -2,12 +2,15 @@ import os
 import shutil
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
+from src.backend.credits import UserCredits
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
@@ -72,6 +75,7 @@ def _auth_headers(token="test-token"):
 def _prepare_app(monkeypatch, overrides=None):
     data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
+    fake_jobs: dict[str, dict] = {}
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
@@ -79,8 +83,80 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
-    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
-    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
+    monkeypatch.setattr(
+        "src.backend.main.verify_id_token_claims",
+        lambda token: {"uid": "test-user", "email": "test@example.com"},
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.get_or_create_credits",
+        lambda user_id, user_email: UserCredits(
+            balance=9999,
+            reserved=0,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            overdrafted=False,
+        ),
+    )
+    monkeypatch.setattr("src.backend.credits.reserve_credits", lambda *_, **__: True)
+    monkeypatch.setattr("src.backend.credits.release_credits", lambda *_, **__: True)
+    monkeypatch.setattr("src.backend.credits.settle_credits", lambda *_, **__: (1, False))
+
+    def _fake_create_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        session_id: str,
+        status: str,
+        input_path: str | None = None,
+        render_type: str | None = None,
+    ) -> None:
+        payload = {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": status,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        if input_path:
+            payload["inputPath"] = input_path
+        if render_type:
+            payload["renderType"] = render_type
+        fake_jobs[job_id] = payload
+
+    def _fake_update_job(self, job_id: str, **fields) -> None:
+        payload = fake_jobs.setdefault(job_id, {})
+        payload.update(fields)
+        payload["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+    def _fake_get_latest_job_by_session(self, *, user_id: str, session_id: str):
+        matches = [
+            (job_id, payload)
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: item[1].get("updatedAt", ""))
+
+    def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
+        to_delete = [
+            job_id
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
+        ]
+        for job_id in to_delete:
+            fake_jobs.pop(job_id, None)
+
+    monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
+    monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.get_latest_job_by_session",
+        _fake_get_latest_job_by_session,
+    )
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.clear_jobs_for_session",
+        _fake_clear_jobs_for_session,
+        raising=False,
+    )
     if overrides:
         for key, value in overrides.items():
             monkeypatch.setenv(key, value)
@@ -153,6 +229,17 @@ def test_missing_auth_header_returns_401(monkeypatch):
     with TestClient(app) as test_client:
         response = test_client.post("/sessions")
         assert response.status_code == 401
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_query_token_auth_is_rejected(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        response = test_client.post("/sessions?id_token=test-token")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Missing Authorization header."
     if not keep_outputs:
         shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -314,10 +401,45 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert progress_payload["status"] == "done"
     audio_url = progress_payload["audio_url"]
     assert audio_url.startswith(f"/sessions/{session_id}/audio")
+    query = parse_qs(urlsplit(audio_url).query)
+    assert "playback_token" in query
+    assert query["playback_token"][0]
 
     audio_response = test_client.get(audio_url)
     assert audio_response.status_code == 200
     assert audio_response.content.startswith(b"RIFF")
+
+
+def test_audio_playback_token_rejects_tampering(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+    audio_url = progress_payload["audio_url"]
+    parts = urlsplit(audio_url)
+    query = parse_qs(parts.query)
+    query["playback_token"] = ["tampered"]
+    tampered_query = "&".join(
+        f"{key}={value}"
+        for key, values in query.items()
+        for value in values
+    )
+    tampered_url = parts._replace(query=tampered_query).geturl()
+
+    audio_response = test_client.get(tampered_url)
+    assert audio_response.status_code == 401
 
 
 def test_chat_returns_error_when_llm_fails(client):
@@ -380,7 +502,7 @@ def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
     assert payload["type"] == "chat_progress"
     progress_payload = _wait_for_progress(test_client, payload["progress_url"])
     audio_url = progress_payload.get("audio_url", "")
-    file_name = audio_url.split("file=")[-1]
+    file_name = parse_qs(urlsplit(audio_url).query)["file"][0]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
@@ -412,7 +534,7 @@ def test_chat_audio_outputs_wav_when_debug(client_with_env):
     assert payload["type"] == "chat_progress"
     progress_payload = _wait_for_progress(test_client, payload["progress_url"])
     audio_url = progress_payload.get("audio_url", "")
-    file_name = audio_url.split("file=")[-1]
+    file_name = parse_qs(urlsplit(audio_url).query)["file"][0]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
