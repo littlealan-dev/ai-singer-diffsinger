@@ -20,11 +20,7 @@ from src.mcp.logging_utils import get_logger
 logger = get_logger(__name__)
 
 BREVO_DOI_ENDPOINT = "https://api.brevo.com/v3/contacts/doubleOptinConfirmation"
-BREVO_TIMEOUT_SECONDS = 10.0
-BREVO_MAX_ATTEMPTS = 2
 BREVO_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-BREVO_RETRY_BASE_DELAY_SECONDS = 0.25
-BREVO_RETRY_JITTER_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -58,9 +54,12 @@ def _load_brevo_api_key(settings: Settings) -> str:
     )
 
 
-def _retry_delay_seconds(attempt: int) -> float:
+def _retry_delay_seconds(settings: Settings, attempt: int) -> float:
     """Return a short capped delay for retryable waitlist failures."""
-    return BREVO_RETRY_BASE_DELAY_SECONDS + random.uniform(0.0, BREVO_RETRY_JITTER_SECONDS * attempt)
+    return settings.brevo_waitlist_retry_base_delay_seconds + random.uniform(
+        0.0,
+        settings.brevo_waitlist_retry_jitter_seconds * attempt,
+    )
 
 
 def _dependency_failure_result() -> WaitlistResult:
@@ -112,12 +111,12 @@ async def subscribe_to_waitlist(
         },
     }
 
-    async with httpx.AsyncClient(timeout=BREVO_TIMEOUT_SECONDS) as client:
-        for attempt in range(1, BREVO_MAX_ATTEMPTS + 1):
+    async with httpx.AsyncClient(timeout=settings.brevo_waitlist_timeout_seconds) as client:
+        for attempt in range(1, settings.brevo_waitlist_max_attempts + 1):
             try:
                 response = await client.post(BREVO_DOI_ENDPOINT, headers=headers, json=payload)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
-                should_retry = attempt < BREVO_MAX_ATTEMPTS
+                should_retry = attempt < settings.brevo_waitlist_max_attempts
                 logger.warning(
                     "brevo_transport_error attempt=%s retry=%s error=%s",
                     attempt,
@@ -125,7 +124,7 @@ async def subscribe_to_waitlist(
                     exc,
                 )
                 if should_retry:
-                    await asyncio.sleep(_retry_delay_seconds(attempt))
+                    await asyncio.sleep(_retry_delay_seconds(settings, attempt))
                     continue
                 return _dependency_failure_result()
 
@@ -141,14 +140,17 @@ async def subscribe_to_waitlist(
                     message="If this email isn't already subscribed, you'll receive a confirmation shortly.",
                     requires_confirmation=True,
                 )
-            if response.status_code in BREVO_RETRYABLE_STATUS_CODES and attempt < BREVO_MAX_ATTEMPTS:
+            if (
+                response.status_code in BREVO_RETRYABLE_STATUS_CODES
+                and attempt < settings.brevo_waitlist_max_attempts
+            ):
                 logger.warning(
                     "brevo_retryable_status attempt=%s status=%s response=%s",
                     attempt,
                     response.status_code,
                     response.text,
                 )
-                await asyncio.sleep(_retry_delay_seconds(attempt))
+                await asyncio.sleep(_retry_delay_seconds(settings, attempt))
                 continue
             logger.warning(
                 "brevo_api_error attempt=%s status=%s response=%s",

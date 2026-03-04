@@ -96,6 +96,10 @@ class Settings:
     brevo_waitlist_list_id: int
     brevo_doi_template_id: int
     brevo_doi_redirect_url: str
+    brevo_waitlist_timeout_seconds: float
+    brevo_waitlist_max_attempts: int
+    brevo_waitlist_retry_base_delay_seconds: float
+    brevo_waitlist_retry_jitter_seconds: float
     brevo_waitlist_api_key_secret: str
     brevo_waitlist_api_key_secret_version: str
 
@@ -169,6 +173,16 @@ class Settings:
         brevo_waitlist_list_id = _env_int("BREVO_WAITLIST_LIST_ID", 0)
         brevo_doi_template_id = _env_int("BREVO_DOI_TEMPLATE_ID", 0)
         brevo_doi_redirect_url = os.getenv("BREVO_DOI_REDIRECT_URL", "").strip()
+        brevo_waitlist_timeout_seconds = _env_float("BREVO_WAITLIST_TIMEOUT_SECONDS", 10.0)
+        brevo_waitlist_max_attempts = max(1, _env_int("BREVO_WAITLIST_MAX_ATTEMPTS", 2))
+        brevo_waitlist_retry_base_delay_seconds = _env_float(
+            "BREVO_WAITLIST_RETRY_BASE_DELAY_SECONDS",
+            0.25,
+        )
+        brevo_waitlist_retry_jitter_seconds = _env_float(
+            "BREVO_WAITLIST_RETRY_JITTER_SECONDS",
+            0.1,
+        )
         brevo_waitlist_api_key_secret = os.getenv(
             "BREVO_WAITLIST_API_KEY_SECRET",
             "BREVO_WAITLIST_API_KEY",
@@ -224,6 +238,10 @@ class Settings:
             brevo_waitlist_list_id=brevo_waitlist_list_id,
             brevo_doi_template_id=brevo_doi_template_id,
             brevo_doi_redirect_url=brevo_doi_redirect_url,
+            brevo_waitlist_timeout_seconds=brevo_waitlist_timeout_seconds,
+            brevo_waitlist_max_attempts=brevo_waitlist_max_attempts,
+            brevo_waitlist_retry_base_delay_seconds=brevo_waitlist_retry_base_delay_seconds,
+            brevo_waitlist_retry_jitter_seconds=brevo_waitlist_retry_jitter_seconds,
             brevo_waitlist_api_key_secret=brevo_waitlist_api_key_secret,
             brevo_waitlist_api_key_secret_version=brevo_waitlist_api_key_secret_version,
         )
