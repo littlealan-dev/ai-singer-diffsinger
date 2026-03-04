@@ -1,10 +1,12 @@
 import asyncio
 import copy
+import io
 import os
 import shutil
 import time
 import uuid
 import json
+import zipfile
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -209,7 +211,26 @@ def _create_session(test_client):
 
 def _upload_score(test_client, session_id, filename="score.xml"):
     xml = b"<score-partwise version='3.1'></score-partwise>"
-    files = {"file": (filename, xml, "application/xml")}
+    content = xml
+    content_type = "application/xml"
+    if filename.endswith(".mxl"):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(
+                "META-INF/container.xml",
+                (
+                    "<?xml version='1.0' encoding='UTF-8'?>"
+                    "<container version='1.0' "
+                    "xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+                    "<rootfiles><rootfile full-path='score.xml' "
+                    "media-type='application/vnd.recordare.musicxml+xml'/>"
+                    "</rootfiles></container>"
+                ),
+            )
+            zf.writestr("score.xml", xml)
+        content = archive.getvalue()
+        content_type = "application/vnd.recordare.musicxml"
+    files = {"file": (filename, content, content_type)}
     return test_client.post(f"/sessions/{session_id}/upload", files=files)
 
 
@@ -1570,8 +1591,11 @@ def test_upload_parses_zipped_musicxml(client):
     assert payload["parsed"] is True
     current_score = payload["current_score"]["score"]
     assert current_score["parts"]
-    score_path = app.state.settings.data_dir / "sessions" / session_id / "score.mxl"
-    assert score_path.exists()
+    session_dir = app.state.settings.data_dir / "sessions" / session_id
+    assert (session_dir / "score.mxl").exists()
+    canonical_path = session_dir / "score.xml"
+    assert canonical_path.exists()
+    assert current_score["source_musicxml_path"] == str(canonical_path)
 
 
 def test_chat_text_response_with_llm(client):

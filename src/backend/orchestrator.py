@@ -1820,7 +1820,14 @@ class Orchestrator:
                 score_available,
                 voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
-                parsed_score_json=planning_score if isinstance(planning_score, dict) else None,
+                parsed_score_json=(
+                    planning_score
+                    if (
+                        self._settings.inject_full_parsed_score_json
+                        and isinstance(planning_score, dict)
+                    )
+                    else None
+                ),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
                 last_successful_preprocess_plan=(
@@ -1902,7 +1909,14 @@ class Orchestrator:
                 score_available=True,
                 voicebank_ids=voicebank_ids,
                 score_summary=snapshot.get("score_summary"),
-                parsed_score_json=planning_score if isinstance(planning_score, dict) else None,
+                parsed_score_json=(
+                    planning_score
+                    if (
+                        self._settings.inject_full_parsed_score_json
+                        and isinstance(planning_score, dict)
+                    )
+                    else None
+                ),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
                 last_successful_preprocess_plan=(

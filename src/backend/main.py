@@ -182,8 +182,16 @@ def create_app() -> FastAPI:
         session_dir.mkdir(parents=True, exist_ok=True)
         target_path = session_dir / f"score{suffix}"
         await _write_upload(target_path, file, settings.max_upload_bytes)
+        canonical_musicxml_path = target_path
+        if suffix == ".mxl":
+            canonical_musicxml_path = session_dir / "score.xml"
+            canonical_musicxml_path.write_text(
+                _read_musicxml_content(target_path),
+                encoding="utf-8",
+            )
 
-        await sessions.set_file(session_id, "musicxml_path", target_path)
+        await sessions.set_file(session_id, "musicxml_path", canonical_musicxml_path)
+        await sessions.set_file(session_id, "uploaded_musicxml_path", target_path)
         if original_name:
             await sessions.set_metadata(session_id, "musicxml_name", original_name)
         if settings.backend_use_storage:
@@ -197,7 +205,7 @@ def create_app() -> FastAPI:
             )
             await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
 
-        rel_path = str(target_path.relative_to(settings.project_root))
+        rel_path = str(canonical_musicxml_path.relative_to(settings.project_root))
         try:
             score = await asyncio.to_thread(
                 request.app.state.router.call_tool,

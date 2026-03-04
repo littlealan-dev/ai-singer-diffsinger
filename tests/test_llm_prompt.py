@@ -157,3 +157,18 @@ def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None
     )
     assert "Study the full parsed score JSON, score summary, and voice-part planning signals together" in prompt
     assert "Prefer the full parsed score JSON as the ground truth for note-level planning details" in prompt
+
+
+def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_successful_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "Full parsed score JSON (if available):\nnone" in prompt

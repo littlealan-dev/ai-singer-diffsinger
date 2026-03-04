@@ -70,6 +70,7 @@ class Settings:
     gemini_timeout_seconds: float
     gemini_thinking_level: str
     gemini_include_thought_summary: bool
+    inject_full_parsed_score_json: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
     llm_max_history_items: int
@@ -123,6 +124,10 @@ class Settings:
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
         gemini_thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").strip()
         gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
+        inject_full_parsed_score_json = _env_bool(
+            "INJECT_FULL_PARSED_SCORE_JSON",
+            False,
+        )
         llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
@@ -178,6 +183,7 @@ class Settings:
             gemini_timeout_seconds=gemini_timeout_seconds,
             gemini_thinking_level=gemini_thinking_level,
             gemini_include_thought_summary=gemini_include_thought_summary,
+            inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
             llm_max_history_items=llm_max_history_items,
