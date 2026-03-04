@@ -846,6 +846,31 @@ def test_upload_accepts_mxl_extension(client):
     assert response.status_code == 200
 
 
+def test_upload_dispatches_mxl_normalization_via_to_thread(client, monkeypatch):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+    dispatched_calls: list[str] = []
+
+    import src.backend.main as backend_main
+
+    original_to_thread = backend_main.asyncio.to_thread
+
+    async def recording_to_thread(func, /, *args, **kwargs):
+        dispatched_calls.append(getattr(func, "__name__", repr(func)))
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(backend_main.asyncio, "to_thread", recording_to_thread)
+
+    mxl_response = _upload_score(test_client, session_id, filename="score.mxl")
+    assert mxl_response.status_code == 200
+    assert "_normalize_uploaded_mxl" in dispatched_calls
+
+    dispatched_calls.clear()
+    xml_response = _upload_score(test_client, session_id, filename="score.xml")
+    assert xml_response.status_code == 200
+    assert "_normalize_uploaded_mxl" not in dispatched_calls
+
+
 def test_upload_rejects_malformed_mxl_archive(client):
     test_client, _ = client
     session_id = _create_session(test_client)
