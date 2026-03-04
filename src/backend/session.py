@@ -248,6 +248,28 @@ class SessionStore:
                 state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
 
+    async def reset_for_new_upload(self, session_id: str) -> None:
+        """Clear score-specific session state and remove prior derived artifacts."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.history = []
+            state.files = {}
+            state.original_score = None
+            state.preprocess_plan_history = []
+            state.preprocess_attempt_history = []
+            state.last_successful_preprocess_plan = None
+            state.current_score = None
+            state.current_score_version = 0
+            state.score_summary = None
+            state.current_audio = None
+            state.last_active_at = _utcnow()
+            session_dir = self.session_dir(session_id)
+            if session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
+
     async def evict_expired(self) -> None:
         """Evict any sessions that have expired in memory."""
         async with self._lock:
@@ -542,6 +564,29 @@ class FirestoreSessionStore:
             self._doc_ref(session_id).update(
                 {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
+
+    async def reset_for_new_upload(self, session_id: str) -> None:
+        """Clear score-specific Firestore session state and local derived artifacts."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "history": [],
+                    "files": {},
+                    "originalScore": None,
+                    "preprocessPlanHistory": [],
+                    "preprocessAttemptHistory": [],
+                    "lastSuccessfulPreprocessPlan": None,
+                    "currentScore": None,
+                    "currentScoreVersion": 0,
+                    "scoreSummary": None,
+                    "currentAudio": None,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+            session_dir = self.session_dir(session_id)
+            if session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
 
     async def evict_expired(self) -> None:
         """Firestore-backed sessions rely on TTL policies; no-op here."""

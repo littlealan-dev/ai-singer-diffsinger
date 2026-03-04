@@ -2427,7 +2427,8 @@ class Orchestrator:
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                 )
         # If a reparse succeeded but no downstream tool produced a terminal response in this
-        # batch, force one internal follow-up LLM turn so it can continue with preprocess.
+        # batch, issue one internal follow-up LLM turn with refreshed score context and let
+        # the model decide whether to synthesize directly or preprocess for the new verse.
         if reparse_completed_this_batch and audio_response is None:
             reparse_prompt = json.dumps(
                 {
@@ -2439,9 +2440,6 @@ class Orchestrator:
                         )
                         if reparse_noop_this_batch
                         else "Score context has been reparsed for the requested verse. "
-                    )
-                    + (
-                        "Continue with preprocess_voice_parts for this verse before synthesis."
                     ),
                     "selected_verse_number": reparse_selected_verse,
                 },

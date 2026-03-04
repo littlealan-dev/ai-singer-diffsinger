@@ -164,11 +164,24 @@ def _prepare_app(monkeypatch, overrides=None):
             return None
         return max(matches, key=lambda item: item[1].get("updatedAt", ""))
 
+    def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
+        to_delete = [
+            job_id
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
+        ]
+        for job_id in to_delete:
+            fake_jobs.pop(job_id, None)
+
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
+    )
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.clear_jobs_for_session",
+        _fake_clear_jobs_for_session,
     )
     if overrides:
         for key, value in overrides.items():
@@ -307,6 +320,71 @@ def test_upload_musicxml_parses_and_saves(client):
     assert score_path.exists()
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"] == current_score["score"]
+
+
+def test_upload_resets_previous_score_specific_state(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    first_upload = _upload_score(test_client, session_id)
+    assert first_upload.status_code == 200
+
+    asyncio.run(app.state.sessions.append_history(session_id, "user", "old message"))
+    asyncio.run(
+        app.state.sessions.append_preprocess_plan(session_id, {"attempt": 1, "song": "old"})
+    )
+    asyncio.run(
+        app.state.sessions.append_preprocess_attempt_summary(
+            session_id, {"attempt_number": 1, "quality_class": 2}
+        )
+    )
+    asyncio.run(
+        app.state.sessions.set_last_successful_preprocess_plan(
+            session_id, {"targets": [{"target": {"part_index": 0, "voice_part_id": "old"}}]}
+        )
+    )
+    session_dir = app.state.sessions.session_dir(session_id)
+    audio_path = session_dir / "old.wav"
+    audio_path.write_bytes(b"RIFFTESTDATA")
+    asyncio.run(app.state.sessions.set_audio(session_id, audio_path, 0.01))
+    derived_path = session_dir / "score.derived_old.xml"
+    derived_path.write_text("<score-partwise version='3.1'></score-partwise>", encoding="utf-8")
+    progress_path = app.state.sessions.progress_path(session_id)
+    progress_path.write_text('{"status":"running"}', encoding="utf-8")
+    app.state.job_store.create_job(
+        job_id="old-job",
+        user_id="test-user",
+        session_id=session_id,
+        status="running",
+    )
+
+    second_upload = _upload_score(test_client, session_id, filename="replacement.xml")
+    assert second_upload.status_code == 200
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["history"] == []
+    assert snapshot["preprocess_plan_history"] == []
+    assert snapshot["preprocess_attempt_history"] == []
+    assert snapshot["last_successful_preprocess_plan"] is None
+    assert snapshot["current_audio"] is None
+    assert snapshot["score_summary"]["title"] == "Test"
+    assert snapshot["current_score"]["version"] == 1
+    assert set(snapshot["files"].keys()) >= {
+        "musicxml_path",
+        "uploaded_musicxml_path",
+        "musicxml_name",
+    }
+
+    assert not derived_path.exists()
+    assert not audio_path.exists()
+    assert not progress_path.exists()
+    assert (session_dir / "score.xml").exists()
+
+    latest = app.state.job_store.get_latest_job_by_session(
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is None
 
 
 def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
@@ -1820,7 +1898,7 @@ def test_chat_executes_followup_tool_calls_same_turn(client):
     assert proceed_payload["type"] == "chat_progress"
 
 
-def test_chat_reparse_continues_to_preprocess_same_turn(client):
+def test_chat_reparse_allows_direct_synthesis_same_turn(client):
     test_client, app = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
@@ -1856,7 +1934,7 @@ def test_chat_reparse_continues_to_preprocess_same_turn(client):
             }
         return _make_router_call_tool()(name, arguments)
 
-    class ReparseThenPreprocessClient:
+    class ReparseThenSynthesizeClient:
         def generate(self, system_prompt, history):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(
@@ -1866,36 +1944,15 @@ def test_chat_reparse_continues_to_preprocess_same_turn(client):
                     {
                         "tool_calls": [
                             {
-                                "name": "preprocess_voice_parts",
+                                "name": "synthesize",
                                 "arguments": {
-                                    "request": {
-                                        "plan": {
-                                            "targets": [
-                                                {
-                                                    "target": {
-                                                        "part_index": 0,
-                                                        "voice_part_id": "soprano",
-                                                    },
-                                                    "sections": [
-                                                        {
-                                                            "start_measure": 1,
-                                                            "end_measure": 1,
-                                                            "mode": "derive",
-                                                            "melody_source": {
-                                                                "part_index": 0,
-                                                                "voice_part_id": "soprano",
-                                                            },
-                                                        }
-                                                    ],
-                                                }
-                                            ]
-                                        }
-                                    }
+                                    "part_index": 0,
+                                    "voice_id": "voicebank-1",
                                 },
                             }
                         ],
-                        "final_message": "Preprocessing for verse 2.",
-                        "include_score": True,
+                        "final_message": "Singing verse 2 now.",
+                        "include_score": False,
                     }
                 )
             return json.dumps(
@@ -1912,31 +1969,38 @@ def test_chat_reparse_continues_to_preprocess_same_turn(client):
             )
 
     app.state.router.call_tool = call_tool
-    llm_client = ReparseThenPreprocessClient()
+    import src.backend.orchestrator as orchestrator_module
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
+    llm_client = ReparseThenSynthesizeClient()
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
+    async def fake_start_synthesis_job(*args, **kwargs):
+        return {"type": "chat_text", "message": "Singing verse 2 now."}
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
 
     response = test_client.post(
         f"/sessions/{session_id}/chat", json={"message": "Change to verse 2 and sing soprano"}
     )
     assert response.status_code == 200
-    _resolve_review_response(test_client, response.json())
+    body = response.json()
+    assert body["type"] == "chat_text"
 
     reparses_to_verse_2 = [
         args for name, args in tool_calls if name == "parse_score" and str(args.get("verse_number")) == "2"
     ]
     preprocess_calls = [args for name, args in tool_calls if name == "preprocess_voice_parts"]
+    orchestrator_module.synthesize_preflight_action_required = original_precheck
     assert reparses_to_verse_2, f"Expected parse_score reparse with verse 2. tool_calls={tool_calls}"
-    assert preprocess_calls, f"Expected preprocess after reparse in same turn. tool_calls={tool_calls}"
+    assert not preprocess_calls, f"Did not expect forced preprocess after reparse. tool_calls={tool_calls}"
+    assert body["message"] == "Singing verse 2 now."
 
 
-def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
+def test_chat_reparse_same_verse_noop_allows_direct_synthesis(client):
     test_client, app = client
     session_id = _create_session(test_client)
 
     parse_score_calls = {"count": 0}
-    preprocess_calls = {"count": 0}
-
     def call_tool(name, arguments):
         if name == "parse_score":
             parse_score_calls["count"] += 1
@@ -1957,20 +2021,16 @@ def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
                     "selected_verse_number": selected_verse,
                 },
             }
-        if name == "preprocess_voice_parts":
-            preprocess_calls["count"] += 1
-            return {
-                "status": "ready",
-                "score": arguments.get("score", {}),
-                "part_index": 0,
-                "modified_musicxml_path": "tests/output/derived-noop.xml",
-            }
         return _make_router_call_tool()(name, arguments)
 
     app.state.router.call_tool = call_tool
     upload_response = _upload_score(test_client, session_id)
     assert upload_response.status_code == 200
     assert parse_score_calls["count"] == 1
+
+    import src.backend.orchestrator as orchestrator_module
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
 
     class SameVerseReparseClient:
         def generate(self, system_prompt, history):
@@ -1982,36 +2042,15 @@ def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
                     {
                         "tool_calls": [
                             {
-                                "name": "preprocess_voice_parts",
+                                "name": "synthesize",
                                 "arguments": {
-                                    "request": {
-                                        "plan": {
-                                            "targets": [
-                                                {
-                                                    "target": {
-                                                        "part_index": 0,
-                                                        "voice_part_id": "soprano",
-                                                    },
-                                                    "sections": [
-                                                        {
-                                                            "start_measure": 1,
-                                                            "end_measure": 1,
-                                                            "mode": "derive",
-                                                            "melody_source": {
-                                                                "part_index": 0,
-                                                                "voice_part_id": "soprano",
-                                                            },
-                                                        }
-                                                    ],
-                                                }
-                                            ]
-                                        }
-                                    }
+                                    "part_index": 0,
+                                    "voice_id": "voicebank-1",
                                 },
                             }
                         ],
-                        "final_message": "Proceeding to preprocess for current verse.",
-                        "include_score": True,
+                        "final_message": "Proceeding to sing the current verse.",
+                        "include_score": False,
                     }
                 )
             return json.dumps(
@@ -2027,14 +2066,19 @@ def test_chat_reparse_same_verse_noop_continues_to_preprocess(client):
     llm_client = SameVerseReparseClient()
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
+    async def fake_start_synthesis_job(*args, **kwargs):
+        return {"type": "chat_text", "message": "Proceeding to sing the current verse."}
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
 
     response = test_client.post(
         f"/sessions/{session_id}/chat", json={"message": "Use verse 1 and proceed"}
     )
     assert response.status_code == 200
-    _resolve_review_response(test_client, response.json())
+    body = response.json()
+    orchestrator_module.synthesize_preflight_action_required = original_precheck
     assert parse_score_calls["count"] == 1, "Same-verse reparse should be treated as no-op."
-    assert preprocess_calls["count"] == 1, "No-op reparse should still continue to preprocess."
+    assert body["type"] == "chat_text"
+    assert body["message"] == "Proceeding to sing the current verse."
 
 
 def test_preprocess_returns_last_validation_review_after_repair_cap(client):

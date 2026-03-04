@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import tempfile
 
 from src.musicxml import parse_musicxml
 
@@ -24,7 +25,7 @@ class MusicXmlParserTests(unittest.TestCase):
     def test_parse_basic(self) -> None:
         score = parse_musicxml(TEST_XML)
         self.assertEqual(score.title, "Amazing Grace— How Sweet the Sound")
-        self.assertEqual(len(score.parts), 1)
+        self.assertEqual(len(score.parts), 2)
         self.assertGreater(len(score.tempos), 0)
         self.assertEqual(score.tempos[0].bpm, 120.0)
         self.assertEqual(score.parts[0].part_name, "SOPRANO ALTO")
@@ -99,6 +100,48 @@ class MusicXmlParserTests(unittest.TestCase):
         tempo_148 = [event for event in tempos if abs(event.bpm - 148.0) < 1e-6]
         self.assertTrue(tempo_148, "Expected a 148 BPM tempo event.")
         self.assertAlmostEqual(tempo_148[0].offset_beats, 40.0, places=6)
+
+    def test_harmony_symbols_do_not_become_note_events(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 2.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="2.0">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Voice</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <harmony>
+        <root><root-step>C</root-step></root>
+        <kind text="">major</kind>
+      </harmony>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+        <lyric><text>Hello</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harmony-symbol.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(len(score.parts), 1)
+        notes = [event for event in score.parts[0].notes if not event.is_rest]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].pitch_midi, 60.0)
+        self.assertEqual(notes[0].lyric, "Hello")
 
 
 if __name__ == "__main__":

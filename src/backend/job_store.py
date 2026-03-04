@@ -72,6 +72,17 @@ class JobStore:
         data = doc.to_dict() or {}
         return doc.id, data
 
+    def clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
+        """Delete all stored jobs for a user/session pair."""
+        self._ensure_client()
+        query = (
+            self._client.collection(self.collection)
+            .where("userId", "==", user_id)
+            .where("sessionId", "==", session_id)
+        )
+        for doc in query.stream():
+            doc.reference.delete()
+
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize job data into a progress payload for clients."""

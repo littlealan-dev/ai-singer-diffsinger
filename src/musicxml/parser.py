@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from music21 import chord, converter, note, stream, tempo
+from music21 import chord, converter, harmony, note, stream, tempo
 
 
 @dataclass(frozen=True)
@@ -332,7 +332,14 @@ def _collect_part_events(
     lyrics_only: bool,
     keep_rests: bool,
 ) -> Sequence[NoteEvent]:
-    elements = list(part.recurse().notesAndRests)
+    # music21 exposes <harmony> chord symbols as ChordSymbol objects inside
+    # notesAndRests. They are not sung melody notes and must not participate in
+    # note-event extraction or downstream voice-part split analysis.
+    elements = [
+        element
+        for element in part.recurse().notesAndRests
+        if not isinstance(element, harmony.ChordSymbol)
+    ]
     elements.sort(
         key=lambda element: (
             float(element.getOffsetInHierarchy(part)),

@@ -169,9 +169,17 @@ def create_app() -> FastAPI:
         """Upload a MusicXML file, parse it, and attach to a session."""
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
+        job_store: JobStore = request.app.state.job_store
         user_id, user_email = await _get_user_context_or_401(request)
         await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
+
+        await sessions.reset_for_new_upload(session_id)
+        await asyncio.to_thread(
+            job_store.clear_jobs_for_session,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
         original_name = Path(file.filename or "").name
         suffix = Path(original_name).suffix.lower()
