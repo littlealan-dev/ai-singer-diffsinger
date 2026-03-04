@@ -54,6 +54,7 @@ class Settings:
     data_dir: Path
     sessions_dir: Path
     max_upload_bytes: int
+    max_mxl_uncompressed_bytes: int
     session_ttl_seconds: int
     max_sessions: int
     default_voicebank: str
@@ -101,6 +102,8 @@ class Settings:
         sessions_dir = data_dir / "sessions"
         max_upload_mb = _env_int("BACKEND_MAX_UPLOAD_MB", 20)
         max_upload_bytes = max_upload_mb * 1024 * 1024
+        max_mxl_uncompressed_mb = _env_int("BACKEND_MAX_MXL_UNCOMPRESSED_MB", 20)
+        max_mxl_uncompressed_bytes = max_mxl_uncompressed_mb * 1024 * 1024
         session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 5 * 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
         default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "Raine_Rena_2.01")
@@ -156,6 +159,7 @@ class Settings:
             data_dir=data_dir,
             sessions_dir=sessions_dir,
             max_upload_bytes=max_upload_bytes,
+            max_mxl_uncompressed_bytes=max_mxl_uncompressed_bytes,
             session_ttl_seconds=session_ttl_seconds,
             max_sessions=max_sessions,
             default_voicebank=default_voicebank,

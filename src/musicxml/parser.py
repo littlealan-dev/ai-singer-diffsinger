@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from music21 import chord, converter, note, stream, tempo
 
+from src.musicxml.io import read_musicxml_content
+
 
 @dataclass(frozen=True)
 class TempoEvent:
@@ -65,7 +67,7 @@ def parse_musicxml(
     the lyric is marked as extended.
     keep_rests: when True, rest events are included alongside notes.
     """
-    score = converter.parse(str(path))
+    score = _load_musicxml_score(path)
     return _parse_score(
         score,
         part_id=part_id,
@@ -86,7 +88,7 @@ def parse_musicxml_with_summary(
     keep_rests: bool = False,
 ) -> tuple[ScoreData, Dict[str, Any]]:
     """Parse MusicXML and return both score data and a summary dict."""
-    score = converter.parse(str(path))
+    score = _load_musicxml_score(path)
     summary = _summarize_score(score)
     normalized_verse = _normalize_verse_number(verse_number)
     if normalized_verse is None:
@@ -141,6 +143,15 @@ def _parse_score(
         )
     title = score.metadata.title if score.metadata else None
     return ScoreData(title=title, tempos=tempos, parts=parts)
+
+
+def _load_musicxml_score(path: str | Path) -> stream.Score:
+    """Load MusicXML via a shared bounded reader for .mxl archives."""
+    source_path = Path(path)
+    if source_path.suffix.lower() != ".mxl":
+        return converter.parse(str(source_path))
+    content = read_musicxml_content(source_path)
+    return converter.parseData(content, format="musicxml")
 
 
 def _select_parts(

@@ -1,13 +1,17 @@
+import io
 import os
 import shutil
 import time
 import uuid
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
+from src.backend.credits import UserCredits
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
@@ -79,6 +83,19 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
+    monkeypatch.setattr(
+        "src.backend.main.verify_id_token_claims",
+        lambda token: {"uid": "test-user", "email": "test@example.com"},
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.get_or_create_credits",
+        lambda user_id, user_email: UserCredits(
+            balance=9999,
+            reserved=0,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            overdrafted=False,
+        ),
+    )
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
     if overrides:
@@ -122,8 +139,34 @@ def _create_session(test_client):
 
 def _upload_score(test_client, session_id, filename="score.xml"):
     xml = b"<score-partwise version='3.1'></score-partwise>"
-    files = {"file": (filename, xml, "application/xml")}
+    content = xml
+    content_type = "application/xml"
+    if filename.endswith(".mxl"):
+        content = _build_mxl_archive(score_xml=xml)
+        content_type = "application/vnd.recordare.musicxml"
+    files = {"file": (filename, content, content_type)}
     return test_client.post(f"/sessions/{session_id}/upload", files=files)
+
+
+def _build_mxl_archive(
+    *,
+    score_xml: bytes = b"<score-partwise version='3.1'></score-partwise>",
+    container_xml: bytes | None = None,
+) -> bytes:
+    if container_xml is None:
+        container_xml = (
+            b"<?xml version='1.0' encoding='UTF-8'?>"
+            b"<container version='1.0' "
+            b"xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+            b"<rootfiles><rootfile full-path='score.xml' "
+            b"media-type='application/vnd.recordare.musicxml+xml'/>"
+            b"</rootfiles></container>"
+        )
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("score.xml", score_xml)
+    return archive.getvalue()
 
 
 def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
@@ -201,6 +244,66 @@ def test_upload_accepts_mxl_extension(client):
     session_id = _create_session(test_client)
     response = _upload_score(test_client, session_id, filename="score.mxl")
     assert response.status_code == 200
+
+
+def test_upload_rejects_malformed_mxl_archive(client):
+    test_client, app = client
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            file_path = resolve_project_path(arguments["file_path"])
+            return parse_score(
+                file_path,
+                part_id=arguments.get("part_id"),
+                part_index=arguments.get("part_index"),
+                expand_repeats=arguments.get("expand_repeats", False),
+            )
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    session_id = _create_session(test_client)
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.mxl", b"not-a-zip-file", "application/vnd.recordare.musicxml")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid MXL archive."
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_MAX_MXL_UNCOMPRESSED_MB": "1"}],
+    indirect=True,
+)
+def test_upload_rejects_oversized_mxl_archive(client_with_env):
+    test_client, app = client_with_env
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            file_path = resolve_project_path(arguments["file_path"])
+            return parse_score(
+                file_path,
+                part_id=arguments.get("part_id"),
+                part_index=arguments.get("part_index"),
+                expand_repeats=arguments.get("expand_repeats", False),
+            )
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    session_id = _create_session(test_client)
+    large_score = b"<score-partwise>" + (b"A" * (1024 * 1024 + 1)) + b"</score-partwise>"
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={
+            "file": (
+                "score.mxl",
+                _build_mxl_archive(score_xml=large_score),
+                "application/vnd.recordare.musicxml",
+            )
+        },
+    )
+    assert response.status_code == 413
+    assert "exceeds" in response.json()["detail"]
 
 
 def test_upload_returns_score_summary_with_verses(client):

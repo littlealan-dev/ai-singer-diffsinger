@@ -5,8 +5,11 @@ Tests cover the core public APIs defined in api_design.md.
 """
 
 import unittest
+import tempfile
+import zipfile
 from pathlib import Path
 import json
+import os
 
 from src.api import (
     parse_score,
@@ -81,6 +84,46 @@ class TestParseScore(unittest.TestCase):
         self.assertIn("multi_voice_part", part_signal)
         self.assertIn("missing_lyric_voice_parts", part_signal)
 
+    def test_parse_rejects_invalid_mxl_archive(self):
+        """parse_score should reject corrupt .mxl inputs deterministically."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mxl_path = Path(tmp_dir) / "invalid.mxl"
+            mxl_path.write_bytes(b"not-a-zip-file")
+            with self.assertRaisesRegex(ValueError, "Invalid MXL archive\\."):
+                parse_score(mxl_path)
+
+    def test_parse_rejects_oversized_mxl_archive(self):
+        """parse_score should reject oversized decompressed .mxl payloads."""
+        original = os.environ.get("BACKEND_MAX_MXL_UNCOMPRESSED_MB")
+        os.environ["BACKEND_MAX_MXL_UNCOMPRESSED_MB"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                mxl_path = Path(tmp_dir) / "oversized.mxl"
+                large_score = (
+                    b"<score-partwise version='3.1'>"
+                    + (b"A" * (1024 * 1024 + 1))
+                    + b"</score-partwise>"
+                )
+                with zipfile.ZipFile(mxl_path, "w") as archive:
+                    archive.writestr(
+                        "META-INF/container.xml",
+                        (
+                            b"<?xml version='1.0' encoding='UTF-8'?>"
+                            b"<container version='1.0' "
+                            b"xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+                            b"<rootfiles><rootfile full-path='score.xml' "
+                            b"media-type='application/vnd.recordare.musicxml+xml'/>"
+                            b"</rootfiles></container>"
+                        ),
+                    )
+                    archive.writestr("score.xml", large_score)
+                with self.assertRaisesRegex(ValueError, "exceeds"):
+                    parse_score(mxl_path)
+        finally:
+            if original is None:
+                os.environ.pop("BACKEND_MAX_MXL_UNCOMPRESSED_MB", None)
+            else:
+                os.environ["BACKEND_MAX_MXL_UNCOMPRESSED_MB"] = original
 
 class TestModifyScore(unittest.TestCase):
     """Tests for modify_score API."""

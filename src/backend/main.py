@@ -14,8 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr
 import logging
-import zipfile
-from xml.etree import ElementTree
 
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
@@ -30,6 +28,11 @@ from src.backend.firebase_app import (
 )
 from src.backend.storage_client import download_bytes, upload_file
 from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
+from src.musicxml.io import (
+    MusicXmlArchiveError,
+    MusicXmlArchiveTooLargeError,
+    read_musicxml_content as read_musicxml_content_bounded,
+)
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -182,6 +185,11 @@ def create_app() -> FastAPI:
         session_dir.mkdir(parents=True, exist_ok=True)
         target_path = session_dir / f"score{suffix}"
         await _write_upload(target_path, file, settings.max_upload_bytes)
+        if suffix == ".mxl":
+            _read_musicxml_content(
+                target_path,
+                max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
+            )
 
         await sessions.set_file(session_id, "musicxml_path", target_path)
         if original_name:
@@ -366,7 +374,10 @@ def create_app() -> FastAPI:
         score_path = settings.project_root / rel_path
         if not score_path.exists():
             raise HTTPException(status_code=404, detail="Score file not found.")
-        content = _read_musicxml_content(score_path)
+        content = _read_musicxml_content(
+            score_path,
+            max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
+        )
         return Response(content=content, media_type="application/xml")
 
     return app
@@ -537,14 +548,17 @@ async def _stream_storage_audio(settings: Settings, storage_path: str) -> Respon
     return Response(content=data, media_type=media_type)
 
 
-def _read_musicxml_content(path: Path) -> str:
-    """Read MusicXML content from .xml or .mxl files."""
-    if path.suffix.lower() != ".mxl":
-        return path.read_text(encoding="utf-8", errors="replace")
-    with zipfile.ZipFile(path) as archive:
-        xml_name = _find_mxl_xml(archive)
-        xml_bytes = archive.read(xml_name)
-    return xml_bytes.decode("utf-8", errors="replace")
+def _read_musicxml_content(path: Path, *, max_mxl_uncompressed_bytes: int) -> str:
+    """Read MusicXML content and map bounded archive failures to HTTP errors."""
+    try:
+        return read_musicxml_content_bounded(
+            path,
+            max_mxl_uncompressed_bytes=max_mxl_uncompressed_bytes,
+        )
+    except MusicXmlArchiveTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except MusicXmlArchiveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
@@ -555,36 +569,5 @@ def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
             if not chunk:
                 break
             yield chunk
-
-
-def _find_mxl_xml(archive: zipfile.ZipFile) -> str:
-    """Find the referenced XML file inside an MXL archive."""
-    try:
-        container_bytes = archive.read("META-INF/container.xml")
-    except KeyError:
-        return _first_mxl_xml(archive)
-    try:
-        root = ElementTree.fromstring(container_bytes)
-    except ElementTree.ParseError:
-        return _first_mxl_xml(archive)
-    for elem in root.iter():
-        if elem.tag.endswith("rootfile"):
-            full_path = elem.attrib.get("full-path")
-            if full_path and full_path in archive.namelist():
-                return full_path
-    return _first_mxl_xml(archive)
-
-
-def _first_mxl_xml(archive: zipfile.ZipFile) -> str:
-    """Return the first XML entry found in an MXL archive."""
-    candidates = [
-        name
-        for name in archive.namelist()
-        if name.lower().endswith(".xml") and not name.startswith("META-INF/")
-    ]
-    if not candidates:
-        raise HTTPException(status_code=400, detail="No MusicXML file found in archive.")
-    return candidates[0]
-
 
 app = create_app()
