@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import time
@@ -13,6 +14,7 @@ from src.api.score import parse_score
 from src.backend.credits import UserCredits
 from src.backend.main import create_app
 from src.backend.llm_client import StaticLlmClient
+from src.backend.session import SessionStore
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 
 
@@ -80,6 +82,8 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
+    import src.backend.main as backend_main
+    backend_main._PLAYBACK_SECRET_CACHE.clear()
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
@@ -99,6 +103,13 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr("src.backend.credits.reserve_credits", lambda *_, **__: True)
     monkeypatch.setattr("src.backend.credits.release_credits", lambda *_, **__: True)
     monkeypatch.setattr("src.backend.credits.settle_credits", lambda *_, **__: (1, False))
+    monkeypatch.setattr("src.backend.main.upload_file", lambda *_, **__: None)
+    monkeypatch.setattr(
+        "src.backend.main.download_bytes",
+        lambda bucket, storage_path: f"storage:{storage_path}".encode("utf-8"),
+    )
+    monkeypatch.setattr("src.backend.orchestrator.upload_file", lambda *_, **__: None)
+    monkeypatch.setattr("src.backend.orchestrator.copy_blob", lambda *_, **__: None)
 
     def _fake_create_job(
         self,
@@ -160,6 +171,8 @@ def _prepare_app(monkeypatch, overrides=None):
     if overrides:
         for key, value in overrides.items():
             monkeypatch.setenv(key, value)
+    if overrides and str(overrides.get("APP_ENV", "")).lower() == "prod":
+        monkeypatch.setattr("src.backend.main.FirestoreSessionStore", SessionStore)
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
     return app, data_dir
@@ -440,6 +453,90 @@ def test_audio_playback_token_rejects_tampering(client):
 
     audio_response = test_client.get(tampered_url)
     assert audio_response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_storage_backed_audio_uses_signed_resource_identity(client_with_env):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+    audio_url = progress_payload["audio_url"]
+    original_audio = test_client.get(audio_url)
+    assert original_audio.status_code == 200
+    assert original_audio.content.startswith(b"storage:")
+    assert b"/jobs/" in original_audio.content
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    current_audio = snapshot["current_audio"]
+    audio_path = app.state.settings.project_root / current_audio["path"]
+    asyncio.run(
+        app.state.sessions.set_audio(
+            session_id,
+            audio_path,
+            current_audio["duration_s"],
+            storage_path="jobs/test-user/other-job/newer.mp3",
+        )
+    )
+
+    replay_audio = test_client.get(audio_url)
+    assert replay_audio.status_code == 200
+    assert replay_audio.content == original_audio.content
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"APP_ENV": "prod"}],
+)
+def test_playback_secret_is_cached_on_hot_path(overrides, monkeypatch):
+    calls = {"count": 0}
+
+    def _fake_read_secret(settings, secret_name, version):
+        calls["count"] += 1
+        return "prod-playback-secret"
+
+    monkeypatch.setattr("src.backend.main.read_secret", _fake_read_secret)
+    app, data_dir = _prepare_app(monkeypatch, overrides=overrides)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
+        session_id = _create_session(test_client)
+        _upload_score(test_client, session_id)
+        llm_client = StaticLlmClient(
+            response_text=(
+                '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+                '"final_message":"Rendered.","include_score":true}'
+            )
+        )
+        app.state.llm_client = llm_client
+        app.state.orchestrator._llm_client = llm_client
+
+        response = test_client.post(
+            f"/sessions/{session_id}/chat", json={"message": "render audio"}
+        )
+        assert response.status_code == 200
+        progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+        audio_response = test_client.get(progress_payload["audio_url"])
+        assert audio_response.status_code == 200
+        assert calls["count"] == 1
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def test_chat_returns_error_when_llm_fails(client):
