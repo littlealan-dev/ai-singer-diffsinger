@@ -198,26 +198,41 @@ def create_app() -> FastAPI:
         temp_upload_path = temp_dir / f"score{suffix}"
         temp_canonical_path = temp_upload_path
         try:
+            upload_write_start = time.monotonic()
             await _write_upload(temp_upload_path, file, settings.max_upload_bytes)
+            upload_write_ms = (time.monotonic() - upload_write_start) * 1000.0
+            normalize_mxl_ms = 0.0
             if suffix == ".mxl":
                 temp_canonical_path = temp_dir / "score.xml"
-                temp_canonical_path.write_text(
-                    _read_musicxml_content(
-                        temp_upload_path,
-                        max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
-                    ),
-                    encoding="utf-8",
+                normalize_start = time.monotonic()
+                await asyncio.to_thread(
+                    _normalize_uploaded_mxl,
+                    temp_upload_path,
+                    temp_canonical_path,
+                    max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
                 )
+                normalize_mxl_ms = (time.monotonic() - normalize_start) * 1000.0
 
             rel_path = str(temp_canonical_path.relative_to(settings.project_root))
             try:
+                parse_score_start = time.monotonic()
                 score = await asyncio.to_thread(
                     request.app.state.router.call_tool,
                     "parse_score",
                     {"file_path": rel_path, "expand_repeats": False},
                 )
+                parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
             except McpError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
+            logger.info(
+                "upload_musicxml_timing session_id=%s suffix=%s upload_write_ms=%.2f "
+                "normalize_mxl_ms=%.2f parse_score_ms=%.2f",
+                session_id,
+                suffix,
+                upload_write_ms,
+                normalize_mxl_ms,
+                parse_score_ms,
+            )
 
             await sessions.reset_for_new_upload(session_id)
             await asyncio.to_thread(
@@ -576,6 +591,22 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
         raise
     finally:
         await file.close()
+
+
+def _normalize_uploaded_mxl(
+    upload_path: Path,
+    canonical_path: Path,
+    *,
+    max_mxl_uncompressed_bytes: int,
+) -> None:
+    """Normalize a zipped MusicXML upload to canonical XML on disk."""
+    canonical_path.write_text(
+        _read_musicxml_content(
+            upload_path,
+            max_mxl_uncompressed_bytes=max_mxl_uncompressed_bytes,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _sign_audio_payload_urls(
