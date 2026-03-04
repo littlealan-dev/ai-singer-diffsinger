@@ -48,6 +48,8 @@ from src.mcp.logging_utils import (
 )
 from firebase_admin import app_check
 
+_PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
+
 
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
@@ -297,13 +299,13 @@ def create_app() -> FastAPI:
         if file:
             snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
             current_audio = snapshot.get("current_audio") if snapshot else None
-            storage_path = current_audio.get("storage_path") if current_audio else None
-            if settings.backend_use_storage and storage_path:
-                return await _stream_storage_audio(settings, storage_path)
             session_dir = sessions.session_dir(session_id)
             file_name = Path(file).name
             if file_name != file:
                 raise HTTPException(status_code=400, detail="Invalid audio file name.")
+            storage_path = claims.resource_path if claims else None
+            if settings.backend_use_storage and storage_path:
+                return await _stream_storage_audio(settings, storage_path)
             audio_path = (session_dir / file_name).resolve()
             try:
                 audio_path.relative_to(session_dir)
@@ -349,7 +351,12 @@ def create_app() -> FastAPI:
             return {"status": "idle"}
         job_id, data = latest
         payload = build_progress_payload(job_id, data)
-        return _sign_audio_payload_urls(request, payload, user_id=user_id)
+        return _sign_audio_payload_urls(
+            request,
+            payload,
+            user_id=user_id,
+            resource_path=data.get("outputPath") if isinstance(data.get("outputPath"), str) else None,
+        )
 
     @app.get("/credits")
     async def get_credits(request: Request) -> Dict[str, Any]:
@@ -563,13 +570,23 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
 
 
 def _sign_audio_payload_urls(
-    request: Request, payload: Dict[str, Any], *, user_id: str
+    request: Request,
+    payload: Dict[str, Any],
+    *,
+    user_id: str,
+    resource_path: str | None = None,
 ) -> Dict[str, Any]:
     """Attach signed playback tokens to backend-issued audio URLs."""
     audio_url = payload.get("audio_url")
     if not isinstance(audio_url, str) or not audio_url:
         return payload
-    signed = _build_signed_audio_url(request.app.state.settings, user_id, audio_url)
+    signed = _build_signed_audio_url(
+        request.app.state.settings,
+        payload,
+        user_id,
+        audio_url,
+        resource_path=resource_path,
+    )
     if signed == audio_url:
         return payload
     updated = dict(payload)
@@ -577,7 +594,14 @@ def _sign_audio_payload_urls(
     return updated
 
 
-def _build_signed_audio_url(settings: Settings, user_id: str, audio_url: str) -> str:
+def _build_signed_audio_url(
+    settings: Settings,
+    payload: Dict[str, Any],
+    user_id: str,
+    audio_url: str,
+    *,
+    resource_path: str | None = None,
+) -> str:
     """Append a short-lived playback token to a backend audio URL."""
     parts = urlsplit(audio_url)
     if not parts.path.startswith("/sessions/") or not parts.path.endswith("/audio"):
@@ -590,12 +614,14 @@ def _build_signed_audio_url(settings: Settings, user_id: str, audio_url: str) ->
     file_name = query.get("file")
     if not file_name:
         return audio_url
+    playback_resource_path = resource_path or _playback_resource_path(payload)
     playback_token = issue_playback_token(
         _load_playback_token_secret(settings),
         user_id=user_id,
         session_id=session_id,
         file_name=file_name,
         ttl_seconds=settings.playback_token_ttl_seconds,
+        resource_path=playback_resource_path,
     )
     query["playback_token"] = playback_token
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
@@ -630,11 +656,29 @@ def _load_playback_token_secret(settings: Settings) -> str:
     env_secret = os.getenv("BACKEND_PLAYBACK_TOKEN_VALUE", "").strip()
     if app_env in {"dev", "development", "local", "test"}:
         return env_secret or "dev-playback-token-secret"
-    return read_secret(
+    cache_key = (
+        settings.project_id,
+        settings.playback_token_secret_name,
+        settings.playback_token_secret_version,
+    )
+    cached = _PLAYBACK_SECRET_CACHE.get(cache_key)
+    if cached:
+        return cached
+    secret = read_secret(
         settings,
         settings.playback_token_secret_name,
         settings.playback_token_secret_version,
     )
+    _PLAYBACK_SECRET_CACHE[cache_key] = secret
+    return secret
+
+
+def _playback_resource_path(payload: Dict[str, Any]) -> str | None:
+    """Extract the exact backend resource identity for a playback URL."""
+    candidate = payload.get("output_storage_path") or payload.get("outputPath")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return None
 
 
 def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:

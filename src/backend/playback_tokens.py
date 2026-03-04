@@ -22,6 +22,7 @@ class PlaybackTokenClaims:
     session_id: str
     file_name: str
     expires_at: int
+    resource_path: str | None = None
 
 
 def issue_playback_token(
@@ -31,6 +32,7 @@ def issue_playback_token(
     session_id: str,
     file_name: str,
     ttl_seconds: int,
+    resource_path: str | None = None,
     now: int | None = None,
 ) -> str:
     """Create a signed playback token scoped to one user/session/file tuple."""
@@ -41,6 +43,8 @@ def issue_playback_token(
         "sid": session_id,
         "uid": user_id,
     }
+    if resource_path:
+        payload["res"] = resource_path
     payload_bytes = _canonical_payload(payload)
     signature = _sign(secret, payload_bytes)
     return f"{_b64encode(payload_bytes)}.{_b64encode(signature)}"
@@ -52,6 +56,7 @@ def verify_playback_token(
     *,
     session_id: str,
     file_name: str,
+    resource_path: str | None = None,
     now: int | None = None,
 ) -> PlaybackTokenClaims:
     """Validate a playback token and return its claims."""
@@ -72,15 +77,19 @@ def verify_playback_token(
     token_file_name = payload.get("file")
     token_user_id = payload.get("uid")
     expires_at = payload.get("exp")
+    token_resource_path = payload.get("res")
     if (
         not isinstance(token_session_id, str)
         or not isinstance(token_file_name, str)
         or not isinstance(token_user_id, str)
         or not isinstance(expires_at, int)
+        or (token_resource_path is not None and not isinstance(token_resource_path, str))
     ):
         raise PlaybackTokenError("Playback token payload is incomplete.")
     if token_session_id != session_id or token_file_name != file_name:
         raise PlaybackTokenError("Playback token does not match this audio resource.")
+    if resource_path is not None and token_resource_path != resource_path:
+        raise PlaybackTokenError("Playback token does not match this playback target.")
     current_time = int(time.time() if now is None else now)
     if expires_at < current_time:
         raise PlaybackTokenError("Playback token expired.")
@@ -89,6 +98,7 @@ def verify_playback_token(
         session_id=token_session_id,
         file_name=token_file_name,
         expires_at=expires_at,
+        resource_path=token_resource_path,
     )
 
 
