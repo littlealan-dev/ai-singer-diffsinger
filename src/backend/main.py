@@ -8,6 +8,9 @@ import asyncio
 from contextlib import asynccontextmanager
 import time
 import os
+import shutil
+import tempfile
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +33,13 @@ from src.backend.firebase_app import (
 )
 from src.backend.storage_client import download_bytes, upload_file
 from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
+from src.backend.playback_tokens import (
+    PlaybackTokenClaims,
+    PlaybackTokenError,
+    issue_playback_token,
+    verify_playback_token,
+)
+from src.backend.secret_manager import read_secret
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -174,54 +184,68 @@ def create_app() -> FastAPI:
         await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
 
-        await sessions.reset_for_new_upload(session_id)
-        await asyncio.to_thread(
-            job_store.clear_jobs_for_session,
-            user_id=user_id,
-            session_id=session_id,
-        )
-
         original_name = Path(file.filename or "").name
         suffix = Path(original_name).suffix.lower()
         if suffix not in {".xml", ".mxl"}:
             raise HTTPException(status_code=400, detail="Only .xml or .mxl files are supported.")
 
-        session_dir = sessions.session_dir(session_id)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        target_path = session_dir / f"score{suffix}"
-        await _write_upload(target_path, file, settings.max_upload_bytes)
-        canonical_musicxml_path = target_path
-        if suffix == ".mxl":
-            canonical_musicxml_path = session_dir / "score.xml"
-            canonical_musicxml_path.write_text(
-                _read_musicxml_content(target_path),
-                encoding="utf-8",
-            )
-
-        await sessions.set_file(session_id, "musicxml_path", canonical_musicxml_path)
-        await sessions.set_file(session_id, "uploaded_musicxml_path", target_path)
-        if original_name:
-            await sessions.set_metadata(session_id, "musicxml_name", original_name)
-        if settings.backend_use_storage:
-            # Persist the uploaded file in object storage when configured.
-            storage_path = _session_input_storage_path(
-                user_id, session_id, target_path.suffix
-            )
-            content_type = file.content_type or "application/octet-stream"
-            await asyncio.to_thread(
-                upload_file, settings.storage_bucket, target_path, storage_path, content_type
-            )
-            await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
-
-        rel_path = str(canonical_musicxml_path.relative_to(settings.project_root))
+        temp_dir = Path(tempfile.mkdtemp(prefix="upload-", dir=settings.data_dir))
+        temp_upload_path = temp_dir / f"score{suffix}"
+        temp_canonical_path = temp_upload_path
         try:
-            score = await asyncio.to_thread(
-                request.app.state.router.call_tool,
-                "parse_score",
-                {"file_path": rel_path, "expand_repeats": False},
+            await _write_upload(temp_upload_path, file, settings.max_upload_bytes)
+            if suffix == ".mxl":
+                temp_canonical_path = temp_dir / "score.xml"
+                temp_canonical_path.write_text(
+                    _read_musicxml_content(temp_upload_path),
+                    encoding="utf-8",
+                )
+
+            rel_path = str(temp_canonical_path.relative_to(settings.project_root))
+            try:
+                score = await asyncio.to_thread(
+                    request.app.state.router.call_tool,
+                    "parse_score",
+                    {"file_path": rel_path, "expand_repeats": False},
+                )
+            except McpError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            await sessions.reset_for_new_upload(session_id)
+            await asyncio.to_thread(
+                job_store.clear_jobs_for_session,
+                user_id=user_id,
+                session_id=session_id,
             )
-        except McpError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            session_dir = sessions.session_dir(session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            target_path = session_dir / f"score{suffix}"
+            temp_upload_path.replace(target_path)
+            canonical_musicxml_path = target_path
+            if suffix == ".mxl":
+                canonical_musicxml_path = session_dir / "score.xml"
+                temp_canonical_path.replace(canonical_musicxml_path)
+
+            await sessions.set_file(session_id, "musicxml_path", canonical_musicxml_path)
+            await sessions.set_file(session_id, "uploaded_musicxml_path", target_path)
+            if original_name:
+                await sessions.set_metadata(session_id, "musicxml_name", original_name)
+            if settings.backend_use_storage:
+                # Persist the uploaded file in object storage when configured.
+                storage_path = _session_input_storage_path(
+                    user_id, session_id, target_path.suffix
+                )
+                content_type = file.content_type or "application/octet-stream"
+                await asyncio.to_thread(
+                    upload_file, settings.storage_bucket, target_path, storage_path, content_type
+                )
+                await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
+            if isinstance(score, dict):
+                score = dict(score)
+                score["source_musicxml_path"] = str(canonical_musicxml_path)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         score_summary = score.get("score_summary") if isinstance(score, dict) else None
         if isinstance(score, dict):
@@ -248,9 +272,10 @@ def create_app() -> FastAPI:
         if len(payload.message) > request.app.state.settings.llm_max_message_chars:
             raise HTTPException(status_code=400, detail="Message too long.")
         try:
-            return await orchestrator.handle_chat(
+            response = await orchestrator.handle_chat(
                 session_id, payload.message, user_id=user_id, user_email=user_email
             )
+            return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -265,7 +290,8 @@ def create_app() -> FastAPI:
     ) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        user_id = await _get_user_id_or_401(request)
+        claims = _get_playback_claims_or_none(request, settings, session_id, file)
+        user_id = claims.user_id if claims else await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
         snapshot = None
         if file:
@@ -322,7 +348,8 @@ def create_app() -> FastAPI:
         if latest is None:
             return {"status": "idle"}
         job_id, data = latest
-        return build_progress_payload(job_id, data)
+        payload = build_progress_payload(job_id, data)
+        return _sign_audio_payload_urls(request, payload, user_id=user_id)
 
     @app.get("/credits")
     async def get_credits(request: Request) -> Dict[str, Any]:
@@ -428,12 +455,9 @@ async def _get_snapshot_or_404(
 
 
 def _extract_bearer_token(request: Request) -> str:
-    """Extract a bearer token from headers or query params."""
+    """Extract a bearer token from the Authorization header."""
     auth_header = request.headers.get("authorization")
     if not auth_header:
-        token = request.query_params.get("id_token") or request.query_params.get("auth")
-        if token:
-            return token
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
     parts = auth_header.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -536,6 +560,81 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
         raise
     finally:
         await file.close()
+
+
+def _sign_audio_payload_urls(
+    request: Request, payload: Dict[str, Any], *, user_id: str
+) -> Dict[str, Any]:
+    """Attach signed playback tokens to backend-issued audio URLs."""
+    audio_url = payload.get("audio_url")
+    if not isinstance(audio_url, str) or not audio_url:
+        return payload
+    signed = _build_signed_audio_url(request.app.state.settings, user_id, audio_url)
+    if signed == audio_url:
+        return payload
+    updated = dict(payload)
+    updated["audio_url"] = signed
+    return updated
+
+
+def _build_signed_audio_url(settings: Settings, user_id: str, audio_url: str) -> str:
+    """Append a short-lived playback token to a backend audio URL."""
+    parts = urlsplit(audio_url)
+    if not parts.path.startswith("/sessions/") or not parts.path.endswith("/audio"):
+        return audio_url
+    path_parts = [part for part in parts.path.split("/") if part]
+    if len(path_parts) != 3:
+        return audio_url
+    session_id = path_parts[1]
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    file_name = query.get("file")
+    if not file_name:
+        return audio_url
+    playback_token = issue_playback_token(
+        _load_playback_token_secret(settings),
+        user_id=user_id,
+        session_id=session_id,
+        file_name=file_name,
+        ttl_seconds=settings.playback_token_ttl_seconds,
+    )
+    query["playback_token"] = playback_token
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _get_playback_claims_or_none(
+    request: Request,
+    settings: Settings,
+    session_id: str,
+    file_name: Optional[str],
+) -> PlaybackTokenClaims | None:
+    """Return verified playback claims when a playback token is supplied."""
+    token = request.query_params.get("playback_token")
+    if not token:
+        return None
+    if not file_name:
+        raise HTTPException(status_code=401, detail="Playback token requires an audio file name.")
+    try:
+        return verify_playback_token(
+            token,
+            _load_playback_token_secret(settings),
+            session_id=session_id,
+            file_name=file_name,
+        )
+    except PlaybackTokenError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+def _load_playback_token_secret(settings: Settings) -> str:
+    """Load the playback token signing secret using the standard secret pattern."""
+    app_env = settings.app_env.lower()
+    env_secret = os.getenv("BACKEND_PLAYBACK_TOKEN_VALUE", "").strip()
+    if app_env in {"dev", "development", "local", "test"}:
+        return env_secret or "dev-playback-token-secret"
+    return read_secret(
+        settings,
+        settings.playback_token_secret_name,
+        settings.playback_token_secret_version,
+    )
 
 
 def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:

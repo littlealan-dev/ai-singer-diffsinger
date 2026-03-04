@@ -89,6 +89,9 @@ class Settings:
     app_env: str
     project_id: str | None
     backend_require_app_check: bool
+    playback_token_secret_name: str
+    playback_token_secret_version: str
+    playback_token_ttl_seconds: int
     brevo_waitlist_list_id: int
     brevo_doi_template_id: int
     brevo_doi_redirect_url: str
@@ -151,6 +154,15 @@ class Settings:
             "BACKEND_REQUIRE_APP_CHECK",
             app_env_lower not in {"dev", "development", "local", "test"},
         )
+        playback_token_secret_name = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+        ).strip()
+        playback_token_secret_version = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET_VERSION",
+            "latest",
+        ).strip()
+        playback_token_ttl_seconds = _env_int("BACKEND_PLAYBACK_TOKEN_TTL_SECONDS", 300)
         brevo_waitlist_list_id = _env_int("BREVO_WAITLIST_LIST_ID", 0)
         brevo_doi_template_id = _env_int("BREVO_DOI_TEMPLATE_ID", 0)
         brevo_doi_redirect_url = os.getenv("BREVO_DOI_REDIRECT_URL", "").strip()
@@ -202,6 +214,9 @@ class Settings:
             app_env=app_env,
             project_id=project_id,
             backend_require_app_check=backend_require_app_check,
+            playback_token_secret_name=playback_token_secret_name,
+            playback_token_secret_version=playback_token_secret_version,
+            playback_token_ttl_seconds=playback_token_ttl_seconds,
             brevo_waitlist_list_id=brevo_waitlist_list_id,
             brevo_doi_template_id=brevo_doi_template_id,
             brevo_doi_redirect_url=brevo_doi_redirect_url,

@@ -9,6 +9,7 @@ import json
 import zipfile
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -288,6 +289,17 @@ def test_missing_auth_header_returns_401(monkeypatch):
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_query_token_auth_is_rejected(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        response = test_client.post("/sessions?id_token=test-token")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Missing Authorization header."
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 @pytest.mark.parametrize(
     "client_with_env",
     [{"LLM_MAX_MESSAGE_CHARS": "5"}],
@@ -385,6 +397,41 @@ def test_upload_resets_previous_score_specific_state(client):
         session_id=session_id,
     )
     assert latest is None
+
+
+def test_upload_rejects_invalid_extension_without_resetting_session(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    first_upload = _upload_score(test_client, session_id)
+    assert first_upload.status_code == 200
+
+    asyncio.run(app.state.sessions.append_history(session_id, "user", "keep this"))
+    app.state.job_store.create_job(
+        job_id="existing-job",
+        user_id="test-user",
+        session_id=session_id,
+        status="running",
+    )
+
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("notes.txt", b"not musicxml", "text/plain")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only .xml or .mxl files are supported."
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["history"] == [{"role": "user", "content": "keep this"}]
+    assert snapshot["current_score"]["version"] == 1
+    assert snapshot["files"]["musicxml_name"] == "score.xml"
+
+    latest = app.state.job_store.get_latest_job_by_session(
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is not None
+    assert latest[0] == "existing-job"
 
 
 def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
@@ -1720,10 +1767,45 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert progress_payload["status"] == "done"
     audio_url = progress_payload["audio_url"]
     assert audio_url.startswith(f"/sessions/{session_id}/audio")
+    query = parse_qs(urlsplit(audio_url).query)
+    assert "playback_token" in query
+    assert query["playback_token"][0]
 
     audio_response = test_client.get(audio_url)
     assert audio_response.status_code == 200
     assert audio_response.content.startswith(b"RIFF")
+
+
+def test_audio_playback_token_rejects_tampering(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+    audio_url = progress_payload["audio_url"]
+    parts = urlsplit(audio_url)
+    query = parse_qs(parts.query)
+    query["playback_token"] = ["tampered"]
+    tampered_query = "&".join(
+        f"{key}={value}"
+        for key, values in query.items()
+        for value in values
+    )
+    tampered_url = parts._replace(query=tampered_query).geturl()
+
+    audio_response = test_client.get(tampered_url)
+    assert audio_response.status_code == 401
 
 
 def test_chat_returns_error_when_llm_fails(client):
@@ -2207,7 +2289,7 @@ def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
     assert payload["type"] == "chat_progress"
     progress_payload = _wait_for_progress(test_client, payload["progress_url"])
     audio_url = progress_payload.get("audio_url", "")
-    file_name = audio_url.split("file=")[-1]
+    file_name = parse_qs(urlsplit(audio_url).query)["file"][0]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
@@ -2239,7 +2321,7 @@ def test_chat_audio_outputs_wav_when_debug(client_with_env):
     assert payload["type"] == "chat_progress"
     progress_payload = _wait_for_progress(test_client, payload["progress_url"])
     audio_url = progress_payload.get("audio_url", "")
-    file_name = audio_url.split("file=")[-1]
+    file_name = parse_qs(urlsplit(audio_url).query)["file"][0]
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
