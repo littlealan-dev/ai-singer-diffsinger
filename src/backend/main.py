@@ -404,7 +404,7 @@ def create_app() -> FastAPI:
             source=request_body.source,
         )
         if not result.success:
-            raise HTTPException(status_code=500, detail=result.message)
+            raise HTTPException(status_code=result.status_code, detail=result.message)
         return {
             "success": result.success,
             "message": result.message,
