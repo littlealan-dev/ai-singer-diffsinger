@@ -260,6 +260,27 @@ def _upload_score(test_client, session_id, filename="score.xml"):
     return test_client.post(f"/sessions/{session_id}/upload", files=files)
 
 
+def _build_mxl_archive(
+    *,
+    score_xml: bytes = b"<score-partwise version='3.1'></score-partwise>",
+    container_xml: bytes | None = None,
+) -> bytes:
+    if container_xml is None:
+        container_xml = (
+            b"<?xml version='1.0' encoding='UTF-8'?>"
+            b"<container version='1.0' "
+            b"xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+            b"<rootfiles><rootfile full-path='score.xml' "
+            b"media-type='application/vnd.recordare.musicxml+xml'/>"
+            b"</rootfiles></container>"
+        )
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("score.xml", score_xml)
+    return archive.getvalue()
+
+
 def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
     deadline = time.time() + timeout_seconds
     last_payload = None
@@ -823,6 +844,40 @@ def test_upload_accepts_mxl_extension(client):
     session_id = _create_session(test_client)
     response = _upload_score(test_client, session_id, filename="score.mxl")
     assert response.status_code == 200
+
+
+def test_upload_rejects_malformed_mxl_archive(client):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.mxl", b"not-a-zip-file", "application/vnd.recordare.musicxml")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid MXL archive."
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_MAX_MXL_UNCOMPRESSED_MB": "1"}],
+    indirect=True,
+)
+def test_upload_rejects_oversized_mxl_archive(client_with_env):
+    test_client, _ = client_with_env
+    session_id = _create_session(test_client)
+    large_score = b"<score-partwise>" + (b"A" * (1024 * 1024 + 1)) + b"</score-partwise>"
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={
+            "file": (
+                "score.mxl",
+                _build_mxl_archive(score_xml=large_score),
+                "application/vnd.recordare.musicxml",
+            )
+        },
+    )
+    assert response.status_code == 413
+    assert "exceeds" in response.json()["detail"]
 
 
 def test_upload_returns_score_summary_with_verses(client):
