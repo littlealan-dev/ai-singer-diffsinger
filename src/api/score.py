@@ -6,12 +6,12 @@ import dataclasses
 import json
 import math
 import logging
-import zipfile
 from xml.etree import ElementTree
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from src.mcp.logging_utils import get_logger, summarize_payload
+from src.musicxml.io import read_musicxml_content
 
 logger = get_logger(__name__)
 
@@ -140,42 +140,7 @@ def _resolve_selected_verse_number(
 
 def _read_musicxml_content(path: Path) -> str:
     """Read MusicXML content from .xml or .mxl files."""
-    if path.suffix.lower() != ".mxl":
-        return path.read_text(encoding="utf-8", errors="replace")
-    with zipfile.ZipFile(path) as archive:
-        xml_name = _find_mxl_xml(archive)
-        xml_bytes = archive.read(xml_name)
-    return xml_bytes.decode("utf-8", errors="replace")
-
-
-def _find_mxl_xml(archive: zipfile.ZipFile) -> str:
-    """Find the referenced XML file inside an MXL archive."""
-    try:
-        container_bytes = archive.read("META-INF/container.xml")
-    except KeyError:
-        return _first_mxl_xml(archive)
-    try:
-        root = ElementTree.fromstring(container_bytes)
-    except ElementTree.ParseError:
-        return _first_mxl_xml(archive)
-    for elem in root.iter():
-        if elem.tag.endswith("rootfile"):
-            full_path = elem.attrib.get("full-path")
-            if full_path and full_path in archive.namelist():
-                return full_path
-    return _first_mxl_xml(archive)
-
-
-def _first_mxl_xml(archive: zipfile.ZipFile) -> str:
-    """Return the first XML entry found in an MXL archive."""
-    candidates = [
-        name
-        for name in archive.namelist()
-        if name.lower().endswith(".xml") and not name.startswith("META-INF/")
-    ]
-    if not candidates:
-        raise ValueError("No MusicXML file found in archive.")
-    return candidates[0]
+    return read_musicxml_content(path)
 
 
 def _local_tag(tag: str) -> str:
