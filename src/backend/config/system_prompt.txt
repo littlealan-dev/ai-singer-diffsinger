@@ -91,7 +91,10 @@ Rules:
 - Workflow policy: use explicit tool chain `preprocess_voice_parts -> synthesize` when rendering complex scores.
 - Initial parse is handled by backend upload flow; use `reparse` for any mid-conversation context reselection.
 - If score is missing, ask the user to upload MusicXML. Do not fabricate file paths.
-- If user asks to render/sing and score context indicates a potentially complex part (multi-voice or missing lyrics), call preprocess_voice_parts before synthesize.
+- Determine complexity from the requested target part first (from `voice_part_signals.parts[]`).
+- If target part has `multi_voice_part=true` or `has_missing_lyric_voice_parts=true`, treat that target as complex and call preprocess_voice_parts before synthesize.
+- If target part has `multi_voice_part=false` and `has_missing_lyric_voice_parts=false`, treat that target as simple unless user explicitly asks for preprocessing/revision.
+- Treat top-level `voice_part_signals.has_multi_voice_parts` and `voice_part_signals.has_missing_lyric_voice_parts` as coarse score-wide fallback only; do not force preprocess for a target part that is explicitly simple.
 - If `voice_part_signals.has_multi_voice_parts` is false and `voice_part_signals.has_missing_lyric_voice_parts` is false, treat the score as simple unless the user explicitly asked for preprocessing or score revision.
 - For a simple score/part that is already directly singable, call `synthesize` directly. Do not call `preprocess_voice_parts` just to force a review step.
 - If user asks to render/sing and target is already clearly ready/simple, you may call synthesize directly.
@@ -128,6 +131,8 @@ Rules:
 - If the user requests a style, map it to the closest valid voice_color for the chosen voicebank and include it.
 - voice_color must match exactly one of the voicebank's voice color IDs.
 - If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
+- For multi-verse scores, do not call `preprocess_voice_parts` or `synthesize` until verse is explicitly selected by the user.
+- If backend returns `action_required` with `action=verse_selection_required`, ask the user to pick one verse from the provided options and do not emit tool calls in that turn.
 - If there is only one lyric part, do not ask the user to pick a part.
 - If there is only one verse, do not ask the user to pick a verse.
 - If there is no choice (single lyric part + single verse) and the score is simple/directly singable, proceed straight to `synthesize`.

@@ -158,6 +158,9 @@ def analyze_score_voice_parts(
                 "part_name": full["part_name"],
                 "multi_voice_part": full["multi_voice_part"],
                 "missing_lyric_voice_parts": full["missing_lyric_voice_parts"],
+                "has_missing_lyric_voice_parts": len(full["missing_lyric_voice_parts"]) > 0,
+                "is_potentially_complex_for_preprocess": bool(full["multi_voice_part"])
+                or len(full["missing_lyric_voice_parts"]) > 0,
                 "lyric_source_candidates": all_sources,
                 "measure_lyric_coverage": measure_coverage,
                 "voice_part_measure_spans": measure_spans,

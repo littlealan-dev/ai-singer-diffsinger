@@ -85,6 +85,8 @@ class TestParseScore(unittest.TestCase):
         part_signal = signals["parts"][0]
         self.assertIn("multi_voice_part", part_signal)
         self.assertIn("missing_lyric_voice_parts", part_signal)
+        self.assertIn("has_missing_lyric_voice_parts", part_signal)
+        self.assertIn("is_potentially_complex_for_preprocess", part_signal)
 
     def test_parse_exposes_extended_voice_part_signals(self):
         """parse_score should expose analyzer extensions for planning."""
