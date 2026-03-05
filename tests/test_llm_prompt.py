@@ -64,7 +64,7 @@ def test_build_system_prompt_includes_preprocess_mapping_context() -> None:
     assert '"derived_part_id": "P_DERIVED_ABC"' in prompt
 
 
-def test_build_system_prompt_includes_latest_successful_preprocess_plan() -> None:
+def test_build_system_prompt_includes_latest_attempted_preprocess_plan() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -73,7 +73,7 @@ def test_build_system_prompt_includes_latest_successful_preprocess_plan() -> Non
         parsed_score_json={"parts": []},
         voice_part_signals={"parts": []},
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan={
+        last_preprocess_plan={
             "targets": [
                 {
                     "target": {"part_index": 0, "voice_part_id": "voice part 1"},
@@ -85,7 +85,7 @@ def test_build_system_prompt_includes_latest_successful_preprocess_plan() -> Non
         },
         voicebank_details=None,
     )
-    assert "Latest successful preprocess plan (if available):" in prompt
+    assert "Latest attempted preprocess plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
     assert '"start_measure": 7' in prompt
 
@@ -99,7 +99,7 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
         parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan=None,
+        last_preprocess_plan=None,
         voicebank_details=None,
     )
     assert "SVS Voice-Part Lint Rules (Canonical Runtime Validation)" in prompt
@@ -118,7 +118,7 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
         parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan=None,
+        last_preprocess_plan=None,
         voicebank_details=None,
     )
     assert (
@@ -136,7 +136,7 @@ def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() ->
         parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan=None,
+        last_preprocess_plan=None,
         voicebank_details=None,
     )
     assert '"phase": "preprocess_repair_planning"' in prompt
@@ -152,7 +152,7 @@ def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None
         parsed_score_json={"parts": [{"part_index": 1}]},
         voice_part_signals=None,
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan=None,
+        last_preprocess_plan=None,
         voicebank_details=None,
     )
     assert "Study the full parsed score JSON, score summary, and voice-part planning signals together" in prompt
@@ -168,7 +168,7 @@ def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() ->
         parsed_score_json=None,
         voice_part_signals=None,
         preprocess_mapping_context=None,
-        last_successful_preprocess_plan=None,
+        last_preprocess_plan=None,
         voicebank_details=None,
     )
     assert "Full parsed score JSON (if available):\nnone" in prompt

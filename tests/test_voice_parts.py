@@ -18,6 +18,7 @@ from src.api.voice_parts import (
     _normalize_materialized_musicxml_stem,
     _reviewable_action_required_from_finalized,
     _run_preflight_plan_lint,
+    _validate_structural_singability,
     finalize_review_materialization,
     parse_voice_part_plan,
     prepare_score_for_voice_part,
@@ -670,6 +671,74 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         first_measure = first_part["measures"][0]
         self.assertIn("measure_number", first_measure)
         self.assertIn("max_simultaneous_notes", first_measure)
+
+    def test_parse_score_ignores_grace_and_zero_duration_in_voice_part_region_checks(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <grace slash="yes"/>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <voice>1</voice>
+        <type>eighth</type>
+        <lyric><text>la</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>0</duration>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xml_path = Path(tmpdir) / "voice-grace-check.xml"
+            xml_path.write_text(xml, encoding="utf-8")
+            score = parse_score(xml_path, verse_number=1)
+        part_signal = score["voice_part_signals"]["parts"][0]
+        self.assertFalse(part_signal["multi_voice_part"])
+        self.assertEqual(part_signal["part_region_indices"]["chord_regions"], [])
+
+    def test_structural_singability_ignores_non_positive_duration_notes(self) -> None:
+        transformed_notes = [
+            {
+                "offset_beats": 1.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 62.0,
+                "is_rest": False,
+                "measure_number": 1,
+            },
+            {
+                "offset_beats": 1.0,
+                "duration_beats": 0.0,
+                "pitch_midi": 64.0,
+                "is_rest": False,
+                "measure_number": 1,
+            },
+        ]
+        structural = _validate_structural_singability(transformed_notes)
+        self.assertFalse(structural["hard_fail"])
+        self.assertEqual(structural["max_simultaneous_notes"], 1)
+        self.assertEqual(structural["simultaneous_conflict_count"], 0)
+        self.assertEqual(structural["overlap_conflict_count"], 0)
 
     def test_status_taxonomy_alignment(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)

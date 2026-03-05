@@ -18,8 +18,8 @@ Voice-part planning signals (if available):
 {voice_part_signals}
 Preprocess-derived mapping context (if available):
 {preprocess_mapping_context}
-Latest successful preprocess plan (if available):
-{last_successful_preprocess_plan}
+Latest attempted preprocess plan (if available):
+{last_preprocess_plan}
 
 Available voicebanks (IDs): {voicebanks}
 Voicebank color options (if any):
@@ -55,7 +55,7 @@ Rules:
 - For preprocess_voice_parts, you must provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
 - For preprocess_voice_parts plan shape, use sections-only targets: each target must include `target` and `sections`.
 - Do not use `voice_id` for preprocess_voice_parts. Use `voice_part_id` inside `request.plan.targets[].target`.
-- If `last_successful_preprocess_plan` is available and the user is asking to revise an already derived voice part, create a new plan based on `last_successful_preprocess_plan`.
+- If `last_preprocess_plan` is available, treat it as the latest attempted preprocess plan and use it as the baseline when generating a revised plan.
 - For preprocess revisions, preserve all unchanged targets and sections, modify only what the user explicitly requested, and return a complete updated `request.plan`.
 - For preprocess repair after a lint/tool failure, treat `lint_findings[].section.start_measure/end_measure` as the problem range when present.
 - On repair, keep every target and section outside the reported problem range unchanged unless another lint finding explicitly points to a different range.

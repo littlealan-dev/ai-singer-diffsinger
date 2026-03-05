@@ -118,6 +118,19 @@ def _postflight_finding(
     return finding
 
 
+def _is_countable_sung_note(note: Dict[str, Any]) -> bool:
+    """Return True when a note should participate in pre/postflight checks."""
+    if note.get("is_rest"):
+        return False
+    duration = note.get("duration_beats")
+    if duration is None:
+        return True
+    try:
+        return float(duration) > 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def analyze_score_voice_parts(
     score: Dict[str, Any], *, verse_number: Optional[str | int] = None
 ) -> Dict[str, Any]:
@@ -195,7 +208,7 @@ def _build_part_region_indices(
     chord_measures: set[int] = set()
     grouped: Dict[Tuple[str, int, float], int] = {}
     for note in notes:
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         voice = _voice_key(note.get("voice"))
         measure = int(note.get("measure_number") or 0)
@@ -212,7 +225,7 @@ def _build_part_region_indices(
         {
             int(note.get("measure_number") or 0)
             for note in notes
-            if (not note.get("is_rest"))
+            if _is_countable_sung_note(note)
             and _voice_key(note.get("voice")) == "_default"
             and int(note.get("measure_number") or 0) > 0
         }
@@ -224,7 +237,7 @@ def _build_part_region_indices(
             {
                 int(note.get("measure_number") or 0)
                 for note in notes
-                if (not note.get("is_rest"))
+                if _is_countable_sung_note(note)
                 and _voice_key(note.get("voice")) == source_voice
                 and int(note.get("measure_number") or 0) > 0
             }
@@ -1011,7 +1024,7 @@ def _analyze_part_voice_parts(part: Dict[str, Any], part_index: int) -> Dict[str
     notes = part.get("notes") or []
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     for note in notes:
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         key = _voice_key(note.get("voice"))
         buckets.setdefault(key, []).append(note)
@@ -1934,7 +1947,9 @@ def _trivial_method_chord_size_mismatch_details(
 
     grouped: Dict[Tuple[int, float], int] = {}
     for note in source_notes:
-        if note.get("is_rest") or not _note_in_measure_range(note, (start_measure, end_measure)):
+        if (not _is_countable_sung_note(note)) or not _note_in_measure_range(
+            note, (start_measure, end_measure)
+        ):
             continue
         measure = int(note.get("measure_number") or 0)
         offset = round(float(note.get("offset_beats") or 0.0), 6)
@@ -2026,7 +2041,7 @@ def _native_sung_measures_for_target(
     return {
         int(note.get("measure_number") or 0)
         for note in selected
-        if not note.get("is_rest") and int(note.get("measure_number") or 0) > 0
+        if _is_countable_sung_note(note) and int(note.get("measure_number") or 0) > 0
     }
 
 
@@ -2038,7 +2053,7 @@ def _part_sung_measures(score: Dict[str, Any], *, part_index: int) -> set[int]:
     return {
         int(note.get("measure_number") or 0)
         for note in notes
-        if not note.get("is_rest") and int(note.get("measure_number") or 0) > 0
+        if _is_countable_sung_note(note) and int(note.get("measure_number") or 0) > 0
     }
 
 
@@ -2057,7 +2072,7 @@ def _part_has_word_lyric_in_range(
         return False
     notes = parts[part_index].get("notes") or []
     for note in notes:
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         measure = int(note.get("measure_number") or 0)
         if measure < start_measure or measure > end_measure:
@@ -2083,7 +2098,7 @@ def _source_voice_measure_max_simultaneous_notes(
     selected = _select_part_notes_for_voice(part.get("notes") or [], source_voice)
     grouped: Dict[tuple[int, float], int] = {}
     for note in selected:
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         measure = int(note.get("measure_number") or 0)
         if measure <= 0:
@@ -3237,7 +3252,7 @@ def _count_lyric_sung_notes_in_range(
         1
         for note in notes
         if (
-            not note.get("is_rest")
+            _is_countable_sung_note(note)
             and _note_in_measure_range(note, (start_measure, end_measure))
             and _has_lyric(note)
         )
@@ -3253,7 +3268,7 @@ def _lyric_stats_for_notes_range(
     sung = [
         note
         for note in notes
-        if (not note.get("is_rest")) and _note_in_measure_range(note, (start_measure, end_measure))
+        if _is_countable_sung_note(note) and _note_in_measure_range(note, (start_measure, end_measure))
     ]
     word = sum(1 for note in sung if _lyric_kind(note) == "word")
     extension = sum(1 for note in sung if _lyric_kind(note) == "extension")
@@ -3455,7 +3470,7 @@ def _count_word_lyric_sung_notes_in_range(
         1
         for note in notes
         if (
-            not note.get("is_rest")
+            _is_countable_sung_note(note)
             and _note_in_measure_range(note, (start_measure, end_measure))
             and _lyric_kind(note) == "word"
         )
@@ -3491,7 +3506,7 @@ def _target_sung_note_count_for_section(
         1
         for note in source_notes
         if (
-            not note.get("is_rest")
+            _is_countable_sung_note(note)
             and _note_in_measure_range(note, (start_measure, end_measure))
         )
     )
@@ -3504,7 +3519,7 @@ def _count_extension_lyric_sung_notes_in_range(
         1
         for note in notes
         if (
-            not note.get("is_rest")
+            _is_countable_sung_note(note)
             and _note_in_measure_range(note, (start_measure, end_measure))
             and _lyric_kind(note) == "extension"
         )
@@ -3518,7 +3533,7 @@ def _count_missing_lyric_sung_notes_in_range(
         1
         for note in notes
         if (
-            not note.get("is_rest")
+            _is_countable_sung_note(note)
             and _note_in_measure_range(note, (start_measure, end_measure))
             and not _has_lyric(note)
         )
@@ -3532,7 +3547,7 @@ def _has_sung_note_in_measure_range(
     end_measure: int,
 ) -> bool:
     return any(
-        not note.get("is_rest")
+        _is_countable_sung_note(note)
         and _note_in_measure_range(note, (start_measure, end_measure))
         for note in notes
     )
@@ -3800,7 +3815,7 @@ def _validate_transformed_notes(
     transformed_notes: Sequence[Dict[str, Any]],
     source_notes: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    sung_notes = [note for note in transformed_notes if not note.get("is_rest")]
+    sung_notes = [note for note in transformed_notes if _is_countable_sung_note(note)]
     exempt_notes = [note for note in sung_notes if bool(note.get("lyric_exempt"))]
     missing_notes = [note for note in sung_notes if not _has_lyric(note) and note not in exempt_notes]
     word_notes = [note for note in sung_notes if _lyric_kind(note) == "word" and note not in exempt_notes]
@@ -3816,10 +3831,10 @@ def _validate_transformed_notes(
     source_offsets = {
         round(float(note.get("offset_beats") or 0.0), 6)
         for note in source_notes
-        if not note.get("is_rest") and _has_lyric(note)
+        if _is_countable_sung_note(note) and _has_lyric(note)
     }
     source_word_note_count = sum(
-        1 for note in source_notes if not note.get("is_rest") and _lyric_kind(note) == "word"
+        1 for note in source_notes if _is_countable_sung_note(note) and _lyric_kind(note) == "word"
     )
     aligned_notes = 0
     lyric_notes = 0
@@ -3860,7 +3875,7 @@ def _validate_structural_singability(
     transformed_notes: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
     overlap_epsilon = 1e-5
-    sung = [note for note in transformed_notes if not note.get("is_rest")]
+    sung = [note for note in transformed_notes if _is_countable_sung_note(note)]
     if not sung:
         return {
             "hard_fail": False,
@@ -3933,7 +3948,7 @@ def _build_source_timeline(
 ) -> List[Dict[str, Any]]:
     timeline: List[Dict[str, Any]] = []
     for idx, note in enumerate(notes):
-        if note.get("is_rest") or not _has_lyric(note):
+        if (not _is_countable_sung_note(note)) or not _has_lyric(note):
             continue
         lyric = str(note.get("lyric") or "")
         if not _lyric_matches_requested_verse(
@@ -3998,7 +4013,7 @@ def _detect_phrase_boundaries(target_notes: Sequence[Dict[str, Any]]) -> set[int
     boundaries: set[int] = set()
     last_note_end: Optional[float] = None
     for idx, note in enumerate(target_notes):
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         start = float(note.get("offset_beats") or 0.0)
         duration = float(note.get("duration_beats") or 0.0)
@@ -4684,7 +4699,7 @@ def _build_measure_lyric_coverage(
     }
     per_measure: Dict[int, Dict[str, Dict[str, Any]]] = {}
     for note in part.get("notes") or []:
-        if note.get("is_rest"):
+        if not _is_countable_sung_note(note):
             continue
         measure = int(note.get("measure_number") or 0)
         source_voice = _voice_key(note.get("voice"))
@@ -4770,7 +4785,7 @@ def _build_source_candidate_hints(
         target_offsets = {
             round(float(note.get("offset_beats") or 0.0), 6)
             for note in target_notes
-            if not note.get("is_rest")
+            if _is_countable_sung_note(note)
         }
         ranked_sources: List[Dict[str, Any]] = []
         for candidate in _collect_all_lyric_source_options(score):
@@ -4790,7 +4805,7 @@ def _build_source_candidate_hints(
             lyric_offsets = {
                 round(float(note.get("offset_beats") or 0.0), 6)
                 for note in source_notes
-                if not note.get("is_rest") and _has_lyric(note)
+                if _is_countable_sung_note(note) and _has_lyric(note)
             }
             if not lyric_offsets:
                 continue
@@ -5967,4 +5982,4 @@ def _lyric_kind(note: Dict[str, Any]) -> str:
 
 
 def _part_has_any_lyric(notes: Sequence[Dict[str, Any]]) -> bool:
-    return any(_has_lyric(note) for note in notes if not note.get("is_rest"))
+    return any(_has_lyric(note) for note in notes if _is_countable_sung_note(note))

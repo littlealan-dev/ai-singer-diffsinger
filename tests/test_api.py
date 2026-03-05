@@ -174,6 +174,57 @@ class TestParseScore(unittest.TestCase):
             else:
                 os.environ["BACKEND_MAX_MXL_UNCOMPRESSED_MB"] = original
 
+    def test_parse_chord_density_ignores_grace_and_non_positive_duration_notes(self):
+        """Chord density should ignore grace notes and duration<=0 artifacts."""
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <grace slash="yes"/>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>0</duration>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            xml_path = Path(tmp_dir) / "grace-density.xml"
+            xml_path.write_text(xml, encoding="utf-8")
+            score = parse_score(xml_path)
+        density = score["voice_part_signals"]["measure_chord_density"]
+        voice_part = next(part for part in density if part["part_id"] == "P1")
+        measure_1 = next(m for m in voice_part["measures"] if m["measure_number"] == "1")
+        self.assertEqual(measure_1["max_simultaneous_notes"], 1)
+
     def test_preprocess_ready_with_warnings(self):
         """Propagation with 90% coverage should return ready_with_warnings."""
         notes = []

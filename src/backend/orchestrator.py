@@ -1805,7 +1805,7 @@ class Orchestrator:
             planning_score = None
             voice_part_signals = None
             preprocess_mapping_context = None
-            last_successful_preprocess_plan = snapshot.get("last_successful_preprocess_plan")
+            last_preprocess_plan = snapshot.get("last_preprocess_plan")
             if isinstance(current_score, dict):
                 score_payload = current_score.get("score")
                 planning_score = self._resolve_llm_planning_score(snapshot, score_payload)
@@ -1830,9 +1830,9 @@ class Orchestrator:
                 ),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
-                last_successful_preprocess_plan=(
-                    last_successful_preprocess_plan
-                    if isinstance(last_successful_preprocess_plan, dict)
+                last_preprocess_plan=(
+                    last_preprocess_plan
+                    if isinstance(last_preprocess_plan, dict)
                     else None
                 ),
                 voicebank_details=voicebank_details,
@@ -1895,7 +1895,7 @@ class Orchestrator:
                 if isinstance(planning_score, dict)
                 else None
             )
-            last_successful_preprocess_plan = snapshot.get("last_successful_preprocess_plan")
+            last_preprocess_plan = snapshot.get("last_preprocess_plan")
             preprocess_mapping_context = (
                 self._build_preprocess_mapping_context(
                     current_score,
@@ -1919,9 +1919,9 @@ class Orchestrator:
                 ),
                 voice_part_signals=voice_part_signals,
                 preprocess_mapping_context=preprocess_mapping_context,
-                last_successful_preprocess_plan=(
-                    last_successful_preprocess_plan
-                    if isinstance(last_successful_preprocess_plan, dict)
+                last_preprocess_plan=(
+                    last_preprocess_plan
+                    if isinstance(last_preprocess_plan, dict)
                     else None
                 ),
                 voicebank_details=voicebank_details,
@@ -2207,13 +2207,9 @@ class Orchestrator:
                 preprocess_args = dict(call.arguments)
                 requested_plan = self._extract_preprocess_plan(preprocess_args)
                 if requested_plan is not None:
-                    await self._sessions.append_preprocess_plan(
-                        session_id,
-                        {
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                            "status": "generated",
-                            "plan": requested_plan,
-                        },
+                    # Keep only the latest attempted preprocess plan in prompt context.
+                    await self._sessions.set_last_preprocess_plan(
+                        session_id, requested_plan
                     )
                 try:
                     preprocess_score = await self._resolve_preprocess_score(
@@ -2242,10 +2238,6 @@ class Orchestrator:
                 ):
                     current_score = self._mark_review_pending(result["score"], result)
                     await self._sessions.set_score(session_id, current_score)
-                    if requested_plan is not None:
-                        await self._sessions.set_last_successful_preprocess_plan(
-                            session_id, requested_plan
-                        )
                     mapping_context = self._build_preprocess_mapping_context(
                         current_score,
                         score_summary=score_summary,

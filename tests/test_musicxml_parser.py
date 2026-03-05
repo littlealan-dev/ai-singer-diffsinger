@@ -143,6 +143,86 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(notes[0].pitch_midi, 60.0)
         self.assertEqual(notes[0].lyric, "Hello")
 
+    def test_raw_xml_voice_fallback_applies_when_music21_voice_context_missing(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+        <lyric><text>la</text></lyric>
+      </note>
+    </measure>
+    <measure number="2">
+      <note>
+        <rest/>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "single-voice.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, keep_rests=True, lyrics_only=False)
+
+        self.assertEqual(len(score.parts), 1)
+        voices = {event.voice for event in score.parts[0].notes}
+        self.assertEqual(voices, {"1"})
+
+    def test_raw_xml_voice_fallback_skips_multi_voice_parts(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>2</duration>
+        <voice>1</voice>
+        <type>half</type>
+      </note>
+      <backup><duration>2</duration></backup>
+      <note>
+        <pitch><step>E</step><octave>3</octave></pitch>
+        <duration>2</duration>
+        <voice>2</voice>
+        <type>half</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "multi-voice.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, keep_rests=False, lyrics_only=False)
+
+        self.assertEqual(len(score.parts), 1)
+        voices = {event.voice for event in score.parts[0].notes}
+        self.assertEqual(voices, {"1", "2"})
+
 
 if __name__ == "__main__":
     unittest.main()

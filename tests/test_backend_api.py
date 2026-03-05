@@ -384,7 +384,7 @@ def test_upload_resets_previous_score_specific_state(client):
         )
     )
     asyncio.run(
-        app.state.sessions.set_last_successful_preprocess_plan(
+        app.state.sessions.set_last_preprocess_plan(
             session_id, {"targets": [{"target": {"part_index": 0, "voice_part_id": "old"}}]}
         )
     )
@@ -410,7 +410,7 @@ def test_upload_resets_previous_score_specific_state(client):
     assert snapshot["history"] == []
     assert snapshot["preprocess_plan_history"] == []
     assert snapshot["preprocess_attempt_history"] == []
-    assert snapshot["last_successful_preprocess_plan"] is None
+    assert snapshot["last_preprocess_plan"] is None
     assert snapshot["current_audio"] is None
     assert snapshot["score_summary"]["title"] == "Test"
     assert snapshot["current_score"]["version"] == 1
@@ -707,9 +707,9 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"]["source_musicxml_path"] == str(original_path)
     assert snapshot["current_score"]["score"]["source_musicxml_path"] == str(derived_path)
-    assert len(snapshot["preprocess_plan_history"]) == 2
-    assert snapshot["last_successful_preprocess_plan"] is not None
-    latest_plan = snapshot["last_successful_preprocess_plan"]
+    assert len(snapshot["preprocess_plan_history"]) == 0
+    assert snapshot["last_preprocess_plan"] is not None
+    latest_plan = snapshot["last_preprocess_plan"]
     assert latest_plan["targets"][0]["target"]["voice_part_id"] == "soprano"
 
 
@@ -787,7 +787,7 @@ def test_chat_returns_explicit_error_when_original_score_missing_for_repreproces
     assert payload["message"] == MISSING_ORIGINAL_SCORE_MESSAGE
 
 
-def test_orchestrator_stores_latest_successful_preprocess_plan_in_prompt_context(client):
+def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     _, app = client
     orchestrator = app.state.orchestrator
     original_score = {
@@ -802,7 +802,7 @@ def test_orchestrator_stores_latest_successful_preprocess_plan_in_prompt_context
     snapshot = {
         "original_score": original_score,
         "current_score": {"score": current_score, "version": 2},
-        "last_successful_preprocess_plan": {
+        "last_preprocess_plan": {
             "targets": [
                 {
                     "target": {"part_index": 0, "voice_part_id": "voice part 1"},
@@ -828,7 +828,7 @@ def test_orchestrator_stores_latest_successful_preprocess_plan_in_prompt_context
     assert error is None
     assert response is not None
     assert prompt is not None
-    assert "Latest successful preprocess plan (if available):" in prompt
+    assert "Latest attempted preprocess plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
 
 

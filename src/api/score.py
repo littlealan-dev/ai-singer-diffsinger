@@ -414,6 +414,7 @@ def _build_measure_chord_density(path: Path) -> List[Dict[str, Any]]:
                     continue
                 is_chord = False
                 is_rest = False
+                is_grace = False
                 duration = 0.0
                 for note_child in child:
                     note_tag = _local_tag(note_child.tag)
@@ -421,12 +422,16 @@ def _build_measure_chord_density(path: Path) -> List[Dict[str, Any]]:
                         is_chord = True
                     elif note_tag == "rest":
                         is_rest = True
+                    elif note_tag == "grace":
+                        is_grace = True
                     elif note_tag == "duration":
                         value = (note_child.text or "").strip()
                         if value:
                             duration = float(value)
                 note_start = last_note_start if is_chord else offset_in_measure
-                if not is_rest:
+                # Grace and non-positive-duration notes should not trigger false
+                # simultaneity/chord density signals.
+                if not is_rest and not is_grace and duration > 0.0:
                     absolute_start = round(measure_start + note_start, 6)
                     note_counts_by_start[absolute_start] = note_counts_by_start.get(absolute_start, 0) + 1
                     if note_counts_by_start[absolute_start] > max_simultaneous_notes:

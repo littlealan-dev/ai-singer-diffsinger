@@ -31,7 +31,7 @@ class SessionState:
     original_score: Optional[Dict[str, Any]] = None
     preprocess_plan_history: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_attempt_history: List[Dict[str, Any]] = field(default_factory=list)
-    last_successful_preprocess_plan: Optional[Dict[str, Any]] = None
+    last_preprocess_plan: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
@@ -49,9 +49,9 @@ class SessionState:
             "original_score": dict(self.original_score) if self.original_score else None,
             "preprocess_plan_history": list(self.preprocess_plan_history),
             "preprocess_attempt_history": list(self.preprocess_attempt_history),
-            "last_successful_preprocess_plan": (
-                dict(self.last_successful_preprocess_plan)
-                if self.last_successful_preprocess_plan
+            "last_preprocess_plan": (
+                dict(self.last_preprocess_plan)
+                if self.last_preprocess_plan
                 else None
             ),
             "current_score": self._score_snapshot(),
@@ -217,15 +217,15 @@ class SessionStore:
             state.preprocess_attempt_history.append(entry)
             state.last_active_at = _utcnow()
 
-    async def set_last_successful_preprocess_plan(
+    async def set_last_preprocess_plan(
         self, session_id: str, plan: Optional[Dict[str, Any]]
     ) -> None:
-        """Persist the latest successful preprocess plan for prompt context."""
+        """Persist the latest preprocess plan for prompt context."""
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            state.last_successful_preprocess_plan = plan
+            state.last_preprocess_plan = plan
             state.last_active_at = _utcnow()
 
     async def set_audio(
@@ -259,7 +259,7 @@ class SessionStore:
             state.original_score = None
             state.preprocess_plan_history = []
             state.preprocess_attempt_history = []
-            state.last_successful_preprocess_plan = None
+            state.last_preprocess_plan = None
             state.current_score = None
             state.current_score_version = 0
             state.score_summary = None
@@ -391,7 +391,11 @@ class FirestoreSessionStore:
             original_score=data.get("originalScore"),
             preprocess_plan_history=list(data.get("preprocessPlanHistory") or []),
             preprocess_attempt_history=list(data.get("preprocessAttemptHistory") or []),
-            last_successful_preprocess_plan=data.get("lastSuccessfulPreprocessPlan"),
+            last_preprocess_plan=(
+                data.get("lastPreprocessPlan")
+                if data.get("lastPreprocessPlan") is not None
+                else data.get("lastSuccessfulPreprocessPlan")
+            ),
             current_score=data.get("currentScore"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
@@ -412,7 +416,7 @@ class FirestoreSessionStore:
                 "originalScore": None,
                 "preprocessPlanHistory": [],
                 "preprocessAttemptHistory": [],
-                "lastSuccessfulPreprocessPlan": None,
+                "lastPreprocessPlan": None,
                 "currentScore": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
@@ -534,14 +538,14 @@ class FirestoreSessionStore:
                 }
             )
 
-    async def set_last_successful_preprocess_plan(
+    async def set_last_preprocess_plan(
         self, session_id: str, plan: Optional[Dict[str, Any]]
     ) -> None:
-        """Persist the latest successful preprocess plan in Firestore."""
+        """Persist the latest preprocess plan in Firestore."""
         async with self._lock:
             self._doc_ref(session_id).update(
                 {
-                    "lastSuccessfulPreprocessPlan": plan,
+                    "lastPreprocessPlan": plan,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
@@ -575,6 +579,7 @@ class FirestoreSessionStore:
                     "originalScore": None,
                     "preprocessPlanHistory": [],
                     "preprocessAttemptHistory": [],
+                    "lastPreprocessPlan": None,
                     "lastSuccessfulPreprocessPlan": None,
                     "currentScore": None,
                     "currentScoreVersion": 0,

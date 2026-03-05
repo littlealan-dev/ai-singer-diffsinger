@@ -44,7 +44,7 @@ def build_system_prompt(
     parsed_score_json: Optional[Dict[str, Any]] = None,
     voice_part_signals: Optional[Dict[str, Any]] = None,
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
-    last_successful_preprocess_plan: Optional[Dict[str, Any]] = None,
+    last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Build the system prompt with tool specs and context metadata."""
@@ -77,10 +77,10 @@ def build_system_prompt(
         preprocess_mapping_context_text = json.dumps(
             preprocess_mapping_context, indent=2, sort_keys=True
         )
-    last_successful_preprocess_plan_text = "none"
-    if last_successful_preprocess_plan:
-        last_successful_preprocess_plan_text = json.dumps(
-            last_successful_preprocess_plan, indent=2, sort_keys=True
+    last_preprocess_plan_text = "none"
+    if last_preprocess_plan:
+        last_preprocess_plan_text = json.dumps(
+            last_preprocess_plan, indent=2, sort_keys=True
         )
     voicebank_details_text = "none"
     if voicebank_details:
@@ -94,7 +94,7 @@ def build_system_prompt(
         .replace("{parsed_score_json}", parsed_score_json_text)
         .replace("{voice_part_signals}", voice_part_signals_text)
         .replace("{preprocess_mapping_context}", preprocess_mapping_context_text)
-        .replace("{last_successful_preprocess_plan}", last_successful_preprocess_plan_text)
+        .replace("{last_preprocess_plan}", last_preprocess_plan_text)
         .replace("{voicebank_details}", voicebank_details_text)
     )
 
