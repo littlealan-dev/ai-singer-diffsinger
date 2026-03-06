@@ -40,7 +40,6 @@ _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
         "preprocess_voice_parts",
         "list_voicebanks",
         "get_voicebank_info",
-        "estimate_credits",
     },
     "gpu": {"synthesize", "save_audio"},
     "all": {
@@ -49,7 +48,6 @@ _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
         "preprocess_voice_parts",
         "list_voicebanks",
         "get_voicebank_info",
-        "estimate_credits",
         "synthesize",
         "save_audio",
     },

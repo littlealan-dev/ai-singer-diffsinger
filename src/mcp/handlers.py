@@ -217,44 +217,6 @@ def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, 
     return _strip_path(info)
 
 
-def handle_estimate_credits(params: Dict[str, Any], device: str) -> Dict[str, Any]:
-    """Handle estimate_credits tool calls."""
-    score = params["score"]
-    uid = params.get("uid")
-    email = params.get("email") or ""
-    duration_override = params.get("duration_seconds")
-    
-    # 1. Calculate duration in seconds
-    if isinstance(duration_override, (int, float)) and duration_override > 0:
-        duration_seconds = float(duration_override)
-    else:
-        duration_seconds = _calculate_score_duration(score)
-    
-    # 2. Estimate credits
-    from src.backend.credits import estimate_credits, get_or_create_credits
-    est_credits = estimate_credits(duration_seconds)
-    
-    result = {
-        "estimated_seconds": round(duration_seconds, 2),
-        "estimated_credits": est_credits,
-    }
-    
-    # 3. Add balance info if uid is provided
-    if uid:
-        try:
-            user_credits = get_or_create_credits(uid, email)
-            result["current_balance"] = user_credits.balance
-            result["balance_after"] = user_credits.balance - est_credits
-            result["sufficient"] = (user_credits.available_balance >= est_credits)
-            result["overdrafted"] = user_credits.overdrafted
-            result["is_expired"] = user_credits.is_expired
-        except Exception as e:
-            # Logging is handled by the logger in handlers.py
-            pass
-            
-    return result
-
-
 def _calculate_score_duration(score: Dict[str, Any]) -> float:
     """Calculate the total duration of a score in seconds."""
     tempos = score.get("tempos", [{"offset_beats": 0.0, "bpm": 120.0}])
@@ -308,5 +270,4 @@ HANDLERS = {
     "synthesize": handle_synthesize,
     "list_voicebanks": handle_list_voicebanks,
     "get_voicebank_info": handle_get_voicebank_info,
-    "estimate_credits": handle_estimate_credits,
 }

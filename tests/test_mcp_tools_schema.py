@@ -41,6 +41,4 @@ def test_metadata_tools_have_field_descriptions() -> None:
     assert voicebank_info["description"]
     assert voicebank_info["properties"]["speakers"]["items"]["description"]
 
-    estimate_credits = schema_map["estimate_credits"]["outputSchema"]
-    assert estimate_credits["description"]
-    assert estimate_credits["properties"]["estimated_credits"]["description"]
+    assert "estimate_credits" not in schema_map

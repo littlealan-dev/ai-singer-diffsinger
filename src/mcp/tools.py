@@ -1237,42 +1237,6 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_ESTIMATE_CREDITS_OUTPUT_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "description": "Estimated render cost and resulting balance for a score.",
-    "properties": {
-        "estimated_seconds": {
-            "type": "number",
-            "description": "Estimated render duration in seconds.",
-        },
-        "estimated_credits": {
-            "type": "integer",
-            "description": "Estimated credit cost for the render.",
-        },
-        "current_balance": {
-            "type": "integer",
-            "description": "Current available credit balance before the render.",
-        },
-        "balance_after": {
-            "type": "integer",
-            "description": "Projected credit balance after the render.",
-        },
-        "sufficient": {
-            "type": "boolean",
-            "description": "Whether the current balance is sufficient for the estimated cost.",
-        },
-    },
-    "required": [
-        "estimated_seconds",
-        "estimated_credits",
-        "current_balance",
-        "balance_after",
-        "sufficient",
-    ],
-    "additionalProperties": False,
-}
-
-
 TOOLS: List[Tool] = [
     Tool(
         name="parse_score",
@@ -1533,22 +1497,6 @@ TOOLS: List[Tool] = [
             "additionalProperties": False,
         },
         output_schema=_VOICEBANK_INFO_SCHEMA,
-    ),
-    Tool(
-        name="estimate_credits",
-        description="Estimate the credit cost for a score.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "score": {"type": "object", "description": "Parsed score payload used to estimate rendering duration/cost."},
-                "uid": {"type": "string", "description": "Optional authenticated user id supplied by the orchestrator."},
-                "email": {"type": "string", "description": "Optional authenticated user email supplied by the orchestrator."},
-                "duration_seconds": {"type": "number", "description": "Optional externally computed duration override in seconds."},
-            },
-            "required": ["score"],
-            "additionalProperties": False,
-        },
-        output_schema=_ESTIMATE_CREDITS_OUTPUT_SCHEMA,
     ),
 ]
 
