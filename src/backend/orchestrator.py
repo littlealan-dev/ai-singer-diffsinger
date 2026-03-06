@@ -32,6 +32,7 @@ from src.mcp.tools import list_tools
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
 REVIEW_PENDING_KEY = "_preprocess_review_pending"
+EXPLICIT_VERSE_METADATA_KEY = "explicit_verse_number"
 MISSING_ORIGINAL_SCORE_MESSAGE = (
     "Session is missing the original parsed score baseline required for preprocessing. "
     "Please re-upload the MusicXML file."
@@ -71,6 +72,7 @@ class Orchestrator:
         *,
         user_id: str,
         user_email: str,
+        selection: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
@@ -111,6 +113,22 @@ class Orchestrator:
             current_score = snapshot.get("current_score")
             response_message = "Acknowledged."
             include_score = self._should_include_score(message)
+            explicit_verse_from_selection = self._normalize_verse_number(
+                selection.get("verse_number")
+                if isinstance(selection, dict)
+                else None
+            )
+            if explicit_verse_from_selection:
+                await self._sessions.set_metadata(
+                    session_id,
+                    EXPLICIT_VERSE_METADATA_KEY,
+                    explicit_verse_from_selection,
+                )
+                files = snapshot.get("files")
+                next_files = dict(files) if isinstance(files, dict) else {}
+                next_files[EXPLICIT_VERSE_METADATA_KEY] = explicit_verse_from_selection
+                snapshot = dict(snapshot)
+                snapshot["files"] = next_files
 
             if current_score is None:
                 # Require a score before any synthesis steps.
@@ -160,16 +178,28 @@ class Orchestrator:
                     llm_response.tool_calls,
                 )
                 if self._should_start_preprocess_job(llm_response.tool_calls):
-                    await self._sessions.append_history(session_id, "assistant", response_message)
-                    return await self._start_preprocess_job(
-                        session_id,
-                        current_score["score"],
-                        llm_response.tool_calls,
-                        initial_message=response_message,
-                        initial_thought_summary=llm_response.thought_summary,
-                        user_id=user_id,
-                        user_email=user_email,
+                    explicit_verse_number = self._normalize_verse_number(
+                        (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
+                        if isinstance(snapshot.get("files"), dict)
+                        else None
                     )
+                    requires_verse_selection = self._tool_calls_require_verse_selection(
+                        llm_response.tool_calls,
+                        score=current_score["score"],
+                        score_summary=snapshot.get("score_summary"),
+                        explicit_verse_number=explicit_verse_number,
+                    )
+                    if not requires_verse_selection:
+                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        return await self._start_preprocess_job(
+                            session_id,
+                            current_score["score"],
+                            llm_response.tool_calls,
+                            initial_message=response_message,
+                            initial_thought_summary=llm_response.thought_summary,
+                            user_id=user_id,
+                            user_email=user_email,
+                        )
 
                 response = await self._run_llm_tool_workflow(
                     session_id,
@@ -616,6 +646,7 @@ class Orchestrator:
                     progress=1.0,
                     jobKind="preprocess",
                     reviewRequired=bool(response.get("review_required")),
+                    actionRequired=response.get("action_required"),
                     details=response.get("details"),
                     warningMessage=warning_message,
                 )
@@ -678,6 +709,11 @@ class Orchestrator:
 
         while True:
             attempt_number += 1
+            explicit_verse_number = self._normalize_verse_number(
+                (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
+                if isinstance(snapshot.get("files"), dict)
+                else None
+            )
             tool_result = await self._execute_tool_calls(
                 session_id,
                 working_score,
@@ -685,11 +721,18 @@ class Orchestrator:
                 user_id=user_id,
                 score_summary=score_summary,
                 user_email=user_email,
+                explicit_verse_number=explicit_verse_number,
             )
             working_score = tool_result.score
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
+            if tool_result.explicit_verse_number is not None:
+                snapshot = dict(snapshot)
+                files = snapshot.get("files")
+                next_files = dict(files) if isinstance(files, dict) else {}
+                next_files[EXPLICIT_VERSE_METADATA_KEY] = tool_result.explicit_verse_number
+                snapshot["files"] = next_files
             candidate = self._build_workflow_candidate(
                 attempt_number=attempt_number,
                 tool_result=tool_result,
@@ -722,9 +765,17 @@ class Orchestrator:
                 "message": response_message,
             }
             followup_prompt = tool_result.followup_prompt
+            action_name = (
+                str(tool_result.action_required_payload.get("action") or "").strip()
+                if isinstance(tool_result.action_required_payload, dict)
+                else ""
+            )
+            is_selection_blocker = action_name == "verse_selection_required"
             preprocess_iteration = any(
                 call.name == "preprocess_voice_parts" for call in pending_calls
             ) or candidate is not None
+            if is_selection_blocker:
+                preprocess_iteration = False
 
             if followup_prompt is None:
                 if response_message:
@@ -935,6 +986,16 @@ class Orchestrator:
                 followup_response.thought_summary,
                 followup_response.tool_calls,
             )
+            if (
+                isinstance(last_action_required_payload, dict)
+                and str(last_action_required_payload.get("action") or "").strip()
+                == "verse_selection_required"
+            ):
+                response = {
+                    "type": "chat_text",
+                    "message": self._format_followup_message_text(response_message),
+                }
+                break
             thought_block_for_response = self._format_thought_summary_block(
                 followup_response.thought_summary,
                 followup_response.tool_calls,
@@ -962,6 +1023,8 @@ class Orchestrator:
             pending_calls = list(followup_response.tool_calls)
 
         response = self._attach_attempt_messages(response, attempt_messages)
+        if isinstance(last_action_required_payload, dict):
+            response["action_required"] = copy.deepcopy(last_action_required_payload)
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
@@ -1556,6 +1619,111 @@ class Orchestrator:
         """Return True if any selection parameters were provided."""
         return part_id is not None or part_index is not None or verse_number is not None
 
+    def _available_verses(
+        self, score_summary: Optional[Dict[str, Any]]
+    ) -> List[str]:
+        """Return normalized available verses from score summary."""
+        if not isinstance(score_summary, dict):
+            return []
+        raw = score_summary.get("available_verses")
+        if not isinstance(raw, list):
+            return []
+        out: List[str] = []
+        for entry in raw:
+            text = self._normalize_verse_number(entry)
+            if text and text not in out:
+                out.append(text)
+        return out
+
+    def _extract_call_requested_verse(self, call: ToolCall) -> Optional[str]:
+        """Extract explicit requested verse from a tool call when provided."""
+        if call.name == "synthesize":
+            return self._normalize_verse_number(call.arguments.get("verse_number"))
+        if call.name == "reparse":
+            return self._normalize_verse_number(call.arguments.get("verse_number"))
+        if call.name == "preprocess_voice_parts":
+            direct = self._normalize_verse_number(call.arguments.get("verse_number"))
+            if direct:
+                return direct
+            request = call.arguments.get("request")
+            if isinstance(request, dict):
+                request_verse = self._normalize_verse_number(request.get("verse_number"))
+                if request_verse:
+                    return request_verse
+                plan = request.get("plan")
+                if isinstance(plan, dict):
+                    plan_verse = self._normalize_verse_number(plan.get("verse_number"))
+                    if plan_verse:
+                        return plan_verse
+                    targets = plan.get("targets")
+                    if isinstance(targets, list):
+                        for entry in targets:
+                            if not isinstance(entry, dict):
+                                continue
+                            target_verse = self._normalize_verse_number(entry.get("verse_number"))
+                            if target_verse:
+                                return target_verse
+        return None
+
+    def _tool_calls_require_verse_selection(
+        self,
+        tool_calls: List[ToolCall],
+        *,
+        score: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
+        explicit_verse_number: Optional[str],
+    ) -> bool:
+        """Return True when render-path tool calls must be blocked for verse choice."""
+        available_verses = self._available_verses(score_summary)
+        if len(available_verses) <= 1:
+            return False
+        selected_verse_number = self._score_selected_verse_number(score)
+        for call in tool_calls:
+            if call.name not in {"preprocess_voice_parts", "synthesize"}:
+                continue
+            requested_verse_number = self._extract_call_requested_verse(call)
+            if requested_verse_number:
+                return False
+            if (
+                explicit_verse_number
+                and selected_verse_number
+                and explicit_verse_number == selected_verse_number
+            ):
+                return False
+            return True
+        return False
+
+    def _build_verse_selection_required_action(
+        self,
+        *,
+        score: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
+        tool_attempted: str,
+        explicit_verse_number: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build action_required payload when explicit verse selection is required."""
+        available_verses = self._available_verses(score_summary)
+        selected_verse_number = self._score_selected_verse_number(score)
+        return {
+            "status": "action_required",
+            "action": "verse_selection_required",
+            "code": "verse_selection_required",
+            "reason": "multi_verse_selection_required_before_render",
+            "message": "Select a verse before preprocessing or synthesis.",
+            "available_verses": available_verses,
+            "selected_verse_number": selected_verse_number,
+            "failed_validation_rules": [
+                "verse_selection.required_for_multi_verse_render"
+            ],
+            "diagnostics": {
+                "tool_attempted": tool_attempted,
+                "requested_verse_number": None,
+                "selected_verse_number": selected_verse_number,
+                "available_verses_count": len(available_verses),
+                "explicit_verse_number": explicit_verse_number,
+            },
+        }
+
     def _selection_matches_current(
         self,
         score: Dict[str, Any],
@@ -2128,6 +2296,7 @@ class Orchestrator:
         user_id: str,
         score_summary: Optional[Dict[str, Any]],
         user_email: str,
+        explicit_verse_number: Optional[str],
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -2135,6 +2304,7 @@ class Orchestrator:
         reparse_completed_this_batch = False
         reparse_selected_verse: Optional[str] = None
         reparse_noop_this_batch = False
+        selected_explicit_verse_number = explicit_verse_number
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
@@ -2149,6 +2319,7 @@ class Orchestrator:
                 reparse_part_id = call.arguments.get("part_id")
                 reparse_part_index = call.arguments.get("part_index")
                 reparse_verse_number = call.arguments.get("verse_number")
+                normalized_reparse_verse = self._normalize_verse_number(reparse_verse_number)
                 reparse_expand_repeats = bool(call.arguments.get("expand_repeats", False))
                 if self._is_reparse_noop(
                     current_score,
@@ -2160,6 +2331,13 @@ class Orchestrator:
                     reparse_completed_this_batch = True
                     reparse_noop_this_batch = True
                     reparse_selected_verse = self._score_selected_verse_number(current_score)
+                    if normalized_reparse_verse:
+                        selected_explicit_verse_number = normalized_reparse_verse
+                        await self._sessions.set_metadata(
+                            session_id,
+                            EXPLICIT_VERSE_METADATA_KEY,
+                            normalized_reparse_verse,
+                        )
                     self._logger.info(
                         "reparse_noop session=%s selected_verse=%s requested_verse=%s",
                         session_id,
@@ -2179,6 +2357,13 @@ class Orchestrator:
                     current_score = reparsed_score
                     reparse_completed_this_batch = True
                     reparse_selected_verse = self._score_selected_verse_number(current_score)
+                    if normalized_reparse_verse:
+                        selected_explicit_verse_number = normalized_reparse_verse
+                        await self._sessions.set_metadata(
+                            session_id,
+                            EXPLICIT_VERSE_METADATA_KEY,
+                            normalized_reparse_verse,
+                        )
                     self._logger.info(
                         "reparse_ready session=%s selected_verse=%s",
                         session_id,
@@ -2204,6 +2389,25 @@ class Orchestrator:
                     )
                 continue
             if call.name == "preprocess_voice_parts":
+                if self._tool_calls_require_verse_selection(
+                    [call],
+                    score=current_score,
+                    score_summary=score_summary,
+                    explicit_verse_number=selected_explicit_verse_number,
+                ):
+                    action_required = self._build_verse_selection_required_action(
+                        score=current_score,
+                        score_summary=score_summary,
+                        tool_attempted=call.name,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
                 preprocess_args = dict(call.arguments)
                 requested_plan = self._extract_preprocess_plan(preprocess_args)
                 if requested_plan is not None:
@@ -2220,6 +2424,7 @@ class Orchestrator:
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response={"type": "chat_text", "message": str(exc)},
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 preprocess_args["score"] = preprocess_score
                 self._logger.info("mcp_call tool=preprocess_voice_parts session=%s", session_id)
@@ -2253,6 +2458,7 @@ class Orchestrator:
                         audio_response=None,
                         followup_prompt=json.dumps(result, sort_keys=True),
                         review_required=True,
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 if result.get("status") == "action_required":
                     self._logger.info(
@@ -2275,10 +2481,30 @@ class Orchestrator:
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=followup_prompt,
                         action_required_payload=result,
-                        review_materialization=review_materialization
+                        review_materialization=review_materialization,
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 continue
             if call.name == "synthesize":
+                if self._tool_calls_require_verse_selection(
+                    [call],
+                    score=current_score,
+                    score_summary=score_summary,
+                    explicit_verse_number=selected_explicit_verse_number,
+                ):
+                    action_required = self._build_verse_selection_required_action(
+                        score=current_score,
+                        score_summary=score_summary,
+                        tool_attempted=call.name,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
                 if self._score_has_review_pending(current_score):
                     # Review progression is LLM-driven; synth tool call implies user-approved proceed.
                     current_score = self._clear_review_pending(current_score)
@@ -2292,7 +2518,8 @@ class Orchestrator:
                         audio_response={
                             "type": "chat_text", 
                             "message": "Your account is locked due to a negative credit balance. Please join the waiting list for more credits."
-                        }
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 if user_credits.is_expired:
                     return ToolExecutionResult(
@@ -2300,7 +2527,8 @@ class Orchestrator:
                         audio_response={
                             "type": "chat_text", 
                             "message": "Your free trial credits have expired."
-                        }
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
 
                 # Launch an async synthesis job.
@@ -2337,6 +2565,14 @@ class Orchestrator:
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=json.dumps(action_required, sort_keys=True),
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                if requested_verse_number is not None:
+                    selected_explicit_verse_number = requested_verse_number
+                    await self._sessions.set_metadata(
+                        session_id,
+                        EXPLICIT_VERSE_METADATA_KEY,
+                        requested_verse_number,
                     )
                 mapping_context = self._build_preprocess_mapping_context(
                     current_score,
@@ -2373,6 +2609,7 @@ class Orchestrator:
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=followup_prompt,
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 
                 from src.mcp.handlers import _calculate_score_duration
@@ -2414,6 +2651,7 @@ class Orchestrator:
                             "message": "",
                         },
                         followup_prompt=followup_prompt,
+                        explicit_verse_number=selected_explicit_verse_number,
                     )
                 audio_response = await self._start_synthesis_job(
                     session_id, current_score, synth_args, user_id=user_id, job_id=job_id
@@ -2441,8 +2679,13 @@ class Orchestrator:
                 score=current_score,
                 audio_response={"type": "chat_text", "message": ""},
                 followup_prompt=reparse_prompt,
+                explicit_verse_number=selected_explicit_verse_number,
             )
-        return ToolExecutionResult(score=current_score, audio_response=audio_response)
+        return ToolExecutionResult(
+            score=current_score,
+            audio_response=audio_response,
+            explicit_verse_number=selected_explicit_verse_number,
+        )
 
     def _extract_preprocess_plan(self, preprocess_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Return the request.plan object from a preprocess tool call, if present."""
@@ -2642,6 +2885,7 @@ class ToolExecutionResult:
     review_required: bool = False
     action_required_payload: Optional[Dict[str, Any]] = None
     review_materialization: Optional[Dict[str, Any]] = None
+    explicit_verse_number: Optional[str] = None
 
 
 @dataclass(frozen=True)

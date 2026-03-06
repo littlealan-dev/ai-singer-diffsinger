@@ -57,6 +57,9 @@ _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
     message: str
+    # Optional structured selector payload from UI widgets (for example verse dropdown).
+    # Values are treated as authoritative user selections and avoid fragile text parsing.
+    selection: dict[str, Any] | None = None
 
 
 class WaitlistSubscribeRequest(BaseModel):
@@ -296,7 +299,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Message too long.")
         try:
             response = await orchestrator.handle_chat(
-                session_id, payload.message, user_id=user_id, user_email=user_email
+                session_id,
+                payload.message,
+                user_id=user_id,
+                user_email=user_email,
+                selection=payload.selection,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpError as exc:

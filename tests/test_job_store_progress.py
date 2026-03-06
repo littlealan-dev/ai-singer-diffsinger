@@ -63,3 +63,21 @@ def test_build_progress_payload_includes_details():
     assert payload["status"] == "done"
     assert payload["details"]["quality_class"] == 2
     assert payload["details"]["issues"][0]["rule"] == "validation_failed_needs_review"
+
+
+def test_build_progress_payload_includes_action_required():
+    payload = build_progress_payload(
+        "job-action",
+        {
+            "status": "completed",
+            "message": "Please pick a verse.",
+            "actionRequired": {
+                "status": "action_required",
+                "action": "verse_selection_required",
+                "available_verses": ["1", "2"],
+            },
+        },
+    )
+    assert payload["status"] == "done"
+    assert payload["action_required"]["action"] == "verse_selection_required"
+    assert payload["action_required"]["available_verses"] == ["1", "2"]

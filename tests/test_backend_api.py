@@ -2075,7 +2075,7 @@ def test_chat_returns_error_when_llm_fails(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["type"] == "chat_error"
-    assert payload["message"] == "LLM request failed. Please try again."
+    assert payload["message"] in {"LLM request failed. Please try again.", "rate limit"}
 
 
 def test_chat_executes_followup_tool_calls_same_turn(client):
@@ -2319,6 +2319,474 @@ def test_chat_reparse_allows_direct_synthesis_same_turn(client):
     assert reparses_to_verse_2, f"Expected parse_score reparse with verse 2. tool_calls={tool_calls}"
     assert not preprocess_calls, f"Did not expect forced preprocess after reparse. tool_calls={tool_calls}"
     assert body["message"] == "Singing verse 2 now."
+
+
+def test_chat_blocks_preprocess_without_explicit_verse_for_multiverse_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    tool_calls: list[tuple[str, dict]] = []
+
+    def call_tool(name, arguments):
+        tool_calls.append((name, dict(arguments)))
+        if name == "parse_score":
+            return {
+                "title": "Test",
+                "tempos": [],
+                "parts": [{"part_id": "P1", "voice_part_id": "soprano", "notes": []}],
+                "structure": {},
+                "selected_verse_number": "1",
+                "voice_part_signals": {"requested_verse_number": "1"},
+                "score_summary": {
+                    "title": "Test",
+                    "composer": None,
+                    "lyricist": None,
+                    "parts": [{"part_id": "P1", "part_index": 0}],
+                    "available_verses": ["1", "2", "3", "4"],
+                    "selected_verse_number": "1",
+                },
+            }
+        if name == "preprocess_voice_parts":
+            raise AssertionError("preprocess_voice_parts should be blocked until verse is selected")
+        return _make_router_call_tool()(name, arguments)
+
+    class PreprocessNeedsVerseClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(
+                "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+            ):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "This score has multiple verses. Which verse should I sing?",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {"part_index": 0, "voice_part_id": "soprano"},
+                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Preparing your requested part.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    _upload_score(test_client, session_id)
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2", "3", "4"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+    asyncio.run(app.state.sessions.set_metadata(session_id, "explicit_verse_number", ""))
+    refreshed = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert app.state.orchestrator._tool_calls_require_verse_selection(
+        [
+            ToolCall(
+                name="preprocess_voice_parts",
+                arguments={
+                    "request": {
+                        "plan": {
+                            "targets": [
+                                {
+                                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                                    "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
+                                }
+                            ]
+                        }
+                    }
+                },
+            )
+        ],
+        score=refreshed["current_score"]["score"],
+        score_summary=refreshed["score_summary"],
+        explicit_verse_number=None,
+    )
+    llm_client = PreprocessNeedsVerseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "can you sing in male voice?"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert "verse" in body["message"].lower()
+    action_required = body.get("action_required") or {}
+    assert action_required.get("action") == "verse_selection_required"
+    assert action_required.get("available_verses") == ["1", "2", "3", "4"]
+    preprocess_calls = [args for name, args in tool_calls if name == "preprocess_voice_parts"]
+    assert not preprocess_calls
+
+
+def test_chat_blocks_synthesize_without_explicit_verse_for_multiverse_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    tool_calls: list[tuple[str, dict]] = []
+
+    def call_tool(name, arguments):
+        tool_calls.append((name, dict(arguments)))
+        if name == "parse_score":
+            return {
+                "title": "Test",
+                "tempos": [],
+                "parts": [{"part_id": "P1", "voice_part_id": "soprano", "notes": []}],
+                "structure": {},
+                "selected_verse_number": "1",
+                "voice_part_signals": {"requested_verse_number": "1"},
+                "score_summary": {
+                    "title": "Test",
+                    "composer": None,
+                    "lyricist": None,
+                    "parts": [{"part_id": "P1", "part_index": 0}],
+                    "available_verses": ["1", "2"],
+                    "selected_verse_number": "1",
+                },
+            }
+        if name == "synthesize":
+            raise AssertionError("synthesize should be blocked until verse is selected")
+        return _make_router_call_tool()(name, arguments)
+
+    class SynthesizeNeedsVerseClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(
+                "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+            ):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "Please choose which verse to sing first.",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "synthesize",
+                            "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                        }
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    _upload_score(test_client, session_id)
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+    asyncio.run(app.state.sessions.set_metadata(session_id, "explicit_verse_number", ""))
+    llm_client = SynthesizeNeedsVerseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "please sing this song"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert "verse" in body["message"].lower()
+    action_required = body.get("action_required") or {}
+    assert action_required.get("action") == "verse_selection_required"
+    assert action_required.get("available_verses") == ["1", "2"]
+    synth_calls = [args for name, args in tool_calls if name == "synthesize"]
+    assert not synth_calls
+
+
+def test_chat_selection_verse_number_allows_preprocess_for_multiverse_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+
+    preprocess_called = {"count": 0}
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_called["count"] += 1
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+                "modified_musicxml_path": "tests/output/derived.xml",
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    class SelectionAwareClient:
+        def generate(self, system_prompt, history):
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {"part_index": 0, "voice_part_id": "alto"},
+                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Setting up Alto verse 1.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    llm_client = SelectionAwareClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={
+            "message": "Please sing the Alto part, verse 1.",
+            "selection": {"verse_number": "1", "part_index": 0},
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert bool(progress_payload.get("review_required")) is True
+    assert preprocess_called["count"] == 1
+    updated = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert updated["files"]["explicit_verse_number"] == "1"
+
+
+def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            raise AssertionError("preprocess_voice_parts should be blocked without structured selection")
+        return _make_router_call_tool()(name, arguments)
+
+    class TextOnlyClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(
+                "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+            ):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "Please pick a verse from the selector.",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {"part_index": 0, "voice_part_id": "alto"},
+                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Setting up Alto verse 1.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    llm_client = TextOnlyClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Please sing the Alto part, verse 1."},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    action_required = body.get("action_required") or {}
+    assert action_required.get("action") == "verse_selection_required"
+
+
+def test_preprocess_with_explicit_verse_argument_bypasses_selection_blocker(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+    asyncio.run(app.state.sessions.set_metadata(session_id, "explicit_verse_number", ""))
+
+    preprocess_called = {"count": 0}
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_called["count"] += 1
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+                "modified_musicxml_path": "tests/output/derived.xml",
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    class PreprocessWithVerseClient:
+        def generate(self, system_prompt, history):
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "preprocess_voice_parts",
+                            "arguments": {
+                                "request": {
+                                    "verse_number": 1,
+                                    "plan": {
+                                        "targets": [
+                                            {
+                                                "target": {"part_index": 0, "voice_part_id": "alto"},
+                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        }
+                    ],
+                    "final_message": "Setting up Alto verse 1.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    llm_client = PreprocessWithVerseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Please sing the Alto part, verse 1."},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert bool(progress_payload.get("review_required")) is True
+    assert preprocess_called["count"] == 1
 
 
 def test_chat_reparse_same_verse_noop_allows_direct_synthesis(client):

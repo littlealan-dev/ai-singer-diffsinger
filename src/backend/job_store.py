@@ -102,6 +102,7 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "job_id": job_id,
         "job_kind": data.get("jobKind"),
         "review_required": data.get("reviewRequired"),
+        "action_required": data.get("actionRequired"),
         "details": data.get("details"),
         "updated_at": data.get("updatedAt"),
     }

@@ -1294,7 +1294,11 @@ TOOLS: List[Tool] = [
                 },
                 "verse_number": {
                     "type": ["integer", "string", "null"],
-                    "description": "Optional verse selector for lyric extraction.",
+                    "description": (
+                        "Optional verse selector for lyric extraction. "
+                        "For multi-verse rendering workflows, provide an explicit verse "
+                        "via reparse before preprocess/synthesize."
+                    ),
                 },
                 "expand_repeats": {
                     "type": "boolean",
@@ -1325,7 +1329,11 @@ TOOLS: List[Tool] = [
                 },
                 "verse_number": {
                     "type": ["integer", "string", "null"],
-                    "description": "Optional verse selector for lyric extraction during reparse.",
+                    "description": (
+                        "Optional verse selector for lyric extraction during reparse. "
+                        "Use this to explicitly lock the active verse when score_summary.available_verses "
+                        "contains multiple entries."
+                    ),
                 },
                 "expand_repeats": {
                     "type": "boolean",
@@ -1447,6 +1455,13 @@ TOOLS: List[Tool] = [
                 "source_part_index": {
                     "type": ["integer", "null"],
                     "description": "Optional source part index hint for lyric propagation or derived-target reuse.",
+                },
+                "verse_number": {
+                    "type": ["integer", "string", "null"],
+                    "description": (
+                        "Optional explicit verse selector used by orchestration guards. "
+                        "Required for multi-verse scores before preprocess/synthesize can proceed."
+                    ),
                 },
                 "voice_color": {
                     "type": ["string", "null"],
