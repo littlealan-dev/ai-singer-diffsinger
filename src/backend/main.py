@@ -445,7 +445,7 @@ def create_app() -> FastAPI:
             rel_path = session.files.get("musicxml_path")
             if not rel_path:
                 raise HTTPException(status_code=404, detail="Score not found.")
-            score_path = settings.project_root / rel_path
+            score_path = _resolve_allowlisted_score_path(settings, rel_path)
         if not score_path.exists():
             raise HTTPException(status_code=404, detail="Score file not found.")
         content = _read_musicxml_content(
@@ -776,10 +776,26 @@ def _resolve_session_score_path(
     source_musicxml_path = score_payload.get("source_musicxml_path")
     if not isinstance(source_musicxml_path, str) or not source_musicxml_path.strip():
         return None
-    score_path = Path(source_musicxml_path)
+    return _resolve_allowlisted_score_path(settings, source_musicxml_path)
+
+
+def _resolve_allowlisted_score_path(settings: Settings, candidate: str | Path) -> Path:
+    """Resolve a score path and require that it stays within approved backend roots."""
+    score_path = Path(candidate)
     if not score_path.is_absolute():
         score_path = settings.project_root / score_path
-    return score_path
+    resolved = score_path.resolve()
+    approved_roots = (
+        settings.sessions_dir.resolve(),
+        settings.data_dir.resolve(),
+    )
+    for root in approved_roots:
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    raise HTTPException(status_code=403, detail="Score path is outside allowed roots.")
 
 
 def _iter_file(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:

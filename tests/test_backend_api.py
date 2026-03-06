@@ -599,6 +599,73 @@ def test_get_score_returns_derived_musicxml_after_reviewable_validation_candidat
         orchestrator_module.finalize_review_materialization = original_finalize
 
 
+def test_get_score_rejects_out_of_root_payload_path(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    forbidden_path = Path("/tmp/sig14-outside.xml")
+    forbidden_path.write_text("<score-partwise version=\"4.0\"/>", encoding="utf-8")
+    try:
+        snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+        current_score = dict(snapshot["current_score"]["score"])
+        current_score["source_musicxml_path"] = str(forbidden_path)
+        asyncio.run(app.state.sessions.set_score(session_id, current_score))
+
+        score_response = test_client.get(f"/sessions/{session_id}/score")
+        assert score_response.status_code == 403
+        assert score_response.json()["detail"] == "Score path is outside allowed roots."
+    finally:
+        forbidden_path.unlink(missing_ok=True)
+
+
+def test_get_score_rejects_out_of_root_fallback_path(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    forbidden_path = Path("/tmp/sig14-fallback-outside.xml")
+    forbidden_path.write_text("<score-partwise version=\"4.0\"/>", encoding="utf-8")
+    try:
+        snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+        current_score = dict(snapshot["current_score"]["score"])
+        current_score.pop("source_musicxml_path", None)
+        asyncio.run(app.state.sessions.set_score(session_id, current_score))
+        asyncio.run(app.state.sessions.set_metadata(session_id, "musicxml_path", str(forbidden_path)))
+
+        score_response = test_client.get(f"/sessions/{session_id}/score")
+        assert score_response.status_code == 403
+        assert score_response.json()["detail"] == "Score path is outside allowed roots."
+    finally:
+        forbidden_path.unlink(missing_ok=True)
+
+
+def test_get_score_allows_relative_fallback_within_data_dir(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    current_score = dict(snapshot["current_score"]["score"])
+    current_score.pop("source_musicxml_path", None)
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    safe_path = app.state.settings.data_dir / "safe-score.xml"
+    rel_safe_path = str(safe_path.relative_to(app.state.settings.project_root))
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_xml = "<score-partwise version=\"4.0\"><part-list/></score-partwise>"
+    safe_path.write_text(safe_xml, encoding="utf-8")
+    try:
+        asyncio.run(app.state.sessions.set_metadata(session_id, "musicxml_path", rel_safe_path))
+        score_response = test_client.get(f"/sessions/{session_id}/score")
+        assert score_response.status_code == 200
+        assert score_response.text == safe_xml
+    finally:
+        safe_path.unlink(missing_ok=True)
+
+
 def test_chat_returns_progress_immediately_for_preprocess(client):
     test_client, app = client
     session_id = _create_session(test_client)
