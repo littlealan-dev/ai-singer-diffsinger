@@ -91,14 +91,6 @@ function withApiBase(url: string): string {
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
-async function withAppCheckParam(url: string): Promise<string> {
-  if (!url) return url;
-  const token = await getAppCheckToken();
-  if (!token) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}app_check=${encodeURIComponent(token)}`;
-}
-
 async function withAppCheckHeaders(
   headers?: HeadersInit
 ): Promise<HeadersInit | undefined> {
@@ -191,7 +183,7 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
   if (response.type === "chat_audio") {
     return {
       ...response,
-      audio_url: await withAppCheckParam(withApiBase(response.audio_url)),
+      audio_url: withApiBase(response.audio_url),
     };
   }
   if (response.type === "chat_progress") {
@@ -213,7 +205,7 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
   }
   const payload = (await response.json()) as ProgressResponse;
   if (payload.audio_url) {
-    payload.audio_url = await withAppCheckParam(withApiBase(payload.audio_url));
+    payload.audio_url = withApiBase(payload.audio_url);
   }
   return payload;
 }

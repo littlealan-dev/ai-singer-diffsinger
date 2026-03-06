@@ -12,10 +12,11 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
-from src.backend.main import create_app
+from src.backend.main import _require_app_check, create_app
 from src.backend.llm_client import StaticLlmClient
 from src.backend.orchestrator import (
     MISSING_ORIGINAL_SCORE_MESSAGE,
@@ -1868,6 +1869,72 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert audio_response.content.startswith(b"RIFF")
 
 
+def test_app_check_rejects_query_param_only(monkeypatch):
+    calls = {"count": 0}
+    app, data_dir = _prepare_app(
+        monkeypatch,
+        overrides={"BACKEND_REQUIRE_APP_CHECK": "true"},
+    )
+    monkeypatch.setattr("src.backend.main.initialize_firebase_app", lambda: None)
+
+    def _verify_token(token):
+        calls["count"] += 1
+        return True
+
+    monkeypatch.setattr("src.backend.main.app_check.verify_token", _verify_token)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    fake_request = type(
+        "FakeRequest",
+        (),
+        {
+            "app": app,
+            "headers": {},
+            "query_params": {"app_check": "query-only-token"},
+        },
+    )()
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(_require_app_check(fake_request))
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Missing App Check token."
+    assert calls["count"] == 0
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_audio_playback_bypasses_app_check_when_signed(monkeypatch):
+    app, data_dir = _prepare_app(
+        monkeypatch,
+        overrides={"BACKEND_REQUIRE_APP_CHECK": "true"},
+    )
+    monkeypatch.setattr("src.backend.main.initialize_firebase_app", lambda: None)
+    monkeypatch.setattr("src.backend.main.app_check.verify_token", lambda token: True)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
+        test_client.headers.update({"X-Firebase-AppCheck": "header-token"})
+        session_id = _create_session(test_client)
+        _upload_score(test_client, session_id)
+        llm_client = StaticLlmClient(
+            response_text=(
+                '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+                '"final_message":"Rendered.","include_score":true}'
+            )
+        )
+        app.state.llm_client = llm_client
+        app.state.orchestrator._llm_client = llm_client
+        response = test_client.post(
+            f"/sessions/{session_id}/chat", json={"message": "render audio"}
+        )
+        assert response.status_code == 200
+        progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+        audio_url = progress_payload["audio_url"]
+        audio_response = test_client.get(audio_url, headers={})
+        assert audio_response.status_code == 200
+        assert audio_response.content.startswith(b"RIFF")
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_audio_playback_token_rejects_tampering(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -2432,12 +2499,13 @@ def test_preprocess_returns_last_validation_review_after_repair_cap(client):
     assert preprocess_calls["count"] == 3
 
 
-def test_get_audio_returns_404_without_audio(client):
+def test_get_audio_requires_playback_token(client):
     test_client, _ = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
     response = test_client.get(f"/sessions/{session_id}/audio")
-    assert response.status_code == 404
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing playback token."
 
 
 @pytest.mark.parametrize(

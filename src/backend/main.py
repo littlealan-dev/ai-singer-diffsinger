@@ -152,7 +152,7 @@ def create_app() -> FastAPI:
             session_id,
         )
         try:
-            if request.method != "OPTIONS":
+            if request.method != "OPTIONS" and _should_require_app_check(request):
                 await _require_app_check(request)
             response = await call_next(request)
         finally:
@@ -313,8 +313,8 @@ def create_app() -> FastAPI:
     ) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        claims = _get_playback_claims_or_none(request, settings, session_id, file)
-        user_id = claims.user_id if claims else await _get_user_id_or_401(request)
+        claims = _get_playback_claims_or_401(request, settings, session_id, file)
+        user_id = claims.user_id
         await _get_session_or_404(sessions, session_id, user_id)
         snapshot = None
         if file:
@@ -324,7 +324,7 @@ def create_app() -> FastAPI:
             file_name = Path(file).name
             if file_name != file:
                 raise HTTPException(status_code=400, detail="Invalid audio file name.")
-            storage_path = claims.resource_path if claims else None
+            storage_path = claims.resource_path
             if settings.backend_use_storage and storage_path:
                 return await _stream_storage_audio(settings, storage_path)
             audio_path = (session_dir / file_name).resolve()
@@ -563,13 +563,17 @@ async def _require_app_check(request: Request) -> None:
     initialize_firebase_app()
     token = request.headers.get("X-Firebase-AppCheck")
     if not token:
-        token = request.query_params.get("app_check")
-    if not token:
         raise HTTPException(status_code=401, detail="Missing App Check token.")
     try:
         await asyncio.to_thread(app_check.verify_token, token)
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid App Check token.") from exc
+
+
+def _should_require_app_check(request: Request) -> bool:
+    """Skip App Check only for signed audio playback routes."""
+    path = request.url.path
+    return not (path.startswith("/sessions/") and path.endswith("/audio"))
 
 
 async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
@@ -667,16 +671,16 @@ def _build_signed_audio_url(
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
-def _get_playback_claims_or_none(
+def _get_playback_claims_or_401(
     request: Request,
     settings: Settings,
     session_id: str,
     file_name: Optional[str],
-) -> PlaybackTokenClaims | None:
-    """Return verified playback claims when a playback token is supplied."""
+) -> PlaybackTokenClaims:
+    """Return verified playback claims or raise HTTP 401."""
     token = request.query_params.get("playback_token")
     if not token:
-        return None
+        raise HTTPException(status_code=401, detail="Missing playback token.")
     if not file_name:
         raise HTTPException(status_code=401, detail="Playback token requires an audio file name.")
     try:
