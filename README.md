@@ -4,7 +4,7 @@ AI sight-singing from MusicXML, via AI chat. No DAW required.
 
 Live app: https://sightsinger.app/
 
-![SightSinger product screenshot](marketing/public/landing/sightsinger_screenshot.png)
+![SightSinger product screenshot](ui/public/landing/sightsinger_screenshot.png)
 
 ## What it’s for
 
