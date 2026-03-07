@@ -102,6 +102,10 @@ class Settings:
     brevo_waitlist_retry_jitter_seconds: float
     brevo_waitlist_api_key_secret: str
     brevo_waitlist_api_key_secret_version: str
+    credit_retry_max_attempts: int
+    credit_retry_base_delay_seconds: float
+    credit_retry_test_settle_fail_count: int
+    credit_retry_test_release_fail_count: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -191,6 +195,19 @@ class Settings:
             "BREVO_WAITLIST_API_KEY_SECRET_VERSION",
             "latest",
         ).strip()
+        credit_retry_max_attempts = max(1, _env_int("CREDIT_RETRY_MAX_ATTEMPTS", 3))
+        credit_retry_base_delay_seconds = max(
+            0.0,
+            _env_float("CREDIT_RETRY_BASE_DELAY_SECONDS", 0.5),
+        )
+        credit_retry_test_settle_fail_count = max(
+            0,
+            _env_int("CREDIT_RETRY_TEST_SETTLE_FAIL_COUNT", 0),
+        )
+        credit_retry_test_release_fail_count = max(
+            0,
+            _env_int("CREDIT_RETRY_TEST_RELEASE_FAIL_COUNT", 0),
+        )
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -244,4 +261,8 @@ class Settings:
             brevo_waitlist_retry_jitter_seconds=brevo_waitlist_retry_jitter_seconds,
             brevo_waitlist_api_key_secret=brevo_waitlist_api_key_secret,
             brevo_waitlist_api_key_secret_version=brevo_waitlist_api_key_secret_version,
+            credit_retry_max_attempts=credit_retry_max_attempts,
+            credit_retry_base_delay_seconds=credit_retry_base_delay_seconds,
+            credit_retry_test_settle_fail_count=credit_retry_test_settle_fail_count,
+            credit_retry_test_release_fail_count=credit_retry_test_release_fail_count,
         )

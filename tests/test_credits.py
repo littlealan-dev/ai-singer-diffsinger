@@ -6,6 +6,7 @@ from src.backend.credits import (
     estimate_credits,
     reserve_credits,
     settle_credits,
+    settle_credits_and_complete_job,
     release_credits,
     mark_reservation_reconciliation_required,
     CREDIT_DURATION_SECONDS,
@@ -22,7 +23,7 @@ def cleanup_firestore():
     """Clear Firestore before each test."""
     db = get_firestore_client()
     # Delete all documents in relevant collections
-    for collection in ["users", "credit_reservations", "credit_ledger"]:
+    for collection in ["users", "credit_reservations", "credit_ledger", "jobs"]:
         docs = db.collection(collection).list_documents()
         for doc in docs:
             doc.delete()
@@ -189,3 +190,64 @@ def test_mark_reconciliation_required_updates_reservation():
     reservation = db.collection("credit_reservations").document(job_id).get().to_dict()
     assert reservation["status"] == "reconciliation_required"
     assert reservation["lastError"] == "release_failed"
+
+
+def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
+    uid = "test-user-11"
+    session_id = "session-11"
+    email = "test11@example.com"
+    job_id = "job-10"
+    db = get_firestore_client()
+
+    get_or_create_credits(uid, email)
+    reserve_credits(uid, job_id, 2)
+    db.collection("jobs").document(job_id).set(
+        {
+            "userId": uid,
+            "sessionId": session_id,
+            "status": "queued",
+        }
+    )
+
+    result = settle_credits_and_complete_job(
+        uid,
+        job_id,
+        session_id,
+        61.0,
+        output_path="sessions/test/audio.mp3",
+        audio_url="/sessions/session-11/audio?file=audio.mp3",
+    )
+
+    assert result.status == "completed_and_settled"
+    assert result.actual_credits == 3
+
+    credits = get_or_create_credits(uid, email)
+    assert credits.balance == TRIAL_CREDIT_AMOUNT - 3
+    assert credits.reserved == 0
+
+    job = db.collection("jobs").document(job_id).get().to_dict()
+    assert job["status"] == "completed"
+    assert job["audioUrl"] == "/sessions/session-11/audio?file=audio.mp3"
+
+    ledger = list(
+        db.collection("credit_ledger")
+        .where("jobId", "==", job_id)
+        .where("type", "==", "settle")
+        .stream()
+    )
+    assert len(ledger) == 1
+
+    retry_result = settle_credits_and_complete_job(
+        uid,
+        job_id,
+        session_id,
+        61.0,
+        output_path="sessions/test/audio.mp3",
+        audio_url="/sessions/session-11/audio?file=audio.mp3",
+    )
+
+    assert retry_result.status == "already_completed_and_settled"
+
+    credits_after_retry = get_or_create_credits(uid, email)
+    assert credits_after_retry.balance == TRIAL_CREDIT_AMOUNT - 3
+    assert credits_after_retry.reserved == 0

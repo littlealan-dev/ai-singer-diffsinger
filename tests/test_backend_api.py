@@ -28,9 +28,9 @@ from src.backend.session import SessionStore
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 from src.backend.credits import UserCredits
 from src.backend.credits import (
+    CompleteJobAndSettleCreditsResult,
     ReleaseCreditsResult,
     ReserveCreditsResult,
-    SettleCreditsResult,
 )
 
 
@@ -142,8 +142,12 @@ def _prepare_app(monkeypatch, overrides=None):
         lambda *_, **__: ReleaseCreditsResult(status="released"),
     )
     monkeypatch.setattr(
-        "src.backend.credits.settle_credits",
-        lambda *_, **__: SettleCreditsResult(status="settled", actual_credits=1, overdrafted=False),
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *_, **__: CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=1,
+            overdrafted=False,
+        ),
     )
     monkeypatch.setattr("src.backend.main.upload_file", lambda *_, **__: None)
     monkeypatch.setattr(
@@ -3111,18 +3115,97 @@ def test_chat_releases_reserved_credits_when_synthesis_job_start_fails(client, m
     assert len(release_calls) == 1
 
 
-def test_progress_hides_audio_until_credit_settlement_succeeds(client, monkeypatch):
+def test_settle_failure_releases_reservation_and_fails_job_without_audio(client, monkeypatch):
     test_client, app = client
     session_id = _create_session(test_client)
-    job_id = "job-credit-reconcile"
+    job_id = "job-credit-settle-failed"
+    release_calls = {"count": 0}
 
     monkeypatch.setattr(
-        "src.backend.credits.settle_credits",
-        lambda *_, **__: SettleCreditsResult(
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *_, **__: CompleteJobAndSettleCreditsResult(
             status="reconciliation_required",
             actual_credits=2,
             overdrafted=False,
         ),
+    )
+
+    def fake_release(*_args, **_kwargs):
+        release_calls["count"] += 1
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "error"
+    assert "no credits were charged" in payload["message"].lower()
+    assert "audio_url" not in payload
+    assert release_calls["count"] == 1
+
+
+def test_settle_failure_with_release_failure_marks_reservation_for_ops_but_fails_job(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-credit-settle-release-failed"
+    reconciliation_marks = {"count": 0}
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *_, **__: CompleteJobAndSettleCreditsResult(
+            status="reconciliation_required",
+            actual_credits=2,
+            overdrafted=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda *_, **__: ReleaseCreditsResult(status="reconciliation_required"),
+    )
+
+    def fake_mark_reconciliation(*_args, **_kwargs):
+        reconciliation_marks["count"] += 1
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.credits.mark_reservation_reconciliation_required",
+        fake_mark_reconciliation,
     )
 
     app.state.job_store.create_job(
@@ -3162,8 +3245,434 @@ def test_progress_hides_audio_until_credit_settlement_succeeds(client, monkeypat
     assert progress.status_code == 200
     payload = progress.json()
     assert payload["status"] == "error"
-    assert "billing finalization failed" in payload["message"].lower()
+    assert "support intervention required" in payload["message"].lower()
     assert "audio_url" not in payload
+    assert reconciliation_marks["count"] == 1
+
+
+def test_run_synthesis_job_retries_settle_before_success(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-settle-retry"
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+
+    settle_calls = {"count": 0}
+
+    def fake_complete_and_settle(*_args, **_kwargs):
+        settle_calls["count"] += 1
+        if settle_calls["count"] == 1:
+            return CompleteJobAndSettleCreditsResult(
+                status="infra_error",
+                actual_credits=2,
+                overdrafted=False,
+            )
+        app.state.job_store.update_job(
+            job_id,
+            status="completed",
+            step="done",
+            message="Your take is ready.",
+            progress=1.0,
+            outputPath=_kwargs.get("output_path"),
+            audioUrl=_kwargs.get("audio_url"),
+        )
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=2,
+            overdrafted=False,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        fake_complete_and_settle,
+    )
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "done"
+    assert "audio_url" in payload
+    assert settle_calls["count"] == 2
+
+
+def test_run_synthesis_job_retries_atomic_complete_and_settle(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-update-retry"
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+
+    complete_attempts = {"count": 0}
+
+    def flaky_complete(*_args, **_kwargs):
+        complete_attempts["count"] += 1
+        if complete_attempts["count"] == 1:
+            return CompleteJobAndSettleCreditsResult(
+                status="infra_error",
+                actual_credits=2,
+                overdrafted=False,
+            )
+        app.state.job_store.update_job(
+            job_id,
+            status="completed",
+            step="done",
+            message="Your take is ready.",
+            progress=1.0,
+            outputPath=_kwargs.get("output_path"),
+            audioUrl=_kwargs.get("audio_url"),
+        )
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=2,
+            overdrafted=False,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        flaky_complete,
+    )
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "done"
+    assert "audio_url" in payload
+    assert complete_attempts["count"] == 2
+
+
+def test_chat_retries_startup_compensation_release(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+
+    release_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "src.backend.credits.reserve_credits",
+        lambda *_, **__: ReserveCreditsResult(status="reserved", estimated_credits=1),
+    )
+
+    def fake_release(_uid, _job_id):
+        release_calls["count"] += 1
+        if release_calls["count"] == 1:
+            return ReleaseCreditsResult(status="infra_error")
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
+
+    class SynthesisClient:
+        def generate(self, system_prompt, history):
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    import src.backend.orchestrator as orchestrator_module
+
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
+    app.state.llm_client = SynthesisClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+
+    async def fake_start_synthesis_job(*args, **kwargs):
+        raise RuntimeError("queue unavailable")
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    try:
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "please sing this song"},
+        )
+    finally:
+        orchestrator_module.synthesize_preflight_action_required = original_precheck
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert body["message"] == "Couldn't start the take. Please retry."
+    assert release_calls["count"] == 2
+
+
+def test_chat_retries_credit_reserve_before_starting_job(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+
+    reserve_calls = {"count": 0}
+
+    def fake_reserve(*_args, **_kwargs):
+        reserve_calls["count"] += 1
+        if reserve_calls["count"] == 1:
+            return ReserveCreditsResult(status="infra_error", estimated_credits=1)
+        return ReserveCreditsResult(status="reserved", estimated_credits=1)
+
+    monkeypatch.setattr("src.backend.credits.reserve_credits", fake_reserve)
+
+    class SynthesisClient:
+        def generate(self, system_prompt, history):
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    import src.backend.orchestrator as orchestrator_module
+
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
+    app.state.llm_client = SynthesisClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+
+    async def fake_start_synthesis_job(*args, **kwargs):
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    try:
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "please sing this song"},
+        )
+    finally:
+        orchestrator_module.synthesize_preflight_action_required = original_precheck
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert body["message"] == "Starting synthesis."
+    assert reserve_calls["count"] == 2
+
+
+def test_run_synthesis_job_can_inject_two_settle_failures_before_success(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-settle-fault-inject"
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+    object.__setattr__(app.state.settings, "credit_retry_test_settle_fail_count", 2)
+
+    settle_calls = {"count": 0}
+
+    def fake_complete_and_settle(*_args, **_kwargs):
+        settle_calls["count"] += 1
+        app.state.job_store.update_job(
+            job_id,
+            status="completed",
+            step="done",
+            message="Your take is ready.",
+            progress=1.0,
+            outputPath=_kwargs.get("output_path"),
+            audioUrl=_kwargs.get("audio_url"),
+        )
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=2,
+            overdrafted=False,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        fake_complete_and_settle,
+    )
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "done"
+    assert "audio_url" in payload
+    assert settle_calls["count"] == 1
+    assert app.state.orchestrator._settle_fault_injection_remaining.get(job_id) is None
+
+
+def test_run_synthesis_job_can_inject_three_release_failures_before_ops_failure(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-release-fault-inject"
+
+    object.__setattr__(app.state.settings, "credit_retry_base_delay_seconds", 0.0)
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 3)
+    object.__setattr__(app.state.settings, "credit_retry_test_settle_fail_count", 0)
+    object.__setattr__(app.state.settings, "credit_retry_test_release_fail_count", 3)
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *_args, **_kwargs: CompleteJobAndSettleCreditsResult(
+            status="infra_error",
+            actual_credits=2,
+            overdrafted=False,
+        ),
+    )
+
+    reconciliation_marks = {"count": 0}
+
+    def fake_mark_reconciliation(*_args, **_kwargs):
+        reconciliation_marks["count"] += 1
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.credits.mark_reservation_reconciliation_required",
+        fake_mark_reconciliation,
+    )
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "error"
+    assert "support intervention required" in payload["message"].lower()
+    assert "audio_url" not in payload
+    assert reconciliation_marks["count"] == 1
+    assert app.state.orchestrator._release_fault_injection_remaining.get(job_id) is None
 
 
 @pytest.mark.parametrize(

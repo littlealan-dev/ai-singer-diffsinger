@@ -16,7 +16,7 @@ The low-level credit mutations in [src/backend/credits.py](/Users/alanchan/antig
 
 The inconsistency risk exists in the orchestration around those transactions:
 - credits are reserved before synthesis job startup
-- job completion is recorded before settlement succeeds
+- settlement and user-visible job completion are published as separate operations
 - release/settle failures are collapsed to `False` or `(0, False)`
 - there is no visible reconciler for stranded `pending` reservations
 
@@ -46,14 +46,14 @@ In [src/backend/orchestrator.py](/Users/alanchan/antigravity/ai-singer-diffsinge
 Risk:
 - if job creation or task scheduling fails after reservation, credits remain `pending`
 
-### Gap 2: completed before settle
+### Gap 2: settlement and completion are split writes
 
-In `_run_synthesis_job(...)`, the job is marked `completed` before `settle_credits(...)` is called.
+In `_run_synthesis_job(...)`, credit settlement and completed-job publication happen as separate steps.
 
 Risk:
-- audio is exposed as ready
-- reservation may still be `pending`
-- user balance may remain unchanged
+- credits may be settled but `audioUrl` publication may fail
+- or job completion may be retried independently from billing state
+- the UI publish boundary is not atomic
 
 ### Gap 3: ambiguous credit API outcomes
 
@@ -124,6 +124,20 @@ class SettleCreditsResult:
 
 
 @dataclass(frozen=True)
+class CompleteJobAndSettleCreditsResult:
+    status: Literal[
+        "completed_and_settled",
+        "already_completed_and_settled",
+        "reservation_missing",
+        "already_released",
+        "reconciliation_required",
+        "infra_error",
+    ]
+    actual_credits: int
+    overdrafted: bool
+
+
+@dataclass(frozen=True)
 class ReleaseCreditsResult:
     status: Literal[
         "released",
@@ -160,15 +174,24 @@ Decision for implementation:
 3. if job startup fails, release immediately
 4. synthesize audio
 5. persist output
-6. settle credits
-7. only if settlement succeeds, mark job completed and expose final output
+6. atomically settle credits and mark the job completed with `audioUrl`
 
 If settlement fails:
 - do not mark the job completed
-- mark job as failed or `credit_reconciliation_required`
-- retain explicit recovery metadata on the job
-- retain the output file in storage/session state for operational replay, but withhold `audioUrl` from the progress payload until reconciliation succeeds
+- attempt to release the reservation immediately
+- if release succeeds, mark job as failed and return credits to the user
+- if release fails, mark the reservation `reconciliation_required` for ops, but still fail the job for the user
+- do not expose `audioUrl`
 - log at warning/error with correlation fields
+
+Atomic publish boundary:
+- user balance update
+- reservation status -> `settled`
+- settle ledger entry
+- job status -> `completed`
+- `audioUrl`
+
+These should commit in one Firestore transaction so the client never observes audio publication without settled billing, and billing never commits without the completed job payload.
 
 ## 4. Startup Compensation
 
@@ -213,17 +236,17 @@ Extend job status semantics in [src/backend/job_store.py](/Users/alanchan/antigr
 - `completed`
 - `failed`
 - `cancelled`
-- `credit_reconciliation_required`
 
-The UI/progress payload should expose this as a terminal error-like state with a user-safe message, for example:
-- "Your audio was generated, but billing finalization failed. Please retry later."
+The UI/progress payload should expose post-billing failures as normal terminal error states, for example:
+- "Audio was generated but billing could not be finalized. No credits were charged. Please try again."
+- "Audio was generated, but billing rollback failed. No audio was delivered. Support intervention required."
 
-This prevents silent exposure of a "completed" result when billing state is unresolved.
+This prevents silent exposure of a "completed" result when billing state is unresolved and avoids holding user credits when no audio can be delivered.
 
 Decision for implementation:
-- retain generated output files for operational replay and manual recovery
-- do not expose `audioUrl` while job status is `credit_reconciliation_required`
-- after successful reconciliation, update the job to `completed` and populate `audioUrl`; the existing client progress polling flow will pick up the transition naturally on the next poll
+- if the user cannot access the audio, reserved credits should be released instead of held for later user recovery
+- reservations may still be marked `reconciliation_required` internally when rollback itself fails, but job status remains `failed` or `cancelled`
+- generated output files may be retained for debugging, but they are not exposed later through progress polling
 
 ## Data Model Changes
 
@@ -273,6 +296,7 @@ Required logs:
 Change:
 - `reserve_credits(...)`
 - `settle_credits(...)`
+- `settle_credits_and_complete_job(...)`
 - `release_credits(...)`
 
 to return structured results rather than bare `bool` / tuple.
@@ -318,8 +342,10 @@ Behavior:
 
 Behavior:
 - do not mark completed
-- mark job `credit_reconciliation_required`
-- retain output path for ops recovery, but do not expose final success state
+- attempt `release_credits(...)`
+- if release succeeds, mark job `failed` and state that no credits were charged
+- if release fails, mark reservation `reconciliation_required` for ops and mark job `failed`
+- do not expose final success state
 
 ### Reserve succeeded, synthesis in progress, worker/server crashed
 
@@ -343,12 +369,14 @@ Unit / integration coverage required:
 1. reserve succeeds, `_start_synthesis_job(...)` raises, release succeeds
 2. reserve succeeds, startup fails, release fails, reservation becomes `reconciliation_required`
 3. synth succeeds, settle succeeds, job becomes completed
-4. synth succeeds, settle fails, job does not become completed
-5. failed settle does not decrement user balance or reserved credits because the Firestore transaction rolls back
-6. release on failure returns already-released or already-settled idempotently
-7. reconciler repairs expired `pending` reservation
-8. repeated reconciler run is idempotent
-9. ledger entries are written for reconciliation actions
+4. synth succeeds, atomic complete-and-settle succeeds, job becomes completed and `audioUrl` is exposed
+5. synth succeeds, atomic complete-and-settle fails, release succeeds, job becomes failed and credits are released
+6. synth succeeds, atomic complete-and-settle fails, release fails, job becomes failed and reservation becomes `reconciliation_required`
+7. failed atomic complete-and-settle does not partially commit credits or `audioUrl`
+8. release on failure returns already-released or already-settled idempotently
+9. reconciler repairs expired `pending` reservation
+10. repeated reconciler run is idempotent
+11. ledger entries are written for reconciliation actions
 
 ## Rollout Plan
 
@@ -359,12 +387,13 @@ Unit / integration coverage required:
 5. Backfill or inspect existing `pending` reservations in staging before prod rollout
 
 Note:
-- this is a signature-breaking change for `reserve_credits(...)`, `settle_credits(...)`, and `release_credits(...)`
+- this is a signature-breaking change for `reserve_credits(...)`, `settle_credits(...)`, `settle_credits_and_complete_job(...)`, and `release_credits(...)`
 - rollout step 1 is not additive behind old interfaces; caller updates must land atomically
 
 ## Remaining Open Questions
 
 None at the design level. Current implementation decisions are:
-- `credit_reconciliation_required` jobs do not expose `audioUrl`
-- reconciler updates the job to `completed` and sets `audioUrl` after successful reconciliation
-- the client discovers this through the existing progress polling path via the status transition `credit_reconciliation_required -> completed`
+- if playback is not exposed to the user, reserved credits must not remain held after retry exhaustion
+- reservation reconciliation is internal-only and exists only for rollback failures
+- jobs do not transition from a billing-error state back to `completed` through progress polling
+- the user-visible publish boundary is the atomic `complete_and_settle` Firestore transaction

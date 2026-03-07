@@ -15,9 +15,9 @@ import firebase_admin
 from src.backend.main import create_app
 from src.backend.firebase_app import get_firestore_client
 from src.backend.credits import (
+    CompleteJobAndSettleCreditsResult,
     ReleaseCreditsResult,
     ReserveCreditsResult,
-    SettleCreditsResult,
 )
 from src.backend.llm_client import StaticLlmClient
 from src.backend.llm_prompt import parse_llm_response
@@ -276,8 +276,12 @@ def gemini_client(monkeypatch):
         lambda *args, **kwargs: ReserveCreditsResult(status="reserved", estimated_credits=1),
     )
     monkeypatch.setattr(
-        "src.backend.credits.settle_credits",
-        lambda *args, **kwargs: SettleCreditsResult(status="settled", actual_credits=0, overdrafted=False),
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *args, **kwargs: CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=0,
+            overdrafted=False,
+        ),
     )
     monkeypatch.setattr(
         "src.backend.credits.release_credits",

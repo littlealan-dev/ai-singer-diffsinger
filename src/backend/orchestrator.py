@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 import asyncio
 import logging
 import copy
@@ -14,9 +14,11 @@ import re
 import uuid
 
 from src.backend.config import Settings
+from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient
 from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
+from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
@@ -64,6 +66,8 @@ class Orchestrator:
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
         self._chat_locks_guard = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
+        self._settle_fault_injection_remaining: Dict[str, int] = {}
+        self._release_fault_injection_remaining: Dict[str, int] = {}
 
     async def handle_chat(
         self,
@@ -486,10 +490,12 @@ class Orchestrator:
     def _release_result_allows_terminal_status(status: str) -> bool:
         return status in {"released", "already_released", "reservation_missing"}
 
-    async def _mark_job_credit_reconciliation_required(
+    async def _mark_job_terminal_billing_state(
         self,
         *,
         job_id: str,
+        status: str,
+        step: str,
         message: str,
         error_message: str,
         output_path: Optional[str] = None,
@@ -497,13 +503,103 @@ class Orchestrator:
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
-            status="credit_reconciliation_required",
-            step="billing",
+            status=status,
+            step=step,
             message=message,
             progress=1.0,
             outputPath=output_path,
             errorMessage=error_message,
         )
+
+    async def _mark_reservation_reconciliation_required(
+        self,
+        *,
+        user_id: str,
+        job_id: str,
+        reservation_error: str,
+        reservation_error_message: str,
+    ) -> None:
+        from src.backend.credits import mark_reservation_reconciliation_required
+
+        await asyncio.to_thread(
+            mark_reservation_reconciliation_required,
+            user_id,
+            job_id,
+            last_error=reservation_error,
+            last_error_message=reservation_error_message,
+        )
+
+    def _complete_job_and_settle_credits_with_retry_fault_injection(
+        self,
+        user_id: str,
+        job_id: str,
+        session_id: str,
+        duration_seconds: float,
+        *,
+        output_path: Optional[str],
+        audio_url: Optional[str],
+    ):
+        from src.backend.credits import (
+            CompleteJobAndSettleCreditsResult,
+            estimate_credits,
+            settle_credits_and_complete_job,
+        )
+
+        if (
+            self._settings.credit_retry_test_settle_fail_count > 0
+            and self._settings.app_env.lower() in {"dev", "development", "local", "test"}
+        ):
+            remaining = self._settle_fault_injection_remaining.setdefault(
+                job_id,
+                self._settings.credit_retry_test_settle_fail_count,
+            )
+            if remaining > 0:
+                self._settle_fault_injection_remaining[job_id] = remaining - 1
+                self._logger.warning(
+                    "inject_settle_infra_error job=%s remaining_failures=%s",
+                    job_id,
+                    remaining - 1,
+                )
+                return CompleteJobAndSettleCreditsResult(
+                    status="infra_error",
+                    actual_credits=estimate_credits(duration_seconds),
+                    overdrafted=False,
+                )
+            self._settle_fault_injection_remaining.pop(job_id, None)
+        return settle_credits_and_complete_job(
+            user_id,
+            job_id,
+            session_id,
+            duration_seconds,
+            output_path=output_path,
+            audio_url=audio_url,
+        )
+
+    def _release_credits_with_retry_fault_injection(
+        self,
+        user_id: str,
+        job_id: str,
+    ):
+        from src.backend.credits import ReleaseCreditsResult, release_credits
+
+        if (
+            self._settings.credit_retry_test_release_fail_count > 0
+            and self._settings.app_env.lower() in {"dev", "development", "local", "test"}
+        ):
+            remaining = self._release_fault_injection_remaining.setdefault(
+                job_id,
+                self._settings.credit_retry_test_release_fail_count,
+            )
+            if remaining > 0:
+                self._release_fault_injection_remaining[job_id] = remaining - 1
+                self._logger.warning(
+                    "inject_release_infra_error job=%s remaining_failures=%s",
+                    job_id,
+                    remaining - 1,
+                )
+                return ReleaseCreditsResult(status="infra_error")
+            self._release_fault_injection_remaining.pop(job_id, None)
+        return release_credits(user_id, job_id)
 
     async def _run_synthesis_job(
         self,
@@ -548,26 +644,23 @@ class Orchestrator:
                 user_id=user_id,
                 output_storage_path=output_storage_path,
             )
-            from src.backend.credits import settle_credits
             duration_seconds = response.get("duration_seconds", 0.0)
-            settle_result = await asyncio.to_thread(
-                settle_credits,
+            output_path = response.get("output_storage_path") or response.get("output_path")
+            settle_result = await retry_credit_op(
+                self._complete_job_and_settle_credits_with_retry_fault_injection,
                 user_id,
                 job_id,
+                session_id,
                 duration_seconds,
+                output_path=output_path,
+                audio_url=response.get("audio_url"),
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
             )
-            output_path = response.get("output_storage_path") or response.get("output_path")
-            if settle_result.status in {"settled", "already_settled"}:
-                await asyncio.to_thread(
-                    self._job_store.update_job,
-                    job_id,
-                    status="completed",
-                    step="done",
-                    message="Your take is ready.",
-                    progress=1.0,
-                    outputPath=output_path,
-                    audioUrl=response.get("audio_url"),
-                )
+            if settle_result.status in {
+                "completed_and_settled",
+                "already_completed_and_settled",
+            }:
                 return
             self._logger.error(
                 "credit_settlement_unresolved session=%s job=%s status=%s",
@@ -575,32 +668,82 @@ class Orchestrator:
                 job_id,
                 settle_result.status,
             )
-            await self._mark_job_credit_reconciliation_required(
+            release_result = await retry_credit_op(
+                self._release_credits_with_retry_fault_injection,
+                user_id,
+                job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
+            if self._release_result_allows_terminal_status(release_result.status):
+                await self._mark_job_terminal_billing_state(
+                    job_id=job_id,
+                    status="failed",
+                    step="error",
+                    message=backend_message("job.audio_generated_billing_failed_no_charge"),
+                    error_message=(
+                        "Billing finalization failed after audio generation. "
+                        f"settle_status={settle_result.status} "
+                        f"release_status={release_result.status}"
+                    ),
+                    output_path=output_path,
+                )
+                return
+            await self._mark_reservation_reconciliation_required(
+                user_id=user_id,
                 job_id=job_id,
-                message="Your audio was generated, but billing finalization failed. Please retry later.",
+                reservation_error="settle_release_failed",
+                reservation_error_message=(
+                    "Billing finalization failed after audio generation and reservation rollback "
+                    f"could not be completed. settle_status={settle_result.status} "
+                    f"release_status={release_result.status}"
+                ),
+            )
+            await self._mark_job_terminal_billing_state(
+                job_id=job_id,
+                status="failed",
+                step="error",
+                message=backend_message("job.audio_generated_billing_rollback_failed"),
                 error_message=(
-                    "Billing finalization failed after audio generation. "
-                    f"status={settle_result.status}"
+                    "Billing finalization failed after audio generation and billing rollback "
+                    f"did not complete. settle_status={settle_result.status} "
+                    f"release_status={release_result.status}"
                 ),
                 output_path=output_path,
             )
         except asyncio.CancelledError:
             # Release credits
-            from src.backend.credits import release_credits
-            release_result = await asyncio.to_thread(release_credits, user_id, job_id)
+            release_result = await retry_credit_op(
+                self._release_credits_with_retry_fault_injection,
+                user_id,
+                job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
                     status="cancelled",
                     step="cancelled",
-                    message="That take was cancelled.",
+                    message=backend_message("job.cancelled"),
                     progress=1.0,
                 )
             else:
-                await self._mark_job_credit_reconciliation_required(
+                await self._mark_reservation_reconciliation_required(
+                    user_id=user_id,
                     job_id=job_id,
-                    message="That take was cancelled, but billing rollback still needs repair.",
+                    reservation_error="release_failed_after_cancel",
+                    reservation_error_message=(
+                        "Billing rollback failed after cancellation. "
+                        f"status={release_result.status}"
+                    ),
+                )
+                await self._mark_job_terminal_billing_state(
+                    job_id=job_id,
+                    status="cancelled",
+                    step="cancelled",
+                    message=backend_message("job.cancelled_billing_rollback_failed"),
                     error_message=(
                         "Billing rollback failed after cancellation. "
                         f"status={release_result.status}"
@@ -609,8 +752,13 @@ class Orchestrator:
             raise
         except Exception as exc:
             # Release credits
-            from src.backend.credits import release_credits
-            release_result = await asyncio.to_thread(release_credits, user_id, job_id)
+            release_result = await retry_credit_op(
+                self._release_credits_with_retry_fault_injection,
+                user_id,
+                job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
@@ -618,14 +766,24 @@ class Orchestrator:
                     job_id,
                     status="failed",
                     step="error",
-                    message="Couldn't finish the take.",
+                    message=backend_message("job.finish_failed"),
                     progress=1.0,
                     errorMessage=str(exc),
                 )
             else:
-                await self._mark_job_credit_reconciliation_required(
+                await self._mark_reservation_reconciliation_required(
+                    user_id=user_id,
                     job_id=job_id,
-                    message="Audio generation failed, and billing rollback still needs repair.",
+                    reservation_error="release_failed_after_synthesis_error",
+                    reservation_error_message=(
+                        f"{exc} | billing_rollback_status={release_result.status}"
+                    ),
+                )
+                await self._mark_job_terminal_billing_state(
+                    job_id=job_id,
+                    status="failed",
+                    step="error",
+                    message=backend_message("job.audio_generation_and_billing_rollback_failed"),
                     error_message=(
                         f"{exc} | billing_rollback_status={release_result.status}"
                     ),
@@ -2583,7 +2741,7 @@ class Orchestrator:
                         score=current_score, 
                         audio_response={
                             "type": "chat_text", 
-                            "message": "Your account is locked due to a negative credit balance. Please join the waiting list for more credits."
+                            "message": backend_message("account.locked_negative_balance"),
                         },
                         explicit_verse_number=selected_explicit_verse_number,
                     )
@@ -2592,7 +2750,7 @@ class Orchestrator:
                         score=current_score, 
                         audio_response={
                             "type": "chat_text", 
-                            "message": "Your free trial credits have expired."
+                            "message": backend_message("account.free_trial_expired"),
                         },
                         explicit_verse_number=selected_explicit_verse_number,
                     )
@@ -2688,21 +2846,24 @@ class Orchestrator:
                 est_credits = estimate_credits(float(duration_seconds))
                 
                 job_id = uuid.uuid4().hex
-                reserve_result = await asyncio.to_thread(
+                reserve_result = await retry_credit_op(
                     reserve_credits,
                     user_id,
                     job_id,
                     est_credits,
                     self._settings.session_ttl_seconds,
+                    max_attempts=self._settings.credit_retry_max_attempts,
+                    base_delay=self._settings.credit_retry_base_delay_seconds,
                 )
                 if reserve_result.status in {"insufficient_balance", "overdrafted"}:
                     followup_prompt = json.dumps(
                         {
                             "error": {
                                 "type": "insufficient_credits",
-                                "message": (
-                                    f"Insufficient credits. This render requires ~{est_credits} credits, "
-                                    f"but you only have {user_credits.available_balance} available."
+                                "message": backend_message(
+                                    "account.insufficient_credits",
+                                    estimated_credits=est_credits,
+                                    available_credits=user_credits.available_balance,
                                 ),
                                 "estimated_credits": est_credits,
                                 "available_credits": user_credits.available_balance,
@@ -2724,7 +2885,7 @@ class Orchestrator:
                         score=current_score,
                         audio_response={
                             "type": "chat_text",
-                            "message": "Your free trial credits have expired.",
+                            "message": backend_message("account.free_trial_expired"),
                         },
                         explicit_verse_number=selected_explicit_verse_number,
                     )
@@ -2739,7 +2900,7 @@ class Orchestrator:
                         score=current_score,
                         audio_response={
                             "type": "chat_text",
-                            "message": "Couldn't start the take because billing setup failed. Please retry.",
+                            "message": backend_message("billing.setup_failed_retry"),
                         },
                         explicit_verse_number=selected_explicit_verse_number,
                     )
@@ -2750,10 +2911,15 @@ class Orchestrator:
                 except Exception as exc:
                     from src.backend.credits import (
                         mark_reservation_reconciliation_required,
-                        release_credits,
                     )
 
-                    release_result = await asyncio.to_thread(release_credits, user_id, job_id)
+                    release_result = await retry_credit_op(
+                        self._release_credits_with_retry_fault_injection,
+                        user_id,
+                        job_id,
+                        max_attempts=self._settings.credit_retry_max_attempts,
+                        base_delay=self._settings.credit_retry_base_delay_seconds,
+                    )
                     self._logger.exception(
                         "synthesis_job_start_failed session=%s job=%s error=%s",
                         session_id,
@@ -2768,12 +2934,11 @@ class Orchestrator:
                             last_error="start_synthesis_job_failed",
                             last_error_message=str(exc),
                         )
-                        message = (
-                            "Couldn't start the take, and billing rollback still needs repair. "
-                            "Please retry later."
+                        message = backend_message(
+                            "job.start_failed_billing_rollback_pending"
                         )
                     else:
-                        message = "Couldn't start the take. Please retry."
+                        message = backend_message("job.start_failed_retry")
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response={
@@ -3000,8 +3165,6 @@ class Orchestrator:
                 }
             )
         return summary
-
-
 @dataclass(frozen=True)
 class ToolExecutionResult:
     """Return value for tool execution: optional audio plus score."""
