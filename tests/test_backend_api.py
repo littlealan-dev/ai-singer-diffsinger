@@ -27,6 +27,11 @@ from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.session import SessionStore
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 from src.backend.credits import UserCredits
+from src.backend.credits import (
+    ReleaseCreditsResult,
+    ReserveCreditsResult,
+    SettleCreditsResult,
+)
 
 
 def _make_router_call_tool():
@@ -128,9 +133,18 @@ def _prepare_app(monkeypatch, overrides=None):
             overdrafted=False,
         ),
     )
-    monkeypatch.setattr("src.backend.credits.reserve_credits", lambda *_, **__: True)
-    monkeypatch.setattr("src.backend.credits.release_credits", lambda *_, **__: True)
-    monkeypatch.setattr("src.backend.credits.settle_credits", lambda *_, **__: (1, False))
+    monkeypatch.setattr(
+        "src.backend.credits.reserve_credits",
+        lambda *_, **__: ReserveCreditsResult(status="reserved", estimated_credits=1),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda *_, **__: ReleaseCreditsResult(status="released"),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits",
+        lambda *_, **__: SettleCreditsResult(status="settled", actual_credits=1, overdrafted=False),
+    )
     monkeypatch.setattr("src.backend.main.upload_file", lambda *_, **__: None)
     monkeypatch.setattr(
         "src.backend.main.download_bytes",
@@ -3041,6 +3055,115 @@ def test_get_audio_requires_playback_token(client):
     response = test_client.get(f"/sessions/{session_id}/audio")
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing playback token."
+
+
+def test_chat_releases_reserved_credits_when_synthesis_job_start_fails(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    release_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "src.backend.credits.reserve_credits",
+        lambda *_, **__: ReserveCreditsResult(status="reserved", estimated_credits=1),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda _uid, job_id: release_calls.append(job_id) or ReleaseCreditsResult(status="released"),
+    )
+
+    class SynthesisClient:
+        def generate(self, system_prompt, history):
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    import src.backend.orchestrator as orchestrator_module
+
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
+    app.state.llm_client = SynthesisClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+
+    async def fake_start_synthesis_job(*args, **kwargs):
+        raise RuntimeError("queue unavailable")
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    try:
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "please sing this song"},
+        )
+    finally:
+        orchestrator_module.synthesize_preflight_action_required = original_precheck
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert "Couldn't start the take" in body["message"]
+    assert len(release_calls) == 1
+
+
+def test_progress_hides_audio_until_credit_settlement_succeeds(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-credit-reconcile"
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits",
+        lambda *_, **__: SettleCreditsResult(
+            status="reconciliation_required",
+            actual_credits=2,
+            overdrafted=False,
+        ),
+    )
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*args, **kwargs):
+        return {
+            "audio_url": f"/sessions/{session_id}/audio?file=audio-test.wav",
+            "output_path": "tests/output/audio-test.wav",
+            "duration_seconds": 61.0,
+        }
+
+    app.state.orchestrator._synthesize = fake_synthesize
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {},
+            {},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "error"
+    assert "billing finalization failed" in payload["message"].lower()
+    assert "audio_url" not in payload
 
 
 @pytest.mark.parametrize(

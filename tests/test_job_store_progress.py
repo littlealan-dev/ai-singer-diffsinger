@@ -33,6 +33,23 @@ def test_build_progress_payload_maps_error_status():
     assert payload["error"] == "boom"
 
 
+def test_build_progress_payload_maps_credit_reconciliation_status_to_error():
+    payload = build_progress_payload(
+        "job-billing",
+        {
+            "status": "credit_reconciliation_required",
+            "message": "Billing finalization failed.",
+            "errorMessage": "settle_failed",
+            "outputPath": "sessions/u/s/j/audio.wav",
+            "audioUrl": "/sessions/abc/audio",
+        },
+    )
+    assert payload["status"] == "error"
+    assert payload["message"] == "Billing finalization failed."
+    assert payload["error"] == "settle_failed"
+    assert "audio_url" not in payload
+
+
 def test_build_progress_payload_includes_preprocess_review_fields():
     payload = build_progress_payload(
         "job-pre",

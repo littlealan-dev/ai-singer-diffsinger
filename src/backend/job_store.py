@@ -86,10 +86,11 @@ class JobStore:
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize job data into a progress payload for clients."""
-    status = data.get("status", "idle")
-    if status == "completed":
+    raw_status = data.get("status", "idle")
+    status = raw_status
+    if raw_status == "completed":
         status = "done"
-    elif status in {"failed", "cancelled"}:
+    elif raw_status in {"failed", "cancelled", "credit_reconciliation_required"}:
         status = "error"
     payload: Dict[str, Any] = {
         "status": status,
@@ -106,4 +107,6 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "details": data.get("details"),
         "updated_at": data.get("updatedAt"),
     }
+    if raw_status == "credit_reconciliation_required":
+        payload.pop("audio_url", None)
     return {key: value for key, value in payload.items() if value is not None}

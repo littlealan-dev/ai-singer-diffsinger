@@ -482,6 +482,29 @@ class Orchestrator:
             "job_id": job_id,
         }
 
+    @staticmethod
+    def _release_result_allows_terminal_status(status: str) -> bool:
+        return status in {"released", "already_released", "reservation_missing"}
+
+    async def _mark_job_credit_reconciliation_required(
+        self,
+        *,
+        job_id: str,
+        message: str,
+        error_message: str,
+        output_path: Optional[str] = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            status="credit_reconciliation_required",
+            step="billing",
+            message=message,
+            progress=1.0,
+            outputPath=output_path,
+            errorMessage=error_message,
+        )
+
     async def _run_synthesis_job(
         self,
         session_id: str,
@@ -525,47 +548,88 @@ class Orchestrator:
                 user_id=user_id,
                 output_storage_path=output_storage_path,
             )
-            await asyncio.to_thread(
-                self._job_store.update_job,
-                job_id,
-                status="completed",
-                step="done",
-                message="Your take is ready.",
-                progress=1.0,
-                outputPath=response.get("output_storage_path") or response.get("output_path"),
-                audioUrl=response.get("audio_url"),
-            )
-            # Settle credits
             from src.backend.credits import settle_credits
             duration_seconds = response.get("duration_seconds", 0.0)
-            await asyncio.to_thread(settle_credits, user_id, job_id, duration_seconds)
+            settle_result = await asyncio.to_thread(
+                settle_credits,
+                user_id,
+                job_id,
+                duration_seconds,
+            )
+            output_path = response.get("output_storage_path") or response.get("output_path")
+            if settle_result.status in {"settled", "already_settled"}:
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="completed",
+                    step="done",
+                    message="Your take is ready.",
+                    progress=1.0,
+                    outputPath=output_path,
+                    audioUrl=response.get("audio_url"),
+                )
+                return
+            self._logger.error(
+                "credit_settlement_unresolved session=%s job=%s status=%s",
+                session_id,
+                job_id,
+                settle_result.status,
+            )
+            await self._mark_job_credit_reconciliation_required(
+                job_id=job_id,
+                message="Your audio was generated, but billing finalization failed. Please retry later.",
+                error_message=(
+                    "Billing finalization failed after audio generation. "
+                    f"status={settle_result.status}"
+                ),
+                output_path=output_path,
+            )
         except asyncio.CancelledError:
             # Release credits
             from src.backend.credits import release_credits
-            await asyncio.to_thread(release_credits, user_id, job_id)
-            await asyncio.to_thread(
-                self._job_store.update_job,
-                job_id,
-                status="cancelled",
-                step="cancelled",
-                message="That take was cancelled.",
-                progress=1.0,
-            )
+            release_result = await asyncio.to_thread(release_credits, user_id, job_id)
+            if self._release_result_allows_terminal_status(release_result.status):
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="cancelled",
+                    step="cancelled",
+                    message="That take was cancelled.",
+                    progress=1.0,
+                )
+            else:
+                await self._mark_job_credit_reconciliation_required(
+                    job_id=job_id,
+                    message="That take was cancelled, but billing rollback still needs repair.",
+                    error_message=(
+                        "Billing rollback failed after cancellation. "
+                        f"status={release_result.status}"
+                    ),
+                )
             raise
         except Exception as exc:
             # Release credits
             from src.backend.credits import release_credits
-            await asyncio.to_thread(release_credits, user_id, job_id)
+            release_result = await asyncio.to_thread(release_credits, user_id, job_id)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
-            await asyncio.to_thread(
-                self._job_store.update_job,
-                job_id,
-                status="failed",
-                step="error",
-                message="Couldn't finish the take.",
-                progress=1.0,
-                errorMessage=str(exc),
-            )
+            if self._release_result_allows_terminal_status(release_result.status):
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="failed",
+                    step="error",
+                    message="Couldn't finish the take.",
+                    progress=1.0,
+                    errorMessage=str(exc),
+                )
+            else:
+                await self._mark_job_credit_reconciliation_required(
+                    job_id=job_id,
+                    message="Audio generation failed, and billing rollback still needs repair.",
+                    error_message=(
+                        f"{exc} | billing_rollback_status={release_result.status}"
+                    ),
+                )
         finally:
             clear_log_context()
 
@@ -778,7 +842,9 @@ class Orchestrator:
                 preprocess_iteration = False
 
             if followup_prompt is None:
-                if response_message:
+                if response_message and (
+                    response.get("type") == "chat_progress" or not response.get("message")
+                ):
                     response["message"] = response_message
                 if review_required_pending:
                     response["review_required"] = True
@@ -2622,14 +2688,14 @@ class Orchestrator:
                 est_credits = estimate_credits(float(duration_seconds))
                 
                 job_id = uuid.uuid4().hex
-                reserved = await asyncio.to_thread(
+                reserve_result = await asyncio.to_thread(
                     reserve_credits,
                     user_id,
                     job_id,
                     est_credits,
                     self._settings.session_ttl_seconds,
                 )
-                if not reserved:
+                if reserve_result.status in {"insufficient_balance", "overdrafted"}:
                     followup_prompt = json.dumps(
                         {
                             "error": {
@@ -2653,9 +2719,69 @@ class Orchestrator:
                         followup_prompt=followup_prompt,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
-                audio_response = await self._start_synthesis_job(
-                    session_id, current_score, synth_args, user_id=user_id, job_id=job_id
-                )
+                if reserve_result.status == "expired":
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_text",
+                            "message": "Your free trial credits have expired.",
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                if reserve_result.status not in {"reserved", "reservation_exists"}:
+                    self._logger.error(
+                        "credit_reservation_failed session=%s job=%s status=%s",
+                        session_id,
+                        job_id,
+                        reserve_result.status,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_text",
+                            "message": "Couldn't start the take because billing setup failed. Please retry.",
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                try:
+                    audio_response = await self._start_synthesis_job(
+                        session_id, current_score, synth_args, user_id=user_id, job_id=job_id
+                    )
+                except Exception as exc:
+                    from src.backend.credits import (
+                        mark_reservation_reconciliation_required,
+                        release_credits,
+                    )
+
+                    release_result = await asyncio.to_thread(release_credits, user_id, job_id)
+                    self._logger.exception(
+                        "synthesis_job_start_failed session=%s job=%s error=%s",
+                        session_id,
+                        job_id,
+                        exc,
+                    )
+                    if not self._release_result_allows_terminal_status(release_result.status):
+                        await asyncio.to_thread(
+                            mark_reservation_reconciliation_required,
+                            user_id,
+                            job_id,
+                            last_error="start_synthesis_job_failed",
+                            last_error_message=str(exc),
+                        )
+                        message = (
+                            "Couldn't start the take, and billing rollback still needs repair. "
+                            "Please retry later."
+                        )
+                    else:
+                        message = "Couldn't start the take. Please retry."
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_text",
+                            "message": message,
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
         # If a reparse succeeded but no downstream tool produced a terminal response in this
         # batch, issue one internal follow-up LLM turn with refreshed score context and let
         # the model decide whether to synthesize directly or preprocess for the new verse.

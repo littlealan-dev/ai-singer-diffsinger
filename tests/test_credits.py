@@ -7,6 +7,7 @@ from src.backend.credits import (
     reserve_credits,
     settle_credits,
     release_credits,
+    mark_reservation_reconciliation_required,
     CREDIT_DURATION_SECONDS,
     TRIAL_CREDIT_AMOUNT
 )
@@ -55,8 +56,8 @@ def test_reserve_credits_success():
     get_or_create_credits(uid, "test2@example.com")
     
     job_id = "job-1"
-    success = reserve_credits(uid, job_id, 3) # Request 3 credits
-    assert success
+    result = reserve_credits(uid, job_id, 3) # Request 3 credits
+    assert result.status == "reserved"
     
     credits = get_or_create_credits(uid, "test2@example.com")
     assert credits.reserved == 3
@@ -66,8 +67,8 @@ def test_reserve_credits_insufficient():
     uid = "test-user-3"
     get_or_create_credits(uid, "test3@example.com")
     
-    success = reserve_credits(uid, "job-2", TRIAL_CREDIT_AMOUNT + 1)
-    assert not success
+    result = reserve_credits(uid, "job-2", TRIAL_CREDIT_AMOUNT + 1)
+    assert result.status == "insufficient_balance"
     
     credits = get_or_create_credits(uid, "test3@example.com")
     assert credits.reserved == 0
@@ -80,9 +81,10 @@ def test_settle_credits_exact():
     reserve_credits(uid, job_id, 5) # Reserve 5
     
     # Settle with 2 credits (60s)
-    actual_credits, overdrafted = settle_credits(uid, job_id, 60.0)
-    assert actual_credits == 2
-    assert not overdrafted
+    result = settle_credits(uid, job_id, 60.0)
+    assert result.status == "settled"
+    assert result.actual_credits == 2
+    assert not result.overdrafted
     
     credits = get_or_create_credits(uid, "test4@example.com")
     assert credits.balance == TRIAL_CREDIT_AMOUNT - 2
@@ -96,9 +98,10 @@ def test_settle_credits_overdraft():
     reserve_credits(uid, job_id, 5)
     
     # Settle with 12 credits (360s) -> should overdraft
-    actual_credits, overdrafted = settle_credits(uid, job_id, 360.0)
-    assert actual_credits == 12
-    assert overdrafted
+    result = settle_credits(uid, job_id, 360.0)
+    assert result.status == "settled"
+    assert result.actual_credits == 12
+    assert result.overdrafted
     
     credits = get_or_create_credits(uid, "test5@example.com")
     assert credits.balance == TRIAL_CREDIT_AMOUNT - 12
@@ -111,8 +114,8 @@ def test_release_credits():
     job_id = "job-5"
     reserve_credits(uid, job_id, 4)
     
-    success = release_credits(uid, job_id)
-    assert success
+    result = release_credits(uid, job_id)
+    assert result.status == "released"
     
     credits = get_or_create_credits(uid, "test6@example.com")
     assert credits.reserved == 0
@@ -138,5 +141,51 @@ def test_expired_credits():
     assert credits.is_expired
     
     # Reservation should fail
-    success = reserve_credits(uid, "job-6", 1)
-    assert not success
+    result = reserve_credits(uid, "job-6", 1)
+    assert result.status == "expired"
+
+
+def test_reserve_credits_duplicate_is_idempotent():
+    uid = "test-user-8"
+    get_or_create_credits(uid, "test8@example.com")
+
+    first = reserve_credits(uid, "job-7", 2)
+    second = reserve_credits(uid, "job-7", 2)
+
+    assert first.status == "reserved"
+    assert second.status == "reservation_exists"
+
+    credits = get_or_create_credits(uid, "test8@example.com")
+    assert credits.reserved == 2
+
+
+def test_release_credits_reports_already_settled():
+    uid = "test-user-9"
+    get_or_create_credits(uid, "test9@example.com")
+
+    job_id = "job-8"
+    reserve_credits(uid, job_id, 2)
+    settle_credits(uid, job_id, 30.0)
+
+    result = release_credits(uid, job_id)
+    assert result.status == "already_settled"
+
+
+def test_mark_reconciliation_required_updates_reservation():
+    uid = "test-user-10"
+    get_or_create_credits(uid, "test10@example.com")
+    job_id = "job-9"
+    reserve_credits(uid, job_id, 1)
+
+    marked = mark_reservation_reconciliation_required(
+        uid,
+        job_id,
+        last_error="release_failed",
+        last_error_message="boom",
+    )
+
+    assert marked is True
+    db = get_firestore_client()
+    reservation = db.collection("credit_reservations").document(job_id).get().to_dict()
+    assert reservation["status"] == "reconciliation_required"
+    assert reservation["lastError"] == "release_failed"

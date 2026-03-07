@@ -14,6 +14,11 @@ import firebase_admin
 
 from src.backend.main import create_app
 from src.backend.firebase_app import get_firestore_client
+from src.backend.credits import (
+    ReleaseCreditsResult,
+    ReserveCreditsResult,
+    SettleCreditsResult,
+)
 from src.backend.llm_client import StaticLlmClient
 from src.backend.llm_prompt import parse_llm_response
 from src.backend.storage_client import blob_exists
@@ -266,9 +271,18 @@ def gemini_client(monkeypatch):
         "src.backend.credits.get_or_create_credits",
         lambda uid, email: _UnlimitedCredits(),
     )
-    monkeypatch.setattr("src.backend.credits.reserve_credits", lambda *args, **kwargs: True)
-    monkeypatch.setattr("src.backend.credits.settle_credits", lambda *args, **kwargs: (0, False))
-    monkeypatch.setattr("src.backend.credits.release_credits", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "src.backend.credits.reserve_credits",
+        lambda *args, **kwargs: ReserveCreditsResult(status="reserved", estimated_credits=1),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits",
+        lambda *args, **kwargs: SettleCreditsResult(status="settled", actual_credits=0, overdrafted=False),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda *args, **kwargs: ReleaseCreditsResult(status="released"),
+    )
 
     log_path = data_dir / "backend_e2e.log"
     logger = logging.getLogger("backend_e2e")
