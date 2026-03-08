@@ -49,6 +49,8 @@ def test_estimate_credits():
     assert estimate_credits(0) == 0
     assert estimate_credits(15) == 1  # 15s -> 1 credit (30s block)
     assert estimate_credits(30) == 1
+    assert estimate_credits(30.00018140589569) == 1
+    assert estimate_credits(30.0006) == 2
     assert estimate_credits(31) == 2
     assert estimate_credits(60) == 2
 
@@ -57,12 +59,16 @@ def test_reserve_credits_success():
     get_or_create_credits(uid, "test2@example.com")
     
     job_id = "job-1"
-    result = reserve_credits(uid, job_id, 3) # Request 3 credits
+    result = reserve_credits(uid, job_id, 3, session_id="session-1") # Request 3 credits
     assert result.status == "reserved"
     
     credits = get_or_create_credits(uid, "test2@example.com")
     assert credits.reserved == 3
     assert credits.available_balance == TRIAL_CREDIT_AMOUNT - 3
+    db = get_firestore_client()
+    reservation = db.collection("credit_reservations").document(job_id).get().to_dict()
+    assert reservation["jobId"] == job_id
+    assert reservation["sessionId"] == "session-1"
 
 def test_reserve_credits_insufficient():
     uid = "test-user-3"

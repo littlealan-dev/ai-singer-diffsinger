@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 # Constants
 CREDIT_DURATION_SECONDS = 30
+_CREDIT_DURATION_PRECISION_SECONDS = 0.001
 TRIAL_CREDIT_AMOUNT = 10
 TRIAL_EXPIRY_DAYS = 14
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
@@ -189,13 +190,18 @@ def estimate_credits(duration_seconds: float) -> int:
     """Calculate estimated credits for a given duration."""
     if duration_seconds <= 0:
         return 0
-    return math.ceil(duration_seconds / CREDIT_DURATION_SECONDS)
+    normalized_duration = round(
+        float(duration_seconds) / _CREDIT_DURATION_PRECISION_SECONDS
+    ) * _CREDIT_DURATION_PRECISION_SECONDS
+    return math.ceil(normalized_duration / CREDIT_DURATION_SECONDS)
 
 def reserve_credits(
     uid: str,
     job_id: str,
     estimated_credits: int,
     reservation_ttl_seconds: Optional[int] = None,
+    *,
+    session_id: Optional[str] = None,
 ) -> ReserveCreditsResult:
     """
     Atomically reserve credits for a job.
@@ -280,6 +286,8 @@ def reserve_credits(
         now = datetime.now(timezone.utc)
         ttl_seconds = reservation_ttl_seconds or DEFAULT_RESERVATION_TTL_SECONDS
         transaction.set(res_ref, {
+            "jobId": job_id,
+            "sessionId": session_id,
             "userId": uid,
             "estimatedCredits": estimated_credits,
             "createdAt": now,

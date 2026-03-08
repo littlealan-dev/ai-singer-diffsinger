@@ -2852,6 +2852,7 @@ class Orchestrator:
                     job_id,
                     est_credits,
                     self._settings.session_ttl_seconds,
+                    session_id=session_id,
                     max_attempts=self._settings.credit_retry_max_attempts,
                     base_delay=self._settings.credit_retry_base_delay_seconds,
                 )
