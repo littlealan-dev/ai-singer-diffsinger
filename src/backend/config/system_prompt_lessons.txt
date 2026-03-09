@@ -61,9 +61,12 @@ Hard Rules
 - Compare donor lanes in the selected source part and prefer the one with materially stronger target-note word coverage for the section.
 21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
-   - When a lint finding includes `section.start_measure/end_measure`, treat that reported measure span as the repair scope.
-   - When new lint findings appear, change only the fields that directly address those failed rules.
-   - Do not rewrite unrelated ranges outside the reported failing span unless another lint finding or a completeness rule requires it.
+   - Treat backend-provided `baseline_plan` as the only full repair baseline.
+   - If `latest_attempted_plan_summary` is present, use it only as compact diagnostic context, not as a new baseline.
+   - When `repair_context.repair_scopes` is present, treat those same-target failing spans plus anchor sections as the allowed local repair area.
+   - Change only the fields that directly address the failed rules inside that local repair area.
+   - Do not modify targets other than the failing target unless necessary to maintain section continuity.
+   - Do not rewrite unrelated ranges outside the reported repair scopes unless a completeness rule requires it.
    - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.
 22. Bounded repair policy:
    - Repair tries to improve the plan, not to restart from scratch on every turn.

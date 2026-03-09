@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 import asyncio
 import logging
 import copy
@@ -39,6 +39,9 @@ MISSING_ORIGINAL_SCORE_MESSAGE = (
     "Session is missing the original parsed score baseline required for preprocessing. "
     "Please re-upload the MusicXML file."
 )
+MAX_OUT_OF_SCOPE_SECTIONS = 10
+MAX_SECTION_CHANGE_RATIO = 0.7
+MAX_MEASURE_CHANGE_RATIO = 0.8
 
 
 class Orchestrator:
@@ -554,11 +557,12 @@ class Orchestrator:
                 self._settings.credit_retry_test_settle_fail_count,
             )
             if remaining > 0:
-                self._settle_fault_injection_remaining[job_id] = remaining - 1
+                next_remaining = remaining - 1
+                self._settle_fault_injection_remaining[job_id] = next_remaining
                 self._logger.warning(
                     "inject_settle_infra_error job=%s remaining_failures=%s",
                     job_id,
-                    remaining - 1,
+                    next_remaining,
                 )
                 return CompleteJobAndSettleCreditsResult(
                     status="infra_error",
@@ -591,11 +595,12 @@ class Orchestrator:
                 self._settings.credit_retry_test_release_fail_count,
             )
             if remaining > 0:
-                self._release_fault_injection_remaining[job_id] = remaining - 1
+                next_remaining = remaining - 1
+                self._release_fault_injection_remaining[job_id] = next_remaining
                 self._logger.warning(
                     "inject_release_infra_error job=%s remaining_failures=%s",
                     job_id,
-                    remaining - 1,
+                    next_remaining,
                 )
                 return ReleaseCreditsResult(status="infra_error")
             self._release_fault_injection_remaining.pop(job_id, None)
@@ -657,6 +662,7 @@ class Orchestrator:
                 max_attempts=self._settings.credit_retry_max_attempts,
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
+            self._settle_fault_injection_remaining.pop(job_id, None)
             if settle_result.status in {
                 "completed_and_settled",
                 "already_completed_and_settled",
@@ -675,6 +681,7 @@ class Orchestrator:
                 max_attempts=self._settings.credit_retry_max_attempts,
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
+            self._release_fault_injection_remaining.pop(job_id, None)
             if self._release_result_allows_terminal_status(release_result.status):
                 await self._mark_job_terminal_billing_state(
                     job_id=job_id,
@@ -720,6 +727,7 @@ class Orchestrator:
                 max_attempts=self._settings.credit_retry_max_attempts,
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
+            self._release_fault_injection_remaining.pop(job_id, None)
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
                     self._job_store.update_job,
@@ -759,6 +767,7 @@ class Orchestrator:
                 max_attempts=self._settings.credit_retry_max_attempts,
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
+            self._release_fault_injection_remaining.pop(job_id, None)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
@@ -915,6 +924,9 @@ class Orchestrator:
         last_action_required_payload: Optional[Dict[str, Any]] = None
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
+        fixed_structural_issue_keys: set[str] = set()
+        fixed_other_issue_keys: set[str] = set()
+        current_repair_scopes: List[Dict[str, Any]] = []
         attempt_number = 0
         max_attempts = max(1, self._settings.preprocess_max_attempts)
         attempt_messages: List[Dict[str, Any]] = []
@@ -936,6 +948,7 @@ class Orchestrator:
                 if isinstance(snapshot.get("files"), dict)
                 else None
             )
+            attempted_plan = self._extract_preprocess_plan_from_tool_calls(pending_calls)
             tool_result = await self._execute_tool_calls(
                 session_id,
                 working_score,
@@ -959,17 +972,49 @@ class Orchestrator:
                 attempt_number=attempt_number,
                 tool_result=tool_result,
                 fallback_message=response_message,
+                attempted_plan=attempted_plan,
+                incumbent_best_plan=best_valid_candidate.plan if best_valid_candidate is not None else None,
+                repair_scopes=current_repair_scopes,
             )
             replaced_best_valid = False
             replaced_best_invalid = False
+            candidate_decision_reason = ""
             if candidate is not None:
-                if candidate.structurally_valid:
-                    if self._candidate_is_better(candidate, best_valid_candidate):
+                if candidate.comparable:
+                    is_structural_regression = self._candidate_is_structural_regression(
+                        candidate,
+                        fixed_structural_issue_keys,
+                    )
+                    is_full_rewrite = self._candidate_is_full_rewrite(candidate)
+                    if is_structural_regression:
+                        candidate_decision_reason = "rejected_regression"
+                    elif is_full_rewrite:
+                        candidate_decision_reason = "rejected_full_rewrite"
+                    elif self._candidate_is_better(candidate, best_valid_candidate):
+                        if best_valid_candidate is not None:
+                            fixed_structural_issue_keys.update(
+                                set(best_valid_candidate.structural_issue_keys)
+                                - set(candidate.structural_issue_keys)
+                            )
+                            fixed_other_issue_keys.update(
+                                set(best_valid_candidate.other_p1_issue_keys)
+                                - set(candidate.other_p1_issue_keys)
+                            )
+                        candidate = replace(candidate, decision_reason="promoted")
                         best_valid_candidate = candidate
                         replaced_best_valid = True
+                        candidate_decision_reason = "promoted"
+                    else:
+                        candidate_decision_reason = "rejected_worse_than_best"
                 elif self._candidate_is_better(candidate, best_invalid_candidate):
+                    candidate = replace(candidate, decision_reason="promoted_invalid")
                     best_invalid_candidate = candidate
                     replaced_best_invalid = True
+                    candidate_decision_reason = "promoted_invalid"
+                else:
+                    candidate_decision_reason = "rejected_worse_than_best_invalid"
+                if candidate_decision_reason and candidate.decision_reason != candidate_decision_reason:
+                    candidate = replace(candidate, decision_reason=candidate_decision_reason)
             if any(call.name == "preprocess_voice_parts" for call in pending_calls) or candidate is not None:
                 await self._sessions.append_preprocess_attempt_summary(
                     session_id,
@@ -1063,9 +1108,12 @@ class Orchestrator:
                     latest_snapshot,
                     self._build_repair_planning_prompt(
                         best_valid_candidate,
+                        candidate,
                         last_action_required_payload,
                         attempt_number=attempt_number,
                         max_attempts=max_attempts,
+                        fixed_structural_issue_keys=fixed_structural_issue_keys,
+                        fixed_other_issue_keys=fixed_other_issue_keys,
                     ),
                     working_score,
                 )
@@ -1151,6 +1199,10 @@ class Orchestrator:
                     attempt_messages.append(repair_attempt_entry)
                     if progress_callback is not None:
                         await progress_callback(attempt_messages)
+                current_repair_scopes = self._build_repair_scopes(
+                    last_action_required_payload or {},
+                    baseline_plan=best_valid_candidate.plan if best_valid_candidate is not None else attempted_plan,
+                )
                 pending_calls = list(repair_response.tool_calls)
                 continue
 
@@ -1258,28 +1310,48 @@ class Orchestrator:
 
     def _build_repair_planning_prompt(
         self,
-        candidate: Optional["WorkflowCandidate"],
+        best_candidate: Optional["WorkflowCandidate"],
+        latest_candidate: Optional["WorkflowCandidate"],
         action_required_payload: Optional[Dict[str, Any]],
         *,
         attempt_number: int,
         max_attempts: int,
+        fixed_structural_issue_keys: Optional[set[str]] = None,
+        fixed_other_issue_keys: Optional[set[str]] = None,
     ) -> str:
         """Build the next repair-planning prompt for a non-terminal preprocess candidate."""
         payload = (
             action_required_payload
             if isinstance(action_required_payload, dict)
-            else candidate.result_payload if candidate is not None else {}
+            else latest_candidate.result_payload if latest_candidate is not None else {}
         )
-        quality_class = candidate.quality_class if candidate is not None else None
+        baseline_candidate = best_candidate or latest_candidate
+        baseline_plan = baseline_candidate.plan if baseline_candidate is not None else None
+        baseline_source = (
+            "best_plan_so_far" if best_candidate is not None else "latest_attempted_plan"
+        )
+        repair_context = self._build_repair_context_summary(
+            payload,
+            baseline_plan=baseline_plan,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+            latest_candidate=latest_candidate,
+            best_candidate=best_candidate,
+            fixed_structural_issue_keys=fixed_structural_issue_keys or set(),
+            fixed_other_issue_keys=fixed_other_issue_keys or set(),
+        )
         envelope = {
             "tool": "preprocess_voice_parts",
             "phase": "preprocess_repair_planning",
             "tool_result": payload,
-            "repair_context": {
-                "attempt_number": attempt_number,
-                "max_attempts": max_attempts,
-                "quality_class": quality_class,
-            },
+            "baseline_plan_source": baseline_source,
+            "baseline_plan": copy.deepcopy(baseline_plan) if isinstance(baseline_plan, dict) else None,
+            "latest_attempted_plan_summary": (
+                self._build_latest_attempted_plan_summary(latest_candidate, best_candidate)
+                if best_candidate is not None
+                else None
+            ),
+            "repair_context": repair_context,
         }
         return json.dumps(envelope, sort_keys=True)
 
@@ -1289,40 +1361,59 @@ class Orchestrator:
         attempt_number: int,
         tool_result: "ToolExecutionResult",
         fallback_message: str,
+        attempted_plan: Optional[Dict[str, Any]],
+        incumbent_best_plan: Optional[Dict[str, Any]] = None,
+        repair_scopes: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional["WorkflowCandidate"]:
         """Build a candidate summary from a preprocess tool result."""
         payload: Optional[Dict[str, Any]] = None
         review_required = False
+        outcome_stage = "unknown"
+        outcome_preference = 99
+        comparable = False
         if isinstance(tool_result.action_required_payload, dict):
             payload = tool_result.action_required_payload
             action = str(payload.get("action") or "").strip()
             if action == "plan_lint_failed":
                 return None
-            target_results = self._extract_target_results(payload)
-            if not target_results:
-                issue_entries = self._extract_issue_entries(payload)
+            if action == "validation_failed_needs_review":
+                outcome_stage = "postflight_reviewable"
+                outcome_preference = 2
+                comparable = True
             else:
-                issue_entries = self._aggregate_visible_target_issues(target_results)
+                outcome_stage = "postflight_unusable"
+            target_results = self._extract_target_results(payload)
+            issue_entries = self._collect_issue_entries_for_payload(
+                payload,
+                target_results=target_results,
+            )
             if not issue_entries and not target_results:
                 return None
             structurally_valid = self._targets_are_structurally_valid(target_results, issue_entries)
             review_required = structurally_valid
         elif tool_result.review_required and tool_result.followup_prompt:
-            try:
-                parsed = json.loads(tool_result.followup_prompt)
-            except json.JSONDecodeError:
-                return None
-            if not isinstance(parsed, dict):
+            parsed = self._parse_followup_prompt_payload(
+                tool_result.followup_prompt,
+                attempt_number=attempt_number,
+            )
+            if parsed is None:
                 return None
             payload = parsed
             target_results = self._extract_target_results(parsed)
-            issue_entries = (
-                self._aggregate_visible_target_issues(target_results)
-                if target_results
-                else self._extract_issue_entries(parsed)
+            issue_entries = self._collect_issue_entries_for_payload(
+                parsed,
+                target_results=target_results,
             )
             structurally_valid = True
             review_required = True
+            status = str(parsed.get("status") or "").strip()
+            if status == "ready":
+                outcome_stage = "ready"
+                outcome_preference = 0
+            else:
+                outcome_stage = "ready_with_warnings"
+                outcome_preference = 1
+            comparable = True
         else:
             return None
 
@@ -1330,7 +1421,7 @@ class Orchestrator:
             structural_p1_measures = self._aggregate_target_impacted_measures(
                 target_results, severity="P1", domain="STRUCTURAL"
             )
-            lyric_p1_measures = self._aggregate_target_impacted_measures(
+            other_p1_measures = self._aggregate_target_impacted_measures(
                 target_results, severity="P1", domain="LYRIC"
             )
             p2_measures = self._aggregate_target_impacted_measures(
@@ -1340,41 +1431,148 @@ class Orchestrator:
             structural_p1_measures = self._count_impacted_measures(
                 issue_entries, severity="P1", domain="STRUCTURAL"
             )
-            lyric_p1_measures = self._count_impacted_measures(
+            other_p1_measures = self._count_impacted_measures(
                 issue_entries, severity="P1", domain="LYRIC"
             )
             p2_measures = self._count_impacted_measures(issue_entries, severity="P2")
         quality_class = self._classify_candidate_quality(
             structural_p1_measures=structural_p1_measures,
-            lyric_p1_measures=lyric_p1_measures,
+            other_p1_measures=other_p1_measures,
             p2_measures=p2_measures,
+        )
+        issue_keys = self._issue_keys_for_issues(issue_entries)
+        structural_issue_keys = [
+            key
+            for key, issue in issue_keys
+            if str(issue.get("rule_severity") or "") == "P1"
+            and str(issue.get("rule_domain") or "") == "STRUCTURAL"
+        ]
+        other_issue_keys = [
+            key
+            for key, issue in issue_keys
+            if str(issue.get("rule_severity") or "") == "P1"
+            and str(issue.get("rule_domain") or "") != "STRUCTURAL"
+        ]
+        out_of_scope_changed_section_count = 0
+        plan_delta_size = 0
+        section_change_ratio = 0.0
+        measure_change_ratio = 0.0
+        if comparable and isinstance(attempted_plan, dict) and isinstance(incumbent_best_plan, dict):
+            change_metrics = self._compute_plan_change_metrics(
+                best_plan=incumbent_best_plan,
+                candidate_plan=attempted_plan,
+                repair_scopes=repair_scopes or [],
+            )
+            out_of_scope_changed_section_count = change_metrics["out_of_scope_changed_section_count"]
+            plan_delta_size = change_metrics["plan_delta_size"]
+            section_change_ratio = change_metrics["section_change_ratio"]
+            measure_change_ratio = change_metrics["measure_change_ratio"]
+        candidate_tuple = (
+            structural_p1_measures,
+            other_p1_measures,
+            p2_measures,
+            out_of_scope_changed_section_count,
+            plan_delta_size,
         )
         return WorkflowCandidate(
             attempt_number=attempt_number,
             score=tool_result.score,
             message=str(payload.get("message") or fallback_message),
+            plan=copy.deepcopy(attempted_plan) if isinstance(attempted_plan, dict) else None,
             review_required=review_required,
+            outcome_stage=outcome_stage,
+            outcome_preference=outcome_preference,
+            comparable=comparable,
             quality_class=quality_class,
             structurally_valid=structurally_valid,
             structural_p1_measures=structural_p1_measures,
-            lyric_p1_measures=lyric_p1_measures,
+            other_p1_measures=other_p1_measures,
             p2_measures=p2_measures,
+            structural_issue_keys=structural_issue_keys,
+            other_p1_issue_keys=other_issue_keys,
+            candidate_tuple=candidate_tuple,
             issues=issue_entries,
             target_results=target_results,
             result_payload=dict(payload),
             action_required_payload=tool_result.action_required_payload,
             review_materialization=tool_result.review_materialization,
+            out_of_scope_changed_section_count=out_of_scope_changed_section_count,
+            plan_delta_size=plan_delta_size,
+            section_change_ratio=section_change_ratio,
+            measure_change_ratio=measure_change_ratio,
         )
 
-    def _extract_issue_entries(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _parse_followup_prompt_payload(
+        self,
+        followup_prompt: str,
+        *,
+        attempt_number: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Parse structured follow-up prompt payload and log malformed content."""
+        try:
+            parsed = json.loads(followup_prompt)
+        except json.JSONDecodeError as exc:
+            self._logger.warning(
+                "preprocess_followup_prompt_malformed_json attempt=%s error=%s payload=%s",
+                attempt_number,
+                exc,
+                summarize_payload(followup_prompt),
+            )
+            return None
+        if not isinstance(parsed, dict):
+            self._logger.warning(
+                "preprocess_followup_prompt_non_object attempt=%s payload=%s",
+                attempt_number,
+                summarize_payload(parsed),
+            )
+            return None
+        return parsed
+
+    def _collect_issue_entries_for_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        target_results: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Collect normalized issues from visible targets when present, else payload-level issues."""
+        effective_target_results = (
+            target_results if isinstance(target_results, list) else self._extract_target_results(payload)
+        )
+        if effective_target_results:
+            return self._aggregate_visible_target_issues(effective_target_results)
+        return self._extract_issue_entries(payload)
+
+    def _extract_issue_entries(
+        self,
+        payload: Dict[str, Any],
+        *,
+        default_context: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Collect normalized issue entries from preprocess result payloads."""
         issue_entries: List[Dict[str, Any]] = []
+        context = default_context if isinstance(default_context, dict) else payload
+
         def _normalized_issue(entry: Dict[str, Any]) -> Dict[str, Any]:
             normalized = dict(entry)
             if "rule_severity" not in normalized and "severity" in normalized:
                 normalized["rule_severity"] = normalized.get("severity")
             if "rule_domain" not in normalized and "domain" in normalized:
                 normalized["rule_domain"] = normalized.get("domain")
+            for field, fallback_key in (
+                ("part_index", "part_index"),
+                ("target_voice_part_id", "target_voice_part_id"),
+                ("target_voice_part", "target_voice_part"),
+                ("source_part_index", "source_part_index"),
+                ("source_voice_part_id", "source_voice_part_id"),
+            ):
+                if normalized.get(field) is None and isinstance(context, dict):
+                    fallback = context.get(field)
+                    if fallback is None and field == "target_voice_part_id":
+                        fallback = context.get("target_voice_part")
+                    if fallback is None and field == "target_voice_part":
+                        fallback = context.get("target_voice_part_id")
+                    if fallback is not None:
+                        normalized[field] = fallback
             return normalized
         failed_rules = payload.get("failed_validation_rules")
         if isinstance(failed_rules, list):
@@ -1414,7 +1612,16 @@ class Orchestrator:
                     if isinstance(item, dict)
                 ]
             else:
-                normalized["issues"] = self._extract_issue_entries(normalized)
+                normalized["issues"] = self._extract_issue_entries(
+                    normalized,
+                    default_context={
+                        "part_index": normalized.get("part_index"),
+                        "target_voice_part_id": normalized.get("target_voice_part_id"),
+                        "target_voice_part": normalized.get("target_voice_part"),
+                        "source_part_index": normalized.get("source_part_index"),
+                        "source_voice_part_id": normalized.get("source_voice_part_id"),
+                    },
+                )
             if "visible" not in normalized:
                 normalized["visible"] = not bool(normalized.get("hidden_default_lane"))
             if "structurally_valid" not in normalized:
@@ -1425,8 +1632,8 @@ class Orchestrator:
                 normalized["structural_p1_measures"] = self._count_impacted_measures(
                     normalized["issues"], severity="P1", domain="STRUCTURAL"
                 )
-            if "lyric_p1_measures" not in normalized:
-                normalized["lyric_p1_measures"] = self._count_impacted_measures(
+            if "other_p1_measures" not in normalized:
+                normalized["other_p1_measures"] = self._count_impacted_measures(
                     normalized["issues"], severity="P1", domain="LYRIC"
                 )
             if "p2_measures" not in normalized:
@@ -1436,7 +1643,7 @@ class Orchestrator:
             if "quality_class" not in normalized:
                 normalized["quality_class"] = self._classify_candidate_quality(
                     structural_p1_measures=int(normalized["structural_p1_measures"]),
-                    lyric_p1_measures=int(normalized["lyric_p1_measures"]),
+                    other_p1_measures=int(normalized["other_p1_measures"]),
                     p2_measures=int(normalized["p2_measures"]),
                 )
             normalized_targets.append(normalized)
@@ -1463,7 +1670,30 @@ class Orchestrator:
             issues = target.get("issues")
             if isinstance(issues, list):
                 aggregated.extend(
-                    self._normalize_issue_for_candidate(issue)
+                    self._normalize_issue_for_candidate(
+                        {
+                            **issue,
+                            "part_index": issue.get("part_index", target.get("part_index")),
+                            "target_voice_part_id": issue.get(
+                                "target_voice_part_id",
+                                target.get("target_voice_part_id"),
+                            )
+                            or target.get("target_voice_part"),
+                            "target_voice_part": issue.get(
+                                "target_voice_part",
+                                target.get("target_voice_part"),
+                            )
+                            or target.get("target_voice_part_id"),
+                            "source_part_index": issue.get(
+                                "source_part_index",
+                                target.get("source_part_index"),
+                            ),
+                            "source_voice_part_id": issue.get(
+                                "source_voice_part_id",
+                                target.get("source_voice_part_id"),
+                            ),
+                        }
+                    )
                     for issue in issues
                     if isinstance(issue, dict)
                 )
@@ -1560,11 +1790,11 @@ class Orchestrator:
         self,
         *,
         structural_p1_measures: int,
-        lyric_p1_measures: int,
+        other_p1_measures: int,
         p2_measures: int,
     ) -> int:
         """Return quality class 3/2/1 for a structurally valid candidate."""
-        if structural_p1_measures > 0 or lyric_p1_measures > 0:
+        if structural_p1_measures > 0 or other_p1_measures > 0:
             return 1
         if p2_measures > 0:
             return 2
@@ -1578,21 +1808,417 @@ class Orchestrator:
         """Return True when candidate outranks incumbent."""
         if incumbent is None:
             return True
-        candidate_rank = (
-            candidate.quality_class,
-            -candidate.structural_p1_measures,
-            -candidate.lyric_p1_measures,
-            -candidate.p2_measures,
-            -candidate.attempt_number,
+        if candidate.candidate_tuple != incumbent.candidate_tuple:
+            return candidate.candidate_tuple < incumbent.candidate_tuple
+        if candidate.outcome_preference != incumbent.outcome_preference:
+            return candidate.outcome_preference < incumbent.outcome_preference
+        return candidate.attempt_number < incumbent.attempt_number
+
+    def _build_repair_context_summary(
+        self,
+        payload: Dict[str, Any],
+        *,
+        baseline_plan: Optional[Dict[str, Any]],
+        attempt_number: int,
+        max_attempts: int,
+        latest_candidate: Optional["WorkflowCandidate"],
+        best_candidate: Optional["WorkflowCandidate"],
+        fixed_structural_issue_keys: set[str],
+        fixed_other_issue_keys: set[str],
+    ) -> Dict[str, Any]:
+        """Build normalized repair context for the next preprocess repair turn."""
+        target_results = self._extract_target_results(payload)
+        if target_results:
+            issues = self._aggregate_visible_target_issues(target_results)
+        else:
+            issues = self._extract_issue_entries(payload)
+        repair_scopes = self._build_repair_scopes(payload, baseline_plan=baseline_plan)
+        issue_keys = [key for key, _ in self._issue_keys_for_issues(issues)]
+        return {
+            "attempt_number": attempt_number,
+            "max_attempts": max_attempts,
+            "quality_class": latest_candidate.quality_class if latest_candidate is not None else None,
+            "current_issue_keys": issue_keys,
+            "fixed_structural_p1_issue_keys": sorted(fixed_structural_issue_keys),
+            "fixed_other_p1_issue_keys": sorted(fixed_other_issue_keys),
+            "repair_scopes": repair_scopes,
+            "best_plan_quality_summary": (
+                self._build_plan_quality_summary(best_candidate)
+                if best_candidate is not None
+                else None
+            ),
+        }
+
+    def _build_latest_attempted_plan_summary(
+        self,
+        latest_candidate: Optional["WorkflowCandidate"],
+        best_candidate: Optional["WorkflowCandidate"],
+    ) -> Optional[Dict[str, Any]]:
+        """Build compact summary for the latest attempted plan."""
+        if latest_candidate is None:
+            return None
+        summary: Dict[str, Any] = {
+            "outcome_stage": latest_candidate.outcome_stage,
+            "main_failure_rules": [
+                str(issue.get("rule") or issue.get("code") or "")
+                for issue in latest_candidate.issues
+            ],
+            "structurally_valid": latest_candidate.structurally_valid,
+        }
+        if best_candidate is not None:
+            summary["changed_sections_vs_best"] = latest_candidate.plan_delta_size
+            summary["out_of_scope_changed_sections_vs_best"] = (
+                latest_candidate.out_of_scope_changed_section_count
+            )
+            if latest_candidate.decision_reason:
+                summary["not_promoted_reason"] = latest_candidate.decision_reason
+            elif not latest_candidate.comparable:
+                summary["not_promoted_reason"] = "non_comparable_candidate"
+        return summary
+
+    def _build_plan_quality_summary(
+        self, candidate: Optional["WorkflowCandidate"]
+    ) -> Optional[Dict[str, Any]]:
+        """Build plan-quality summary for comparator/debug payloads."""
+        if candidate is None:
+            return None
+        return {
+            "structural_p1_union_affected_measure_count": candidate.structural_p1_measures,
+            "other_p1_union_affected_measure_count": candidate.other_p1_measures,
+            "p2_union_affected_measure_count": candidate.p2_measures,
+            "out_of_scope_changed_section_count": candidate.out_of_scope_changed_section_count,
+            "plan_delta_size": candidate.plan_delta_size,
+            "candidate_tuple": list(candidate.candidate_tuple),
+            "outcome_stage": candidate.outcome_stage,
+        }
+
+    def _issue_keys_for_issues(
+        self, issues: List[Dict[str, Any]]
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Build normalized issue fingerprints for regression tracking."""
+        keyed: List[Tuple[str, Dict[str, Any]]] = []
+        for issue in issues:
+            keyed.append((self._normalize_issue_key(issue), issue))
+        return keyed
+
+    def _normalize_issue_key(self, issue: Dict[str, Any]) -> str:
+        """Return normalized scoped issue fingerprint."""
+        spans = self._normalize_issue_spans(issue)
+        payload = {
+            "rule_code": str(issue.get("rule") or issue.get("code") or ""),
+            "severity_bucket": str(issue.get("rule_severity") or issue.get("severity") or ""),
+            "part_index": issue.get("part_index"),
+            "target_voice_part_id": issue.get("target_voice_part_id")
+            or issue.get("target_voice_part")
+            or issue.get("voice_part_id"),
+            "source_part_index": issue.get("source_part_index"),
+            "source_voice_part_id": issue.get("source_voice_part_id"),
+            "affected_spans": spans,
+        }
+        return json.dumps(payload, sort_keys=True)
+
+    def _normalize_issue_spans(self, issue: Dict[str, Any]) -> List[Dict[str, int]]:
+        """Normalize measure spans from issue metadata."""
+        spans: List[Dict[str, int]] = []
+        impacted_ranges = issue.get("impacted_ranges")
+        if isinstance(impacted_ranges, list):
+            for item in impacted_ranges:
+                if not isinstance(item, dict):
+                    continue
+                start = item.get("start")
+                end = item.get("end")
+                if isinstance(start, int) and isinstance(end, int) and start <= end:
+                    spans.append({"start": start, "end": end})
+        if spans:
+            return self._normalize_spans(spans)
+        measures = issue.get("impacted_measures")
+        if isinstance(measures, list):
+            normalized_measures = sorted({int(m) for m in measures if isinstance(m, int)})
+            return self._collapse_measures_to_spans(normalized_measures)
+        return []
+
+    def _normalize_spans(self, spans: List[Dict[str, int]]) -> List[Dict[str, int]]:
+        """Sort and merge span dictionaries."""
+        points: List[Tuple[int, int]] = []
+        for span in spans:
+            start = span.get("start")
+            end = span.get("end")
+            if isinstance(start, int) and isinstance(end, int) and start <= end:
+                points.append((start, end))
+        points.sort()
+        merged: List[Dict[str, int]] = []
+        for start, end in points:
+            if not merged or start > merged[-1]["end"] + 1:
+                merged.append({"start": start, "end": end})
+            else:
+                merged[-1]["end"] = max(merged[-1]["end"], end)
+        return merged
+
+    def _collapse_measures_to_spans(self, measures: List[int]) -> List[Dict[str, int]]:
+        """Collapse sorted measures to inclusive spans."""
+        if not measures:
+            return []
+        spans: List[Dict[str, int]] = []
+        start = measures[0]
+        end = measures[0]
+        for measure in measures[1:]:
+            if measure == end + 1:
+                end = measure
+                continue
+            spans.append({"start": start, "end": end})
+            start = end = measure
+        spans.append({"start": start, "end": end})
+        return spans
+
+    def _build_repair_scopes(
+        self,
+        payload: Dict[str, Any],
+        *,
+        baseline_plan: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build repair scopes from failing payload and current baseline plan."""
+        scopes: List[Dict[str, Any]] = []
+        target_results = self._extract_target_results(payload)
+        if target_results:
+            for target in self._visible_target_results(target_results):
+                target_identity = self._repair_scope_target_identity(target, fallback_payload=payload)
+                failing_spans = self._repair_scope_spans_from_payload(target) or self._repair_scope_spans_from_payload(payload)
+                if not failing_spans:
+                    continue
+                scopes.append(
+                    {
+                        **target_identity,
+                        "failing_spans": failing_spans,
+                        "anchor_sections": self._find_anchor_sections(
+                            baseline_plan,
+                            target_identity,
+                            failing_spans,
+                        ),
+                    }
+                )
+            if scopes:
+                return scopes
+        target_identity = self._repair_scope_target_identity(payload, fallback_payload=payload)
+        failing_spans = self._repair_scope_spans_from_payload(payload)
+        if not failing_spans:
+            return []
+        return [
+            {
+                **target_identity,
+                "failing_spans": failing_spans,
+                "anchor_sections": self._find_anchor_sections(
+                    baseline_plan,
+                    target_identity,
+                    failing_spans,
+                ),
+            }
+        ]
+
+    def _repair_scope_target_identity(
+        self,
+        payload: Dict[str, Any],
+        *,
+        fallback_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Extract target identity for repair scope logic."""
+        return {
+            "part_index": payload.get("part_index", fallback_payload.get("part_index") if isinstance(fallback_payload, dict) else None),
+            "target_voice_part_id": payload.get("target_voice_part_id")
+            or payload.get("target_voice_part")
+            or (fallback_payload.get("target_voice_part") if isinstance(fallback_payload, dict) else None),
+        }
+
+    def _repair_scope_spans_from_payload(self, payload: Dict[str, Any]) -> List[Dict[str, int]]:
+        """Extract normalized failing spans from payload."""
+        spans = payload.get("failing_ranges")
+        if isinstance(spans, list):
+            normalized = self._normalize_spans([item for item in spans if isinstance(item, dict)])
+            if normalized:
+                return normalized
+        issues = payload.get("issues")
+        if isinstance(issues, list):
+            issue_spans: List[Dict[str, int]] = []
+            for issue in issues:
+                if isinstance(issue, dict):
+                    issue_spans.extend(self._normalize_issue_spans(issue))
+            if issue_spans:
+                return self._normalize_spans(issue_spans)
+        failed_rules = payload.get("failed_validation_rules")
+        if isinstance(failed_rules, list):
+            issue_spans = []
+            for issue in failed_rules:
+                if isinstance(issue, dict):
+                    issue_spans.extend(self._normalize_issue_spans(issue))
+            if issue_spans:
+                return self._normalize_spans(issue_spans)
+        return []
+
+    def _find_anchor_sections(
+        self,
+        baseline_plan: Optional[Dict[str, Any]],
+        target_identity: Dict[str, Any],
+        failing_spans: List[Dict[str, int]],
+    ) -> List[Dict[str, int]]:
+        """Return all baseline sections on the same target that intersect failing spans."""
+        if not isinstance(baseline_plan, dict):
+            return []
+        anchors: List[Dict[str, int]] = []
+        for section in self._iter_plan_sections(baseline_plan):
+            if section["part_index"] != target_identity.get("part_index"):
+                continue
+            if section["target_voice_part_id"] != target_identity.get("target_voice_part_id"):
+                continue
+            for failing_span in failing_spans:
+                if self._spans_overlap(
+                    section["start_measure"],
+                    section["end_measure"],
+                    int(failing_span["start"]),
+                    int(failing_span["end"]),
+                ):
+                    anchors.append(
+                        {"start": section["start_measure"], "end": section["end_measure"]}
+                    )
+                    break
+        return self._normalize_spans(anchors)
+
+    def _iter_plan_sections(self, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flatten plan targets/sections into diffable section entries."""
+        results: List[Dict[str, Any]] = []
+        raw_targets = plan.get("targets")
+        if not isinstance(raw_targets, list):
+            return results
+        for target_entry in raw_targets:
+            if not isinstance(target_entry, dict):
+                continue
+            target = target_entry.get("target")
+            if not isinstance(target, dict):
+                continue
+            part_index = target.get("part_index")
+            voice_part_id = target.get("voice_part_id")
+            sections = target_entry.get("sections")
+            if not isinstance(sections, list):
+                continue
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                start = section.get("start_measure")
+                end = section.get("end_measure")
+                if not isinstance(start, int) or not isinstance(end, int):
+                    continue
+                results.append(
+                    {
+                        "part_index": part_index,
+                        "target_voice_part_id": voice_part_id,
+                        "start_measure": start,
+                        "end_measure": end,
+                        "identity": (part_index, str(voice_part_id or ""), start, end),
+                        "semantics": self._normalize_section_semantics(section),
+                    }
+                )
+        return results
+
+    def _normalize_section_semantics(self, section: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize execution-relevant section fields for semantic diffing."""
+        return {
+            key: copy.deepcopy(value)
+            for key, value in section.items()
+            if key not in {"start_measure", "end_measure"}
+        }
+
+    def _compute_plan_change_metrics(
+        self,
+        *,
+        best_plan: Dict[str, Any],
+        candidate_plan: Dict[str, Any],
+        repair_scopes: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Compute semantic plan diff and out-of-scope counts against best plan."""
+        best_sections = {entry["identity"]: entry for entry in self._iter_plan_sections(best_plan)}
+        candidate_sections = {entry["identity"]: entry for entry in self._iter_plan_sections(candidate_plan)}
+        all_keys = set(best_sections) | set(candidate_sections)
+        changed_entries: List[Dict[str, Any]] = []
+        for key in all_keys:
+            best_entry = best_sections.get(key)
+            candidate_entry = candidate_sections.get(key)
+            if best_entry is None or candidate_entry is None:
+                entry = best_entry or candidate_entry
+                assert entry is not None
+                changed_entries.append(entry)
+                continue
+            if best_entry["semantics"] != candidate_entry["semantics"]:
+                changed_entries.append(candidate_entry)
+        out_of_scope = 0
+        changed_measures: set[int] = set()
+        total_measures: set[int] = set()
+        for entry in best_sections.values():
+            total_measures.update(range(entry["start_measure"], entry["end_measure"] + 1))
+        for entry in candidate_sections.values():
+            total_measures.update(range(entry["start_measure"], entry["end_measure"] + 1))
+        for entry in changed_entries:
+            changed_measures.update(range(entry["start_measure"], entry["end_measure"] + 1))
+            if not self._section_change_is_in_scope(entry, repair_scopes):
+                out_of_scope += 1
+        total_section_count = max(1, max(len(best_sections), len(candidate_sections)))
+        total_measure_count = max(1, len(total_measures))
+        return {
+            "plan_delta_size": len(changed_entries),
+            "out_of_scope_changed_section_count": out_of_scope,
+            "section_change_ratio": round(len(changed_entries) / total_section_count, 4),
+            "measure_change_ratio": round(len(changed_measures) / total_measure_count, 4),
+        }
+
+    def _section_change_is_in_scope(
+        self,
+        section_entry: Dict[str, Any],
+        repair_scopes: List[Dict[str, Any]],
+    ) -> bool:
+        """Return True when section change falls within same-target failing span or anchor section."""
+        if not repair_scopes:
+            return True
+        for scope in repair_scopes:
+            if section_entry["part_index"] != scope.get("part_index"):
+                continue
+            if section_entry["target_voice_part_id"] != scope.get("target_voice_part_id"):
+                continue
+            for span in scope.get("failing_spans") or []:
+                if self._spans_overlap(
+                    section_entry["start_measure"],
+                    section_entry["end_measure"],
+                    int(span["start"]),
+                    int(span["end"]),
+                ):
+                    return True
+            for anchor in scope.get("anchor_sections") or []:
+                if self._spans_overlap(
+                    section_entry["start_measure"],
+                    section_entry["end_measure"],
+                    int(anchor["start"]),
+                    int(anchor["end"]),
+                ):
+                    return True
+        return False
+
+    def _spans_overlap(self, start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+        """Return True when two inclusive spans overlap."""
+        return start_a <= end_b and start_b <= end_a
+
+    def _candidate_is_structural_regression(
+        self,
+        candidate: "WorkflowCandidate",
+        fixed_structural_issue_keys: set[str],
+    ) -> bool:
+        """Return True when candidate reintroduces a previously fixed structural issue."""
+        return bool(set(candidate.structural_issue_keys) & fixed_structural_issue_keys)
+
+    def _candidate_is_full_rewrite(
+        self, candidate: "WorkflowCandidate"
+    ) -> bool:
+        """Return True when candidate rewrites too much of the baseline plan."""
+        return (
+            candidate.out_of_scope_changed_section_count > MAX_OUT_OF_SCOPE_SECTIONS
+            or candidate.section_change_ratio > MAX_SECTION_CHANGE_RATIO
+            or candidate.measure_change_ratio > MAX_MEASURE_CHANGE_RATIO
         )
-        incumbent_rank = (
-            incumbent.quality_class,
-            -incumbent.structural_p1_measures,
-            -incumbent.lyric_p1_measures,
-            -incumbent.p2_measures,
-            -incumbent.attempt_number,
-        )
-        return candidate_rank > incumbent_rank
 
     def _build_candidate_response(
         self, candidate: Optional["WorkflowCandidate"]
@@ -1608,6 +2234,27 @@ class Orchestrator:
         if candidate.review_required:
             response["review_required"] = True
         return response
+
+    def _serialize_other_p1_measures(self, value: int) -> Dict[str, int]:
+        """Return compatibility fields for the non-structural P1 bucket."""
+        return {
+            "lyric_p1_measures": value,
+            "other_p1_measures": value,
+        }
+
+    def _detect_followup_prompt_internal_error(
+        self, tool_result: "ToolExecutionResult"
+    ) -> str:
+        """Return structured internal reason for malformed follow-up payloads."""
+        if not tool_result.review_required or not tool_result.followup_prompt:
+            return ""
+        try:
+            parsed = json.loads(tool_result.followup_prompt)
+        except json.JSONDecodeError:
+            return "malformed_followup_prompt_json"
+        if not isinstance(parsed, dict):
+            return "non_object_followup_prompt"
+        return ""
 
     async def _materialize_review_candidate_if_needed(
         self,
@@ -1707,10 +2354,10 @@ class Orchestrator:
             "attempt_number": candidate.attempt_number,
             "quality_class": candidate.quality_class,
             "structural_p1_measures": candidate.structural_p1_measures,
-            "lyric_p1_measures": candidate.lyric_p1_measures,
             "p2_measures": candidate.p2_measures,
             "targets": candidate.target_results,
         }
+        diagnostics.update(self._serialize_other_p1_measures(candidate.other_p1_measures))
         validation = payload.get("validation")
         if isinstance(validation, dict):
             diagnostics["validation"] = validation
@@ -1737,11 +2384,15 @@ class Orchestrator:
             "quality_class": candidate.quality_class,
             "structurally_valid": candidate.structurally_valid,
             "structural_p1_measures": candidate.structural_p1_measures,
-            "lyric_p1_measures": candidate.lyric_p1_measures,
             "p2_measures": candidate.p2_measures,
+            "out_of_scope_changed_section_count": candidate.out_of_scope_changed_section_count,
+            "plan_delta_size": candidate.plan_delta_size,
+            "candidate_tuple": list(candidate.candidate_tuple),
+            "outcome_stage": candidate.outcome_stage,
             "issues": candidate.issues,
             "targets": candidate.target_results,
         }
+        details.update(self._serialize_other_p1_measures(candidate.other_p1_measures))
         warnings = payload.get("warnings")
         if isinstance(warnings, list):
             details["warnings"] = warnings
@@ -1766,6 +2417,7 @@ class Orchestrator:
         """Build a lightweight persisted summary for one preprocess attempt."""
         payload = tool_result.action_required_payload if isinstance(tool_result.action_required_payload, dict) else None
         issue_entries = candidate.issues if candidate is not None else self._extract_issue_entries(payload or {})
+        internal_error_reason = self._detect_followup_prompt_internal_error(tool_result)
         return {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "attempt_number": attempt_number,
@@ -1777,16 +2429,25 @@ class Orchestrator:
             ),
             "result_action": str(payload.get("action") or "") if payload is not None else "",
             "candidate_present": candidate is not None,
+            "comparable": candidate.comparable if candidate is not None else False,
+            "outcome_stage": candidate.outcome_stage if candidate is not None else "",
+            "decision_reason": candidate.decision_reason if candidate is not None else "",
+            "internal_error_reason": internal_error_reason,
             "structurally_valid": candidate.structurally_valid if candidate is not None else False,
             "quality_class": candidate.quality_class if candidate is not None else None,
             "structural_p1_measures": candidate.structural_p1_measures if candidate is not None else 0,
-            "lyric_p1_measures": candidate.lyric_p1_measures if candidate is not None else 0,
             "p2_measures": candidate.p2_measures if candidate is not None else 0,
+            "out_of_scope_changed_section_count": (
+                candidate.out_of_scope_changed_section_count if candidate is not None else 0
+            ),
+            "plan_delta_size": candidate.plan_delta_size if candidate is not None else 0,
+            "candidate_tuple": list(candidate.candidate_tuple) if candidate is not None else None,
             "replaced_best_valid": replaced_best_valid,
             "replaced_best_invalid": replaced_best_invalid,
             "issue_codes": [str(issue.get("rule") or issue.get("code") or "") for issue in issue_entries],
             "issue_severities": [str(issue.get("rule_severity") or "") for issue in issue_entries],
             "issue_domains": [str(issue.get("rule_domain") or "") for issue in issue_entries],
+            **self._serialize_other_p1_measures(candidate.other_p1_measures if candidate is not None else 0),
         }
 
     def _build_attempt_message_entry(
@@ -2989,6 +3650,20 @@ class Orchestrator:
             return None
         return copy.deepcopy(plan)
 
+    def _extract_preprocess_plan_from_tool_calls(
+        self, tool_calls: List[ToolCall]
+    ) -> Optional[Dict[str, Any]]:
+        """Return the first preprocess plan from a tool-call batch, if present."""
+        for call in tool_calls:
+            if call.name != "preprocess_voice_parts":
+                continue
+            if not isinstance(call.arguments, dict):
+                continue
+            plan = self._extract_preprocess_plan(call.arguments)
+            if isinstance(plan, dict):
+                return plan
+        return None
+
     def _mark_review_pending(
         self, score: Dict[str, Any], preprocess_result: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -3184,17 +3859,29 @@ class WorkflowCandidate:
     attempt_number: int
     score: Dict[str, Any]
     message: str
+    plan: Optional[Dict[str, Any]]
     review_required: bool
+    outcome_stage: str
+    outcome_preference: int
+    comparable: bool
     quality_class: int
     structurally_valid: bool
     structural_p1_measures: int
-    lyric_p1_measures: int
+    other_p1_measures: int
     p2_measures: int
+    structural_issue_keys: List[str]
+    other_p1_issue_keys: List[str]
+    candidate_tuple: Tuple[int, int, int, int, int]
     issues: List[Dict[str, Any]]
     target_results: List[Dict[str, Any]]
     result_payload: Dict[str, Any]
     action_required_payload: Optional[Dict[str, Any]] = None
     review_materialization: Optional[Dict[str, Any]] = None
+    out_of_scope_changed_section_count: int = 0
+    plan_delta_size: int = 0
+    section_change_ratio: float = 0.0
+    measure_change_ratio: float = 0.0
+    decision_reason: str = ""
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

@@ -141,14 +141,6 @@ def _prepare_app(monkeypatch, overrides=None):
         "src.backend.credits.release_credits",
         lambda *_, **__: ReleaseCreditsResult(status="released"),
     )
-    monkeypatch.setattr(
-        "src.backend.credits.settle_credits_and_complete_job",
-        lambda *_, **__: CompleteJobAndSettleCreditsResult(
-            status="completed_and_settled",
-            actual_credits=1,
-            overdrafted=False,
-        ),
-    )
     monkeypatch.setattr("src.backend.main.upload_file", lambda *_, **__: None)
     monkeypatch.setattr(
         "src.backend.main.download_bytes",
@@ -212,6 +204,40 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.clear_jobs_for_session",
         _fake_clear_jobs_for_session,
+    )
+
+    def _fake_complete_and_settle(
+        user_id: str,
+        job_id: str,
+        session_id: str,
+        duration_seconds: float,
+        *,
+        output_path: str | None = None,
+        audio_url: str | None = None,
+    ) -> CompleteJobAndSettleCreditsResult:
+        payload = fake_jobs.setdefault(job_id, {})
+        payload.update(
+            {
+                "userId": user_id,
+                "sessionId": session_id,
+                "status": "completed",
+                "step": "done",
+                "message": "Your take is ready.",
+                "progress": 1.0,
+                "audioUrl": audio_url,
+                "outputPath": output_path,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=1,
+            overdrafted=False,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        _fake_complete_and_settle,
     )
     if overrides:
         for key, value in overrides.items():
@@ -1048,14 +1074,16 @@ def test_build_workflow_candidate_classifies_reviewable_postflight_result(client
         attempt_number=2,
         tool_result=tool_result,
         fallback_message="fallback",
+        attempted_plan={"targets": []},
     )
 
     assert candidate is not None
     assert candidate.structurally_valid is True
     assert candidate.review_required is True
+    assert candidate.comparable is True
     assert candidate.quality_class == 1
     assert candidate.structural_p1_measures == 0
-    assert candidate.lyric_p1_measures == 3
+    assert candidate.other_p1_measures == 3
     assert candidate.p2_measures == 0
     assert candidate.message == "Coverage still needs review."
     assert candidate.target_results == []
@@ -1100,11 +1128,12 @@ def test_build_workflow_candidate_uses_visible_targets_for_quality(client):
         attempt_number=2,
         tool_result=tool_result,
         fallback_message="fallback",
+        attempted_plan={"targets": []},
     )
 
     assert candidate is not None
     assert candidate.quality_class == 1
-    assert candidate.lyric_p1_measures == 3
+    assert candidate.other_p1_measures == 3
     assert candidate.structurally_valid is True
     assert len(candidate.target_results) == 2
     assert candidate.target_results[0]["quality_class"] == 1
@@ -1140,6 +1169,7 @@ def test_candidate_ranking_prefers_higher_quality_then_smaller_impact(client):
             review_required=True,
         ),
         fallback_message="fallback",
+        attempted_plan={"targets": []},
     )
     class1_candidate = orchestrator._build_workflow_candidate(
         attempt_number=1,
@@ -1163,6 +1193,7 @@ def test_candidate_ranking_prefers_higher_quality_then_smaller_impact(client):
             },
         ),
         fallback_message="fallback",
+        attempted_plan={"targets": []},
     )
 
     assert class2_candidate is not None
@@ -1329,12 +1360,173 @@ def test_build_workflow_candidate_normalizes_postflight_severity_domain_keys(cli
         attempt_number=1,
         tool_result=tool_result,
         fallback_message="fallback",
+        attempted_plan={"targets": []},
     )
 
     assert candidate is not None
     assert candidate.quality_class == 1
-    assert candidate.lyric_p1_measures == 3
+    assert candidate.other_p1_measures == 3
     assert candidate.structural_p1_measures == 0
+
+
+def test_issue_fingerprint_inherits_outer_payload_scope_for_reviewable_postflight(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    tool_result = ToolExecutionResult(
+        score={"title": "Derived"},
+        audio_response={"type": "chat_text", "message": ""},
+        action_required_payload={
+            "status": "action_required",
+            "action": "validation_failed_needs_review",
+            "message": "Coverage still needs review.",
+            "part_index": 0,
+            "target_voice_part": "alto",
+            "source_part_index": 0,
+            "source_voice_part_id": "voice part 2",
+            "failed_validation_rules": [
+                {
+                    "rule": "validation_failed_needs_review",
+                    "rule_severity": "P1",
+                    "rule_domain": "LYRIC",
+                    "impacted_ranges": [{"start": 12, "end": 15}],
+                }
+            ],
+        },
+    )
+
+    candidate = orchestrator._build_workflow_candidate(
+        attempt_number=1,
+        tool_result=tool_result,
+        fallback_message="fallback",
+        attempted_plan={"targets": []},
+    )
+
+    assert candidate is not None
+    assert candidate.other_p1_issue_keys
+    fingerprint = json.loads(candidate.other_p1_issue_keys[0])
+    assert fingerprint["part_index"] == 0
+    assert fingerprint["target_voice_part_id"] == "alto"
+    assert fingerprint["source_part_index"] == 0
+    assert fingerprint["source_voice_part_id"] == "voice part 2"
+
+
+def test_latest_attempt_summary_preserves_structural_regression_reason(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    best_candidate = WorkflowCandidate(
+        attempt_number=1,
+        score={"title": "Best"},
+        message="Best so far",
+        plan={"targets": []},
+        review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        other_p1_measures=1,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 1, 0, 0, 0),
+        issues=[],
+        target_results=[],
+        result_payload={},
+        decision_reason="promoted",
+    )
+    latest_candidate = WorkflowCandidate(
+        attempt_number=2,
+        score={"title": "Latest"},
+        message="Regression",
+        plan={"targets": []},
+        review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=1,
+        other_p1_measures=0,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(1, 0, 0, 0, 1),
+        issues=[],
+        target_results=[],
+        result_payload={},
+        out_of_scope_changed_section_count=2,
+        plan_delta_size=3,
+        decision_reason="rejected_regression",
+    )
+
+    summary = orchestrator._build_latest_attempted_plan_summary(
+        latest_candidate,
+        best_candidate,
+    )
+
+    assert summary is not None
+    assert summary["not_promoted_reason"] == "rejected_regression"
+
+
+def test_repair_context_current_issue_keys_uses_visible_target_issues(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    payload = {
+        "status": "action_required",
+        "action": "validation_failed_needs_review",
+        "targets": [
+            {
+                "part_index": 0,
+                "target_voice_part_id": "alto",
+                "visible": True,
+                "issues": [
+                    {
+                        "rule": "validation_failed_needs_review",
+                        "rule_severity": "P1",
+                        "rule_domain": "LYRIC",
+                        "impacted_ranges": [{"start": 12, "end": 15}],
+                    }
+                ],
+            }
+        ],
+    }
+
+    repair_context = orchestrator._build_repair_context_summary(
+        payload,
+        baseline_plan=None,
+        attempt_number=2,
+        max_attempts=3,
+        latest_candidate=None,
+        best_candidate=None,
+        fixed_structural_issue_keys=set(),
+        fixed_other_issue_keys=set(),
+    )
+
+    assert repair_context["current_issue_keys"]
+    fingerprint = json.loads(repair_context["current_issue_keys"][0])
+    assert fingerprint["target_voice_part_id"] == "alto"
+    assert fingerprint["affected_spans"] == [{"start": 12, "end": 15}]
+
+
+def test_preprocess_attempt_summary_records_malformed_followup_prompt_reason(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    summary = orchestrator._build_preprocess_attempt_summary(
+        attempt_number=1,
+        tool_calls=[ToolCall(name="preprocess_voice_parts", arguments={})],
+        tool_result=ToolExecutionResult(
+            score={"title": "Derived"},
+            audio_response=None,
+            followup_prompt="{not-json",
+            review_required=True,
+        ),
+        candidate=None,
+        replaced_best_valid=False,
+        replaced_best_invalid=False,
+    )
+
+    assert summary["internal_error_reason"] == "malformed_followup_prompt_json"
 
 
 def test_format_llm_error_returns_plain_timeout_message(client):
@@ -1732,12 +1924,19 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
         attempt_number=1,
         score={"title": "Derived"},
         message="Coverage still needs review.",
+        plan={"targets": [{"target": {"part_index": 0, "voice_part_id": "alto"}, "sections": []}]},
         review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
         quality_class=1,
         structurally_valid=True,
         structural_p1_measures=0,
-        lyric_p1_measures=2,
+        other_p1_measures=2,
         p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 2, 0, 0, 0),
         issues=[
             {
                 "rule": "validation_failed_needs_review",
@@ -1752,6 +1951,7 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
 
     prompt = orchestrator._build_repair_planning_prompt(
         candidate,
+        candidate,
         {"status": "action_required", "action": "validation_failed_needs_review"},
         attempt_number=1,
         max_attempts=3,
@@ -1760,10 +1960,155 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
 
     assert payload["tool"] == "preprocess_voice_parts"
     assert payload["phase"] == "preprocess_repair_planning"
+    assert payload["baseline_plan_source"] == "best_plan_so_far"
+    assert payload["baseline_plan"]["targets"][0]["target"]["voice_part_id"] == "alto"
     assert payload["tool_result"]["action"] == "validation_failed_needs_review"
     assert payload["repair_context"]["attempt_number"] == 1
     assert payload["repair_context"]["max_attempts"] == 3
     assert payload["repair_context"]["quality_class"] == 1
+    assert payload["latest_attempted_plan_summary"]["outcome_stage"] == "postflight_reviewable"
+
+
+def test_build_repair_planning_prompt_bootstraps_from_latest_attempted_plan(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    latest_candidate = WorkflowCandidate(
+        attempt_number=1,
+        score={"title": "Derived"},
+        message="Coverage still needs review.",
+        plan={"targets": [{"target": {"part_index": 0, "voice_part_id": "alto"}, "sections": []}]},
+        review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        other_p1_measures=2,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 2, 0, 0, 0),
+        issues=[],
+        target_results=[],
+        result_payload={"status": "action_required", "action": "validation_failed_needs_review"},
+    )
+
+    payload = json.loads(
+        orchestrator._build_repair_planning_prompt(
+            None,
+            latest_candidate,
+            {"status": "action_required", "action": "validation_failed_needs_review"},
+            attempt_number=1,
+            max_attempts=3,
+        )
+    )
+
+    assert payload["baseline_plan_source"] == "latest_attempted_plan"
+    assert payload["baseline_plan"]["targets"][0]["target"]["voice_part_id"] == "alto"
+    assert payload["latest_attempted_plan_summary"] is None
+
+
+def test_compute_plan_change_metrics_treats_anchor_local_reshaping_as_in_scope(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    best_plan = {
+        "targets": [
+            {
+                "target": {"part_index": 0, "voice_part_id": "alto"},
+                "sections": [
+                    {"start_measure": 1, "end_measure": 9, "mode": "derive"},
+                    {"start_measure": 10, "end_measure": 20, "mode": "derive"},
+                    {"start_measure": 21, "end_measure": 30, "mode": "derive"},
+                ],
+            }
+        ]
+    }
+    candidate_plan = {
+        "targets": [
+            {
+                "target": {"part_index": 0, "voice_part_id": "alto"},
+                "sections": [
+                    {"start_measure": 1, "end_measure": 9, "mode": "derive"},
+                    {"start_measure": 10, "end_measure": 11, "mode": "derive"},
+                    {"start_measure": 12, "end_measure": 15, "mode": "derive"},
+                    {"start_measure": 16, "end_measure": 20, "mode": "derive"},
+                    {"start_measure": 21, "end_measure": 30, "mode": "derive"},
+                ],
+            }
+        ]
+    }
+    repair_scopes = [
+        {
+            "part_index": 0,
+            "target_voice_part_id": "alto",
+            "failing_spans": [{"start": 12, "end": 15}],
+            "anchor_sections": [{"start": 10, "end": 20}],
+        }
+    ]
+
+    metrics = orchestrator._compute_plan_change_metrics(
+        best_plan=best_plan,
+        candidate_plan=candidate_plan,
+        repair_scopes=repair_scopes,
+    )
+
+    assert metrics["plan_delta_size"] == 4
+    assert metrics["out_of_scope_changed_section_count"] == 0
+
+
+def test_candidate_ranking_penalizes_out_of_scope_rewrites_before_plan_delta(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    local_candidate = WorkflowCandidate(
+        attempt_number=1,
+        score={"title": "Derived"},
+        message="Local repair",
+        plan={"targets": []},
+        review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        other_p1_measures=1,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 1, 0, 0, 4),
+        issues=[],
+        target_results=[],
+        result_payload={"status": "action_required", "action": "validation_failed_needs_review"},
+        out_of_scope_changed_section_count=0,
+        plan_delta_size=4,
+    )
+    broad_candidate = WorkflowCandidate(
+        attempt_number=2,
+        score={"title": "Derived"},
+        message="Broad repair",
+        plan={"targets": []},
+        review_required=True,
+        outcome_stage="postflight_reviewable",
+        outcome_preference=2,
+        comparable=True,
+        quality_class=1,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        other_p1_measures=1,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 1, 0, 3, 2),
+        issues=[],
+        target_results=[],
+        result_payload={"status": "action_required", "action": "validation_failed_needs_review"},
+        out_of_scope_changed_section_count=3,
+        plan_delta_size=2,
+    )
+
+    assert orchestrator._candidate_is_better(local_candidate, broad_candidate) is True
+    assert orchestrator._candidate_is_better(broad_candidate, local_candidate) is False
 
 
 def test_workflow_persists_preprocess_attempt_summary(client):
