@@ -19,6 +19,7 @@ from src.api.score import parse_score
 from src.backend.main import _require_app_check, create_app
 from src.backend.llm_client import StaticLlmClient
 from src.backend.orchestrator import (
+    BootstrapPlanBaseline,
     MISSING_ORIGINAL_SCORE_MESSAGE,
     ToolExecutionResult,
     WorkflowCandidate,
@@ -1524,9 +1525,13 @@ def test_preprocess_attempt_summary_records_malformed_followup_prompt_reason(cli
         candidate=None,
         replaced_best_valid=False,
         replaced_best_invalid=False,
+        baseline_plan_source_for_next_repair="latest_attempted_plan",
+        used_bootstrap_plan_baseline=False,
     )
 
     assert summary["internal_error_reason"] == "malformed_followup_prompt_json"
+    assert summary["baseline_plan_source_for_next_repair"] == "latest_attempted_plan"
+    assert summary["used_bootstrap_plan_baseline"] is False
 
 
 def test_format_llm_error_returns_plain_timeout_message(client):
@@ -1951,6 +1956,7 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
 
     prompt = orchestrator._build_repair_planning_prompt(
         candidate,
+        None,
         candidate,
         {"status": "action_required", "action": "validation_failed_needs_review"},
         attempt_number=1,
@@ -1969,7 +1975,7 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
     assert payload["latest_attempted_plan_summary"]["outcome_stage"] == "postflight_reviewable"
 
 
-def test_build_repair_planning_prompt_bootstraps_from_latest_attempted_plan(client):
+def test_build_repair_planning_prompt_bootstraps_from_bootstrap_baseline(client):
     _, app = client
     orchestrator = app.state.orchestrator
     latest_candidate = WorkflowCandidate(
@@ -1993,10 +1999,18 @@ def test_build_repair_planning_prompt_bootstraps_from_latest_attempted_plan(clie
         target_results=[],
         result_payload={"status": "action_required", "action": "validation_failed_needs_review"},
     )
+    bootstrap_baseline = BootstrapPlanBaseline(
+        attempt_number=1,
+        plan={"targets": [{"target": {"part_index": 0, "voice_part_id": "alto"}, "sections": []}]},
+        action="plan_lint_failed",
+        lint_findings=[{"rule": "same_part_chord_source_underclaimed_by_visible_targets"}],
+        repair_scopes=[],
+    )
 
     payload = json.loads(
         orchestrator._build_repair_planning_prompt(
             None,
+            bootstrap_baseline,
             latest_candidate,
             {"status": "action_required", "action": "validation_failed_needs_review"},
             attempt_number=1,
@@ -2004,9 +2018,26 @@ def test_build_repair_planning_prompt_bootstraps_from_latest_attempted_plan(clie
         )
     )
 
-    assert payload["baseline_plan_source"] == "latest_attempted_plan"
+    assert payload["baseline_plan_source"] == "bootstrap_plan_baseline"
     assert payload["baseline_plan"]["targets"][0]["target"]["voice_part_id"] == "alto"
     assert payload["latest_attempted_plan_summary"] is None
+
+
+def test_select_repair_baseline_falls_back_to_latest_attempted_plan(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    source, plan = orchestrator._select_repair_baseline(
+        best_candidate=None,
+        bootstrap_baseline=None,
+        latest_attempted_plan={
+            "targets": [{"target": {"part_index": 0, "voice_part_id": "alto"}, "sections": []}]
+        },
+    )
+
+    assert source == "latest_attempted_plan"
+    assert plan is not None
+    assert plan["targets"][0]["target"]["voice_part_id"] == "alto"
 
 
 def test_compute_plan_change_metrics_treats_anchor_local_reshaping_as_in_scope(client):

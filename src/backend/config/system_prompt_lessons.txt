@@ -62,6 +62,11 @@ Hard Rules
 21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
    - Treat backend-provided `baseline_plan` as the only full repair baseline.
+   - If `baseline_plan_source=bootstrap_plan_baseline`, the baseline is concrete but lint-failed:
+     - repair directly from that baseline
+     - keep changes local to the reported `repair_scopes`
+     - do not restart from scratch
+     - do not assume that baseline is already valid
    - If `latest_attempted_plan_summary` is present, use it only as compact diagnostic context, not as a new baseline.
    - When `repair_context.repair_scopes` is present, treat those same-target failing spans plus anchor sections as the allowed local repair area.
    - Change only the fields that directly address the failed rules inside that local repair area.

@@ -924,6 +924,7 @@ class Orchestrator:
         last_action_required_payload: Optional[Dict[str, Any]] = None
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
+        bootstrap_plan_baseline: Optional[BootstrapPlanBaseline] = None
         fixed_structural_issue_keys: set[str] = set()
         fixed_other_issue_keys: set[str] = set()
         current_repair_scopes: List[Dict[str, Any]] = []
@@ -976,6 +977,46 @@ class Orchestrator:
                 incumbent_best_plan=best_valid_candidate.plan if best_valid_candidate is not None else None,
                 repair_scopes=current_repair_scopes,
             )
+            action_required_payload = (
+                tool_result.action_required_payload
+                if isinstance(tool_result.action_required_payload, dict)
+                else {}
+            )
+            action_name = str(action_required_payload.get("action") or "").strip()
+            if (
+                best_valid_candidate is None
+                and isinstance(attempted_plan, dict)
+                and action_name == "plan_lint_failed"
+            ):
+                baseline_scopes = self._build_repair_scopes(
+                    action_required_payload,
+                    baseline_plan=attempted_plan,
+                )
+                next_baseline = BootstrapPlanBaseline(
+                    attempt_number=attempt_number,
+                    plan=copy.deepcopy(attempted_plan),
+                    action=action_name,
+                    lint_findings=[
+                        dict(item)
+                        for item in action_required_payload.get("lint_findings", [])
+                        if isinstance(item, dict)
+                    ],
+                    repair_scopes=copy.deepcopy(baseline_scopes),
+                )
+                if bootstrap_plan_baseline is None:
+                    self._logger.info(
+                        "bootstrap_plan_baseline_set session=%s attempt=%s baseline_source=plan_lint_failed",
+                        session_id,
+                        attempt_number,
+                    )
+                else:
+                    self._logger.info(
+                        "bootstrap_plan_baseline_replaced session=%s attempt=%s previous_attempt=%s baseline_source=plan_lint_failed",
+                        session_id,
+                        attempt_number,
+                        bootstrap_plan_baseline.attempt_number,
+                    )
+                bootstrap_plan_baseline = next_baseline
             replaced_best_valid = False
             replaced_best_invalid = False
             candidate_decision_reason = ""
@@ -1004,6 +1045,14 @@ class Orchestrator:
                         best_valid_candidate = candidate
                         replaced_best_valid = True
                         candidate_decision_reason = "promoted"
+                        if bootstrap_plan_baseline is not None:
+                            self._logger.info(
+                                "bootstrap_plan_baseline_cleared session=%s attempt=%s promoted_attempt=%s",
+                                session_id,
+                                attempt_number,
+                                candidate.attempt_number,
+                            )
+                            bootstrap_plan_baseline = None
                     else:
                         candidate_decision_reason = "rejected_worse_than_best"
                 elif self._candidate_is_better(candidate, best_invalid_candidate):
@@ -1025,6 +1074,14 @@ class Orchestrator:
                         candidate=candidate,
                         replaced_best_valid=replaced_best_valid,
                         replaced_best_invalid=replaced_best_invalid,
+                        baseline_plan_source_for_next_repair=(
+                            self._select_repair_baseline(
+                                best_candidate=best_valid_candidate,
+                                bootstrap_baseline=bootstrap_plan_baseline,
+                                latest_attempted_plan=attempted_plan,
+                            )[0]
+                        ),
+                        used_bootstrap_plan_baseline=bootstrap_plan_baseline is not None,
                     ),
                 )
             response = tool_result.audio_response or {
@@ -1032,11 +1089,6 @@ class Orchestrator:
                 "message": response_message,
             }
             followup_prompt = tool_result.followup_prompt
-            action_name = (
-                str(tool_result.action_required_payload.get("action") or "").strip()
-                if isinstance(tool_result.action_required_payload, dict)
-                else ""
-            )
             is_selection_blocker = action_name == "verse_selection_required"
             preprocess_iteration = any(
                 call.name == "preprocess_voice_parts" for call in pending_calls
@@ -1108,6 +1160,7 @@ class Orchestrator:
                     latest_snapshot,
                     self._build_repair_planning_prompt(
                         best_valid_candidate,
+                        bootstrap_plan_baseline,
                         candidate,
                         last_action_required_payload,
                         attempt_number=attempt_number,
@@ -1201,7 +1254,11 @@ class Orchestrator:
                         await progress_callback(attempt_messages)
                 current_repair_scopes = self._build_repair_scopes(
                     last_action_required_payload or {},
-                    baseline_plan=best_valid_candidate.plan if best_valid_candidate is not None else attempted_plan,
+                    baseline_plan=self._select_repair_baseline(
+                        best_candidate=best_valid_candidate,
+                        bootstrap_baseline=bootstrap_plan_baseline,
+                        latest_attempted_plan=attempted_plan,
+                    )[1],
                 )
                 pending_calls = list(repair_response.tool_calls)
                 continue
@@ -1311,6 +1368,7 @@ class Orchestrator:
     def _build_repair_planning_prompt(
         self,
         best_candidate: Optional["WorkflowCandidate"],
+        bootstrap_plan_baseline: Optional["BootstrapPlanBaseline"],
         latest_candidate: Optional["WorkflowCandidate"],
         action_required_payload: Optional[Dict[str, Any]],
         *,
@@ -1325,10 +1383,11 @@ class Orchestrator:
             if isinstance(action_required_payload, dict)
             else latest_candidate.result_payload if latest_candidate is not None else {}
         )
-        baseline_candidate = best_candidate or latest_candidate
-        baseline_plan = baseline_candidate.plan if baseline_candidate is not None else None
-        baseline_source = (
-            "best_plan_so_far" if best_candidate is not None else "latest_attempted_plan"
+        latest_attempted_plan = latest_candidate.plan if latest_candidate is not None else None
+        baseline_source, baseline_plan = self._select_repair_baseline(
+            best_candidate=best_candidate,
+            bootstrap_baseline=bootstrap_plan_baseline,
+            latest_attempted_plan=latest_attempted_plan,
         )
         repair_context = self._build_repair_context_summary(
             payload,
@@ -1354,6 +1413,22 @@ class Orchestrator:
             "repair_context": repair_context,
         }
         return json.dumps(envelope, sort_keys=True)
+
+    def _select_repair_baseline(
+        self,
+        *,
+        best_candidate: Optional["WorkflowCandidate"],
+        bootstrap_baseline: Optional["BootstrapPlanBaseline"],
+        latest_attempted_plan: Optional[Dict[str, Any]],
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Select the concrete baseline plan for the next repair turn."""
+        if best_candidate is not None and isinstance(best_candidate.plan, dict):
+            return "best_plan_so_far", best_candidate.plan
+        if bootstrap_baseline is not None:
+            return "bootstrap_plan_baseline", bootstrap_baseline.plan
+        if isinstance(latest_attempted_plan, dict):
+            return "latest_attempted_plan", latest_attempted_plan
+        return "none", None
 
     def _build_workflow_candidate(
         self,
@@ -2413,6 +2488,8 @@ class Orchestrator:
         candidate: Optional["WorkflowCandidate"],
         replaced_best_valid: bool,
         replaced_best_invalid: bool,
+        baseline_plan_source_for_next_repair: str,
+        used_bootstrap_plan_baseline: bool,
     ) -> Dict[str, Any]:
         """Build a lightweight persisted summary for one preprocess attempt."""
         payload = tool_result.action_required_payload if isinstance(tool_result.action_required_payload, dict) else None
@@ -2444,6 +2521,8 @@ class Orchestrator:
             "candidate_tuple": list(candidate.candidate_tuple) if candidate is not None else None,
             "replaced_best_valid": replaced_best_valid,
             "replaced_best_invalid": replaced_best_invalid,
+            "baseline_plan_source_for_next_repair": baseline_plan_source_for_next_repair,
+            "used_bootstrap_plan_baseline": used_bootstrap_plan_baseline,
             "issue_codes": [str(issue.get("rule") or issue.get("code") or "") for issue in issue_entries],
             "issue_severities": [str(issue.get("rule_severity") or "") for issue in issue_entries],
             "issue_domains": [str(issue.get("rule_domain") or "") for issue in issue_entries],
@@ -3882,6 +3961,16 @@ class WorkflowCandidate:
     section_change_ratio: float = 0.0
     measure_change_ratio: float = 0.0
     decision_reason: str = ""
+
+
+@dataclass(frozen=True)
+class BootstrapPlanBaseline:
+    """Concrete lint-failed preprocess plan used before any comparable candidate exists."""
+    attempt_number: int
+    plan: Dict[str, Any]
+    action: str
+    lint_findings: List[Dict[str, Any]]
+    repair_scopes: List[Dict[str, Any]]
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

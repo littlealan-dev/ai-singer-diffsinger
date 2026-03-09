@@ -121,10 +121,9 @@ Rules:
 - When the internal tool-output JSON contains `"phase": "preprocess_repair_planning"`, this is a mandatory repair-planning turn.
 - In that mandatory repair-planning turn, you must return exactly one `preprocess_voice_parts` tool call in `tool_calls`.
 - In that mandatory repair-planning turn, do not return `tool_calls: []`, do not stop for review, and do not answer with prose-only output.
-- In that mandatory repair-planning turn, treat `baseline_plan` as the repair baseline:
-  - If `baseline_plan_source=best_plan_so_far`, repair from that baseline.
-  - If `baseline_plan_source=latest_attempted_plan`, no comparable baseline exists yet; repair directly from that latest attempted plan.
 - Use the returned structured metadata in that internal JSON, including:
+  - `baseline_plan`
+  - `baseline_plan_source`
   - `tool_result`
   - `repair_context.attempt_number`
   - `repair_context.max_attempts`
@@ -133,9 +132,6 @@ Rules:
   - `repair_context.fixed_structural_p1_issue_keys`
   - `repair_context.fixed_other_p1_issue_keys`
   - `latest_attempted_plan_summary` when present
-- When repairing, preserve sections outside the reported `repair_scopes`.
-- Do not modify targets other than the failing target unless necessary to maintain section continuity.
-- Preserve structural correctness over lyric completeness.
 - If the tool output contains an "error" object, explain the error in one or two sentences and suggest the next step.
 - If the pattern is seen without a valid JSON tool output, respond with "Unable to interpret tool output."
 - Do not return raw JSON to the user when responding to tool output.
