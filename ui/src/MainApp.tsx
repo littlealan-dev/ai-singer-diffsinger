@@ -900,46 +900,36 @@ function splitThoughtSummary(content: string): {
   thoughtSummary: string;
   trailingContent: string;
 } {
-  const marker = "\n\nThought summary:\n";
-  if (content.includes(marker)) {
-    const [main, remainder] = content.split(marker, 2);
-    const trailingMarker = "\n\nPost-update:\n";
-    if (remainder.includes(trailingMarker)) {
-      const [thought, trailing] = remainder.split(trailingMarker, 2);
-      return {
-        mainContent: main.trim(),
-        thoughtSummary: thought.trim(),
-        trailingContent: trailing.trim(),
-      };
-    }
-    return {
-      mainContent: main.trim(),
-      thoughtSummary: remainder.trim(),
-      trailingContent: "",
-    };
+  const thoughtMarker = "\n\nThought summary:\n";
+  const trailingMarker = "\n\nPost-update:\n";
+  const thoughtPrefix = "Thought summary:\n";
+  const trailingPrefix = "Post-update:\n";
+  let main = content;
+  let thought = "";
+  let trailing = "";
+
+  if (main.includes(trailingMarker)) {
+    const parts = main.split(trailingMarker);
+    trailing = parts.pop() ?? "";
+    main = parts.join(trailingMarker).trim();
+  } else if (main.startsWith(trailingPrefix)) {
+    trailing = main.slice(trailingPrefix.length);
+    main = "";
   }
-  const prefix = "Thought summary:\n";
-  if (content.startsWith(prefix)) {
-    const remainder = content.slice(prefix.length);
-    const trailingMarker = "\n\nPost-update:\n";
-    if (remainder.includes(trailingMarker)) {
-      const [thought, trailing] = remainder.split(trailingMarker, 2);
-      return {
-        mainContent: "",
-        thoughtSummary: thought.trim(),
-        trailingContent: trailing.trim(),
-      };
-    }
-    return {
-      mainContent: "",
-      thoughtSummary: remainder.trim(),
-      trailingContent: "",
-    };
+
+  if (main.includes(thoughtMarker)) {
+    const parts = main.split(thoughtMarker);
+    thought = parts.pop() ?? "";
+    main = parts.join(thoughtMarker).trim();
+  } else if (main.startsWith(thoughtPrefix)) {
+    thought = main.slice(thoughtPrefix.length);
+    main = "";
   }
+
   return {
-    mainContent: content,
-    thoughtSummary: "",
-    trailingContent: "",
+    mainContent: main.trim(),
+    thoughtSummary: thought.trim(),
+    trailingContent: trailing.trim(),
   };
 }
 
@@ -956,16 +946,15 @@ function appendPreprocessTerminalMessage(current: string, incoming?: string | nu
   const nextTrailingContent = trailingContent
     ? `${trailingContent.trimEnd()}\n\n${trimmedIncoming}`
     : trimmedIncoming;
-  if (!thoughtSummary) {
-    const nextMainContent = mainContent
-      ? `${mainContent.trimEnd()}\n\n${trimmedIncoming}`
-      : trimmedIncoming;
-    return nextMainContent;
+  let result = mainContent;
+  if (thoughtSummary) {
+    result = result
+      ? `${result}\n\nThought summary:\n${thoughtSummary}`
+      : `Thought summary:\n${thoughtSummary}`;
   }
-  const baseContent = mainContent
-    ? `${mainContent}\n\nThought summary:\n${thoughtSummary}`
-    : `Thought summary:\n${thoughtSummary}`;
-  return `${baseContent}\n\nPost-update:\n${nextTrailingContent}`;
+  return result
+    ? `${result}\n\nPost-update:\n${nextTrailingContent}`
+    : `Post-update:\n${nextTrailingContent}`;
 }
 
 function formatDiagnostics(details: unknown): string {
