@@ -68,9 +68,13 @@ class Settings:
     gemini_base_url: str
     gemini_model: str
     gemini_timeout_seconds: float
+    gemini_thinking_level: str
+    gemini_include_thought_summary: bool
+    inject_full_parsed_score_json: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
     llm_max_history_items: int
+    preprocess_max_attempts: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -85,6 +89,9 @@ class Settings:
     app_env: str
     project_id: str | None
     backend_require_app_check: bool
+    playback_token_secret_name: str
+    playback_token_secret_version: str
+    playback_token_ttl_seconds: int
     brevo_waitlist_list_id: int
     brevo_doi_template_id: int
     brevo_doi_redirect_url: str
@@ -118,9 +125,16 @@ class Settings:
         )
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
+        gemini_thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").strip()
+        gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
+        inject_full_parsed_score_json = _env_bool(
+            "INJECT_FULL_PARSED_SCORE_JSON",
+            False,
+        )
         llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
+        preprocess_max_attempts = _env_int("PREPROCESS_MAX_ATTEMPTS", 3)
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
@@ -140,6 +154,15 @@ class Settings:
             "BACKEND_REQUIRE_APP_CHECK",
             app_env_lower not in {"dev", "development", "local", "test"},
         )
+        playback_token_secret_name = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+        ).strip()
+        playback_token_secret_version = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET_VERSION",
+            "latest",
+        ).strip()
+        playback_token_ttl_seconds = _env_int("BACKEND_PLAYBACK_TOKEN_TTL_SECONDS", 300)
         brevo_waitlist_list_id = _env_int("BREVO_WAITLIST_LIST_ID", 0)
         brevo_doi_template_id = _env_int("BREVO_DOI_TEMPLATE_ID", 0)
         brevo_doi_redirect_url = os.getenv("BREVO_DOI_REDIRECT_URL", "").strip()
@@ -170,9 +193,13 @@ class Settings:
             gemini_base_url=gemini_base_url,
             gemini_model=gemini_model,
             gemini_timeout_seconds=gemini_timeout_seconds,
+            gemini_thinking_level=gemini_thinking_level,
+            gemini_include_thought_summary=gemini_include_thought_summary,
+            inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
             llm_max_history_items=llm_max_history_items,
+            preprocess_max_attempts=preprocess_max_attempts,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,
@@ -187,6 +214,9 @@ class Settings:
             app_env=app_env,
             project_id=project_id,
             backend_require_app_check=backend_require_app_check,
+            playback_token_secret_name=playback_token_secret_name,
+            playback_token_secret_version=playback_token_secret_version,
+            playback_token_ttl_seconds=playback_token_ttl_seconds,
             brevo_waitlist_list_id=brevo_waitlist_list_id,
             brevo_doi_template_id=brevo_doi_template_id,
             brevo_doi_redirect_url=brevo_doi_redirect_url,

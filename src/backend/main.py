@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import time
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,13 @@ from src.backend.firebase_app import (
 )
 from src.backend.storage_client import download_bytes, upload_file
 from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
+from src.backend.playback_tokens import (
+    PlaybackTokenClaims,
+    PlaybackTokenError,
+    issue_playback_token,
+    verify_playback_token,
+)
+from src.backend.secret_manager import read_secret
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -37,6 +45,8 @@ from src.mcp.logging_utils import (
     set_log_context,
 )
 from firebase_admin import app_check
+
+_PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 
 
 class ChatRequest(BaseModel):
@@ -231,9 +241,10 @@ def create_app() -> FastAPI:
         if len(payload.message) > request.app.state.settings.llm_max_message_chars:
             raise HTTPException(status_code=400, detail="Message too long.")
         try:
-            return await orchestrator.handle_chat(
+            response = await orchestrator.handle_chat(
                 session_id, payload.message, user_id=user_id, user_email=user_email
             )
+            return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -248,19 +259,20 @@ def create_app() -> FastAPI:
     ) -> Response:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
-        user_id = await _get_user_id_or_401(request)
+        claims = _get_playback_claims_or_none(request, settings, session_id, file)
+        user_id = claims.user_id if claims else await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
         snapshot = None
         if file:
             snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
             current_audio = snapshot.get("current_audio") if snapshot else None
-            storage_path = current_audio.get("storage_path") if current_audio else None
-            if settings.backend_use_storage and storage_path:
-                return await _stream_storage_audio(settings, storage_path)
             session_dir = sessions.session_dir(session_id)
             file_name = Path(file).name
             if file_name != file:
                 raise HTTPException(status_code=400, detail="Invalid audio file name.")
+            storage_path = claims.resource_path if claims else None
+            if settings.backend_use_storage and storage_path:
+                return await _stream_storage_audio(settings, storage_path)
             audio_path = (session_dir / file_name).resolve()
             try:
                 audio_path.relative_to(session_dir)
@@ -305,7 +317,13 @@ def create_app() -> FastAPI:
         if latest is None:
             return {"status": "idle"}
         job_id, data = latest
-        return build_progress_payload(job_id, data)
+        payload = build_progress_payload(job_id, data)
+        return _sign_audio_payload_urls(
+            request,
+            payload,
+            user_id=user_id,
+            resource_path=data.get("outputPath") if isinstance(data.get("outputPath"), str) else None,
+        )
 
     @app.get("/credits")
     async def get_credits(request: Request) -> Dict[str, Any]:
@@ -408,12 +426,9 @@ async def _get_snapshot_or_404(
 
 
 def _extract_bearer_token(request: Request) -> str:
-    """Extract a bearer token from headers or query params."""
+    """Extract a bearer token from the Authorization header."""
     auth_header = request.headers.get("authorization")
     if not auth_header:
-        token = request.query_params.get("id_token") or request.query_params.get("auth")
-        if token:
-            return token
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
     parts = auth_header.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -516,6 +531,118 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
         raise
     finally:
         await file.close()
+
+
+def _sign_audio_payload_urls(
+    request: Request,
+    payload: Dict[str, Any],
+    *,
+    user_id: str,
+    resource_path: str | None = None,
+) -> Dict[str, Any]:
+    """Attach signed playback tokens to backend-issued audio URLs."""
+    audio_url = payload.get("audio_url")
+    if not isinstance(audio_url, str) or not audio_url:
+        return payload
+    signed = _build_signed_audio_url(
+        request.app.state.settings,
+        payload,
+        user_id,
+        audio_url,
+        resource_path=resource_path,
+    )
+    if signed == audio_url:
+        return payload
+    updated = dict(payload)
+    updated["audio_url"] = signed
+    return updated
+
+
+def _build_signed_audio_url(
+    settings: Settings,
+    payload: Dict[str, Any],
+    user_id: str,
+    audio_url: str,
+    *,
+    resource_path: str | None = None,
+) -> str:
+    """Append a short-lived playback token to a backend audio URL."""
+    parts = urlsplit(audio_url)
+    if not parts.path.startswith("/sessions/") or not parts.path.endswith("/audio"):
+        return audio_url
+    path_parts = [part for part in parts.path.split("/") if part]
+    if len(path_parts) != 3:
+        return audio_url
+    session_id = path_parts[1]
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    file_name = query.get("file")
+    if not file_name:
+        return audio_url
+    playback_resource_path = resource_path or _playback_resource_path(payload)
+    playback_token = issue_playback_token(
+        _load_playback_token_secret(settings),
+        user_id=user_id,
+        session_id=session_id,
+        file_name=file_name,
+        ttl_seconds=settings.playback_token_ttl_seconds,
+        resource_path=playback_resource_path,
+    )
+    query["playback_token"] = playback_token
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _get_playback_claims_or_none(
+    request: Request,
+    settings: Settings,
+    session_id: str,
+    file_name: Optional[str],
+) -> PlaybackTokenClaims | None:
+    """Return verified playback claims when a playback token is supplied."""
+    token = request.query_params.get("playback_token")
+    if not token:
+        return None
+    if not file_name:
+        raise HTTPException(status_code=401, detail="Playback token requires an audio file name.")
+    try:
+        return verify_playback_token(
+            token,
+            _load_playback_token_secret(settings),
+            session_id=session_id,
+            file_name=file_name,
+        )
+    except PlaybackTokenError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+def _load_playback_token_secret(settings: Settings) -> str:
+    """Load the playback token signing secret using the standard secret pattern."""
+    app_env = settings.app_env.lower()
+    env_secret = os.getenv("BACKEND_PLAYBACK_TOKEN_VALUE", "").strip()
+    if app_env in {"dev", "development", "local", "test"}:
+        return env_secret or "dev-playback-token-secret"
+    cache_key = (
+        settings.project_id,
+        settings.playback_token_secret_name,
+        settings.playback_token_secret_version,
+    )
+    cached = _PLAYBACK_SECRET_CACHE.get(cache_key)
+    if cached:
+        return cached
+    secret = read_secret(
+        settings,
+        settings.playback_token_secret_name,
+        settings.playback_token_secret_version,
+    )
+    _PLAYBACK_SECRET_CACHE[cache_key] = secret
+    return secret
+
+
+def _playback_resource_path(payload: Dict[str, Any]) -> str | None:
+    """Extract the exact backend resource identity for a playback URL."""
+    candidate = payload.get("output_storage_path") or payload.get("outputPath")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return None
 
 
 def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:
