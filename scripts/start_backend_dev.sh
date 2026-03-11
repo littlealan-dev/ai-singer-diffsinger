@@ -40,6 +40,7 @@ fi
 : "${BACKEND_HOST:=0.0.0.0}"
 : "${BACKEND_PORT:=8000}"
 : "${BACKEND_LOG_LEVEL:=debug}"
+: "${BACKEND_BUILD_ID:=dev-$(date +%s)}"
 
 PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv310/bin/python}"
 
@@ -63,6 +64,7 @@ export APP_ENV
 export MCP_DEBUG
 export BACKEND_AUTH_DISABLED
 export BACKEND_USE_STORAGE
+export BACKEND_BUILD_ID
 export STORAGE_EMULATOR_HOST
 export PYTHONPATH="${ROOT_DIR}"
 

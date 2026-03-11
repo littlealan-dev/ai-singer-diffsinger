@@ -44,10 +44,13 @@ ui/dist/
 ui/.vite/
 ui/.env*
 ui/*.log
+ui/
+marketing/
 
 # Artifacts
 outputs/
 tests/output/
+tests/
 logs/
 runs/
 checkpoints/
@@ -56,6 +59,10 @@ tmp/
 data/
 docs/
 third_party/
+.firebase/
+firebase-debug.log
+firestore-debug.log
+.agent/
 
 # Git
 .git/

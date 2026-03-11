@@ -1,16 +1,29 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv310/
 env/
 venv/
 .env
 .DS_Store
+.agent/
+.pytest_cache/
+.git/
+.gitmodules
+.gcloudignore
+.firebaserc
+.firebase/
+firebase-debug.log
+firestore-debug.log
 
 ui/node_modules/
 ui/dist/
 ui/.vite/
 ui/.env*
 ui/*.log
+ui/
+marketing/
+tests/
 
 logs/
 tests/output/
@@ -22,6 +35,11 @@ tmp/
 data/
 docs/
 third_party/
+config/
+env/
+reviews/
+scripts/
+spec/
 
 # Exclude assets from image build
 assets/

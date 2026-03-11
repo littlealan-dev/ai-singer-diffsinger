@@ -9,13 +9,22 @@ import urllib.error
 import urllib.request
 
 from src.backend.config import Settings
+from src.backend.gemini_cache import GeminiPromptCacheManager
+from src.backend.llm_prompt import PromptBundle
 from src.mcp.logging_utils import summarize_payload
 
 
 class GeminiRestClient:
     """Lightweight REST client for Google Gemini."""
-    def __init__(self, settings: Settings, *, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        api_key: str | None = None,
+        cache_manager: GeminiPromptCacheManager | None = None,
+    ) -> None:
         """Configure client endpoints, model, and timeouts."""
+        self._settings = settings
         self._api_key = api_key or settings.gemini_api_key
         self._base_url = settings.gemini_base_url
         self._model = settings.gemini_model
@@ -23,14 +32,31 @@ class GeminiRestClient:
         self._thinking_level = settings.gemini_thinking_level.strip()
         self._include_thought_summary = bool(settings.gemini_include_thought_summary)
         self._logger = logging.getLogger(__name__)
+        self._cache_manager = cache_manager or GeminiPromptCacheManager(settings, api_key=self._api_key)
 
-    def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
+    def generate(self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]) -> str:
         """Generate a response from Gemini using the REST API."""
+        if isinstance(prompt_bundle, str):
+            prompt_bundle = PromptBundle(
+                static_prompt_text=prompt_bundle,
+                dynamic_prompt_text="Dynamic Context:\nnone\nEnd Dynamic Context.",
+            )
         url = f"{self._base_url}/models/{self._model}:generateContent"
         payload = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": self._history_to_contents(history),
+            "contents": self._history_to_contents(
+                history,
+                dynamic_prompt=prompt_bundle.dynamic_prompt_text,
+            ),
         }
+        cached_content_name = self._cache_manager.ensure_prompt_cache(
+            model=self._model,
+            build_id=self._settings.backend_build_id,
+            static_prompt_text=prompt_bundle.static_prompt_text,
+        )
+        if cached_content_name:
+            payload["cachedContent"] = cached_content_name
+        else:
+            payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
         thinking_config: Dict[str, Any] = {}
         if self._thinking_level:
             thinking_config["thinkingLevel"] = self._thinking_level
@@ -38,6 +64,11 @@ class GeminiRestClient:
             thinking_config["includeThoughts"] = True
         if thinking_config:
             payload["generationConfig"] = {"thinkingConfig": thinking_config}
+        self._logger.debug(
+            "gemini_request_payload model=%s payload=%s",
+            self._model,
+            payload,
+        )
         # Encode payload as JSON for the HTTP request body.
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -117,9 +148,16 @@ class GeminiRestClient:
         payload["thought_summary"] = summary
         return json.dumps(payload)
 
-    def _history_to_contents(self, history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    def _history_to_contents(
+        self,
+        history: List[Dict[str, str]],
+        *,
+        dynamic_prompt: str,
+    ) -> List[Dict[str, Any]]:
         """Convert chat history into Gemini content payloads."""
-        contents: List[Dict[str, Any]] = []
+        contents: List[Dict[str, Any]] = [
+            {"role": "user", "parts": [{"text": dynamic_prompt}]}
+        ]
         for entry in history[-10:]:
             role = entry.get("role", "user")
             content_role = "model" if role == "assistant" else "user"

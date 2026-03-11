@@ -36,7 +36,14 @@ class LlmResponse:
     thought_summary: str = ""
 
 
-def build_system_prompt(
+@dataclass(frozen=True)
+class PromptBundle:
+    """Static and dynamic prompt layers for LLM providers."""
+    static_prompt_text: str
+    dynamic_prompt_text: str
+
+
+def build_prompt_bundle(
     tools: List[Dict[str, Any]],
     score_available: bool,
     voicebank_ids: Optional[List[str]] = None,
@@ -47,7 +54,7 @@ def build_system_prompt(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Build the system prompt with tool specs and context metadata."""
+    """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
     for tool in tools:
         tool_specs.append(
@@ -58,8 +65,8 @@ def build_system_prompt(
             }
         )
 
-    score_hint = "available" if score_available else "missing"
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True)
+    score_hint = "available" if score_available else "missing"
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
@@ -85,17 +92,66 @@ def build_system_prompt(
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
-    template = _load_system_prompt()
+    static_prompt = _load_system_prompt().replace("{tool_json}", tool_json)
+    static_prompt = (
+        static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
+        .replace("{voicebanks}", "<provided in Dynamic Context>")
+        .replace("{score_summary}", "<provided in Dynamic Context>")
+        .replace("{parsed_score_json}", "<provided in Dynamic Context>")
+        .replace("{voice_part_signals}", "<provided in Dynamic Context>")
+        .replace("{preprocess_mapping_context}", "<provided in Dynamic Context>")
+        .replace("{last_preprocess_plan}", "<provided in Dynamic Context>")
+        .replace("{voicebank_details}", "<provided in Dynamic Context>")
+    )
+    dynamic_prompt = (
+        "Dynamic Context:\n"
+        f"Score status: {score_hint}.\n"
+        "Score summary (if available):\n"
+        f"{score_summary_text}\n"
+        "Full parsed score JSON (if available):\n"
+        f"{parsed_score_json_text}\n"
+        "Voice-part planning signals (if available):\n"
+        f"{voice_part_signals_text}\n"
+        "Preprocess-derived mapping context (if available):\n"
+        f"{preprocess_mapping_context_text}\n"
+        "Latest attempted preprocess plan (if available):\n"
+        f"{last_preprocess_plan_text}\n"
+        f"Available voicebanks (IDs): {voicebanks_text}\n"
+        "Voicebank color options (if any):\n"
+        f"{voicebank_details_text}\n"
+        "End Dynamic Context."
+    )
+    return PromptBundle(
+        static_prompt_text=static_prompt,
+        dynamic_prompt_text=dynamic_prompt,
+    )
+
+
+def build_system_prompt(
+    tools: List[Dict[str, Any]],
+    score_available: bool,
+    voicebank_ids: Optional[List[str]] = None,
+    score_summary: Optional[Dict[str, Any]] = None,
+    parsed_score_json: Optional[Dict[str, Any]] = None,
+    voice_part_signals: Optional[Dict[str, Any]] = None,
+    preprocess_mapping_context: Optional[Dict[str, Any]] = None,
+    last_preprocess_plan: Optional[Dict[str, Any]] = None,
+    voicebank_details: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Build the full prompt for providers that do not support prompt caching."""
+    bundle = build_prompt_bundle(
+        tools=tools,
+        score_available=score_available,
+        voicebank_ids=voicebank_ids,
+        score_summary=score_summary,
+        parsed_score_json=parsed_score_json,
+        voice_part_signals=voice_part_signals,
+        preprocess_mapping_context=preprocess_mapping_context,
+        last_preprocess_plan=last_preprocess_plan,
+        voicebank_details=voicebank_details,
+    )
     return (
-        template.replace("{score_hint}", score_hint)
-        .replace("{tool_json}", tool_json)
-        .replace("{voicebanks}", voicebanks_text)
-        .replace("{score_summary}", score_summary_text)
-        .replace("{parsed_score_json}", parsed_score_json_text)
-        .replace("{voice_part_signals}", voice_part_signals_text)
-        .replace("{preprocess_mapping_context}", preprocess_mapping_context_text)
-        .replace("{last_preprocess_plan}", last_preprocess_plan_text)
-        .replace("{voicebank_details}", voicebank_details_text)
+        f"{bundle.static_prompt_text}\n\n---\n\n{bundle.dynamic_prompt_text}"
     )
 
 

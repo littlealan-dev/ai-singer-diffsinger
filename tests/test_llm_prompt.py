@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.backend.llm_prompt import build_system_prompt
+from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
 
 def test_build_system_prompt_includes_voice_part_signals() -> None:
@@ -172,3 +172,24 @@ def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() ->
         voicebank_details=None,
     )
     assert "Full parsed score JSON (if available):\nnone" in prompt
+
+
+def test_build_prompt_bundle_splits_static_and_dynamic_content() -> None:
+    bundle = build_prompt_bundle(
+        tools=[{"name": "synthesize", "description": "Render audio", "inputSchema": {"type": "object"}}],
+        score_available=True,
+        voicebank_ids=["Raine_Rena_2.01"],
+        score_summary={"title": "My Tribute"},
+        parsed_score_json={"parts": [{"part_index": 1}]},
+        voice_part_signals={"parts": []},
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "Tool list (name, description, input schema):" in bundle.static_prompt_text
+    assert '"name": "synthesize"' in bundle.static_prompt_text
+    assert "<provided in Dynamic Context>" in bundle.static_prompt_text
+    assert '"title": "My Tribute"' not in bundle.static_prompt_text
+    assert bundle.dynamic_prompt_text.startswith("Dynamic Context:\n")
+    assert '"title": "My Tribute"' in bundle.dynamic_prompt_text
+    assert "End Dynamic Context." in bundle.dynamic_prompt_text

@@ -17,7 +17,12 @@ from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient
-from src.backend.llm_prompt import LlmResponse, ToolCall, build_system_prompt, parse_llm_response
+from src.backend.llm_prompt import (
+    LlmResponse,
+    ToolCall,
+    build_prompt_bundle,
+    parse_llm_response,
+)
 from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
@@ -2947,7 +2952,7 @@ class Orchestrator:
                         score_payload,
                         score_summary=snapshot.get("score_summary"),
                     )
-            system_prompt = build_system_prompt(
+            prompt_bundle = build_prompt_bundle(
                 llm_tools,
                 score_available,
                 voicebank_ids,
@@ -2969,9 +2974,7 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
             )
-            text = await asyncio.to_thread(
-                self._llm_client.generate, system_prompt, history
-            )
+            text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
             self._logger.warning("llm_planning_context_failed error=%s", exc)
             return None, str(exc)
@@ -3036,7 +3039,7 @@ class Orchestrator:
                 if isinstance(current_score, dict)
                 else None
             )
-            system_prompt = build_system_prompt(
+            prompt_bundle = build_prompt_bundle(
                 llm_tools,
                 score_available=True,
                 voicebank_ids=voicebank_ids,
@@ -3058,7 +3061,7 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
             )
-            text = await asyncio.to_thread(self._llm_client.generate, system_prompt, history)
+            text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
             self._logger.warning("llm_followup_context_failed error=%s", exc)
             return None, str(exc)
