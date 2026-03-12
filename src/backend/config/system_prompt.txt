@@ -141,7 +141,7 @@ Rules:
 - If the user requests a style, map it to the closest valid voice_color for the chosen voicebank and include it.
 - voice_color must match exactly one of the voicebank's voice color IDs.
 - If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
-- For multi-verse scores, do not call `preprocess_voice_parts` or `synthesize` until verse is explicitly selected by the user.
+- For multi-verse scores, do not call `reparse`, `preprocess_voice_parts`, or `synthesize` until verse is explicitly selected by the user.
 - If backend returns `action_required` with `action=verse_selection_required`, ask the user to pick one verse from the provided options and do not emit tool calls in that turn.
 - If there is only one lyric part, do not ask the user to pick a part.
 - If there is only one verse, do not ask the user to pick a verse.

@@ -1324,16 +1324,6 @@ class Orchestrator:
                 followup_response.thought_summary,
                 followup_response.tool_calls,
             )
-            if (
-                isinstance(last_action_required_payload, dict)
-                and str(last_action_required_payload.get("action") or "").strip()
-                == "verse_selection_required"
-            ):
-                response = {
-                    "type": "chat_text",
-                    "message": self._format_followup_message_text(response_message),
-                }
-                break
             thought_block_for_response = self._format_thought_summary_block(
                 followup_response.thought_summary,
                 followup_response.tool_calls,
@@ -2642,13 +2632,13 @@ class Orchestrator:
         score_summary: Optional[Dict[str, Any]],
         explicit_verse_number: Optional[str],
     ) -> bool:
-        """Return True when render-path tool calls must be blocked for verse choice."""
+        """Return True when verse-sensitive tool calls must be blocked for verse choice."""
         available_verses = self._available_verses(score_summary)
         if len(available_verses) <= 1:
             return False
         selected_verse_number = self._score_selected_verse_number(score)
         for call in tool_calls:
-            if call.name not in {"preprocess_voice_parts", "synthesize"}:
+            if call.name not in {"reparse", "preprocess_voice_parts", "synthesize"}:
                 continue
             requested_verse_number = self._extract_call_requested_verse(call)
             if requested_verse_number:
@@ -2678,7 +2668,7 @@ class Orchestrator:
             "action": "verse_selection_required",
             "code": "verse_selection_required",
             "reason": "multi_verse_selection_required_before_render",
-            "message": "Select a verse before preprocessing or synthesis.",
+            "message": "Select a verse before reparsing, preprocessing, or synthesis.",
             "available_verses": available_verses,
             "selected_verse_number": selected_verse_number,
             "failed_validation_rules": [
@@ -3283,6 +3273,25 @@ class Orchestrator:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
             if call.name == "reparse":
+                if self._tool_calls_require_verse_selection(
+                    [call],
+                    score=current_score,
+                    score_summary=score_summary,
+                    explicit_verse_number=selected_explicit_verse_number,
+                ):
+                    action_required = self._build_verse_selection_required_action(
+                        score=current_score,
+                        score_summary=score_summary,
+                        tool_attempted=call.name,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
                 reparse_part_id = call.arguments.get("part_id")
                 reparse_part_index = call.arguments.get("part_index")
                 reparse_verse_number = call.arguments.get("verse_number")

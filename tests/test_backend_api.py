@@ -3002,6 +3002,97 @@ def test_chat_blocks_synthesize_without_explicit_verse_for_multiverse_score(clie
     assert not synth_calls
 
 
+def test_chat_blocks_reparse_without_explicit_verse_for_multiverse_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    tool_calls: list[tuple[str, dict]] = []
+
+    def call_tool(name, arguments):
+        tool_calls.append((name, dict(arguments)))
+        if name == "parse_score":
+            return {
+                "title": "Test",
+                "tempos": [],
+                "parts": [{"part_id": "P1", "voice_part_id": "soprano", "notes": []}],
+                "structure": {},
+                "selected_verse_number": "1",
+                "voice_part_signals": {"requested_verse_number": "1"},
+                "score_summary": {
+                    "title": "Test",
+                    "composer": None,
+                    "lyricist": None,
+                    "parts": [{"part_id": "P1", "part_index": 0}],
+                    "available_verses": ["1", "2"],
+                    "selected_verse_number": "1",
+                },
+            }
+        raise AssertionError(f"Unexpected router tool call: {name}")
+
+    class ReparseNeedsVerseClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(
+                "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+            ):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "Please choose which verse to use first.",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "reparse",
+                            "arguments": {"part_index": 0},
+                        }
+                    ],
+                    "final_message": "I'll reparse the score now.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.router.call_tool = call_tool
+    _upload_score(test_client, session_id)
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "composer": None,
+                "lyricist": None,
+                "parts": [{"part_id": "P1", "part_index": 0}],
+                "available_verses": ["1", "2"],
+                "selected_verse_number": "1",
+            },
+        )
+    )
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    seeded_score = dict(snapshot["current_score"]["score"])
+    seeded_score["selected_verse_number"] = "1"
+    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
+    asyncio.run(app.state.sessions.set_metadata(session_id, "explicit_verse_number", ""))
+    llm_client = ReparseNeedsVerseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "switch to the soprano line"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert "verse" in body["message"].lower()
+    action_required = body.get("action_required") or {}
+    assert action_required.get("action") == "verse_selection_required"
+    assert action_required.get("available_verses") == ["1", "2"]
+    reparses = [args for name, args in tool_calls if name == "parse_score"]
+    assert len(reparses) == 1, "Expected only the initial upload parse, not a reparse."
+
+
 def test_chat_selection_verse_number_allows_preprocess_for_multiverse_score(client):
     test_client, app = client
     session_id = _create_session(test_client)
