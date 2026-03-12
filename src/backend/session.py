@@ -28,6 +28,10 @@ class SessionState:
     last_active_at: datetime
     history: List[Dict[str, str]] = field(default_factory=list)
     files: Dict[str, str] = field(default_factory=dict)
+    original_score: Optional[Dict[str, Any]] = None
+    preprocess_plan_history: List[Dict[str, Any]] = field(default_factory=list)
+    preprocess_attempt_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_preprocess_plan: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
@@ -42,6 +46,14 @@ class SessionState:
             "last_active_at": self.last_active_at.isoformat(),
             "history": list(self.history),
             "files": dict(self.files),
+            "original_score": dict(self.original_score) if self.original_score else None,
+            "preprocess_plan_history": list(self.preprocess_plan_history),
+            "preprocess_attempt_history": list(self.preprocess_attempt_history),
+            "last_preprocess_plan": (
+                dict(self.last_preprocess_plan)
+                if self.last_preprocess_plan
+                else None
+            ),
             "current_score": self._score_snapshot(),
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "current_audio": dict(self.current_audio) if self.current_audio else None,
@@ -167,6 +179,15 @@ class SessionStore:
             state.last_active_at = _utcnow()
             return state.current_score_version
 
+    async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
+        """Persist the original parsed score baseline for future replanning."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.original_score = score
+            state.last_active_at = _utcnow()
+
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Attach a score summary to the session."""
         async with self._lock:
@@ -174,6 +195,37 @@ class SessionStore:
             if state is None:
                 raise KeyError(session_id)
             state.score_summary = summary
+            state.last_active_at = _utcnow()
+
+    async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
+        """Append a generated preprocess plan entry for debugging."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.preprocess_plan_history.append(entry)
+            state.last_active_at = _utcnow()
+
+    async def append_preprocess_attempt_summary(
+        self, session_id: str, entry: Dict[str, Any]
+    ) -> None:
+        """Append a lightweight preprocess attempt summary for debugging."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.preprocess_attempt_history.append(entry)
+            state.last_active_at = _utcnow()
+
+    async def set_last_preprocess_plan(
+        self, session_id: str, plan: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist the latest preprocess plan for prompt context."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.last_preprocess_plan = plan
             state.last_active_at = _utcnow()
 
     async def set_audio(
@@ -195,6 +247,28 @@ class SessionStore:
             if storage_path:
                 state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
+
+    async def reset_for_new_upload(self, session_id: str) -> None:
+        """Clear score-specific session state and remove prior derived artifacts."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.history = []
+            state.files = {}
+            state.original_score = None
+            state.preprocess_plan_history = []
+            state.preprocess_attempt_history = []
+            state.last_preprocess_plan = None
+            state.current_score = None
+            state.current_score_version = 0
+            state.score_summary = None
+            state.current_audio = None
+            state.last_active_at = _utcnow()
+            session_dir = self.session_dir(session_id)
+            if session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
 
     async def evict_expired(self) -> None:
         """Evict any sessions that have expired in memory."""
@@ -314,6 +388,14 @@ class FirestoreSessionStore:
             last_active_at=last_active,
             history=list(data.get("history") or []),
             files=dict(data.get("files") or {}),
+            original_score=data.get("originalScore"),
+            preprocess_plan_history=list(data.get("preprocessPlanHistory") or []),
+            preprocess_attempt_history=list(data.get("preprocessAttemptHistory") or []),
+            last_preprocess_plan=(
+                data.get("lastPreprocessPlan")
+                if data.get("lastPreprocessPlan") is not None
+                else data.get("lastSuccessfulPreprocessPlan")
+            ),
             current_score=data.get("currentScore"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
@@ -331,6 +413,10 @@ class FirestoreSessionStore:
                 "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 "history": [],
                 "files": {},
+                "originalScore": None,
+                "preprocessPlanHistory": [],
+                "preprocessAttemptHistory": [],
+                "lastPreprocessPlan": None,
                 "currentScore": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
@@ -416,11 +502,52 @@ class FirestoreSessionStore:
             )
             return version
 
+    async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
+        """Persist the original parsed score baseline in Firestore."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {"originalScore": score, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Update the score summary in Firestore."""
         async with self._lock:
             self._doc_ref(session_id).update(
                 {"scoreSummary": summary, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+            )
+
+    async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
+        """Append a generated preprocess plan entry in Firestore for debugging."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "preprocessPlanHistory": firestore.ArrayUnion([entry]),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def append_preprocess_attempt_summary(
+        self, session_id: str, entry: Dict[str, Any]
+    ) -> None:
+        """Append a preprocess attempt summary in Firestore for debugging."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "preprocessAttemptHistory": firestore.ArrayUnion([entry]),
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_last_preprocess_plan(
+        self, session_id: str, plan: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist the latest preprocess plan in Firestore."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "lastPreprocessPlan": plan,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
             )
 
     async def set_audio(
@@ -441,6 +568,30 @@ class FirestoreSessionStore:
             self._doc_ref(session_id).update(
                 {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
+
+    async def reset_for_new_upload(self, session_id: str) -> None:
+        """Clear score-specific Firestore session state and local derived artifacts."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "history": [],
+                    "files": {},
+                    "originalScore": None,
+                    "preprocessPlanHistory": [],
+                    "preprocessAttemptHistory": [],
+                    "lastPreprocessPlan": None,
+                    "lastSuccessfulPreprocessPlan": None,
+                    "currentScore": None,
+                    "currentScoreVersion": 0,
+                    "scoreSummary": None,
+                    "currentAudio": None,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+            session_dir = self.session_dir(session_id)
+            if session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
 
     async def evict_expired(self) -> None:
         """Firestore-backed sessions rely on TTL policies; no-op here."""

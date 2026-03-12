@@ -1,0 +1,32 @@
+{
+  "targets": [
+    {
+      "actions": [
+        {
+          "split_shared_note_policy": "duplicate_to_all",
+          "type": "split_voice_part"
+        },
+        {
+          "copy_all_verses": false,
+          "policy": "fill_missing_only",
+          "section_overrides": [],
+          "source_priority": [
+            {
+              "part_index": 0,
+              "voice_part_id": "soprano"
+            }
+          ],
+          "strategy": "overlap_best_match",
+          "type": "propagate_lyrics",
+          "verse_number": "1"
+        }
+      ],
+      "confidence": 0.9,
+      "notes": "auto-generated plan for e2e test",
+      "target": {
+        "part_index": 1,
+        "voice_part_id": "tenor"
+      }
+    }
+  ]
+}

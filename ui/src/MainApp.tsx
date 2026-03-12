@@ -27,10 +27,18 @@ type Message = {
   role: Role;
   content: string;
   audioUrl?: string;
+  details?: unknown;
+  attemptMessages?: AttemptMessage[];
   showSelector?: boolean;
   progressUrl?: string;
   isProgress?: boolean;
   progressValue?: number;
+};
+
+type AttemptMessage = {
+  attempt_number: number;
+  message?: string;
+  thought_summary?: string;
 };
 
 type ScorePayload = {
@@ -107,11 +115,14 @@ export default function MainApp() {
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
   const [showCreditsModal, setShowCreditsModal] = useState(false);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
+  const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
+  const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -220,12 +231,24 @@ export default function MainApp() {
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
+      const appendTerminalPreprocessMessage =
+        payload.job_kind === "preprocess" &&
+        (payload.status === "done" || payload.status === "error");
+      const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) =>
         prev.map((msg) => {
           if (msg.id !== activeProgress.messageId) return msg;
+          const nextContent =
+            payload.job_kind === "preprocess" && payload.status === "running"
+              ? msg.content
+              : appendTerminalPreprocessMessage
+                ? appendPreprocessTerminalMessage(msg.content, nextMessage)
+                : appendProgressMessage(msg.content, nextMessage);
           return {
             ...msg,
-            content: appendProgressMessage(msg.content, nextMessage),
+            content: nextContent,
+            details: payload.details ?? msg.details,
+            attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
             audioUrl: nextAudioUrl || msg.audioUrl,
             isProgress: payload.status !== "done" && payload.status !== "error",
@@ -242,12 +265,23 @@ export default function MainApp() {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled) return;
         applyProgress(payload);
+        if (payload.status === "done" && payload.review_required) {
+          await refreshScorePreview();
+        }
+        if (payload.warning) {
+          setError(payload.warning);
+        }
         if (payload.status === "done") {
           setActiveProgress(null);
         }
         if (payload.status === "error") {
           setActiveProgress(null);
-          setError(payload.error || payload.message || "Synthesis failed.");
+          setError(
+            payload.message ||
+              (payload.job_kind === "preprocess"
+                ? "Preprocess failed."
+                : "Synthesis failed.")
+          );
         }
       } catch (err: any) {
         if (!cancelled) {
@@ -268,8 +302,17 @@ export default function MainApp() {
   useEffect(() => {
     const container = chatStreamRef.current;
     if (!container) return;
+    if (!shouldAutoScrollRef.current) return;
     container.scrollTop = container.scrollHeight;
   }, [messages, status]);
+
+  const handleChatScroll = () => {
+    const container = chatStreamRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom < 48;
+  };
 
   const headerSubtitle = useMemo(
     () =>
@@ -282,6 +325,26 @@ export default function MainApp() {
 
   const appendMessage = (message: Message) => {
     setMessages((prev) => [...prev, message]);
+  };
+
+  const toggleThoughtSummary = (messageId: string) => {
+    setExpandedThoughts((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
+  };
+
+  const toggleDiagnostics = (messageId: string) => {
+    setExpandedDiagnostics((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
+  };
+
+  const refreshScorePreview = async () => {
+    if (!sessionId || !score) return;
+    const data = await fetchScoreXml(sessionId);
+    setScore({ name: score.name, data });
   };
 
   const handleUpload = async (file: File) => {
@@ -327,6 +390,10 @@ export default function MainApp() {
         id: crypto.randomUUID(),
         role: "assistant",
         content: response.message,
+        details: "details" in response ? response.details : undefined,
+        attemptMessages: extractAttemptMessages(
+          "details" in response ? response.details : undefined
+        ),
       };
       if (
         response.type === "chat_text" &&
@@ -350,6 +417,12 @@ export default function MainApp() {
         if (pendingSelection) {
           setPendingSelection(false);
         }
+      }
+      if ("current_score" in response && response.current_score) {
+        await refreshScorePreview();
+      }
+      if ("warning" in response && response.warning) {
+        setError(String(response.warning));
       }
       appendMessage(assistantMessage);
       if (response.type === "chat_progress") {
@@ -499,7 +572,7 @@ export default function MainApp() {
             <h2>Studio Chat</h2>
             <span className="chat-subtitle">Natural language takes, no DAW edits</span>
           </div>
-          <div className="chat-stream" ref={chatStreamRef}>
+          <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatScroll}>
             {messages.length === 0 && (
               <div className="empty-state">
                 <p>Drop a MusicXML file here to begin.</p>
@@ -518,9 +591,129 @@ export default function MainApp() {
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 {msg.role === "assistant" ? (
-                  <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
-                    {msg.content}
-                  </ReactMarkdown>
+                  (() => {
+                    const { mainContent, thoughtSummary, trailingContent } = splitThoughtSummary(
+                      msg.content
+                    );
+                    const isExpanded = Boolean(expandedThoughts[msg.id]);
+                    const diagnosticsExpanded = Boolean(expandedDiagnostics[msg.id]);
+                    const diagnosticsText = formatDiagnostics(msg.details);
+                    const followupAttempts = (msg.attemptMessages ?? []).filter(
+                      (attempt) => attempt.attempt_number > 1
+                    );
+                    return (
+                      <>
+                        {mainContent ? (
+                          <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                            {mainContent}
+                          </ReactMarkdown>
+                        ) : null}
+                        {thoughtSummary ? (
+                          <div className="thought-summary">
+                            <button
+                              type="button"
+                              className="thought-summary-toggle"
+                              onClick={() => toggleThoughtSummary(msg.id)}
+                              aria-expanded={isExpanded}
+                            >
+                              <span
+                                className={clsx(
+                                  "thought-summary-caret",
+                                  isExpanded && "expanded"
+                                )}
+                                aria-hidden="true"
+                              >
+                                ▾
+                              </span>
+                              <span>Thought summary</span>
+                            </button>
+                            {isExpanded ? (
+                              <ReactMarkdown
+                                className="chat-markdown thought-summary-content"
+                                remarkPlugins={[remarkGfm]}
+                              >
+                                {thoughtSummary}
+                              </ReactMarkdown>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {followupAttempts.map((attempt) => {
+                          const attemptKey = `${msg.id}:attempt:${attempt.attempt_number}`;
+                          const attemptExpanded = Boolean(expandedThoughts[attemptKey]);
+                          const attemptMessage = attempt.message?.trim() ?? "";
+                          const attemptThought = attempt.thought_summary?.trim() ?? "";
+                          return (
+                            <div key={attemptKey} className="attempt-block">
+                              <div className="attempt-label">Attempt {attempt.attempt_number}</div>
+                              {attemptMessage ? (
+                                <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                                  {attemptMessage}
+                                </ReactMarkdown>
+                              ) : null}
+                              {attemptThought ? (
+                                <div className="thought-summary">
+                                  <button
+                                    type="button"
+                                    className="thought-summary-toggle"
+                                    onClick={() => toggleThoughtSummary(attemptKey)}
+                                    aria-expanded={attemptExpanded}
+                                  >
+                                    <span
+                                      className={clsx(
+                                        "thought-summary-caret",
+                                        attemptExpanded && "expanded"
+                                      )}
+                                      aria-hidden="true"
+                                    >
+                                      ▾
+                                    </span>
+                                    <span>Thought summary</span>
+                                  </button>
+                                  {attemptExpanded ? (
+                                    <ReactMarkdown
+                                      className="chat-markdown thought-summary-content"
+                                      remarkPlugins={[remarkGfm]}
+                                    >
+                                      {attemptThought}
+                                    </ReactMarkdown>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        {trailingContent ? (
+                          <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
+                            {trailingContent}
+                          </ReactMarkdown>
+                        ) : null}
+                        {diagnosticsText ? (
+                          <div className="thought-summary diagnostics-panel">
+                            <button
+                              type="button"
+                              className="thought-summary-toggle"
+                              onClick={() => toggleDiagnostics(msg.id)}
+                              aria-expanded={diagnosticsExpanded}
+                            >
+                              <span
+                                className={clsx(
+                                  "thought-summary-caret",
+                                  diagnosticsExpanded && "expanded"
+                                )}
+                                aria-hidden="true"
+                              >
+                                ▾
+                              </span>
+                              <span>Diagnostics</span>
+                            </button>
+                            {diagnosticsExpanded ? (
+                              <pre className="diagnostics-content">{diagnosticsText}</pre>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </>
+                    );
+                  })()
                 ) : (
                   <p>{msg.content}</p>
                 )}
@@ -700,4 +893,96 @@ function formatDuration(totalSeconds: number): string {
     return `${minutes}:${String(seconds).padStart(2, "0")}`;
   }
   return `${seconds}s`;
+}
+
+function splitThoughtSummary(content: string): {
+  mainContent: string;
+  thoughtSummary: string;
+  trailingContent: string;
+} {
+  const thoughtMarker = "\n\nThought summary:\n";
+  const trailingMarker = "\n\nPost-update:\n";
+  const thoughtPrefix = "Thought summary:\n";
+  const trailingPrefix = "Post-update:\n";
+  let main = content;
+  let thought = "";
+  let trailing = "";
+
+  if (main.includes(trailingMarker)) {
+    const parts = main.split(trailingMarker);
+    trailing = parts.pop() ?? "";
+    main = parts.join(trailingMarker).trim();
+  } else if (main.startsWith(trailingPrefix)) {
+    trailing = main.slice(trailingPrefix.length);
+    main = "";
+  }
+
+  if (main.includes(thoughtMarker)) {
+    const parts = main.split(thoughtMarker);
+    thought = parts.pop() ?? "";
+    main = parts.join(thoughtMarker).trim();
+  } else if (main.startsWith(thoughtPrefix)) {
+    thought = main.slice(thoughtPrefix.length);
+    main = "";
+  }
+
+  return {
+    mainContent: main.trim(),
+    thoughtSummary: thought.trim(),
+    trailingContent: trailing.trim(),
+  };
+}
+
+function appendPreprocessTerminalMessage(current: string, incoming?: string | null): string {
+  const trimmedIncoming = incoming?.trim();
+  if (!trimmedIncoming) return current;
+  const { mainContent, thoughtSummary, trailingContent } = splitThoughtSummary(current);
+  if (
+    mainContent.includes(trimmedIncoming) ||
+    trailingContent.includes(trimmedIncoming)
+  ) {
+    return current;
+  }
+  const nextTrailingContent = trailingContent
+    ? `${trailingContent.trimEnd()}\n\n${trimmedIncoming}`
+    : trimmedIncoming;
+  let result = mainContent;
+  if (thoughtSummary) {
+    result = result
+      ? `${result}\n\nThought summary:\n${thoughtSummary}`
+      : `Thought summary:\n${thoughtSummary}`;
+  }
+  return result
+    ? `${result}\n\nPost-update:\n${nextTrailingContent}`
+    : `Post-update:\n${nextTrailingContent}`;
+}
+
+function formatDiagnostics(details: unknown): string {
+  if (details === null || details === undefined) return "";
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
+function extractAttemptMessages(details: unknown): AttemptMessage[] | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const raw = (details as { attempt_messages?: unknown }).attempt_messages;
+  if (!Array.isArray(raw)) return undefined;
+  const entries = raw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const attemptNumber = Number((entry as { attempt_number?: unknown }).attempt_number);
+      if (!Number.isFinite(attemptNumber)) return null;
+      const message = (entry as { message?: unknown }).message;
+      const thought = (entry as { thought_summary?: unknown }).thought_summary;
+      return {
+        attempt_number: attemptNumber,
+        message: typeof message === "string" ? message : undefined,
+        thought_summary: typeof thought === "string" ? thought : undefined,
+      } satisfies AttemptMessage;
+    })
+    .filter((entry): entry is AttemptMessage => entry !== null);
+  return entries.length > 0 ? entries : undefined;
 }

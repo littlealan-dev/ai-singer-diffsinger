@@ -26,7 +26,7 @@ class TestSopranoVerse1(unittest.TestCase):
         # It takes part_index (int) and verse_number (str/int)
         
         # We know Soprano is likely the first part (index 0) from the file inspection (P1)
-        score = parse_score(self.score_path, part_index=0, verse_number=1)
+        score = parse_score(self.score_path, verse_number=1)
         
         print(f"Parsed {len(score['parts'][0]['notes'])} notes for Soprano Verse 1.")
 

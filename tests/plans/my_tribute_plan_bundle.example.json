@@ -1,0 +1,45 @@
+{
+  "targets": [
+    {
+      "label": "my_tribute_women_voice_part_1",
+      "part_index": 0,
+      "voice_part_id": "voice part 1",
+      "plan": {
+        "targets": [
+          {
+            "target": {
+              "part_index": 0,
+              "voice_part_id": "voice part 1"
+            },
+            "sections": [
+              {
+                "start_measure": 1,
+                "end_measure": 4,
+                "mode": "rest"
+              }
+            ],
+            "verse_number": "1",
+            "copy_all_verses": false,
+            "split_shared_note_policy": "duplicate_to_all",
+            "confidence": 0.8,
+            "notes": "Replace this with fresh LLM-generated timeline sections."
+          }
+        ]
+      },
+      "expect": {
+        "min_sung_measure": 5,
+        "max_sung_measure": 54,
+        "lyric_presence_ranges": [
+          [
+            5,
+            24
+          ],
+          [
+            25,
+            57
+          ]
+        ]
+      }
+    }
+  ]
+}

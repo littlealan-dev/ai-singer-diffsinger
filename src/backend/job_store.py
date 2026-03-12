@@ -72,13 +72,25 @@ class JobStore:
         data = doc.to_dict() or {}
         return doc.id, data
 
+    def clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
+        """Delete all stored jobs for a user/session pair."""
+        self._ensure_client()
+        query = (
+            self._client.collection(self.collection)
+            .where("userId", "==", user_id)
+            .where("sessionId", "==", session_id)
+        )
+        for doc in query.stream():
+            doc.reference.delete()
+
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize job data into a progress payload for clients."""
-    status = data.get("status", "idle")
-    if status == "completed":
+    raw_status = data.get("status", "idle")
+    status = raw_status
+    if raw_status == "completed":
         status = "done"
-    elif status in {"failed", "cancelled"}:
+    elif raw_status in {"failed", "cancelled", "credit_reconciliation_required"}:
         status = "error"
     payload: Dict[str, Any] = {
         "status": status,
@@ -87,7 +99,14 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "progress": data.get("progress"),
         "audio_url": data.get("audioUrl"),
         "error": data.get("errorMessage"),
+        "warning": data.get("warningMessage"),
         "job_id": job_id,
+        "job_kind": data.get("jobKind"),
+        "review_required": data.get("reviewRequired"),
+        "action_required": data.get("actionRequired"),
+        "details": data.get("details"),
         "updated_at": data.get("updatedAt"),
     }
+    if raw_status == "credit_reconciliation_required":
+        payload.pop("audio_url", None)
     return {key: value for key, value in payload.items() if value is not None}

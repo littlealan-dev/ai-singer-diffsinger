@@ -1,0 +1,18 @@
+{
+  "targets": [
+    {
+      "actions": [
+        {
+          "split_shared_note_policy": "duplicate_to_all",
+          "type": "split_voice_part"
+        }
+      ],
+      "confidence": 0.9,
+      "notes": "auto-generated plan for e2e test",
+      "target": {
+        "part_index": 0,
+        "voice_part_id": "voice part 2"
+      }
+    }
+  ]
+}

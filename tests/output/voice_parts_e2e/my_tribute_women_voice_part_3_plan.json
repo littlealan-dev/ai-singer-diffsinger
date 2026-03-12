@@ -1,0 +1,17 @@
+{
+  "targets": [
+    {
+      "actions": [
+        {
+          "type": "split_voice_part"
+        }
+      ],
+      "confidence": 0.9,
+      "notes": "Women voice part 3 has lyrics; split only.",
+      "target": {
+        "part_index": 0,
+        "voice_part_id": "voice part 3"
+      }
+    }
+  ]
+}

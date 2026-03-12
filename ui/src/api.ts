@@ -29,16 +29,27 @@ export type ChatResponse =
       message: string;
       current_score?: unknown;
       suppress_selector?: boolean;
+      details?: unknown;
+      warning?: string;
     }
-  | { type: "chat_audio"; message: string; audio_url: string; current_score?: unknown }
+  | {
+      type: "chat_audio";
+      message: string;
+      audio_url: string;
+      current_score?: unknown;
+      details?: unknown;
+      warning?: string;
+    }
   | {
       type: "chat_progress";
       message: string;
       progress_url: string;
       job_id?: string;
       current_score?: unknown;
+      details?: unknown;
+      warning?: string;
     }
-  | { type: "chat_error"; message: string };
+  | { type: "chat_error"; message: string; details?: unknown };
 
 export type ProgressResponse = {
   status: "idle" | "queued" | "running" | "done" | "error";
@@ -47,7 +58,11 @@ export type ProgressResponse = {
   progress?: number;
   audio_url?: string;
   job_id?: string;
+  job_kind?: string;
+  review_required?: boolean;
   error?: string;
+  details?: unknown;
+  warning?: string;
 };
 
 export type WaitlistSubscribeRequest = {
@@ -74,28 +89,6 @@ function withApiBase(url: string): string {
   }
   if (!API_BASE) return url;
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
-}
-
-function withStream(url: string): string {
-  if (!url) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}stream=1`;
-}
-
-async function withAppCheckParam(url: string): Promise<string> {
-  if (!url) return url;
-  const token = await getAppCheckToken();
-  if (!token) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}app_check=${encodeURIComponent(token)}`;
-}
-
-async function withAuthParam(url: string): Promise<string> {
-  if (!url) return url;
-  const token = await getIdToken();
-  if (!token) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}id_token=${encodeURIComponent(token)}`;
 }
 
 async function withAppCheckHeaders(
@@ -190,10 +183,7 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
   if (response.type === "chat_audio") {
     return {
       ...response,
-      // TODO: Replace query-param auth with short-lived signed URLs from the backend.
-      audio_url: await withAuthParam(
-        await withAppCheckParam(withStream(withApiBase(response.audio_url)))
-      ),
+      audio_url: withApiBase(response.audio_url),
     };
   }
   if (response.type === "chat_progress") {
@@ -215,10 +205,7 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
   }
   const payload = (await response.json()) as ProgressResponse;
   if (payload.audio_url) {
-    // TODO: Replace query-param auth with short-lived signed URLs from the backend.
-    payload.audio_url = await withAuthParam(
-      await withAppCheckParam(withStream(withApiBase(payload.audio_url)))
-    );
+    payload.audio_url = withApiBase(payload.audio_url);
   }
   return payload;
 }

@@ -58,12 +58,25 @@ Manages connections to the "Workers".
   - `worker_cpu`: `python -m src.mcp_server --mode cpu`
   - `worker_gpu`: `python -m src.mcp_server --mode gpu`
 - **Routing Table**:
-  - `cpu`: `parse_score`, `modify_score`, `phonemize`, `align_phonemes_to_notes`, `list_voicebanks`
+  - `cpu`: `parse_score`, `preprocess_voice_parts`, `list_voicebanks`, `get_voicebank_info`, `estimate_credits`
   - `gpu`: `predict_durations`, `predict_pitch`, `predict_variance`, `synthesize_audio`, `synthesize` (convenience), `save_audio`
 - **Lifecycle**:
   - Start workers on backend startup and restart on crash.
   - Enforce timeouts and retries on long GPU calls.
   - Provide a lightweight health check to verify worker readiness.
+
+### 2.5 parse_score MCP Contract
+`parse_score` returns:
+- Core score payload: `title`, `tempos`, `parts`, `structure`, `score_summary`, `source_musicxml_path`
+- Voice-part analysis payload: `voice_part_signals`
+  - `analysis_version`, `requested_verse_number`
+  - `has_multi_voice_parts`, `has_missing_lyric_voice_parts`
+  - `parts[]`: per-part planning and section diagnostics
+  - `full_score_analysis`: static analysis for preflight/planning
+  - `measure_staff_voice_map`: measure/staff/voice occupancy + lyric attachment
+  - `measure_annotations`: measure-level direction words + structured entries
+
+`modify_score` is intentionally not exposed in MCP tool lists and cannot be called through the public MCP modes (`cpu`, `gpu`, `all`).
 
 ## 3. API Endpoints
 

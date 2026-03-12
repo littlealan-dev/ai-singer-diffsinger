@@ -54,6 +54,7 @@ class Settings:
     data_dir: Path
     sessions_dir: Path
     max_upload_bytes: int
+    max_mxl_uncompressed_bytes: int
     session_ttl_seconds: int
     max_sessions: int
     default_voicebank: str
@@ -68,9 +69,13 @@ class Settings:
     gemini_base_url: str
     gemini_model: str
     gemini_timeout_seconds: float
+    gemini_thinking_level: str
+    gemini_include_thought_summary: bool
+    inject_full_parsed_score_json: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
     llm_max_history_items: int
+    preprocess_max_attempts: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -85,11 +90,26 @@ class Settings:
     app_env: str
     project_id: str | None
     backend_require_app_check: bool
+    playback_token_secret_name: str
+    playback_token_secret_version: str
+    playback_token_ttl_seconds: int
     brevo_waitlist_list_id: int
     brevo_doi_template_id: int
     brevo_doi_redirect_url: str
+    brevo_waitlist_timeout_seconds: float
+    brevo_waitlist_max_attempts: int
+    brevo_waitlist_retry_base_delay_seconds: float
+    brevo_waitlist_retry_jitter_seconds: float
     brevo_waitlist_api_key_secret: str
     brevo_waitlist_api_key_secret_version: str
+    credit_retry_max_attempts: int
+    credit_retry_base_delay_seconds: float
+    credit_retry_test_settle_fail_count: int
+    credit_retry_test_release_fail_count: int
+    backend_build_id: str
+    gemini_prompt_cache_enabled: bool
+    gemini_prompt_cache_ttl_days: int
+    gemini_prompt_cache_delete_stale: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -101,6 +121,8 @@ class Settings:
         sessions_dir = data_dir / "sessions"
         max_upload_mb = _env_int("BACKEND_MAX_UPLOAD_MB", 20)
         max_upload_bytes = max_upload_mb * 1024 * 1024
+        max_mxl_uncompressed_mb = _env_int("BACKEND_MAX_MXL_UNCOMPRESSED_MB", 20)
+        max_mxl_uncompressed_bytes = max_mxl_uncompressed_mb * 1024 * 1024
         session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 5 * 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
         default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "Raine_Rena_2.01")
@@ -118,9 +140,16 @@ class Settings:
         )
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
+        gemini_thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").strip()
+        gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
+        inject_full_parsed_score_json = _env_bool(
+            "INJECT_FULL_PARSED_SCORE_JSON",
+            False,
+        )
         llm_max_message_chars = _env_int("LLM_MAX_MESSAGE_CHARS", 2000)
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
+        preprocess_max_attempts = _env_int("PREPROCESS_MAX_ATTEMPTS", 3)
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
@@ -140,9 +169,28 @@ class Settings:
             "BACKEND_REQUIRE_APP_CHECK",
             app_env_lower not in {"dev", "development", "local", "test"},
         )
+        playback_token_secret_name = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+            "BACKEND_PLAYBACK_TOKEN_SECRET",
+        ).strip()
+        playback_token_secret_version = os.getenv(
+            "BACKEND_PLAYBACK_TOKEN_SECRET_VERSION",
+            "latest",
+        ).strip()
+        playback_token_ttl_seconds = _env_int("BACKEND_PLAYBACK_TOKEN_TTL_SECONDS", 300)
         brevo_waitlist_list_id = _env_int("BREVO_WAITLIST_LIST_ID", 0)
         brevo_doi_template_id = _env_int("BREVO_DOI_TEMPLATE_ID", 0)
         brevo_doi_redirect_url = os.getenv("BREVO_DOI_REDIRECT_URL", "").strip()
+        brevo_waitlist_timeout_seconds = _env_float("BREVO_WAITLIST_TIMEOUT_SECONDS", 10.0)
+        brevo_waitlist_max_attempts = max(1, _env_int("BREVO_WAITLIST_MAX_ATTEMPTS", 2))
+        brevo_waitlist_retry_base_delay_seconds = _env_float(
+            "BREVO_WAITLIST_RETRY_BASE_DELAY_SECONDS",
+            0.25,
+        )
+        brevo_waitlist_retry_jitter_seconds = _env_float(
+            "BREVO_WAITLIST_RETRY_JITTER_SECONDS",
+            0.1,
+        )
         brevo_waitlist_api_key_secret = os.getenv(
             "BREVO_WAITLIST_API_KEY_SECRET",
             "BREVO_WAITLIST_API_KEY",
@@ -151,11 +199,39 @@ class Settings:
             "BREVO_WAITLIST_API_KEY_SECRET_VERSION",
             "latest",
         ).strip()
+        credit_retry_max_attempts = max(1, _env_int("CREDIT_RETRY_MAX_ATTEMPTS", 3))
+        credit_retry_base_delay_seconds = max(
+            0.0,
+            _env_float("CREDIT_RETRY_BASE_DELAY_SECONDS", 0.5),
+        )
+        credit_retry_test_settle_fail_count = max(
+            0,
+            _env_int("CREDIT_RETRY_TEST_SETTLE_FAIL_COUNT", 0),
+        )
+        credit_retry_test_release_fail_count = max(
+            0,
+            _env_int("CREDIT_RETRY_TEST_RELEASE_FAIL_COUNT", 0),
+        )
+        backend_build_id = (
+            os.getenv("BACKEND_BUILD_ID")
+            or os.getenv("K_REVISION")
+            or "unknown-build"
+        ).strip()
+        gemini_prompt_cache_enabled = _env_bool(
+            "GEMINI_PROMPT_CACHE_ENABLED",
+            app_env_lower not in {"dev", "development", "local", "test"},
+        )
+        gemini_prompt_cache_ttl_days = max(1, _env_int("GEMINI_PROMPT_CACHE_TTL_DAYS", 3650))
+        gemini_prompt_cache_delete_stale = _env_bool(
+            "GEMINI_PROMPT_CACHE_DELETE_STALE",
+            True,
+        )
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
             sessions_dir=sessions_dir,
             max_upload_bytes=max_upload_bytes,
+            max_mxl_uncompressed_bytes=max_mxl_uncompressed_bytes,
             session_ttl_seconds=session_ttl_seconds,
             max_sessions=max_sessions,
             default_voicebank=default_voicebank,
@@ -170,9 +246,13 @@ class Settings:
             gemini_base_url=gemini_base_url,
             gemini_model=gemini_model,
             gemini_timeout_seconds=gemini_timeout_seconds,
+            gemini_thinking_level=gemini_thinking_level,
+            gemini_include_thought_summary=gemini_include_thought_summary,
+            inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
             llm_max_history_items=llm_max_history_items,
+            preprocess_max_attempts=preprocess_max_attempts,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,
@@ -187,9 +267,24 @@ class Settings:
             app_env=app_env,
             project_id=project_id,
             backend_require_app_check=backend_require_app_check,
+            playback_token_secret_name=playback_token_secret_name,
+            playback_token_secret_version=playback_token_secret_version,
+            playback_token_ttl_seconds=playback_token_ttl_seconds,
             brevo_waitlist_list_id=brevo_waitlist_list_id,
             brevo_doi_template_id=brevo_doi_template_id,
             brevo_doi_redirect_url=brevo_doi_redirect_url,
+            brevo_waitlist_timeout_seconds=brevo_waitlist_timeout_seconds,
+            brevo_waitlist_max_attempts=brevo_waitlist_max_attempts,
+            brevo_waitlist_retry_base_delay_seconds=brevo_waitlist_retry_base_delay_seconds,
+            brevo_waitlist_retry_jitter_seconds=brevo_waitlist_retry_jitter_seconds,
             brevo_waitlist_api_key_secret=brevo_waitlist_api_key_secret,
             brevo_waitlist_api_key_secret_version=brevo_waitlist_api_key_secret_version,
+            credit_retry_max_attempts=credit_retry_max_attempts,
+            credit_retry_base_delay_seconds=credit_retry_base_delay_seconds,
+            credit_retry_test_settle_fail_count=credit_retry_test_settle_fail_count,
+            credit_retry_test_release_fail_count=credit_retry_test_release_fail_count,
+            backend_build_id=backend_build_id,
+            gemini_prompt_cache_enabled=gemini_prompt_cache_enabled,
+            gemini_prompt_cache_ttl_days=gemini_prompt_cache_ttl_days,
+            gemini_prompt_cache_delete_stale=gemini_prompt_cache_delete_stale,
         )

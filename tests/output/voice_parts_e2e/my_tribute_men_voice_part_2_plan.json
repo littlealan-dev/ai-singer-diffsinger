@@ -1,0 +1,45 @@
+{
+  "targets": [
+    {
+      "confidence": 0.95,
+      "copy_all_verses": false,
+      "notes": "Fresh plan from parser facts",
+      "sections": [
+        {
+          "end_measure": 18,
+          "mode": "rest",
+          "start_measure": 1
+        },
+        {
+          "decision_type": "COPY_UNISON_SECTION",
+          "end_measure": 24,
+          "lyric_policy": "replace_all",
+          "lyric_source": {
+            "part_index": 0,
+            "voice_part_id": "voice part 3"
+          },
+          "lyric_strategy": "strict_onset",
+          "melody_source": {
+            "part_index": 1,
+            "voice_part_id": "voice part 2"
+          },
+          "method": "trivial",
+          "mode": "derive",
+          "split_selector": "lower",
+          "start_measure": 19
+        },
+        {
+          "end_measure": 57,
+          "mode": "rest",
+          "start_measure": 25
+        }
+      ],
+      "split_shared_note_policy": "duplicate_to_all",
+      "target": {
+        "part_index": 1,
+        "voice_part_id": "voice part 2"
+      },
+      "verse_number": "1"
+    }
+  ]
+}

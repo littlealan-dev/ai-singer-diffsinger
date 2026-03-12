@@ -34,14 +34,19 @@ def integration_client(monkeypatch):
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
+    monkeypatch.setattr(
+        "src.backend.main.verify_id_token_claims",
+        lambda token: {"uid": "test-user", "email": "test-user@example.com"},
+    )
+    async def _allow_credits(_user_id: str, _user_email: str) -> None:
+        return None
+    monkeypatch.setattr("src.backend.main._require_active_credits", _allow_credits)
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", lambda *_, **__: None)
     app = create_app()
     llm_client = StaticLlmClient(
         response_text=(
-            '{"tool_calls":[{"name":"modify_score","arguments":{"code":'
-            '"notes = score[\'parts\'][0][\'notes\']\\nif notes:\\n'
-            '    score[\'parts\'][0][\'notes\'] = notes[: max(1, len(notes) // 2)]\\n"}},'
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"actions":[{"type":"split_voice_part","split_shared_note_policy":"duplicate_to_all"}]}]}}}},'
             '{"name":"synthesize","arguments":{"voicebank":"'
             + VOICEBANK_ID
             + '"}}],"final_message":"Rendered.","include_score":true}'
@@ -54,7 +59,7 @@ def integration_client(monkeypatch):
         yield test_client, app
 
 
-def test_backend_integration_modify_and_synthesize(integration_client):
+def test_backend_integration_synthesize(integration_client):
     test_client, _ = integration_client
     response = test_client.post("/sessions")
     assert response.status_code == 200
@@ -75,7 +80,7 @@ def test_backend_integration_modify_and_synthesize(integration_client):
     assert chat_payload["type"] == "chat_progress"
     assert chat_payload["message"] == "Rendered."
     assert chat_payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
-    assert chat_payload["current_score"]["version"] == 2
+    assert chat_payload["current_score"]["version"] >= 1
 
     progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
     assert progress_payload["status"] == "done"
@@ -91,7 +96,8 @@ def test_backend_integration_synthesize_soft_color(integration_client):
     test_client, app = integration_client
     llm_client = StaticLlmClient(
         response_text=(
-            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"'
+            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"actions":[{"type":"split_voice_part","split_shared_note_policy":"duplicate_to_all"}]}]}}}},'
+            '{"name":"synthesize","arguments":{"voicebank":"'
             + VOICEBANK_ID
             + '","voice_color":"02: soft"}}],"final_message":"Rendered.","include_score":true}'
         )

@@ -227,7 +227,8 @@ class McpRouter:
         )
         self._tool_to_worker = {
             "parse_score": "cpu",
-            "modify_score": "cpu",
+            "reparse": "cpu",
+            "preprocess_voice_parts": "cpu",
             "list_voicebanks": "cpu",
             "get_voicebank_info": "cpu",
             "synthesize": "gpu",

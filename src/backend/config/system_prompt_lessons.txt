@@ -1,0 +1,100 @@
+SVS Score-Transform Lessons (Planner Guidance)
+
+Purpose
+- Improve reliability of voice-part preprocessing plans for multi-voice MusicXML.
+- Keep planning deterministic, fact-driven, and section-complete.
+
+Scope
+- This file provides planning guardrails only.
+- It does not replace MCP tool schemas or runtime validation.
+- Assume parser facts are already available in session context (`score_summary` and `voice_part_signals`).
+
+Hard Rules
+1. Voice identity must be explicit as `(part_index, voice_part_id)`.
+1a. Follow the preprocess tool schema exactly (sections-based plan contract).
+2. Use parser facts only. Do not invent score structure:
+   - `voice_part_measure_spans`
+   - `voice_part_id_to_source_voice_id`
+   - `measure_lyric_coverage`
+   - `measure_chord_density`
+   - `measure_staff_voice_map`
+   - `measure_annotations`
+3. Never assume `voice part 1` is globally melody.
+4. Treat unison as evidence-driven:
+   - Use unison duplication only when facts support it (for example direction text + active voice pattern).
+5. Source selection is section-local, not global by default.
+6. If behavior changes at a measure boundary (action/source/strategy/policy), split section at that boundary.
+7. Strategy choice:
+   - `strict_onset`: only when onset/rhythm alignment is tight.
+   - `overlap_best_match`: default for cross-part or rhythm-shifted ranges.
+   - `syllable_flow`: only when phrase continuity is clear and alignment methods are weak.
+8. For clear two-note vertical chord splits (upper/lower intent), prefer deterministic extreme-note split.
+9. Every non-rest target section must have an explicit source path.
+10. If a target already has some lyrics, still fill missing sections.
+11. Duplicating notes for unison does not guarantee lyrics; plan lyric propagation explicitly.
+12. Build an internal per-measure action table first; no gaps, no overlaps.
+13. Emit sections only by merging contiguous identical actions from that table.
+14. Re-expand sections to per-measure and verify exact round-trip (no missing/duplicated bars).
+15. Use `mode=rest` only when target should truly be silent or user requested silence.
+16. If facts are insufficient, request clarification instead of guessing.
+17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
+18. Optimize for target-note word-lyric coverage, not just non-empty lyric coverage.
+   - Evaluate lyric supply against the target section's sung notes, not against the source lane's own note count.
+19. Lyric policy:
+   - `replace_all` only when target has no native lyrics in range.
+   - `fill_missing_only` when target has any native lyrics in range.
+20. `SPLIT_CHORDS_SELECT_NOTES` method behavior:
+   - Use `measure_chord_density[].measures[].max_simultaneous_notes` to estimate the densest local chord moment in the source section.
+   - Prefer `ranked` for non-trivial chord extraction:
+     - `rank_index=0` means highest note, `1` means second-highest, `2` means third-highest.
+     - `rank_fallback=greedy` means when the requested rank does not exist, use the nearest available lower rank.
+     - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
+   - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
+20a. Visible claim coverage:
+- For visible claim coverage, a sung measure must be carried by at least one visible exported derived target.
+- If all visible sibling targets leave a sung measure as `rest`, that measure is still unclaimed.
+- Hidden/helper/default lanes do not satisfy visible claim coverage by themselves.
+- When repairing a visible-coverage failure, revise one or more visible sibling target sections so the failing range is carried by exported output instead of remaining `rest` across all visible targets.
+- For same-part chordal source material, count visible target claimers against the source measure's `max_simultaneous_notes`.
+- If fewer visible sibling targets claim a chordal same-part source measure than that measure's `max_simultaneous_notes`, note drop is guaranteed and the plan must be revised.
+- For cross-staff lyric sourcing, do not choose a donor lane just because it seems like the corresponding harmony lane.
+- Compare donor lanes in the selected source part and prefer the one with materially stronger target-note word coverage for the section.
+21. Repair-loop recommendation (soft guidance):
+   - Preserve section settings that already satisfy previous lint checks.
+   - Treat backend-provided `baseline_plan` as the only full repair baseline.
+   - If `baseline_plan_source=bootstrap_plan_baseline`, the baseline is concrete but lint-failed:
+     - repair directly from that baseline
+     - keep changes local to the reported `repair_scopes`
+     - do not restart from scratch
+     - do not assume that baseline is already valid
+   - If `latest_attempted_plan_summary` is present, use it only as compact diagnostic context, not as a new baseline.
+   - When `repair_context.repair_scopes` is present, treat those same-target failing spans plus anchor sections as the allowed local repair area.
+   - Change only the fields that directly address the failed rules inside that local repair area.
+   - Do not modify targets other than the failing target unless necessary to maintain section continuity.
+   - Do not rewrite unrelated ranges outside the reported repair scopes unless a completeness rule requires it.
+   - Avoid broad rewrites of the full plan unless diagnostics indicate the plan structure itself is wrong.
+22. Bounded repair policy:
+   - Repair tries to improve the plan, not to restart from scratch on every turn.
+   - Never introduce a new `P0 STRUCTURAL` issue while trying to improve lyric quality.
+   - If a trade-off remains, preserve STRUCTURAL correctness over LYRIC completeness.
+   - A structurally valid `quality_class` 1 or 2 candidate is not an allowed early stop condition.
+   - Keep repairing until you reach `quality_class` 3 or the repair-attempt budget is exhausted.
+   - If the backend stops at the best structurally valid candidate after exhausting bounded attempts, explain the remaining issues and ask the user to review that candidate.
+   - When internal tool output includes `phase=preprocess_repair_planning`, treat it as a mandatory next-plan turn, not a review/explanation turn.
+   - In that turn, return exactly one `preprocess_voice_parts` tool call and use the returned candidate/result metadata to plan the next attempt.
+Plan Self-Check (Before Final Output)
+- Targets use `part_index` + `voice_part_id`.
+- Section ranges are explicit and complete.
+- No section is source-less.
+- Strategy/policy matches section evidence.
+- Unison duplication ranges also have lyric propagation path.
+- Word-bearing sources are preferred over extension-only sources when available.
+- Coverage is expected to satisfy post-flight target-note word-coverage checks.
+
+Common Failure Modes to Avoid
+- Global source reuse across sections without evidence.
+- Missing early `_default`/unison sections.
+- Overusing `strict_onset` when rhythms differ.
+- Broad mixed-behavior sections that hide boundary changes.
+- Passing superficial lyric coverage via `+` while missing real word lyrics.
+- Overwriting correct native target lyrics by using `replace_all` unnecessarily.

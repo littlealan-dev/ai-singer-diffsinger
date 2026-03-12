@@ -5,8 +5,11 @@ Tests cover the core public APIs defined in api_design.md.
 """
 
 import unittest
+import tempfile
+import zipfile
 from pathlib import Path
 import json
+import os
 
 from src.api import (
     parse_score,
@@ -18,11 +21,13 @@ from src.api import (
     save_audio,
 )
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
+from src.api.voice_parts import preprocess_voice_parts
 
 
 ROOT_DIR = Path(__file__).parent.parent
 VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
 TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
+TEST_MULTI_VERSE_XML = ROOT_DIR / "assets/test_data/o-holy-night.xml"
 OUTPUT_DIR = ROOT_DIR / "tests/output"
 
 
@@ -80,6 +85,259 @@ class TestParseScore(unittest.TestCase):
         part_signal = signals["parts"][0]
         self.assertIn("multi_voice_part", part_signal)
         self.assertIn("missing_lyric_voice_parts", part_signal)
+        self.assertIn("has_missing_lyric_voice_parts", part_signal)
+        self.assertIn("is_potentially_complex_for_preprocess", part_signal)
+
+    def test_parse_exposes_extended_voice_part_signals(self):
+        """parse_score should expose analyzer extensions for planning."""
+        score = parse_score(TEST_XML, verse_number=1)
+        signals = score.get("voice_part_signals")
+        self.assertEqual(signals.get("requested_verse_number"), "1")
+        self.assertIn("full_score_analysis", signals)
+        part_signal = signals["parts"][0]
+        self.assertIn("measure_lyric_coverage", part_signal)
+        self.assertIn("source_candidate_hints", part_signal)
+
+    def test_parse_persists_selected_verse_number_default(self):
+        """parse_score should persist deterministic selected_verse_number."""
+        if not TEST_MULTI_VERSE_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_MULTI_VERSE_XML}")
+        score = parse_score(TEST_MULTI_VERSE_XML)
+        self.assertEqual(score.get("selected_verse_number"), "1")
+        self.assertEqual(
+            (score.get("score_summary") or {}).get("selected_verse_number"),
+            "1",
+        )
+        self.assertEqual(
+            (score.get("voice_part_signals") or {}).get("requested_verse_number"),
+            "1",
+        )
+
+    def test_parse_persists_selected_verse_number_explicit(self):
+        """parse_score should persist explicitly requested verse selection."""
+        if not TEST_MULTI_VERSE_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_MULTI_VERSE_XML}")
+        score = parse_score(TEST_MULTI_VERSE_XML, verse_number=2)
+        self.assertEqual(score.get("selected_verse_number"), "2")
+        self.assertEqual(
+            (score.get("score_summary") or {}).get("selected_verse_number"),
+            "2",
+        )
+        self.assertEqual(
+            (score.get("voice_part_signals") or {}).get("requested_verse_number"),
+            "2",
+        )
+
+    def test_preprocess_invalid_plan_returns_action_required(self):
+        """Invalid preprocessing plan should produce action_required payload."""
+        score = parse_score(TEST_XML)
+        result = preprocess_voice_parts(score, plan={"targets": "invalid"})
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "invalid_plan_payload")
+
+    def test_parse_rejects_invalid_mxl_archive(self):
+        """parse_score should reject corrupt .mxl inputs deterministically."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mxl_path = Path(tmp_dir) / "invalid.mxl"
+            mxl_path.write_bytes(b"not-a-zip-file")
+            with self.assertRaisesRegex(ValueError, "Invalid MXL archive\\."):
+                parse_score(mxl_path)
+
+    def test_parse_rejects_oversized_mxl_archive(self):
+        """parse_score should reject oversized decompressed .mxl payloads."""
+        original = os.environ.get("BACKEND_MAX_MXL_UNCOMPRESSED_MB")
+        os.environ["BACKEND_MAX_MXL_UNCOMPRESSED_MB"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                mxl_path = Path(tmp_dir) / "oversized.mxl"
+                large_score = (
+                    b"<score-partwise version='3.1'>"
+                    + (b"A" * (1024 * 1024 + 1))
+                    + b"</score-partwise>"
+                )
+                with zipfile.ZipFile(mxl_path, "w") as archive:
+                    archive.writestr(
+                        "META-INF/container.xml",
+                        (
+                            b"<?xml version='1.0' encoding='UTF-8'?>"
+                            b"<container version='1.0' "
+                            b"xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+                            b"<rootfiles><rootfile full-path='score.xml' "
+                            b"media-type='application/vnd.recordare.musicxml+xml'/>"
+                            b"</rootfiles></container>"
+                        ),
+                    )
+                    archive.writestr("score.xml", large_score)
+                with self.assertRaisesRegex(ValueError, "exceeds"):
+                    parse_score(mxl_path)
+        finally:
+            if original is None:
+                os.environ.pop("BACKEND_MAX_MXL_UNCOMPRESSED_MB", None)
+            else:
+                os.environ["BACKEND_MAX_MXL_UNCOMPRESSED_MB"] = original
+
+    def test_parse_chord_density_ignores_grace_and_non_positive_duration_notes(self):
+        """Chord density should ignore grace notes and duration<=0 artifacts."""
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <grace slash="yes"/>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>0</duration>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            xml_path = Path(tmp_dir) / "grace-density.xml"
+            xml_path.write_text(xml, encoding="utf-8")
+            score = parse_score(xml_path)
+        density = score["voice_part_signals"]["measure_chord_density"]
+        voice_part = next(part for part in density if part["part_id"] == "P1")
+        measure_1 = next(m for m in voice_part["measures"] if m["measure_number"] == "1")
+        self.assertEqual(measure_1["max_simultaneous_notes"], 1)
+
+    def test_preprocess_ready_with_warnings(self):
+        """Propagation with 90% coverage should return ready_with_warnings."""
+        notes = []
+        for idx in range(10):
+            notes.append(
+                {
+                    "offset_beats": float(idx),
+                    "duration_beats": 1.0,
+                    "pitch_midi": 64.0,
+                    "lyric": f"L{idx}" if idx < 9 else None,
+                    "syllabic": "single",
+                    "lyric_is_extended": False,
+                    "is_rest": False,
+                    "voice": "1",
+                    "measure_number": 1,
+                }
+            )
+            notes.append(
+                {
+                    "offset_beats": float(idx),
+                    "duration_beats": 1.0,
+                    "pitch_midi": 55.0,
+                    "lyric": None,
+                    "syllabic": None,
+                    "lyric_is_extended": False,
+                    "is_rest": False,
+                    "voice": "2",
+                    "measure_number": 1,
+                }
+            )
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": notes,
+                }
+            ]
+        }
+        result = preprocess_voice_parts(
+            score,
+            part_index=0,
+            voice_part_id="alto",
+            allow_lyric_propagation=True,
+            source_part_index=0,
+            source_voice_part_id="soprano",
+        )
+        self.assertEqual(result.get("status"), "ready_with_warnings")
+
+    def test_preprocess_repair_loop(self):
+        """Repair loop should retry and annotate output when enabled."""
+        original = os.environ.get("VOICE_PART_REPAIR_LOOP_ENABLED")
+        os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
+        try:
+            score = {
+                "parts": [
+                    {
+                        "part_id": "P1",
+                        "part_name": "SOPRANO ALTO",
+                        "notes": [
+                            {
+                                "offset_beats": 0.0,
+                                "duration_beats": 1.0,
+                                "pitch_midi": 64.0,
+                                "lyric": "A",
+                                "syllabic": "single",
+                                "lyric_is_extended": False,
+                                "is_rest": False,
+                                "voice": "1",
+                                "measure_number": 1,
+                            },
+                            {
+                                "offset_beats": 0.5,
+                                "duration_beats": 1.0,
+                                "pitch_midi": 55.0,
+                                "lyric": None,
+                                "syllabic": None,
+                                "lyric_is_extended": False,
+                                "is_rest": False,
+                                "voice": "2",
+                                "measure_number": 1,
+                            },
+                        ],
+                    }
+                ]
+            }
+            plan = {
+                "targets": [
+                    {
+                        "target": {"part_index": 0, "voice_part_id": "alto"},
+                        "actions": [
+                            {"type": "split_voice_part"},
+                            {
+                                "type": "propagate_lyrics",
+                                "strategy": "strict_onset",
+                                "source_priority": [
+                                    {"part_index": 0, "voice_part_id": "soprano"}
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            }
+            result = preprocess_voice_parts(score, plan=plan)
+            self.assertEqual(result.get("status"), "ready")
+            self.assertIn("repair_loop", result.get("metadata", {}))
+        finally:
+            if original is None:
+                os.environ.pop("VOICE_PART_REPAIR_LOOP_ENABLED", None)
+            else:
+                os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = original
 
 
 class TestModifyScore(unittest.TestCase):

@@ -1,0 +1,4045 @@
+{
+  "appended_part_ref": {
+    "part_id": "P_DERIVED_CA2ADE44A4",
+    "part_index": 2,
+    "part_name": "tenor (Derived)"
+  },
+  "metadata": {
+    "plan_applied": true,
+    "section_overrides_received": 0,
+    "split_shared_note_policy": "duplicate_to_all"
+  },
+  "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/amazing-grace-satb-verse1.derived_ca2ade44a4.xml",
+  "part_index": 2,
+  "reused_transform": false,
+  "score": {
+    "parts": [
+      {
+        "notes": [
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "1.A",
+            "lyric_is_extended": false,
+            "measure_number": 1,
+            "offset_beats": 0.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "begin",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 1,
+            "offset_beats": 0.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "maz",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 1.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "middle",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 1.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "ing",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 3.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "end",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 3.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 2,
+            "offset_beats": 3.5,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "grace",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 4.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 4.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "how",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 6.0,
+            "pitch_hz": 440.0,
+            "pitch_midi": 69.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 6.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sweet",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 7.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 7.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "the",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 9.0,
+            "pitch_hz": 329.62755691286986,
+            "pitch_midi": 64.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 9.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sound",
+            "lyric_is_extended": false,
+            "measure_number": 5,
+            "offset_beats": 10.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 5,
+            "offset_beats": 10.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "that",
+            "lyric_is_extended": false,
+            "measure_number": 6,
+            "offset_beats": 12.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 6,
+            "offset_beats": 12.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "saved",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 13.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 13.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "a",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 15.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 15.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 7,
+            "offset_beats": 15.5,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "wretch",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 16.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 16.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "like",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 18.0,
+            "pitch_hz": 440.0,
+            "pitch_midi": 69.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 18.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "me!",
+            "lyric_is_extended": false,
+            "measure_number": 9,
+            "offset_beats": 19.0,
+            "pitch_hz": 587.3295358348153,
+            "pitch_midi": 74.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 9,
+            "offset_beats": 19.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": "start",
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 10,
+            "offset_beats": 22.0,
+            "pitch_hz": 587.3295358348153,
+            "pitch_midi": 74.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 10,
+            "offset_beats": 22.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 10,
+            "offset_beats": 24.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 10,
+            "offset_beats": 24.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.5,
+            "is_rest": false,
+            "lyric": "once",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 25.0,
+            "pitch_hz": 587.3295358348153,
+            "pitch_midi": 74.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 25.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 26.5,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 27.0,
+            "pitch_hz": 587.3295358348153,
+            "pitch_midi": 74.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 27.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 27.5,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "lost",
+            "lyric_is_extended": false,
+            "measure_number": 12,
+            "offset_beats": 28.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 12,
+            "offset_beats": 28.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 13,
+            "offset_beats": 30.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 13,
+            "offset_beats": 30.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.5,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 31.0,
+            "pitch_hz": 329.62755691286986,
+            "pitch_midi": 64.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.5,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 31.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 14,
+            "offset_beats": 32.5,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 32.5,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "am",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 33.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 33.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 14,
+            "offset_beats": 33.5,
+            "pitch_hz": 329.62755691286986,
+            "pitch_midi": 64.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "found,",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 34.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 34.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 36.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 36.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "blind",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 37.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 37.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 39.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 39.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 16,
+            "offset_beats": 39.5,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 40.0,
+            "pitch_hz": 493.8833012561241,
+            "pitch_midi": 71.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 40.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 42.0,
+            "pitch_hz": 440.0,
+            "pitch_midi": 69.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 42.0,
+            "pitch_hz": 369.99442271163434,
+            "pitch_midi": 66.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "2"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "see.",
+            "lyric_is_extended": false,
+            "measure_number": 18,
+            "offset_beats": 43.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 18,
+            "offset_beats": 43.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": "start",
+            "voice": "2"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 19,
+            "offset_beats": 46.0,
+            "pitch_hz": 391.99543598174927,
+            "pitch_midi": 67.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 19,
+            "offset_beats": 46.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "2"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": true,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 19,
+            "offset_beats": 48.0,
+            "pitch_hz": null,
+            "pitch_midi": null,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          }
+        ],
+        "part_id": "SOPRANO ALTO",
+        "part_name": "SOPRANO ALTO"
+      },
+      {
+        "notes": [
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "1.A",
+            "lyric_is_extended": false,
+            "measure_number": 1,
+            "offset_beats": 0.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "begin",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "maz",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 1.0,
+            "pitch_hz": 146.83238395870364,
+            "pitch_midi": 50.0,
+            "syllabic": "middle",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "ing",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 3.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "end",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "grace",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 4.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "how",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 6.0,
+            "pitch_hz": 184.9972113558171,
+            "pitch_midi": 54.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sweet",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 7.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "the",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 9.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sound",
+            "lyric_is_extended": false,
+            "measure_number": 5,
+            "offset_beats": 10.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "that",
+            "lyric_is_extended": false,
+            "measure_number": 6,
+            "offset_beats": 12.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "saved",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 13.0,
+            "pitch_hz": 146.83238395870364,
+            "pitch_midi": 50.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "a",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 15.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "wretch",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 16.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "like",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 18.0,
+            "pitch_hz": 184.9972113558171,
+            "pitch_midi": 54.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "me!",
+            "lyric_is_extended": false,
+            "measure_number": 9,
+            "offset_beats": 19.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 10,
+            "offset_beats": 22.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 10,
+            "offset_beats": 24.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.5,
+            "is_rest": false,
+            "lyric": "once",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 25.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 26.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 27.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 27.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "lost",
+            "lyric_is_extended": false,
+            "measure_number": 12,
+            "offset_beats": 28.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 13,
+            "offset_beats": 30.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 31.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "am",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 33.0,
+            "pitch_hz": 164.81377845643485,
+            "pitch_midi": 52.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 14,
+            "offset_beats": 33.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "found,",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 34.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 36.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "blind",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 37.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 39.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 16,
+            "offset_beats": 39.5,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 40.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 42.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "see.",
+            "lyric_is_extended": false,
+            "measure_number": 18,
+            "offset_beats": 43.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 19,
+            "offset_beats": 46.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": true,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 19,
+            "offset_beats": 48.0,
+            "pitch_hz": null,
+            "pitch_midi": null,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          }
+        ],
+        "part_id": "TENOR BASS",
+        "part_name": "tenor"
+      },
+      {
+        "notes": [
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "1.A",
+            "lyric_is_extended": false,
+            "measure_number": 1,
+            "offset_beats": 0.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "begin",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "maz",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 1.0,
+            "pitch_hz": 146.83238395870364,
+            "pitch_midi": 50.0,
+            "syllabic": "middle",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "ing",
+            "lyric_is_extended": false,
+            "measure_number": 2,
+            "offset_beats": 3.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "end",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "grace",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 4.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "how",
+            "lyric_is_extended": false,
+            "measure_number": 3,
+            "offset_beats": 6.0,
+            "pitch_hz": 184.9972113558171,
+            "pitch_midi": 54.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sweet",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 7.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "the",
+            "lyric_is_extended": false,
+            "measure_number": 4,
+            "offset_beats": 9.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "sound",
+            "lyric_is_extended": false,
+            "measure_number": 5,
+            "offset_beats": 10.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "that",
+            "lyric_is_extended": false,
+            "measure_number": 6,
+            "offset_beats": 12.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "saved",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 13.0,
+            "pitch_hz": 146.83238395870364,
+            "pitch_midi": 50.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "a",
+            "lyric_is_extended": false,
+            "measure_number": 7,
+            "offset_beats": 15.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "wretch",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 16.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "like",
+            "lyric_is_extended": false,
+            "measure_number": 8,
+            "offset_beats": 18.0,
+            "pitch_hz": 184.9972113558171,
+            "pitch_midi": 54.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "me!",
+            "lyric_is_extended": false,
+            "measure_number": 9,
+            "offset_beats": 19.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 10,
+            "offset_beats": 22.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 10,
+            "offset_beats": 24.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.5,
+            "is_rest": false,
+            "lyric": "once",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 25.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 26.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 11,
+            "offset_beats": 27.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 11,
+            "offset_beats": 27.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "lost",
+            "lyric_is_extended": false,
+            "measure_number": 12,
+            "offset_beats": 28.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 13,
+            "offset_beats": 30.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 31.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "am",
+            "lyric_is_extended": false,
+            "measure_number": 14,
+            "offset_beats": 33.0,
+            "pitch_hz": 164.81377845643485,
+            "pitch_midi": 52.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 14,
+            "offset_beats": 33.5,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "found,",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 34.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "was",
+            "lyric_is_extended": false,
+            "measure_number": 15,
+            "offset_beats": 36.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "blind",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 37.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "but",
+            "lyric_is_extended": false,
+            "measure_number": 16,
+            "offset_beats": 39.0,
+            "pitch_hz": 195.99771799087452,
+            "pitch_midi": 55.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 0.5,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 16,
+            "offset_beats": 39.5,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "now",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 40.0,
+            "pitch_hz": 293.66476791740746,
+            "pitch_midi": 62.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": false,
+            "lyric": "I",
+            "lyric_is_extended": false,
+            "measure_number": 17,
+            "offset_beats": 42.0,
+            "pitch_hz": 261.6255653005985,
+            "pitch_midi": 60.0,
+            "syllabic": "single",
+            "tie_type": null,
+            "voice": "1"
+          },
+          {
+            "duration_beats": 3.0,
+            "is_rest": false,
+            "lyric": "see.",
+            "lyric_is_extended": false,
+            "measure_number": 18,
+            "offset_beats": 43.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": "single",
+            "tie_type": "start",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 2.0,
+            "is_rest": false,
+            "lyric": "+",
+            "lyric_is_extended": true,
+            "measure_number": 19,
+            "offset_beats": 46.0,
+            "pitch_hz": 246.94165062806198,
+            "pitch_midi": 59.0,
+            "syllabic": null,
+            "tie_type": "stop",
+            "voice": "1"
+          },
+          {
+            "duration_beats": 1.0,
+            "is_rest": true,
+            "lyric": null,
+            "lyric_is_extended": false,
+            "measure_number": 19,
+            "offset_beats": 48.0,
+            "pitch_hz": null,
+            "pitch_midi": null,
+            "syllabic": null,
+            "tie_type": null,
+            "voice": "1"
+          }
+        ],
+        "part_id": "P_DERIVED_CA2ADE44A4",
+        "part_name": "tenor (Derived)"
+      }
+    ],
+    "score_summary": {
+      "available_verses": [
+        "1"
+      ],
+      "composer": null,
+      "duration_seconds": 24.5,
+      "lyricist": null,
+      "parts": [
+        {
+          "has_lyrics": true,
+          "note_count": 68,
+          "part_id": "SOPRANO ALTO",
+          "part_index": 0,
+          "part_name": "SOPRANO ALTO"
+        },
+        {
+          "has_lyrics": false,
+          "note_count": 67,
+          "part_id": "TENOR BASS",
+          "part_index": 1,
+          "part_name": "TENOR BASS"
+        }
+      ],
+      "title": "Amazing Grace\u2014 How Sweet the Sound"
+    },
+    "source_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/amazing-grace-satb-verse1.xml",
+    "structure": {
+      "endings": [],
+      "jumps": [],
+      "repeats": []
+    },
+    "tempos": [
+      {
+        "bpm": 120.0,
+        "offset_beats": 0.0
+      }
+    ],
+    "title": "Amazing Grace\u2014 How Sweet the Sound",
+    "voice_part_signals": {
+      "analysis_version": "v2",
+      "full_score_analysis": {
+        "parts": [
+          {
+            "measure_lyric_coverage": [
+              {
+                "measure_number": 1,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [
+                      "1"
+                    ],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 2,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 3,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 3,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 4,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 5,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 6,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 7,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 3,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 8,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 9,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 10,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 11,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 4,
+                    "sung_note_count": 4,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 12,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 13,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 14,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 4,
+                    "sung_note_count": 4,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 15,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 16,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 3,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 17,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 2,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 18,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              },
+              {
+                "measure_number": 19,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "alto"
+                  },
+                  {
+                    "lyric_coverage_ratio": 1.0,
+                    "lyric_note_count": 1,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "soprano"
+                  }
+                ]
+              }
+            ],
+            "part_id": "SOPRANO ALTO",
+            "part_index": 0,
+            "part_name": "SOPRANO ALTO",
+            "section_source_candidate_hints": [
+              {
+                "end_measure": 19,
+                "ranked_sources": [
+                  {
+                    "lyric_density": 1.0,
+                    "overlap_ratio": 1.0,
+                    "part_index": 0,
+                    "rank_score": 1.0,
+                    "voice_part_id": "soprano"
+                  }
+                ],
+                "start_measure": 1,
+                "target_voice_part_id": "soprano"
+              },
+              {
+                "end_measure": 19,
+                "ranked_sources": [
+                  {
+                    "lyric_density": 1.0,
+                    "overlap_ratio": 1.0,
+                    "part_index": 0,
+                    "rank_score": 1.0,
+                    "voice_part_id": "soprano"
+                  }
+                ],
+                "start_measure": 1,
+                "target_voice_part_id": "alto"
+              }
+            ],
+            "voice_parts": [
+              {
+                "avg_pitch_midi": 67.838,
+                "lyric_note_count": 37,
+                "missing_lyrics": false,
+                "note_count": 37,
+                "source_voice_id": "1",
+                "voice_part_id": "soprano"
+              },
+              {
+                "avg_pitch_midi": 61.258,
+                "lyric_note_count": 0,
+                "missing_lyrics": true,
+                "note_count": 31,
+                "source_voice_id": "2",
+                "voice_part_id": "alto"
+              }
+            ]
+          },
+          {
+            "measure_lyric_coverage": [
+              {
+                "measure_number": 1,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 2,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 3,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 4,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 5,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 6,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 7,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 8,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 9,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 10,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 11,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 4,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 12,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 13,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 14,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 15,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 16,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 3,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 17,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 2,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 18,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              },
+              {
+                "measure_number": 19,
+                "voice_parts": [
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "bass"
+                  },
+                  {
+                    "lyric_coverage_ratio": 0.0,
+                    "lyric_note_count": 0,
+                    "sung_note_count": 1,
+                    "verses_present": [],
+                    "voice_part_id": "tenor"
+                  }
+                ]
+              }
+            ],
+            "part_id": "TENOR BASS",
+            "part_index": 1,
+            "part_name": "TENOR BASS",
+            "section_source_candidate_hints": [
+              {
+                "end_measure": 19,
+                "ranked_sources": [
+                  {
+                    "lyric_density": 1.0,
+                    "overlap_ratio": 1.0,
+                    "part_index": 0,
+                    "rank_score": 1.0,
+                    "voice_part_id": "soprano"
+                  }
+                ],
+                "start_measure": 1,
+                "target_voice_part_id": "tenor"
+              },
+              {
+                "end_measure": 19,
+                "ranked_sources": [
+                  {
+                    "lyric_density": 1.0,
+                    "overlap_ratio": 1.0,
+                    "part_index": 0,
+                    "rank_score": 1.0,
+                    "voice_part_id": "soprano"
+                  }
+                ],
+                "start_measure": 1,
+                "target_voice_part_id": "bass"
+              }
+            ],
+            "voice_parts": [
+              {
+                "avg_pitch_midi": 55.5,
+                "lyric_note_count": 0,
+                "missing_lyrics": true,
+                "note_count": 34,
+                "source_voice_id": "1",
+                "voice_part_id": "tenor"
+              },
+              {
+                "avg_pitch_midi": 47.848,
+                "lyric_note_count": 0,
+                "missing_lyrics": true,
+                "note_count": 33,
+                "source_voice_id": "2",
+                "voice_part_id": "bass"
+              }
+            ]
+          }
+        ],
+        "status_taxonomy": [
+          "action_required",
+          "error",
+          "ready",
+          "ready_with_warnings"
+        ]
+      },
+      "has_missing_lyric_voice_parts": true,
+      "has_multi_voice_parts": true,
+      "parts": [
+        {
+          "lyric_source_candidates": [
+            {
+              "source_part_index": 0,
+              "source_voice_part_id": "soprano"
+            }
+          ],
+          "measure_lyric_coverage": [
+            {
+              "measure_number": 1,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [
+                    "1"
+                  ],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 2,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 3,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 3,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 4,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 5,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 6,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 7,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 3,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 8,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 9,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 10,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 11,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 4,
+                  "sung_note_count": 4,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 12,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 13,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 14,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 4,
+                  "sung_note_count": 4,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 15,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 16,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 3,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 17,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 2,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 18,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            },
+            {
+              "measure_number": 19,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "alto"
+                },
+                {
+                  "lyric_coverage_ratio": 1.0,
+                  "lyric_note_count": 1,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "soprano"
+                }
+              ]
+            }
+          ],
+          "missing_lyric_voice_parts": [
+            "alto"
+          ],
+          "multi_voice_part": true,
+          "part_id": "SOPRANO ALTO",
+          "part_index": 0,
+          "part_name": "SOPRANO ALTO",
+          "source_candidate_hints": [
+            {
+              "end_measure": 19,
+              "ranked_sources": [
+                {
+                  "lyric_density": 1.0,
+                  "overlap_ratio": 1.0,
+                  "part_index": 0,
+                  "rank_score": 1.0,
+                  "voice_part_id": "soprano"
+                }
+              ],
+              "start_measure": 1,
+              "target_voice_part_id": "soprano"
+            },
+            {
+              "end_measure": 19,
+              "ranked_sources": [
+                {
+                  "lyric_density": 1.0,
+                  "overlap_ratio": 1.0,
+                  "part_index": 0,
+                  "rank_score": 1.0,
+                  "voice_part_id": "soprano"
+                }
+              ],
+              "start_measure": 1,
+              "target_voice_part_id": "alto"
+            }
+          ],
+          "verse_number": "1"
+        },
+        {
+          "lyric_source_candidates": [
+            {
+              "source_part_index": 0,
+              "source_voice_part_id": "soprano"
+            }
+          ],
+          "measure_lyric_coverage": [
+            {
+              "measure_number": 1,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 2,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 3,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 4,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 5,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 6,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 7,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 8,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 9,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 10,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 11,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 4,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 12,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 13,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 14,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 15,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 16,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 3,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 17,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 2,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 18,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            },
+            {
+              "measure_number": 19,
+              "voice_parts": [
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "bass"
+                },
+                {
+                  "lyric_coverage_ratio": 0.0,
+                  "lyric_note_count": 0,
+                  "sung_note_count": 1,
+                  "verses_present": [],
+                  "voice_part_id": "tenor"
+                }
+              ]
+            }
+          ],
+          "missing_lyric_voice_parts": [
+            "tenor",
+            "bass"
+          ],
+          "multi_voice_part": true,
+          "part_id": "TENOR BASS",
+          "part_index": 1,
+          "part_name": "TENOR BASS",
+          "source_candidate_hints": [
+            {
+              "end_measure": 19,
+              "ranked_sources": [
+                {
+                  "lyric_density": 1.0,
+                  "overlap_ratio": 1.0,
+                  "part_index": 0,
+                  "rank_score": 1.0,
+                  "voice_part_id": "soprano"
+                }
+              ],
+              "start_measure": 1,
+              "target_voice_part_id": "tenor"
+            },
+            {
+              "end_measure": 19,
+              "ranked_sources": [
+                {
+                  "lyric_density": 1.0,
+                  "overlap_ratio": 1.0,
+                  "part_index": 0,
+                  "rank_score": 1.0,
+                  "voice_part_id": "soprano"
+                }
+              ],
+              "start_measure": 1,
+              "target_voice_part_id": "bass"
+            }
+          ],
+          "verse_number": "1"
+        }
+      ],
+      "requested_verse_number": "1"
+    },
+    "voice_part_transforms": {
+      "part:1|target:tenor|source_part:0|source:soprano|score:335bf830917c636a|hash:ca2ade44a4f8d9cfd2f9b4ab19add9f224ac3ff026af8e696e23873cb9120398": {
+        "appended_part_ref": {
+          "part_id": "P_DERIVED_CA2ADE44A4",
+          "part_index": 2,
+          "part_name": "tenor (Derived)"
+        },
+        "modified_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/amazing-grace-satb-verse1.derived_ca2ade44a4.xml",
+        "part": {
+          "notes": [
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "1.A",
+              "lyric_is_extended": false,
+              "measure_number": 1,
+              "offset_beats": 0.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "begin",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "maz",
+              "lyric_is_extended": false,
+              "measure_number": 2,
+              "offset_beats": 1.0,
+              "pitch_hz": 146.83238395870364,
+              "pitch_midi": 50.0,
+              "syllabic": "middle",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "ing",
+              "lyric_is_extended": false,
+              "measure_number": 2,
+              "offset_beats": 3.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "end",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "grace",
+              "lyric_is_extended": false,
+              "measure_number": 3,
+              "offset_beats": 4.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "how",
+              "lyric_is_extended": false,
+              "measure_number": 3,
+              "offset_beats": 6.0,
+              "pitch_hz": 184.9972113558171,
+              "pitch_midi": 54.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "sweet",
+              "lyric_is_extended": false,
+              "measure_number": 4,
+              "offset_beats": 7.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "the",
+              "lyric_is_extended": false,
+              "measure_number": 4,
+              "offset_beats": 9.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "sound",
+              "lyric_is_extended": false,
+              "measure_number": 5,
+              "offset_beats": 10.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "that",
+              "lyric_is_extended": false,
+              "measure_number": 6,
+              "offset_beats": 12.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "saved",
+              "lyric_is_extended": false,
+              "measure_number": 7,
+              "offset_beats": 13.0,
+              "pitch_hz": 146.83238395870364,
+              "pitch_midi": 50.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "a",
+              "lyric_is_extended": false,
+              "measure_number": 7,
+              "offset_beats": 15.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "wretch",
+              "lyric_is_extended": false,
+              "measure_number": 8,
+              "offset_beats": 16.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "like",
+              "lyric_is_extended": false,
+              "measure_number": 8,
+              "offset_beats": 18.0,
+              "pitch_hz": 184.9972113558171,
+              "pitch_midi": 54.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 3.0,
+              "is_rest": false,
+              "lyric": "me!",
+              "lyric_is_extended": false,
+              "measure_number": 9,
+              "offset_beats": 19.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": "start",
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 10,
+              "offset_beats": 22.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": null,
+              "tie_type": "stop",
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "I",
+              "lyric_is_extended": false,
+              "measure_number": 10,
+              "offset_beats": 24.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.5,
+              "is_rest": false,
+              "lyric": "once",
+              "lyric_is_extended": false,
+              "measure_number": 11,
+              "offset_beats": 25.0,
+              "pitch_hz": 246.94165062806198,
+              "pitch_midi": 59.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 11,
+              "offset_beats": 26.5,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": null,
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "was",
+              "lyric_is_extended": false,
+              "measure_number": 11,
+              "offset_beats": 27.0,
+              "pitch_hz": 246.94165062806198,
+              "pitch_midi": 59.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 11,
+              "offset_beats": 27.5,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": null,
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "lost",
+              "lyric_is_extended": false,
+              "measure_number": 12,
+              "offset_beats": 28.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "but",
+              "lyric_is_extended": false,
+              "measure_number": 13,
+              "offset_beats": 30.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "now",
+              "lyric_is_extended": false,
+              "measure_number": 14,
+              "offset_beats": 31.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "am",
+              "lyric_is_extended": false,
+              "measure_number": 14,
+              "offset_beats": 33.0,
+              "pitch_hz": 164.81377845643485,
+              "pitch_midi": 52.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 14,
+              "offset_beats": 33.5,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": null,
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "found,",
+              "lyric_is_extended": false,
+              "measure_number": 15,
+              "offset_beats": 34.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "was",
+              "lyric_is_extended": false,
+              "measure_number": 15,
+              "offset_beats": 36.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "blind",
+              "lyric_is_extended": false,
+              "measure_number": 16,
+              "offset_beats": 37.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "but",
+              "lyric_is_extended": false,
+              "measure_number": 16,
+              "offset_beats": 39.0,
+              "pitch_hz": 195.99771799087452,
+              "pitch_midi": 55.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 0.5,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 16,
+              "offset_beats": 39.5,
+              "pitch_hz": 246.94165062806198,
+              "pitch_midi": 59.0,
+              "syllabic": null,
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "now",
+              "lyric_is_extended": false,
+              "measure_number": 17,
+              "offset_beats": 40.0,
+              "pitch_hz": 293.66476791740746,
+              "pitch_midi": 62.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": false,
+              "lyric": "I",
+              "lyric_is_extended": false,
+              "measure_number": 17,
+              "offset_beats": 42.0,
+              "pitch_hz": 261.6255653005985,
+              "pitch_midi": 60.0,
+              "syllabic": "single",
+              "tie_type": null,
+              "voice": "1"
+            },
+            {
+              "duration_beats": 3.0,
+              "is_rest": false,
+              "lyric": "see.",
+              "lyric_is_extended": false,
+              "measure_number": 18,
+              "offset_beats": 43.0,
+              "pitch_hz": 246.94165062806198,
+              "pitch_midi": 59.0,
+              "syllabic": "single",
+              "tie_type": "start",
+              "voice": "1"
+            },
+            {
+              "duration_beats": 2.0,
+              "is_rest": false,
+              "lyric": "+",
+              "lyric_is_extended": true,
+              "measure_number": 19,
+              "offset_beats": 46.0,
+              "pitch_hz": 246.94165062806198,
+              "pitch_midi": 59.0,
+              "syllabic": null,
+              "tie_type": "stop",
+              "voice": "1"
+            },
+            {
+              "duration_beats": 1.0,
+              "is_rest": true,
+              "lyric": null,
+              "lyric_is_extended": false,
+              "measure_number": 19,
+              "offset_beats": 48.0,
+              "pitch_hz": null,
+              "pitch_midi": null,
+              "syllabic": null,
+              "tie_type": null,
+              "voice": "1"
+            }
+          ],
+          "part_id": "TENOR BASS",
+          "part_name": "tenor"
+        },
+        "part_index": 1,
+        "propagated_lyrics": true,
+        "score_fingerprint": "335bf830917c636a",
+        "source_part_index": 0,
+        "source_voice_part_id": "soprano",
+        "target_voice_part_id": "tenor",
+        "transform_hash": "ca2ade44a4f8d9cfd2f9b4ab19add9f224ac3ff026af8e696e23873cb9120398",
+        "transform_id": "vp:part1:tenor:ca2ade44a4f8"
+      }
+    }
+  },
+  "score_fingerprint": "335bf830917c636a",
+  "status": "ready",
+  "transform_hash": "ca2ade44a4f8d9cfd2f9b4ab19add9f224ac3ff026af8e696e23873cb9120398",
+  "transform_id": "vp:part1:tenor:ca2ade44a4f8",
+  "validation": {
+    "lyric_coverage_ratio": 1.0,
+    "lyric_exempt_note_count": 0,
+    "missing_lyric_sung_note_count": 0,
+    "source_alignment_ratio": 1.0,
+    "unresolved_measures": []
+  }
+}

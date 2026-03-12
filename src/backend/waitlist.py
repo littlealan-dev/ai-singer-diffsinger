@@ -2,10 +2,12 @@ from __future__ import annotations
 
 """Waiting list service backed by Brevo double opt-in."""
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 import os
+import random
 
 import httpx
 from firebase_admin import app_check
@@ -18,6 +20,7 @@ from src.mcp.logging_utils import get_logger
 logger = get_logger(__name__)
 
 BREVO_DOI_ENDPOINT = "https://api.brevo.com/v3/contacts/doubleOptinConfirmation"
+BREVO_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,7 @@ class WaitlistResult:
     success: bool
     message: str
     requires_confirmation: bool = True
+    status_code: int = 200
 
 
 def verify_app_check_token(token: str) -> bool:
@@ -50,6 +54,24 @@ def _load_brevo_api_key(settings: Settings) -> str:
     )
 
 
+def _retry_delay_seconds(settings: Settings, attempt: int) -> float:
+    """Return a short capped delay for retryable waitlist failures."""
+    return settings.brevo_waitlist_retry_base_delay_seconds + random.uniform(
+        0.0,
+        settings.brevo_waitlist_retry_jitter_seconds * attempt,
+    )
+
+
+def _dependency_failure_result() -> WaitlistResult:
+    """Return a stable dependency-failure contract for waitlist calls."""
+    return WaitlistResult(
+        success=False,
+        message="Waitlist service temporarily unavailable. Please try again later.",
+        requires_confirmation=False,
+        status_code=503,
+    )
+
+
 async def subscribe_to_waitlist(
     settings: Settings,
     *,
@@ -62,7 +84,12 @@ async def subscribe_to_waitlist(
 ) -> WaitlistResult:
     """Submit a DOI request to Brevo."""
     if not gdpr_consent:
-        return WaitlistResult(success=False, message="GDPR consent is required.", requires_confirmation=False)
+        return WaitlistResult(
+            success=False,
+            message="GDPR consent is required.",
+            requires_confirmation=False,
+            status_code=400,
+        )
 
     api_key = _load_brevo_api_key(settings)
     headers = {
@@ -84,24 +111,53 @@ async def subscribe_to_waitlist(
         },
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(BREVO_DOI_ENDPOINT, headers=headers, json=payload)
+    async with httpx.AsyncClient(timeout=settings.brevo_waitlist_timeout_seconds) as client:
+        for attempt in range(1, settings.brevo_waitlist_max_attempts + 1):
+            try:
+                response = await client.post(BREVO_DOI_ENDPOINT, headers=headers, json=payload)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                should_retry = attempt < settings.brevo_waitlist_max_attempts
+                logger.warning(
+                    "brevo_transport_error attempt=%s retry=%s error=%s",
+                    attempt,
+                    should_retry,
+                    exc,
+                )
+                if should_retry:
+                    await asyncio.sleep(_retry_delay_seconds(settings, attempt))
+                    continue
+                return _dependency_failure_result()
 
-    if response.status_code in (200, 201, 204):
-        return WaitlistResult(
-            success=True,
-            message="If this email isn't already subscribed, you'll receive a confirmation shortly.",
-            requires_confirmation=True,
-        )
-    if response.status_code == 400 and "already exists" in response.text.lower():
-        return WaitlistResult(
-            success=True,
-            message="If this email isn't already subscribed, you'll receive a confirmation shortly.",
-            requires_confirmation=True,
-        )
-    logger.warning("brevo_api_error status=%s response=%s", response.status_code, response.text)
-    return WaitlistResult(
-        success=False,
-        message="Failed to subscribe. Please try again later.",
-        requires_confirmation=False,
-    )
+            if response.status_code in (200, 201, 204):
+                return WaitlistResult(
+                    success=True,
+                    message="If this email isn't already subscribed, you'll receive a confirmation shortly.",
+                    requires_confirmation=True,
+                )
+            if response.status_code == 400 and "already exists" in response.text.lower():
+                return WaitlistResult(
+                    success=True,
+                    message="If this email isn't already subscribed, you'll receive a confirmation shortly.",
+                    requires_confirmation=True,
+                )
+            if (
+                response.status_code in BREVO_RETRYABLE_STATUS_CODES
+                and attempt < settings.brevo_waitlist_max_attempts
+            ):
+                logger.warning(
+                    "brevo_retryable_status attempt=%s status=%s response=%s",
+                    attempt,
+                    response.status_code,
+                    response.text,
+                )
+                await asyncio.sleep(_retry_delay_seconds(settings, attempt))
+                continue
+            logger.warning(
+                "brevo_api_error attempt=%s status=%s response=%s",
+                attempt,
+                response.status_code,
+                response.text,
+            )
+            return _dependency_failure_result()
+
+    return _dependency_failure_result()

@@ -7,9 +7,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 
+from src.api.voice_part_lint_rules import (
+    render_lint_rules_for_prompt,
+    render_postflight_validation_rules_for_prompt,
+)
+
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
+_SYSTEM_PROMPT_LESSONS_PATH = (
+    Path(__file__).resolve().parent / "config" / "system_prompt_lessons.txt"
+)
 
 
 @dataclass(frozen=True)
@@ -25,16 +33,28 @@ class LlmResponse:
     tool_calls: List[ToolCall]
     final_message: str
     include_score: bool
+    thought_summary: str = ""
 
 
-def build_system_prompt(
+@dataclass(frozen=True)
+class PromptBundle:
+    """Static and dynamic prompt layers for LLM providers."""
+    static_prompt_text: str
+    dynamic_prompt_text: str
+
+
+def build_prompt_bundle(
     tools: List[Dict[str, Any]],
     score_available: bool,
     voicebank_ids: Optional[List[str]] = None,
     score_summary: Optional[Dict[str, Any]] = None,
+    parsed_score_json: Optional[Dict[str, Any]] = None,
+    voice_part_signals: Optional[Dict[str, Any]] = None,
+    preprocess_mapping_context: Optional[Dict[str, Any]] = None,
+    last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Build the system prompt with tool specs and context metadata."""
+    """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
     for tool in tools:
         tool_specs.append(
@@ -45,32 +65,108 @@ def build_system_prompt(
             }
         )
 
-    score_hint = "available" if score_available else "missing"
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True)
+    score_hint = "available" if score_available else "missing"
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
     score_summary_text = "none"
     if score_summary:
         score_summary_text = json.dumps(score_summary, indent=2, sort_keys=True)
+    parsed_score_json_text = "none"
+    if parsed_score_json:
+        parsed_score_json_text = json.dumps(parsed_score_json, indent=2, sort_keys=True)
+    voice_part_signals_text = "none"
+    if voice_part_signals:
+        voice_part_signals_text = json.dumps(voice_part_signals, indent=2, sort_keys=True)
+    preprocess_mapping_context_text = "none"
+    if preprocess_mapping_context:
+        preprocess_mapping_context_text = json.dumps(
+            preprocess_mapping_context, indent=2, sort_keys=True
+        )
+    last_preprocess_plan_text = "none"
+    if last_preprocess_plan:
+        last_preprocess_plan_text = json.dumps(
+            last_preprocess_plan, indent=2, sort_keys=True
+        )
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
-    template = _load_system_prompt()
+    static_prompt = _load_system_prompt().replace("{tool_json}", tool_json)
+    static_prompt = (
+        static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
+        .replace("{voicebanks}", "<provided in Dynamic Context>")
+        .replace("{score_summary}", "<provided in Dynamic Context>")
+        .replace("{parsed_score_json}", "<provided in Dynamic Context>")
+        .replace("{voice_part_signals}", "<provided in Dynamic Context>")
+        .replace("{preprocess_mapping_context}", "<provided in Dynamic Context>")
+        .replace("{last_preprocess_plan}", "<provided in Dynamic Context>")
+        .replace("{voicebank_details}", "<provided in Dynamic Context>")
+    )
+    dynamic_prompt = (
+        "Dynamic Context:\n"
+        f"Score status: {score_hint}.\n"
+        "Score summary (if available):\n"
+        f"{score_summary_text}\n"
+        "Full parsed score JSON (if available):\n"
+        f"{parsed_score_json_text}\n"
+        "Voice-part planning signals (if available):\n"
+        f"{voice_part_signals_text}\n"
+        "Preprocess-derived mapping context (if available):\n"
+        f"{preprocess_mapping_context_text}\n"
+        "Latest attempted preprocess plan (if available):\n"
+        f"{last_preprocess_plan_text}\n"
+        f"Available voicebanks (IDs): {voicebanks_text}\n"
+        "Voicebank color options (if any):\n"
+        f"{voicebank_details_text}\n"
+        "End Dynamic Context."
+    )
+    return PromptBundle(
+        static_prompt_text=static_prompt,
+        dynamic_prompt_text=dynamic_prompt,
+    )
+
+
+def build_system_prompt(
+    tools: List[Dict[str, Any]],
+    score_available: bool,
+    voicebank_ids: Optional[List[str]] = None,
+    score_summary: Optional[Dict[str, Any]] = None,
+    parsed_score_json: Optional[Dict[str, Any]] = None,
+    voice_part_signals: Optional[Dict[str, Any]] = None,
+    preprocess_mapping_context: Optional[Dict[str, Any]] = None,
+    last_preprocess_plan: Optional[Dict[str, Any]] = None,
+    voicebank_details: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Build the full prompt for providers that do not support prompt caching."""
+    bundle = build_prompt_bundle(
+        tools=tools,
+        score_available=score_available,
+        voicebank_ids=voicebank_ids,
+        score_summary=score_summary,
+        parsed_score_json=parsed_score_json,
+        voice_part_signals=voice_part_signals,
+        preprocess_mapping_context=preprocess_mapping_context,
+        last_preprocess_plan=last_preprocess_plan,
+        voicebank_details=voicebank_details,
+    )
     return (
-        template.replace("{score_hint}", score_hint)
-        .replace("{tool_json}", tool_json)
-        .replace("{voicebanks}", voicebanks_text)
-        .replace("{score_summary}", score_summary_text)
-        .replace("{voicebank_details}", voicebank_details_text)
+        f"{bundle.static_prompt_text}\n\n---\n\n{bundle.dynamic_prompt_text}"
     )
 
 
 def _load_system_prompt() -> str:
-    """Load the system prompt template from disk."""
+    """Load and combine system prompt templates from disk."""
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
-    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt_sections = [base_prompt]
+    if _SYSTEM_PROMPT_LESSONS_PATH.exists():
+        lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
+        prompt_sections.append(lessons_prompt)
+    prompt_sections.append(render_lint_rules_for_prompt())
+    prompt_sections.append(render_postflight_validation_rules_for_prompt())
+    return "\n\n---\n\n".join(prompt_sections)
 
 
 def parse_llm_response(text: str) -> Optional[LlmResponse]:
@@ -110,8 +206,13 @@ def parse_llm_response(text: str) -> Optional[LlmResponse]:
     raw_message = payload.get("final_message")
     final_message = str(raw_message).strip() if raw_message is not None else ""
     include_score = bool(payload.get("include_score", False))
+    raw_thought_summary = payload.get("thought_summary")
+    thought_summary = (
+        str(raw_thought_summary).strip() if raw_thought_summary is not None else ""
+    )
     return LlmResponse(
         tool_calls=tool_calls,
         final_message=final_message,
         include_score=include_score,
+        thought_summary=thought_summary,
     )

@@ -10,6 +10,7 @@ from src.api.inference import predict_durations, predict_pitch, predict_variance
 from src.api.audio import save_audio
 from src.api.synthesize import align_phonemes_to_notes, synthesize
 from src.api.voicebank import list_voicebanks, get_voicebank_info
+from src.api.voice_parts import preprocess_voice_parts
 
 __all__ = [
     # Step 1: Score
@@ -27,6 +28,7 @@ __all__ = [
     "save_audio",
     # Convenience
     "synthesize",
+    "preprocess_voice_parts",
     # Metadata
     "list_voicebanks",
     "get_voicebank_info",

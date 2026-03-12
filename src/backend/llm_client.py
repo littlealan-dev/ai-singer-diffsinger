@@ -6,12 +6,16 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Protocol
 import json
 
+from src.backend.llm_prompt import PromptBundle
+
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 
 
 class LlmClient(Protocol):
     """Protocol for LLM clients used by the orchestrator."""
-    def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
+    def generate(
+        self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]
+    ) -> str:
         """Return a model response given prompt and chat history."""
         raise NotImplementedError
 
@@ -24,7 +28,9 @@ class StaticLlmClient:
     loop: bool = False
     _index: int = 0
 
-    def generate(self, system_prompt: str, history: List[Dict[str, str]]) -> str:
+    def generate(
+        self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]
+    ) -> str:
         """Return the configured static response."""
         if history:
             last = history[-1].get("content", "")

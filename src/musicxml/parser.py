@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+from xml.etree import ElementTree
 
-from music21 import chord, converter, note, stream, tempo
+from music21 import chord, converter, harmony, note, stream, tempo
+
+from src.musicxml.io import read_musicxml_content
 
 
 @dataclass(frozen=True)
@@ -23,12 +26,18 @@ class NoteEvent:
     duration_beats: float
     pitch_midi: Optional[float]
     pitch_hz: Optional[float]
+    pitch_step: Optional[str]
+    pitch_alter: Optional[int]
+    pitch_octave: Optional[int]
     lyric: Optional[str]
     syllabic: Optional[str]
     lyric_is_extended: bool
     is_rest: bool
     tie_type: Optional[str]
     voice: Optional[str]
+    staff: Optional[str]
+    chord_group_id: Optional[str]
+    lyric_line_index: Optional[str]
     measure_number: Optional[int]
 
 
@@ -59,13 +68,15 @@ def parse_musicxml(
 ) -> ScoreData:
     """Parse MusicXML (.xml or .mxl) into a lightweight score structure.
 
-    If no part is specified, the first part with lyrics is selected.
+    If no part is specified, all parts are parsed.
     verse_number: when provided, select lyrics for the matching verse number.
     lyrics_only: when True, parts with lyrics drop notes without lyric tokens unless
     the lyric is marked as extended.
     keep_rests: when True, rest events are included alongside notes.
     """
-    score = converter.parse(str(path))
+    source_path = Path(path)
+    score = _load_musicxml_score(source_path)
+    raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
     return _parse_score(
         score,
         part_id=part_id,
@@ -73,6 +84,7 @@ def parse_musicxml(
         verse_number=verse_number,
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
+        raw_single_voice_fallback=raw_single_voice_fallback,
     )
 
 
@@ -86,8 +98,10 @@ def parse_musicxml_with_summary(
     keep_rests: bool = False,
 ) -> tuple[ScoreData, Dict[str, Any]]:
     """Parse MusicXML and return both score data and a summary dict."""
-    score = converter.parse(str(path))
+    source_path = Path(path)
+    score = _load_musicxml_score(source_path)
     summary = _summarize_score(score)
+    raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
     normalized_verse = _normalize_verse_number(verse_number)
     if normalized_verse is None:
         available_verses = summary.get("available_verses") if isinstance(summary, dict) else None
@@ -100,6 +114,7 @@ def parse_musicxml_with_summary(
         verse_number=normalized_verse,
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
+        raw_single_voice_fallback=raw_single_voice_fallback,
     )
     return score_data, summary
 
@@ -112,6 +127,7 @@ def _parse_score(
     verse_number: Optional[str | int],
     lyrics_only: bool,
     keep_rests: bool,
+    raw_single_voice_fallback: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> ScoreData:
     """Transform a music21 score into the internal ScoreData structure."""
     # Select the part(s) to parse based on user inputs and lyric availability.
@@ -125,13 +141,23 @@ def _parse_score(
     tempos = _extract_tempos(score)
     parts: List[PartData] = []
     for part in selected_parts:
+        part_id_value = str(part.id) if part.id is not None else ""
+        part_name_value = str(part.partName or "").strip()
+        fallback_voice: Optional[str] = None
+        if isinstance(raw_single_voice_fallback, dict):
+            by_part_id = raw_single_voice_fallback.get("by_part_id") or {}
+            by_part_name = raw_single_voice_fallback.get("by_part_name") or {}
+            if part_id_value:
+                fallback_voice = by_part_id.get(part_id_value)
+            if fallback_voice is None and part_name_value:
+                fallback_voice = by_part_name.get(part_name_value)
         part_events = _collect_part_events(
             part,
             verse_number=normalized_verse,
             lyrics_only=lyrics_only,
             keep_rests=keep_rests,
+            fallback_voice=fallback_voice,
         )
-        part_id_value = str(part.id) if part.id is not None else ""
         parts.append(
             PartData(
                 part_id=part_id_value,
@@ -143,6 +169,15 @@ def _parse_score(
     return ScoreData(title=title, tempos=tempos, parts=parts)
 
 
+def _load_musicxml_score(path: str | Path) -> stream.Score:
+    """Load MusicXML via a shared bounded reader for .mxl archives."""
+    source_path = Path(path)
+    if source_path.suffix.lower() != ".mxl":
+        return converter.parse(str(source_path))
+    content = read_musicxml_content(source_path)
+    return converter.parseData(content, format="musicxml")
+
+
 def _select_parts(
     score: stream.Score,
     *,
@@ -150,7 +185,7 @@ def _select_parts(
     part_index: Optional[int],
     verse_number: Optional[str | int],
 ) -> Sequence[stream.Part]:
-    """Select parts by ID/index or choose a reasonable default part."""
+    """Select parts by ID/index or return all parts by default."""
     if part_id is not None and part_index is not None:
         raise ValueError("Provide part_id or part_index, not both.")
     parts = list(score.parts)
@@ -163,12 +198,7 @@ def _select_parts(
         if part_index < 0 or part_index >= len(parts):
             raise IndexError(f"part_index out of range: {part_index}")
         return [parts[part_index]]
-    if not parts:
-        return []
-    for part in parts:
-        if _part_has_lyrics(part, verse_number=verse_number):
-            return [part]
-    return [_select_top_part(parts)]
+    return parts
 
 
 def _select_top_part(parts: Sequence[stream.Part]) -> stream.Part:
@@ -288,16 +318,30 @@ def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:
         bpm = _metronome_bpm(mark)
         if bpm is None:
             continue
+        try:
+            offset_beats = float(mark.getOffsetInHierarchy(score))
+        except Exception:
+            # Fallback for unusual music21 contexts.
+            offset_beats = float(mark.offset)
         tempo_events.append(
             TempoEvent(
-                offset_beats=float(mark.offset),
+                offset_beats=offset_beats,
                 bpm=float(bpm),
             )
         )
     if not tempo_events:
         tempo_events = [TempoEvent(offset_beats=0.0, bpm=120.0)]
     tempo_events.sort(key=lambda event: event.offset_beats)
-    return tempo_events
+    deduped: List[TempoEvent] = []
+    for event in tempo_events:
+        if (
+            deduped
+            and abs(event.offset_beats - deduped[-1].offset_beats) < 1e-9
+            and abs(event.bpm - deduped[-1].bpm) < 1e-9
+        ):
+            continue
+        deduped.append(event)
+    return deduped
 
 
 def _metronome_bpm(mark: tempo.MetronomeMark) -> Optional[float]:
@@ -316,8 +360,16 @@ def _collect_part_events(
     verse_number: Optional[str],
     lyrics_only: bool,
     keep_rests: bool,
+    fallback_voice: Optional[str] = None,
 ) -> Sequence[NoteEvent]:
-    elements = list(part.recurse().notesAndRests)
+    # music21 exposes <harmony> chord symbols as ChordSymbol objects inside
+    # notesAndRests. They are not sung melody notes and must not participate in
+    # note-event extraction or downstream voice-part split analysis.
+    elements = [
+        element
+        for element in part.recurse().notesAndRests
+        if not isinstance(element, harmony.ChordSymbol)
+    ]
     elements.sort(
         key=lambda element: (
             float(element.getOffsetInHierarchy(part)),
@@ -335,6 +387,8 @@ def _collect_part_events(
         voice_ctx = element.getContextByClass(stream.Voice)
         if voice_ctx is not None:
             return str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+        if fallback_voice:
+            return fallback_voice
         return "_default"
 
     def _state_for(key: str) -> Dict[str, object]:
@@ -343,6 +397,7 @@ def _collect_part_events(
             state = {
                 "lyric": None,
                 "syllabic": None,
+                "lyric_line_index": None,
                 "extend": False,
                 "end_offset": None,
             }
@@ -358,17 +413,27 @@ def _collect_part_events(
         state = _state_for(voice_key)
         if is_rest:
             if keep_rests:
-                events.append(_make_rest_event(element, offset_beats=offset))
+                events.append(
+                    _make_rest_event(
+                        element,
+                        offset_beats=offset,
+                        fallback_voice=fallback_voice,
+                    )
+                )
             state["lyric"] = None
             state["syllabic"] = None
+            state["lyric_line_index"] = None
             state["extend"] = False
             state["end_offset"] = end_offset
             continue
-        lyric_text, syllabic, is_extended = _extract_lyric_text(element, verse_number=verse_number)
+        lyric_text, syllabic, is_extended, lyric_line_index = _extract_lyric_text(
+            element, verse_number=verse_number
+        )
         tie_type = element.tie.type if element.tie is not None else None
         include = True
         lyric_value = lyric_text
         syllabic_value = syllabic
+        lyric_line_value = lyric_line_index
         lyric_extended = False
         contiguous = state["end_offset"] is not None and abs(float(state["end_offset"]) - offset) < 1e-6
         has_active_lyric = state["lyric"] is not None
@@ -379,23 +444,46 @@ def _collect_part_events(
         if lyric_text is None and should_extend:
             lyric_value = "+"
             syllabic_value = None
+            lyric_line_value = (
+                str(state["lyric_line_index"])
+                if state.get("lyric_line_index") is not None
+                else None
+            )
             lyric_extended = True
         if lyrics_only and has_lyric_text:
             if lyric_text is None and not lyric_extended:
                 include = False
         if include:
-            events.append(
-                _make_note_event(
-                    element,
-                    offset_beats=offset,
-                    lyric=lyric_value,
-                    syllabic=syllabic_value,
-                    lyric_extended=lyric_extended,
+            if isinstance(element, chord.Chord):
+                for pitch in list(element.pitches):
+                    events.append(
+                        _make_note_event(
+                            element,
+                            offset_beats=offset,
+                            lyric=lyric_value,
+                            syllabic=syllabic_value,
+                            lyric_extended=lyric_extended,
+                            lyric_line_index=lyric_line_value,
+                            pitch_override=pitch,
+                            fallback_voice=fallback_voice,
+                        )
+                    )
+            else:
+                events.append(
+                    _make_note_event(
+                        element,
+                        offset_beats=offset,
+                        lyric=lyric_value,
+                        syllabic=syllabic_value,
+                        lyric_extended=lyric_extended,
+                        lyric_line_index=lyric_line_value,
+                        fallback_voice=fallback_voice,
+                    )
                 )
-            )
         if lyric_text is not None:
             state["lyric"] = lyric_text
             state["syllabic"] = syllabic
+            state["lyric_line_index"] = lyric_line_index
             state["extend"] = is_extended
         elif lyric_extended or tie_type in ("start", "continue"):
             state["extend"] = True
@@ -411,9 +499,9 @@ def _extract_lyric_text(
     element: note.NotRest,
     *,
     verse_number: Optional[str | int],
-) -> tuple[Optional[str], Optional[str], bool]:
+) -> tuple[Optional[str], Optional[str], bool, Optional[str]]:
     if not element.lyrics:
-        return None, None, False
+        return None, None, False, None
     lyric = None
     if verse_number is None:
         lyric = element.lyrics[0]
@@ -425,18 +513,19 @@ def _extract_lyric_text(
                 lyric = candidate
                 break
     if lyric is None:
-        return None, None, False
+        return None, None, False, None
     text = lyric.text if lyric.text is not None else ""
     text = text.strip()
     if not text:
         text = None
     syllabic = getattr(lyric, "syllabic", None)
+    lyric_line_index = _normalize_verse_number(lyric.number) or "1"
     is_extended = False
     if hasattr(lyric, "isExtended"):
         is_extended = bool(lyric.isExtended)
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
-    return text, syllabic, is_extended
+    return text, syllabic, is_extended, lyric_line_index
 
 
 def _make_note_event(
@@ -446,19 +535,44 @@ def _make_note_event(
     lyric: Optional[str],
     syllabic: Optional[str],
     lyric_extended: bool,
+    lyric_line_index: Optional[str],
+    pitch_override: Optional[Any] = None,
+    fallback_voice: Optional[str] = None,
 ) -> NoteEvent:
-    pitch = None
-    if isinstance(element, chord.Chord):
-        pitch = max(element.pitches, key=lambda p: p.midi)
-    elif isinstance(element, note.Note):
-        pitch = element.pitch
+    pitch = pitch_override
+    if pitch is None:
+        if isinstance(element, chord.Chord):
+            pitch = max(element.pitches, key=lambda p: p.midi)
+        elif isinstance(element, note.Note):
+            pitch = element.pitch
     pitch_midi = float(pitch.midi) if pitch is not None else None
     pitch_hz = float(pitch.frequency) if pitch is not None else None
+    pitch_step = str(getattr(pitch, "step", "")).strip() if pitch is not None else None
+    pitch_octave = int(getattr(pitch, "octave")) if pitch is not None and getattr(pitch, "octave", None) is not None else None
+    pitch_alter = None
+    if pitch is not None:
+        accidental = getattr(pitch, "accidental", None)
+        if accidental is not None and getattr(accidental, "alter", None) is not None:
+            pitch_alter = int(round(float(accidental.alter)))
     tie_type = element.tie.type if element.tie is not None else None
     voice = None
     voice_ctx = element.getContextByClass(stream.Voice)
     if voice_ctx is not None:
         voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+    elif fallback_voice:
+        voice = fallback_voice
+    staff = None
+    staff_number = getattr(element, "staffNumber", None)
+    if staff_number is not None:
+        staff = str(staff_number)
+    chord_group_id = None
+    if isinstance(element, chord.Chord) and len(element.pitches) > 1:
+        measure_ctx = element.getContextByClass(stream.Measure)
+        measure_number_raw = measure_ctx.number if measure_ctx is not None else "na"
+        chord_group_id = (
+            f"m{measure_number_raw}:o{offset_beats:.6f}:"
+            f"v{voice or '_default'}:s{staff or '1'}"
+        )
     measure_ctx = element.getContextByClass(stream.Measure)
     measure_number = measure_ctx.number if measure_ctx is not None else None
     return NoteEvent(
@@ -466,12 +580,18 @@ def _make_note_event(
         duration_beats=float(element.duration.quarterLength),
         pitch_midi=pitch_midi,
         pitch_hz=pitch_hz,
+        pitch_step=pitch_step or None,
+        pitch_alter=pitch_alter,
+        pitch_octave=pitch_octave,
         lyric=lyric,
         syllabic=syllabic,
         lyric_is_extended=lyric_extended,
         is_rest=False,
         tie_type=tie_type,
         voice=voice,
+        staff=staff,
+        chord_group_id=chord_group_id,
+        lyric_line_index=lyric_line_index,
         measure_number=measure_number,
     )
 
@@ -480,6 +600,7 @@ def _make_rest_event(
     element: note.Rest,
     *,
     offset_beats: float,
+    fallback_voice: Optional[str] = None,
 ) -> NoteEvent:
     measure_ctx = element.getContextByClass(stream.Measure)
     measure_number = measure_ctx.number if measure_ctx is not None else None
@@ -487,16 +608,76 @@ def _make_rest_event(
     voice_ctx = element.getContextByClass(stream.Voice)
     if voice_ctx is not None:
         voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
+    elif fallback_voice:
+        voice = fallback_voice
+    staff = None
+    staff_number = getattr(element, "staffNumber", None)
+    if staff_number is not None:
+        staff = str(staff_number)
     return NoteEvent(
         offset_beats=offset_beats,
         duration_beats=float(element.duration.quarterLength),
         pitch_midi=None,
         pitch_hz=None,
+        pitch_step=None,
+        pitch_alter=None,
+        pitch_octave=None,
         lyric=None,
         syllabic=None,
         lyric_is_extended=False,
         is_rest=True,
         tie_type=None,
         voice=voice,
+        staff=staff,
+        chord_group_id=None,
+        lyric_line_index=None,
         measure_number=measure_number,
     )
+
+
+def _build_raw_single_voice_fallback(path: Path) -> Dict[str, Dict[str, str]]:
+    """Return fallback mappings when raw MusicXML shows exactly one voice in a part."""
+    try:
+        content = read_musicxml_content(path)
+        root = ElementTree.fromstring(content)
+    except Exception:
+        return {"by_part_id": {}, "by_part_name": {}}
+
+    by_part_id: Dict[str, str] = {}
+    by_part_name: Dict[str, str] = {}
+    seen_part_names: Dict[str, int] = {}
+    for part_elem in root.findall(".//part"):
+        part_id = (part_elem.get("id") or "").strip()
+        if not part_id:
+            continue
+        part_name = ""
+        score_part = root.find(f".//score-part[@id='{part_id}']")
+        if score_part is not None:
+            part_name_elem = score_part.find("part-name")
+            if part_name_elem is not None and part_name_elem.text is not None:
+                part_name = part_name_elem.text.strip()
+        if part_name:
+            seen_part_names[part_name] = seen_part_names.get(part_name, 0) + 1
+        voices: set[str] = set()
+        for note_elem in part_elem.findall(".//note"):
+            voice_elem = note_elem.find("voice")
+            if voice_elem is None or voice_elem.text is None:
+                continue
+            voice_text = voice_elem.text.strip()
+            if voice_text:
+                voices.add(voice_text)
+            if len(voices) > 1:
+                break
+        if len(voices) == 1:
+            single_voice = next(iter(voices))
+            by_part_id[part_id] = single_voice
+            if part_name:
+                by_part_name[part_name] = single_voice
+
+    # Only keep name-based fallback when the raw score part-name is unique.
+    by_part_name = {
+        part_name: voice
+        for part_name, voice in by_part_name.items()
+        if seen_part_names.get(part_name, 0) == 1
+    }
+    return {"by_part_id": by_part_id, "by_part_name": by_part_name}
