@@ -10,6 +10,7 @@ import os
 
 from src.backend.llm_client import LlmClient, StaticLlmClient
 from src.backend.llm_gemini import GeminiRestClient
+from src.backend.llm_openai import OpenAIRestClient
 from src.backend.secret_manager import read_secret
 
 
@@ -61,4 +62,15 @@ def create_llm_client(settings: Settings) -> Optional[LlmClient]:
         if not api_key:
             return None
         return GeminiRestClient(settings, api_key=api_key)
+    if provider == "openai":
+        api_key = settings.openai_api_key
+        if settings.app_env.lower() not in {"dev", "development", "local", "test"}:
+            api_key = read_secret(
+                settings,
+                settings.openai_api_key_secret,
+                settings.openai_api_key_secret_version,
+            )
+        if not api_key or not settings.openai_model:
+            return None
+        return OpenAIRestClient(settings, api_key=api_key)
     raise ValueError(f"Unsupported LLM provider: {provider}")
