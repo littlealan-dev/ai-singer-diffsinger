@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -387,8 +387,21 @@ export default function MainApp() {
       }
       const audio = audioRefs.current[messageId];
       if (audio) {
+        const currentTime = audio.currentTime;
+        const retryPlayback = () => {
+          audio.removeEventListener("canplay", retryPlayback);
+          if (currentTime > 0 && Number.isFinite(currentTime)) {
+            try {
+              audio.currentTime = currentTime;
+            } catch {
+              // Ignore seek failures on freshly loaded media.
+            }
+          }
+          void audio.play().catch(() => undefined);
+        };
+        audio.addEventListener("canplay", retryPlayback, { once: true });
+        audio.src = nextAudioUrl;
         audio.load();
-        await audio.play().catch(() => undefined);
       }
     } catch (err: any) {
       setError(err?.message || "Failed to refresh audio playback.");
@@ -860,11 +873,13 @@ export default function MainApp() {
                     <button
                       type="button"
                       className="audio-download-button"
+                      aria-label="Download audio"
+                      title="Download audio"
                       onClick={() => {
                         void handleAudioDownload(msg.id, msg.audioUrl, msg.progressUrl);
                       }}
                     >
-                      Download audio
+                      <Download size={16} aria-hidden="true" />
                     </button>
                   </div>
                 )}
