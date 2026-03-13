@@ -123,6 +123,8 @@ export default function MainApp() {
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -345,6 +347,75 @@ export default function MainApp() {
     if (!sessionId || !score) return;
     const data = await fetchScoreXml(sessionId);
     setScore({ name: score.name, data });
+  };
+
+  const refreshMessageAudioUrl = async (
+    messageId: string,
+    progressUrl?: string
+  ): Promise<string | null> => {
+    if (!progressUrl) return null;
+    const pending = audioRefreshPromisesRef.current[messageId];
+    if (pending) {
+      return pending;
+    }
+    const refreshPromise = (async () => {
+      const payload = await fetchProgress(progressUrl);
+      const nextAudioUrl = payload.audio_url;
+      if (!nextAudioUrl) return null;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId ? { ...msg, audioUrl: nextAudioUrl, progressUrl } : msg
+        )
+      );
+      setAudioUrl((current) => (current ? nextAudioUrl : current));
+      return nextAudioUrl;
+    })();
+    audioRefreshPromisesRef.current[messageId] = refreshPromise;
+    try {
+      return await refreshPromise;
+    } finally {
+      delete audioRefreshPromisesRef.current[messageId];
+    }
+  };
+
+  const handleAudioPlaybackError = async (messageId: string, progressUrl?: string) => {
+    try {
+      const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl);
+      if (!nextAudioUrl) {
+        setError("Audio link expired. Please try again.");
+        return;
+      }
+      const audio = audioRefs.current[messageId];
+      if (audio) {
+        audio.load();
+        await audio.play().catch(() => undefined);
+      }
+    } catch (err: any) {
+      setError(err?.message || "Failed to refresh audio playback.");
+    }
+  };
+
+  const handleAudioDownload = async (
+    messageId: string,
+    audioUrl?: string,
+    progressUrl?: string
+  ) => {
+    try {
+      const nextAudioUrl = (await refreshMessageAudioUrl(messageId, progressUrl)) || audioUrl;
+      if (!nextAudioUrl) {
+        setError("No audio available to download.");
+        return;
+      }
+      const link = document.createElement("a");
+      link.href = nextAudioUrl;
+      link.download = "";
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err: any) {
+      setError(err?.message || "Failed to refresh audio download.");
+    }
   };
 
   const handleUpload = async (file: File) => {
@@ -770,7 +841,32 @@ export default function MainApp() {
                   </div>
                 )}
                 {msg.audioUrl && (
-                  <audio className="audio-player" controls src={msg.audioUrl} />
+                  <div className="audio-actions">
+                    <audio
+                      ref={(element) => {
+                        if (element) {
+                          audioRefs.current[msg.id] = element;
+                        } else {
+                          delete audioRefs.current[msg.id];
+                        }
+                      }}
+                      className="audio-player"
+                      controls
+                      src={msg.audioUrl}
+                      onError={() => {
+                        void handleAudioPlaybackError(msg.id, msg.progressUrl);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="audio-download-button"
+                      onClick={() => {
+                        void handleAudioDownload(msg.id, msg.audioUrl, msg.progressUrl);
+                      }}
+                    >
+                      Download audio
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
