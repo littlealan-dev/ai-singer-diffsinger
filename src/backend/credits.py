@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Literal, Optional
 import logging
 import math
+import os
 
 from google.cloud import firestore
 from src.backend.firebase_app import get_firestore_client
@@ -21,6 +22,14 @@ _CREDIT_DURATION_PRECISION_SECONDS = 0.001
 TRIAL_CREDIT_AMOUNT = 10
 TRIAL_EXPIRY_DAYS = 14
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
+
+
+def _trial_credit_amount() -> int:
+    """Return the configured trial-credit amount, defaulting to the legacy constant."""
+    raw_value = os.getenv("BACKEND_TRIAL_CREDIT_AMOUNT", "").strip()
+    if not raw_value:
+        return TRIAL_CREDIT_AMOUNT
+    return int(raw_value)
 
 @dataclass(frozen=True)
 class UserCredits:
@@ -140,6 +149,7 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
     """Fetch user credits, granting trial credits if first sign-in."""
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
+    trial_credit_amount = _trial_credit_amount()
     
     @firestore.transactional
     def _transactional_get_or_create(transaction):
@@ -162,7 +172,7 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
         expires_at = now + timedelta(days=TRIAL_EXPIRY_DAYS)
         
         credits_data = {
-            "balance": TRIAL_CREDIT_AMOUNT,
+            "balance": trial_credit_amount,
             "reserved": 0,
             "expiresAt": expires_at,
             "overdrafted": False,
@@ -176,7 +186,7 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
         }, merge=True)
         
         return UserCredits(
-            balance=TRIAL_CREDIT_AMOUNT,
+            balance=trial_credit_amount,
             reserved=0,
             expires_at=expires_at,
             overdrafted=False,

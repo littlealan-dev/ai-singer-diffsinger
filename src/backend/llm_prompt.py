@@ -53,6 +53,7 @@ def build_prompt_bundle(
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
+    backing_track_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
@@ -92,6 +93,11 @@ def build_prompt_bundle(
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
+    backing_track_context_text = "none"
+    if backing_track_context:
+        backing_track_context_text = json.dumps(
+            backing_track_context, indent=2, sort_keys=True
+        )
     static_prompt = _load_system_prompt().replace("{tool_json}", tool_json)
     static_prompt = (
         static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
@@ -102,6 +108,7 @@ def build_prompt_bundle(
         .replace("{preprocess_mapping_context}", "<provided in Dynamic Context>")
         .replace("{last_preprocess_plan}", "<provided in Dynamic Context>")
         .replace("{voicebank_details}", "<provided in Dynamic Context>")
+        .replace("{backing_track_context}", "<provided in Dynamic Context>")
     )
     dynamic_prompt = (
         "Dynamic Context:\n"
@@ -119,6 +126,8 @@ def build_prompt_bundle(
         f"Available voicebanks (IDs): {voicebanks_text}\n"
         "Voicebank color options (if any):\n"
         f"{voicebank_details_text}\n"
+        "Backing-track prerequisite context (if available):\n"
+        f"{backing_track_context_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -137,6 +146,7 @@ def build_system_prompt(
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
+    backing_track_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
     bundle = build_prompt_bundle(
@@ -149,6 +159,7 @@ def build_system_prompt(
         preprocess_mapping_context=preprocess_mapping_context,
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
+        backing_track_context=backing_track_context,
     )
     return (
         f"{bundle.static_prompt_text}\n\n---\n\n{bundle.dynamic_prompt_text}"

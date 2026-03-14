@@ -1237,6 +1237,47 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_BACKING_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Generated backing-track artifact and prompt metadata.",
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "completed when the backing track was generated successfully.",
+        },
+        "output_path": {
+            "type": "string",
+            "description": "Project-relative output audio path.",
+        },
+        "duration_seconds": {
+            "type": "number",
+            "description": "Rendered audio duration in seconds.",
+        },
+        "output_format": {
+            "type": "string",
+            "description": "Effective ElevenLabs output format used for generation.",
+        },
+        "backing_track_prompt": {
+            "type": "string",
+            "description": "Final prompt sent to ElevenLabs music.compose.",
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Deterministic extracted score metadata used for prompt writing.",
+            "additionalProperties": True,
+        },
+    },
+    "required": [
+        "status",
+        "output_path",
+        "duration_seconds",
+        "output_format",
+        "backing_track_prompt",
+        "metadata",
+    ],
+    "additionalProperties": False,
+}
+
 TOOLS: List[Tool] = [
     Tool(
         name="parse_score",
@@ -1465,6 +1506,37 @@ TOOLS: List[Tool] = [
             "additionalProperties": False,
         },
         output_schema=_SYNTH_OUTPUT_SCHEMA,
+    ),
+    Tool(
+        name="generate_backing_track",
+        description=(
+            "Generate an original instrumental backing track in ElevenLabs after a successful "
+            "singing render exists for the current score. In chat flow, backend injects score file context."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "style_request": {
+                    "type": "string",
+                    "description": "Natural-language style or genre request such as lo-fi, jazz trio, or bossa nova.",
+                },
+                "additional_requirements": {
+                    "type": ["string", "null"],
+                    "description": "Optional extra arrangement or mood requirements from the user.",
+                },
+                "output_format": {
+                    "type": ["string", "null"],
+                    "description": "Optional ElevenLabs output format override such as mp3_44100_128.",
+                },
+                "seed": {
+                    "type": ["integer", "null"],
+                    "description": "Optional ElevenLabs music generation seed.",
+                },
+            },
+            "required": ["style_request"],
+            "additionalProperties": False,
+        },
+        output_schema=_BACKING_TRACK_OUTPUT_SCHEMA,
     ),
     Tool(
         name="list_voicebanks",

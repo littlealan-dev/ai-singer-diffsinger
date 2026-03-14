@@ -36,6 +36,8 @@ class SessionState:
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
     current_audio: Optional[Dict[str, Any]] = None
+    current_backing_track_audio: Optional[Dict[str, Any]] = None
+    last_successful_singing_render: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a JSON-serializable snapshot of session state."""
@@ -57,6 +59,16 @@ class SessionState:
             "current_score": self._score_snapshot(),
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "current_audio": dict(self.current_audio) if self.current_audio else None,
+            "current_backing_track_audio": (
+                dict(self.current_backing_track_audio)
+                if self.current_backing_track_audio
+                else None
+            ),
+            "last_successful_singing_render": (
+                dict(self.last_successful_singing_render)
+                if self.last_successful_singing_render
+                else None
+            ),
         }
 
     def _score_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -176,6 +188,9 @@ class SessionStore:
                 raise KeyError(session_id)
             state.current_score = score
             state.current_score_version += 1
+            # Any newly parsed/reparsed/preprocessed score invalidates prior backing-track readiness.
+            state.last_successful_singing_render = None
+            state.current_backing_track_audio = None
             state.last_active_at = _utcnow()
             return state.current_score_version
 
@@ -248,6 +263,39 @@ class SessionStore:
                 state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
 
+    async def set_backing_track_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+    ) -> None:
+        """Store backing-track audio metadata for the session."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.current_backing_track_audio = {
+                "path": self._relative_path(path),
+                "duration_s": duration_s,
+            }
+            if storage_path:
+                state.current_backing_track_audio["storage_path"] = storage_path
+            state.last_active_at = _utcnow()
+
+    async def set_last_successful_singing_render(
+        self,
+        session_id: str,
+        payload: Optional[Dict[str, Any]],
+    ) -> None:
+        """Persist the latest successful singing render context."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.last_successful_singing_render = dict(payload) if payload else None
+            state.last_active_at = _utcnow()
+
     async def reset_for_new_upload(self, session_id: str) -> None:
         """Clear score-specific session state and remove prior derived artifacts."""
         async with self._lock:
@@ -264,6 +312,8 @@ class SessionStore:
             state.current_score_version = 0
             state.score_summary = None
             state.current_audio = None
+            state.current_backing_track_audio = None
+            state.last_successful_singing_render = None
             state.last_active_at = _utcnow()
             session_dir = self.session_dir(session_id)
             if session_dir.exists():
@@ -400,6 +450,8 @@ class FirestoreSessionStore:
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
             current_audio=data.get("currentAudio"),
+            current_backing_track_audio=data.get("currentBackingTrackAudio"),
+            last_successful_singing_render=data.get("lastSuccessfulSingingRender"),
         )
 
     async def create_session(self, user_id: Optional[str]) -> SessionState:
@@ -421,6 +473,8 @@ class FirestoreSessionStore:
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
                 "currentAudio": None,
+                "currentBackingTrackAudio": None,
+                "lastSuccessfulSingingRender": None,
             }
             self._doc_ref(session_id).set(payload)
             session_dir = self.session_dir(session_id)
@@ -497,6 +551,8 @@ class FirestoreSessionStore:
                 {
                     "currentScore": score,
                     "currentScoreVersion": version,
+                    "lastSuccessfulSingingRender": None,
+                    "currentBackingTrackAudio": None,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
@@ -569,6 +625,42 @@ class FirestoreSessionStore:
                 {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
 
+    async def set_backing_track_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+    ) -> None:
+        """Store backing-track audio metadata in Firestore."""
+        async with self._lock:
+            payload = {
+                "path": self._relative_path(path),
+                "duration_s": duration_s,
+            }
+            if storage_path:
+                payload["storage_path"] = storage_path
+            self._doc_ref(session_id).update(
+                {
+                    "currentBackingTrackAudio": payload,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_last_successful_singing_render(
+        self,
+        session_id: str,
+        payload: Optional[Dict[str, Any]],
+    ) -> None:
+        """Persist the latest successful singing render context in Firestore."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "lastSuccessfulSingingRender": payload,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
     async def reset_for_new_upload(self, session_id: str) -> None:
         """Clear score-specific Firestore session state and local derived artifacts."""
         async with self._lock:
@@ -585,6 +677,8 @@ class FirestoreSessionStore:
                     "currentScoreVersion": 0,
                     "scoreSummary": None,
                     "currentAudio": None,
+                    "currentBackingTrackAudio": None,
+                    "lastSuccessfulSingingRender": None,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )

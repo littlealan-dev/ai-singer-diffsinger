@@ -81,6 +81,11 @@ class Settings:
     openai_prompt_cache_key_prefix: str
     openai_prompt_cache_retention: str
     openai_reasoning_effort: str
+    elevenlabs_api_key: str
+    elevenlabs_api_key_secret: str
+    elevenlabs_api_key_secret_version: str
+    elevenlabs_music_model: str
+    elevenlabs_music_output_format: str
     inject_full_parsed_score_json: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
@@ -178,6 +183,20 @@ class Settings:
             raise ValueError(
                 "OPENAI_REASONING_EFFORT must be one of: '', 'minimal', 'low', 'medium', 'high'."
             )
+        elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+        elevenlabs_api_key_secret = os.getenv(
+            "ELEVENLABS_API_KEY_SECRET",
+            "ELEVENLABS_API_KEY",
+        ).strip()
+        elevenlabs_api_key_secret_version = os.getenv(
+            "ELEVENLABS_API_KEY_SECRET_VERSION",
+            "latest",
+        ).strip()
+        elevenlabs_music_model = os.getenv("ELEVENLABS_MUSIC_MODEL", "music_v1").strip()
+        elevenlabs_music_output_format = os.getenv(
+            "ELEVENLABS_MUSIC_OUTPUT_FORMAT",
+            "mp3_44100_128",
+        ).strip()
         inject_full_parsed_score_json = _env_bool(
             "INJECT_FULL_PARSED_SCORE_JSON",
             False,
@@ -298,6 +317,11 @@ class Settings:
             openai_prompt_cache_key_prefix=openai_prompt_cache_key_prefix,
             openai_prompt_cache_retention=openai_prompt_cache_retention,
             openai_reasoning_effort=openai_reasoning_effort,
+            elevenlabs_api_key=elevenlabs_api_key,
+            elevenlabs_api_key_secret=elevenlabs_api_key_secret,
+            elevenlabs_api_key_secret_version=elevenlabs_api_key_secret_version,
+            elevenlabs_music_model=elevenlabs_music_model,
+            elevenlabs_music_output_format=elevenlabs_music_output_format,
             inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,

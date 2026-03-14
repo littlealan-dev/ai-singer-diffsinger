@@ -68,10 +68,16 @@ class Orchestrator:
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
-        self._llm_tool_allowlist = {"reparse", "preprocess_voice_parts", "synthesize"}
+        self._llm_tool_allowlist = {
+            "reparse",
+            "preprocess_voice_parts",
+            "synthesize",
+            "generate_backing_track",
+        }
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
+        self._backing_track_tasks: Dict[str, asyncio.Task] = {}
         self._chat_locks_guard = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
         self._settle_fault_injection_remaining: Dict[str, int] = {}
@@ -103,6 +109,15 @@ class Orchestrator:
                     "type": "chat_text",
                     "message": (
                         "I am still preparing the derived score from your previous request. "
+                        "Please wait for it to finish before sending another message."
+                    ),
+                }
+            existing_backing_track = self._backing_track_tasks.get(session_id)
+            if existing_backing_track and not existing_backing_track.done():
+                return {
+                    "type": "chat_text",
+                    "message": (
+                        "I am still generating the backing track from your previous request. "
                         "Please wait for it to finish before sending another message."
                     ),
                 }
@@ -263,6 +278,7 @@ class Orchestrator:
         job_id: Optional[str] = None,
         user_id: Optional[str] = None,
         output_storage_path: Optional[str] = None,
+        score_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Run the synthesize + save_audio flow for a session."""
         synth_args = dict(arguments)
@@ -345,6 +361,23 @@ class Orchestrator:
             )
         else:
             await self._sessions.set_audio(session_id, output_path, duration)
+        await self._sessions.set_last_successful_singing_render(
+            session_id,
+            {
+                "score_version": score_version,
+                "job_id": job_id,
+                "audio_path": str(output_path.relative_to(self._settings.project_root)),
+                "duration_seconds": duration,
+                "storage_path": output_storage_path,
+                "voicebank": synth_args.get("voicebank"),
+                "part_index": self._resolve_synthesize_part_index(
+                    score,
+                    part_id=synth_args.get("part_id"),
+                    part_index=synth_args.get("part_index"),
+                ),
+                "voice_part_id": synth_args.get("voice_part_id"),
+            },
+        )
         response = {
             "type": "chat_audio",
             "message": "Here is the rendered audio.",
@@ -372,6 +405,8 @@ class Orchestrator:
             job_id = uuid.uuid4().hex
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
+        current_score_payload = snapshot.get("current_score") or {}
+        score_version = current_score_payload.get("version")
         input_path = files.get("musicxml_path")
         storage_input_path = files.get("musicxml_storage_path")
         render_type = arguments.get("render_type")
@@ -415,6 +450,7 @@ class Orchestrator:
                 storage_input_path=storage_input_path,
                 job_input_storage_path=job_input_storage_path,
                 output_storage_path=output_storage_path,
+                score_version=score_version if isinstance(score_version, int) else None,
             )
         )
         self._synthesis_tasks[session_id] = task
@@ -426,7 +462,7 @@ class Orchestrator:
         return {
             "type": "chat_progress",
             "message": "Give me a moment to prepare the take...",
-            "progress_url": f"/sessions/{session_id}/progress",
+            "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
             "job_id": job_id,
         }
 
@@ -490,7 +526,178 @@ class Orchestrator:
         return {
             "type": "chat_progress",
             "message": initial_message,
-            "progress_url": f"/sessions/{session_id}/progress",
+            "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+            "job_id": job_id,
+        }
+
+    async def _run_backing_track_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        job_id: str,
+        user_id: str,
+        *,
+        output_storage_path: Optional[str],
+    ) -> None:
+        """Execute backing-track generation in the background and publish progress."""
+        try:
+            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            files = snapshot.get("files") or {}
+            source_musicxml_path = score.get("source_musicxml_path") or files.get("musicxml_path")
+            if not isinstance(source_musicxml_path, str) or not source_musicxml_path:
+                raise RuntimeError("Current score is missing source MusicXML path.")
+
+            source_path = Path(source_musicxml_path)
+            if source_path.is_absolute():
+                source_rel_path = str(source_path.relative_to(self._settings.project_root))
+            else:
+                source_rel_path = source_musicxml_path
+
+            output_name = f"backing-track-{uuid.uuid4().hex}.mp3"
+            output_path = self._sessions.session_dir(session_id) / output_name
+            output_rel_path = str(output_path.relative_to(self._settings.project_root))
+
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="analyze",
+                message="Analyzing the score for accompaniment...",
+                progress=0.15,
+                jobKind="backing_track",
+            )
+            tool_args = dict(arguments)
+            tool_args["file_path"] = source_rel_path
+            tool_args["output_path"] = output_rel_path
+            result = await asyncio.to_thread(
+                self._router.call_tool,
+                "generate_backing_track",
+                tool_args,
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    f"generate_backing_track returned non-object result: {type(result).__name__}"
+                )
+            if result.get("status") != "completed":
+                raise RuntimeError(str(result.get("message") or "Backing track generation failed."))
+
+            duration_seconds = float(result.get("duration_seconds") or 0.0)
+            if self._settings.backend_use_storage and output_storage_path:
+                await asyncio.to_thread(
+                    upload_file,
+                    self._settings.storage_bucket,
+                    output_path,
+                    output_storage_path,
+                    "audio/mpeg",
+                )
+                await self._sessions.set_backing_track_audio(
+                    session_id,
+                    output_path,
+                    duration_seconds,
+                    storage_path=output_storage_path,
+                )
+            else:
+                await self._sessions.set_backing_track_audio(
+                    session_id,
+                    output_path,
+                    duration_seconds,
+                )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="completed",
+                step="done",
+                message="Backing track ready.",
+                progress=1.0,
+                jobKind="backing_track",
+                audioUrl=f"/sessions/{session_id}/audio?file={output_name}",
+                outputPath=output_storage_path or output_rel_path,
+                details={
+                    "metadata": result.get("metadata"),
+                    "backing_track_prompt": result.get("backing_track_prompt"),
+                    "output_format": result.get("output_format"),
+                },
+            )
+        except Exception as exc:
+            self._logger.exception(
+                "backing_track_generation_failed session=%s error=%s",
+                session_id,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="failed",
+                step="error",
+                message="Couldn't finish the backing track.",
+                errorMessage=str(exc),
+                progress=1.0,
+                jobKind="backing_track",
+            )
+        finally:
+            clear_log_context()
+
+    async def _start_backing_track_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        *,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Create a background backing-track job and return a pollable response."""
+        existing = self._backing_track_tasks.get(session_id)
+        if existing and not existing.done():
+            return {
+                "type": "chat_text",
+                "message": (
+                    "I am still generating the backing track from your previous request. "
+                    "Please wait for it to finish before sending another message."
+                ),
+            }
+        job_id = uuid.uuid4().hex
+        output_storage_path = None
+        if self._settings.backend_use_storage:
+            output_storage_path = f"sessions/{user_id}/{session_id}/jobs/{job_id}/backing_track.mp3"
+        await asyncio.to_thread(
+            self._job_store.create_job,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+            status="queued",
+            render_type="backing_track",
+        )
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            status="queued",
+            step="queued",
+            message="Let me put together the backing track...",
+            progress=0.0,
+            jobKind="backing_track",
+        )
+        task = asyncio.create_task(
+            self._run_backing_track_job(
+                session_id,
+                copy.deepcopy(score),
+                dict(arguments),
+                job_id,
+                user_id,
+                output_storage_path=output_storage_path,
+            )
+        )
+        self._backing_track_tasks[session_id] = task
+
+        def _cleanup(_: asyncio.Task) -> None:
+            self._backing_track_tasks.pop(session_id, None)
+
+        task.add_done_callback(_cleanup)
+        return {
+            "type": "chat_progress",
+            "message": "Let me put together the backing track...",
+            "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
             "job_id": job_id,
         }
 
@@ -623,6 +830,7 @@ class Orchestrator:
         storage_input_path: Optional[str],
         job_input_storage_path: Optional[str],
         output_storage_path: Optional[str],
+        score_version: Optional[int],
     ) -> None:
         """Execute a synthesis job and update status in Firestore."""
         try:
@@ -653,6 +861,7 @@ class Orchestrator:
                 job_id=job_id,
                 user_id=user_id,
                 output_storage_path=output_storage_path,
+                score_version=score_version,
             )
             duration_seconds = response.get("duration_seconds", 0.0)
             output_path = response.get("output_storage_path") or response.get("output_path")
@@ -2719,6 +2928,90 @@ class Orchestrator:
         selected = score.get("selected_verse_number")
         return self._normalize_verse_number(selected)
 
+    def _snapshot_score_version(self, snapshot: Dict[str, Any]) -> Optional[int]:
+        """Return current score version from a session snapshot."""
+        current_score = snapshot.get("current_score")
+        if not isinstance(current_score, dict):
+            return None
+        version = current_score.get("version")
+        return version if isinstance(version, int) else None
+
+    def _build_backing_track_prerequisite_error(
+        self,
+        *,
+        snapshot: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Return an action-required payload if backing-track prerequisites are unmet."""
+        current_score = snapshot.get("current_score")
+        if not isinstance(current_score, dict) or not isinstance(current_score.get("score"), dict):
+            return {
+                "status": "action_required",
+                "action": "no_score_uploaded",
+                "code": "no_score_uploaded",
+                "message": "Please upload a score first.",
+            }
+        singing_render = snapshot.get("last_successful_singing_render")
+        if not isinstance(singing_render, dict):
+            return {
+                "status": "action_required",
+                "action": "no_successful_singing_render",
+                "code": "no_successful_singing_render",
+                "message": (
+                    "Generate a singing track first, then I can create a backing track "
+                    "from the same score."
+                ),
+            }
+        current_version = self._snapshot_score_version(snapshot)
+        render_score_version = singing_render.get("score_version")
+        if current_version is None or render_score_version != current_version:
+            return {
+                "status": "action_required",
+                "action": "stale_singing_render_for_current_score",
+                "code": "stale_singing_render_for_current_score",
+                "message": (
+                    "The score has changed since the last singing render. "
+                    "Please synthesize the current score first, then retry backing track generation."
+                ),
+                "diagnostics": {
+                    "current_score_version": current_version,
+                    "last_successful_singing_render_score_version": render_score_version,
+                },
+            }
+        return None
+
+    def _build_backing_track_context(
+        self,
+        *,
+        snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return compact backing-track prerequisite state for the LLM prompt."""
+        current_score_version = self._snapshot_score_version(snapshot)
+        singing_render = snapshot.get("last_successful_singing_render")
+        if not isinstance(singing_render, dict):
+            return {
+                "status": "missing_singing_render",
+                "ready_for_generate_backing_track": False,
+                "current_score_version": current_score_version,
+            }
+        render_score_version = singing_render.get("score_version")
+        ready = (
+            current_score_version is not None
+            and isinstance(render_score_version, int)
+            and render_score_version == current_score_version
+        )
+        return {
+            "status": "ready" if ready else "stale_singing_render",
+            "ready_for_generate_backing_track": ready,
+            "current_score_version": current_score_version,
+            "last_successful_singing_render": {
+                "score_version": render_score_version,
+                "duration_seconds": singing_render.get("duration_seconds"),
+                "part_index": singing_render.get("part_index"),
+                "voice_part_id": singing_render.get("voice_part_id"),
+                "voicebank": singing_render.get("voicebank"),
+            },
+        }
+
     def _is_reparse_noop(
         self,
         score: Dict[str, Any],
@@ -2963,6 +3256,7 @@ class Orchestrator:
                     else None
                 ),
                 voicebank_details=voicebank_details,
+                backing_track_context=self._build_backing_track_context(snapshot=snapshot),
             )
             text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
@@ -3050,6 +3344,7 @@ class Orchestrator:
                     else None
                 ),
                 voicebank_details=voicebank_details,
+                backing_track_context=self._build_backing_track_context(snapshot=snapshot),
             )
             text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
@@ -3461,6 +3756,30 @@ class Orchestrator:
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 continue
+            if call.name == "generate_backing_track":
+                snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                action_required = self._build_backing_track_prerequisite_error(
+                    snapshot=snapshot
+                )
+                if action_required is not None:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                audio_response = await self._start_backing_track_job(
+                    session_id,
+                    current_score,
+                    dict(call.arguments),
+                    user_id=user_id,
+                )
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response=audio_response,
+                    explicit_verse_number=selected_explicit_verse_number,
+                )
             if call.name == "synthesize":
                 if self._tool_calls_require_verse_selection(
                     [call],

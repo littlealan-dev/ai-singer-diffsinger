@@ -370,14 +370,23 @@ def create_app() -> FastAPI:
     async def get_progress(session_id: str, request: Request) -> Dict[str, Any]:
         job_store: JobStore = request.app.state.job_store
         user_id = await _get_user_id_or_401(request)
-        latest = await asyncio.to_thread(
-            job_store.get_latest_job_by_session,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        if latest is None:
+        requested_job_id = request.query_params.get("job_id", "").strip()
+        if requested_job_id:
+            job_record = await asyncio.to_thread(
+                job_store.get_job_for_session,
+                user_id=user_id,
+                session_id=session_id,
+                job_id=requested_job_id,
+            )
+        else:
+            job_record = await asyncio.to_thread(
+                job_store.get_latest_job_by_session,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        if job_record is None:
             return {"status": "idle"}
-        job_id, data = latest
+        job_id, data = job_record
         payload = build_progress_payload(job_id, data)
         return _sign_audio_payload_urls(
             request,

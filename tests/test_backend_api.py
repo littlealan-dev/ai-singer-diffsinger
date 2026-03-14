@@ -85,6 +85,19 @@ def _make_router_call_tool():
                 "duration_seconds": 0.01,
                 "sample_rate": arguments.get("sample_rate", 44100),
             }
+        if name == "generate_backing_track":
+            rel_path = arguments["output_path"]
+            abs_path = PROJECT_ROOT / rel_path
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_bytes(b"ID3BACKINGTRACK")
+            return {
+                "status": "completed",
+                "output_path": rel_path,
+                "duration_seconds": 0.34,
+                "output_format": arguments.get("output_format") or "mp3_44100_128",
+                "backing_track_prompt": "Create an original instrumental backing track.",
+                "metadata": {"key_signature": "C major", "time_signature": "4/4", "bpm": 120},
+            }
         if name == "list_voicebanks":
             return [{"id": "Dummy", "name": "Dummy", "path": "assets/voicebanks/Dummy"}]
         if name == "get_voicebank_info":
@@ -187,6 +200,14 @@ def _prepare_app(monkeypatch, overrides=None):
             return None
         return max(matches, key=lambda item: item[1].get("updatedAt", ""))
 
+    def _fake_get_job_for_session(self, *, user_id: str, session_id: str, job_id: str):
+        payload = fake_jobs.get(job_id)
+        if not payload:
+            return None
+        if payload.get("userId") != user_id or payload.get("sessionId") != session_id:
+            return None
+        return job_id, payload
+
     def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
         to_delete = [
             job_id
@@ -201,6 +222,10 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
+    )
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.get_job_for_session",
+        _fake_get_job_for_session,
     )
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.clear_jobs_for_session",
@@ -2328,6 +2353,192 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     audio_response = test_client.get(audio_url)
     assert audio_response.status_code == 200
     assert audio_response.content.startswith(b"RIFF")
+
+
+def test_backing_track_tool_requires_successful_singing_render(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    current_score = upload_payload["current_score"]["score"]
+    score_summary = upload_payload["score_summary"]
+    result = asyncio.run(
+        app.state.orchestrator._execute_tool_calls(
+            session_id,
+            current_score,
+            [ToolCall(name="generate_backing_track", arguments={"style_request": "bossa nova"})],
+            user_id="test-user",
+            user_email="test@example.com",
+            score_summary=score_summary,
+            explicit_verse_number=None,
+        )
+    )
+    assert result.action_required_payload is not None
+    assert result.action_required_payload["action"] == "no_successful_singing_render"
+
+
+def test_chat_backing_track_response_with_llm_and_get_audio(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    score_version = upload_payload["current_score"]["version"]
+    session_dir = app.state.settings.sessions_dir / session_id
+    singing_audio_path = session_dir / "audio-existing.mp3"
+    singing_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    singing_audio_path.write_bytes(b"ID3SINGING")
+    asyncio.run(app.state.sessions.set_audio(session_id, singing_audio_path, 0.5))
+    asyncio.run(
+        app.state.sessions.set_last_successful_singing_render(
+            session_id,
+            {
+                "score_version": score_version,
+                "job_id": "job-existing",
+                "audio_path": str(singing_audio_path.relative_to(app.state.settings.project_root)),
+                "duration_seconds": 0.5,
+                "voicebank": "Dummy",
+                "part_index": 0,
+                "voice_part_id": None,
+            },
+        )
+    )
+
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"generate_backing_track","arguments":{"style_request":"bossa nova"}}],'
+            '"final_message":"Let me put together the backing track...","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "generate a bossa nova backing track"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert progress_payload["job_kind"] == "backing_track"
+    audio_url = progress_payload["audio_url"]
+    audio_response = test_client.get(audio_url)
+    assert audio_response.status_code == 200
+    assert audio_response.content.startswith(b"ID3")
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["current_backing_track_audio"] is not None
+
+
+def test_job_specific_progress_url_preserves_original_singing_audio_after_backing_track(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    singing_llm = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":false}'
+        )
+    )
+    app.state.llm_client = singing_llm
+    app.state.orchestrator._llm_client = singing_llm
+    singing_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing this"}
+    )
+    assert singing_response.status_code == 200
+    singing_payload = singing_response.json()
+    assert singing_payload["type"] == "chat_progress"
+    singing_progress_url = singing_payload["progress_url"]
+    singing_progress_query = parse_qs(urlsplit(singing_progress_url).query)
+    assert singing_progress_query.get("job_id")
+
+    singing_progress = _wait_for_progress(test_client, singing_progress_url)
+    assert singing_progress["status"] == "done"
+    singing_audio_response = test_client.get(singing_progress["audio_url"])
+    assert singing_audio_response.status_code == 200
+    assert singing_audio_response.content.startswith(b"RIFF")
+
+    backing_track_llm = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"generate_backing_track","arguments":{"style_request":"simple pop rock"}}],'
+            '"final_message":"Let me put together the backing track...","include_score":false}'
+        )
+    )
+    app.state.llm_client = backing_track_llm
+    app.state.orchestrator._llm_client = backing_track_llm
+    backing_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "generate backing track"}
+    )
+    assert backing_response.status_code == 200
+    backing_payload = backing_response.json()
+    assert backing_payload["type"] == "chat_progress"
+    backing_progress_url = backing_payload["progress_url"]
+    backing_progress_query = parse_qs(urlsplit(backing_progress_url).query)
+    assert backing_progress_query.get("job_id")
+    assert backing_progress_query["job_id"][0] != singing_progress_query["job_id"][0]
+
+    backing_progress = _wait_for_progress(test_client, backing_progress_url)
+    assert backing_progress["status"] == "done"
+    backing_audio_response = test_client.get(backing_progress["audio_url"])
+    assert backing_audio_response.status_code == 200
+    assert backing_audio_response.content.startswith(b"ID3")
+
+    refreshed_singing_progress = test_client.get(singing_progress_url)
+    assert refreshed_singing_progress.status_code == 200
+    refreshed_singing_payload = refreshed_singing_progress.json()
+    refreshed_audio_url = refreshed_singing_payload["audio_url"]
+    refreshed_file_name = parse_qs(urlsplit(refreshed_audio_url).query)["file"][0]
+    assert refreshed_file_name.startswith("audio-")
+    replayed_singing_audio = test_client.get(refreshed_singing_payload["audio_url"])
+    assert replayed_singing_audio.status_code == 200
+    assert replayed_singing_audio.content.startswith(b"RIFF")
+
+
+def test_score_change_resets_backing_track_readiness(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    score_version = upload_payload["current_score"]["version"]
+    session_dir = app.state.settings.sessions_dir / session_id
+    singing_audio_path = session_dir / "audio-existing.mp3"
+    backing_track_path = session_dir / "backing-track-existing.mp3"
+    singing_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    singing_audio_path.write_bytes(b"ID3SINGING")
+    backing_track_path.write_bytes(b"ID3BACKING")
+    asyncio.run(app.state.sessions.set_audio(session_id, singing_audio_path, 0.5))
+    asyncio.run(app.state.sessions.set_backing_track_audio(session_id, backing_track_path, 0.5))
+    asyncio.run(
+        app.state.sessions.set_last_successful_singing_render(
+            session_id,
+            {
+                "score_version": score_version,
+                "job_id": "job-existing",
+                "audio_path": str(singing_audio_path.relative_to(app.state.settings.project_root)),
+                "duration_seconds": 0.5,
+                "voicebank": "Dummy",
+                "part_index": 0,
+                "voice_part_id": None,
+            },
+        )
+    )
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["last_successful_singing_render"] is not None
+    assert snapshot["current_backing_track_audio"] is not None
+
+    asyncio.run(
+        app.state.sessions.set_score(
+            session_id,
+            {"title": "Changed", "parts": [], "tempos": [], "source_musicxml_path": "data/sessions/test/score.xml"},
+        )
+    )
+    refreshed = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert refreshed["last_successful_singing_render"] is None
+    assert refreshed["current_backing_track_audio"] is None
 
 
 def test_app_check_rejects_query_param_only(monkeypatch):

@@ -90,6 +90,28 @@ def test_build_system_prompt_includes_latest_attempted_preprocess_plan() -> None
     assert '"start_measure": 7' in prompt
 
 
+def test_build_system_prompt_includes_backing_track_context() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Raine_Rena_2.01"],
+        score_summary={"title": "Happy Birthday"},
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        backing_track_context={
+            "status": "ready",
+            "ready_for_generate_backing_track": True,
+            "current_score_version": 2,
+            "last_successful_singing_render": {"score_version": 2},
+        },
+    )
+    assert "Backing-track prerequisite context (if available):" in prompt
+    assert '"ready_for_generate_backing_track": true' in prompt
+
+
 def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> None:
     prompt = build_system_prompt(
         tools=[],

@@ -45,6 +45,16 @@ def test_trial_grant():
     assert credits2.balance == TRIAL_CREDIT_AMOUNT
     assert credits2.trial_granted_at == credits.trial_granted_at
 
+
+def test_trial_grant_uses_env_override(monkeypatch):
+    uid = "test-user-override"
+    email = "override@example.com"
+    monkeypatch.setenv("BACKEND_TRIAL_CREDIT_AMOUNT", "100")
+
+    credits = get_or_create_credits(uid, email)
+
+    assert credits.balance == 100
+
 def test_estimate_credits():
     assert estimate_credits(0) == 0
     assert estimate_credits(15) == 1  # 15s -> 1 credit (30s block)

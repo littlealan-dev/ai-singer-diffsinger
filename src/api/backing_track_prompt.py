@@ -60,26 +60,42 @@ _KIND_SUFFIXES = {
 _ACCIDENTALS = {-2: "bb", -1: "b", 0: "", 1: "#", 2: "##"}
 
 
-def build_elevenlabs_backing_track_prompt(file_path: str | Path) -> str:
+def build_elevenlabs_backing_track_prompt(
+    file_path: str | Path,
+    *,
+    purpose: str = "celebration",
+    style_description: str = (
+        "a simple, happy and supportive groove that allows a melody to be easily followed"
+    ),
+) -> str:
     """Build a compact backing-track prompt from a MusicXML score."""
     metadata = extract_backing_track_metadata(file_path)
-    pickup = metadata["pickup"]
-    pickup_line = "No pickup notes." if not pickup["has_pickup"] else (
-        f"Pickup notes begin on beat {pickup['starts_on_beat']} of measure 1. "
-        f"The first downbeat of measure 2 should land on {pickup['second_bar_downbeat_note']}."
+    return build_elevenlabs_backing_track_prompt_from_metadata(
+        metadata,
+        purpose=purpose,
+        style_description=style_description,
     )
-    chord_line = "; ".join(
-        f"m{entry['measure']}: {' -> '.join(entry['chords'])}" for entry in metadata["chord_progression"]
-    )
+
+
+def build_elevenlabs_backing_track_prompt_from_metadata(
+    metadata: Dict[str, Any],
+    *,
+    purpose: str = "celebration",
+    style_description: str = (
+        "a simple, happy and supportive groove that allows a melody to be easily followed"
+    ),
+) -> str:
+    """Build a compact backing-track prompt from pre-extracted score metadata."""
+    section_line = _format_section_plan(metadata)
     return (
-        f"Create an instrumental backing track for \"{metadata['title']}\". "
-        f"Key signature: {metadata['key_signature']}. "
-        f"Time signature: {metadata['time_signature']}. "
-        f"Tempo: {metadata['bpm']} BPM. "
-        f"Duration: {metadata['measure_count']} measures, about {metadata['duration_mmss']}. "
-        f"{pickup_line} "
-        f"Chord progression: {chord_line}. "
-        "Keep the groove simple and supportive so the melody remains easy to follow."
+        f"Create an original instrumental backing track for {purpose} "
+        f"in the key of {metadata['key_signature']} with a {metadata['time_signature']} "
+        f"time signature and a tempo of {metadata['bpm']} BPM. "
+        f"The track should be about {int(round(float(metadata['duration_seconds'])))} seconds long, "
+        f"featuring {style_description}. "
+        "The audio must continue through the end of the last measure and must not end early. "
+        f"Start the accompaniment from the beginning of the first measure. "
+        f"Use this section plan: {section_line}."
     )
 
 
@@ -97,6 +113,8 @@ def extract_backing_track_metadata(file_path: str | Path) -> Dict[str, Any]:
         "title": (score.get("score_summary") or {}).get("title") or score.get("title") or path.stem,
         "key_signature": _extract_key_signature(root),
         "time_signature": f"{beats}/{beat_type}",
+        "beats_per_measure": beats,
+        "beat_type": beat_type,
         "bpm": bpm,
         "measure_count": _count_measures(root),
         "duration_seconds": duration_seconds,
@@ -104,6 +122,88 @@ def extract_backing_track_metadata(file_path: str | Path) -> Dict[str, Any]:
         "pickup": _extract_pickup(score, beats),
         "chord_progression": _extract_chord_progression(root),
     }
+
+
+def _format_section_plan(metadata: Dict[str, Any]) -> str:
+    measure_chords = _measure_chord_sequence(metadata["chord_progression"])
+    measure_count = int(metadata["measure_count"])
+    pickup = metadata.get("pickup") or {}
+    sections = _build_sections(measure_count=measure_count, has_pickup=bool(pickup.get("has_pickup")))
+    formatted_sections: List[str] = []
+    for label, start_measure, end_measure in sections:
+        section_chords = [
+            chord
+            for measure, chord in measure_chords
+            if start_measure <= measure <= end_measure and chord
+        ]
+        if not section_chords:
+            continue
+        bars_label = (
+            f"bar {start_measure}"
+            if start_measure == end_measure
+            else f"bars {start_measure}-{end_measure}"
+        )
+        formatted_sections.append(
+            f"{label}: {bars_label}, chords {', '.join(section_chords)}"
+        )
+    return "; ".join(formatted_sections)
+
+
+def _build_sections(*, measure_count: int, has_pickup: bool) -> List[tuple[str, int, int]]:
+    if measure_count <= 0:
+        return []
+    sections: List[tuple[str, int, int]] = []
+    start_measure = 1
+    if has_pickup:
+        sections.append(("pickup section", 1, 1))
+        start_measure = 2
+    if start_measure > measure_count:
+        return sections
+    remaining_measures = measure_count - start_measure + 1
+    first_section_length = (remaining_measures + 1) // 2
+    section_1_end = start_measure + first_section_length - 1
+    sections.append(("section 1", start_measure, section_1_end))
+    if section_1_end < measure_count:
+        sections.append(("section 2", section_1_end + 1, measure_count))
+    return sections
+
+
+def _measure_chord_sequence(progression: List[Dict[str, Any]]) -> List[tuple[int, str]]:
+    measure_map: Dict[int, str] = {}
+    first_measure_chord = _first_measure_chord(progression)
+    if first_measure_chord:
+        measure_map[1] = first_measure_chord
+    for entry in progression:
+        measure = entry.get("measure")
+        values = entry.get("chords")
+        if not isinstance(measure, int):
+            continue
+        if not isinstance(values, list) or not values:
+            continue
+        chord = str(values[0]).strip()
+        if chord:
+            measure_map[measure] = chord
+    return sorted(measure_map.items())
+
+def _first_measure_chord(progression: List[Dict[str, Any]]) -> str | None:
+    for entry in progression:
+        measure = entry.get("measure")
+        values = entry.get("chords")
+        if not isinstance(values, list) or not values:
+            continue
+        first_chord = str(values[0]).strip()
+        if not first_chord:
+            continue
+        if measure == 1:
+            return first_chord
+    for entry in progression:
+        values = entry.get("chords")
+        if not isinstance(values, list) or not values:
+            continue
+        first_chord = str(values[0]).strip()
+        if first_chord:
+            return first_chord
+    return None
 
 
 def _extract_bpm(score: Dict[str, Any]) -> int:

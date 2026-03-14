@@ -14,6 +14,9 @@ from src.api import (
     save_audio,
     synthesize,
 )
+from src.backend.backing_track import generate_backing_track
+from src.backend.config import Settings
+from src.backend.llm_factory import create_llm_client
 from src.backend.progress import write_progress
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import initialize_firebase_app
@@ -217,6 +220,52 @@ def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, 
     return _strip_path(info)
 
 
+def handle_generate_backing_track(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle backing-track generation using deterministic score analysis + ElevenLabs."""
+    file_path_param = params.get("file_path")
+    if not isinstance(file_path_param, str) or not file_path_param.strip():
+        raise ValueError("generate_backing_track requires file_path for backend/direct MCP calls.")
+    style_request = str(params.get("style_request") or "").strip()
+    if not style_request:
+        return {
+            "status": "action_required",
+            "action": "missing_style_request",
+            "code": "missing_style_request",
+            "message": "Please describe the backing-track style or genre first.",
+        }
+    output_path_param = params.get("output_path")
+    if not isinstance(output_path_param, str) or not output_path_param.strip():
+        raise ValueError("generate_backing_track requires output_path for backend/direct MCP calls.")
+
+    file_path = resolve_project_path(file_path_param)
+    output_path = resolve_project_path(output_path_param)
+    output_format = str(params.get("output_format") or "").strip() or "mp3_44100_128"
+    seed = params.get("seed")
+    if seed is not None and not isinstance(seed, int):
+        raise ValueError("seed must be an integer when provided.")
+
+    settings = Settings.from_env()
+    llm_client = create_llm_client(settings)
+    result = generate_backing_track(
+        file_path=file_path,
+        output_path=output_path,
+        style_request=style_request,
+        additional_requirements=str(params.get("additional_requirements") or "").strip() or None,
+        settings=settings,
+        output_format=output_format,
+        seed=seed,
+        llm_client=llm_client,
+    )
+    return {
+        "status": "completed",
+        "output_path": str(output_path.relative_to(settings.project_root)),
+        "duration_seconds": result.duration_seconds,
+        "output_format": result.output_format,
+        "backing_track_prompt": result.prompt,
+        "metadata": result.metadata,
+    }
+
+
 def _calculate_score_duration(score: Dict[str, Any]) -> float:
     """Calculate the total duration of a score in seconds."""
     tempos = score.get("tempos", [{"offset_beats": 0.0, "bpm": 120.0}])
@@ -268,6 +317,7 @@ HANDLERS = {
     "preprocess_voice_parts": handle_preprocess_voice_parts,
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,
+    "generate_backing_track": handle_generate_backing_track,
     "list_voicebanks": handle_list_voicebanks,
     "get_voicebank_info": handle_get_voicebank_info,
 }
