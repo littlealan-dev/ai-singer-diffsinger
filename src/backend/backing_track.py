@@ -8,6 +8,11 @@ from typing import Any, Dict, Optional
 import json
 import logging
 import copy
+import re
+
+import ffmpeg
+import numpy as np
+import soundfile as sf
 
 from src.api.backing_track_prompt import (
     extract_backing_track_metadata,
@@ -60,19 +65,38 @@ def generate_backing_track(
         llm_client=llm_client,
         logger=logger,
     )
+    prepend_silence = _should_prepend_pickup_silence(metadata)
+    compose_output_format = (
+        _compose_output_format_for_pickup(output_format)
+        if prepend_silence
+        else output_format
+    )
     audio_chunks = _compose_with_elevenlabs(
         prompt=prompt,
         music_length_ms=int(round(float(metadata["duration_seconds"]) * 1000.0)),
-        output_format=output_format,
+        output_format=compose_output_format,
         seed=seed,
         settings=settings,
     )
-    with resolved_output_path.open("wb") as handle:
-        for chunk in audio_chunks:
-            handle.write(chunk)
+    if prepend_silence:
+        save_result = _save_backing_track_with_prepended_silence(
+            audio_chunks=audio_chunks,
+            output_path=resolved_output_path,
+            requested_output_format=output_format,
+            metadata=metadata,
+            keep_wav=bool(settings.backend_debug),
+        )
+        final_output_path = Path(save_result["path"])
+        duration_seconds = float(save_result["duration_seconds"])
+    else:
+        with resolved_output_path.open("wb") as handle:
+            for chunk in audio_chunks:
+                handle.write(chunk)
+        final_output_path = resolved_output_path
+        duration_seconds = float(metadata["duration_seconds"])
     return BackingTrackGenerationResult(
-        output_path=resolved_output_path,
-        duration_seconds=float(metadata["duration_seconds"]),
+        output_path=final_output_path,
+        duration_seconds=duration_seconds,
         prompt=prompt,
         metadata=metadata,
         output_format=output_format,
@@ -168,6 +192,162 @@ def _resolve_elevenlabs_api_key(settings: Settings) -> str:
 def _load_prompt_writer_system_prompt() -> str:
     """Load the backing-track prompt writer system prompt from disk."""
     return _PROMPT_WRITER_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _should_prepend_pickup_silence(metadata: Dict[str, Any]) -> bool:
+    """Return whether the score has a pickup that needs backend silence prepend."""
+    pickup = metadata.get("pickup")
+    return isinstance(pickup, dict) and bool(pickup.get("has_pickup"))
+
+
+def _compose_output_format_for_pickup(requested_output_format: str) -> str:
+    """Return the ElevenLabs compose format to use before silence prepend."""
+    sample_rate = _parse_output_sample_rate(requested_output_format)
+    return f"pcm_{sample_rate}"
+
+
+def _parse_output_sample_rate(output_format: str) -> int:
+    """Extract the sample rate component from an ElevenLabs output format string."""
+    match = re.match(r"^[a-z0-9]+_(\d+)(?:_|$)", str(output_format).strip().lower())
+    if not match:
+        raise RuntimeError(f"Unsupported ElevenLabs output format: {output_format}")
+    return int(match.group(1))
+
+
+def _parse_mp3_bitrate(output_format: str) -> str:
+    """Extract MP3 bitrate from ElevenLabs output format strings like mp3_44100_128."""
+    match = re.match(r"^mp3_\d+_(\d+)$", str(output_format).strip().lower())
+    if not match:
+        raise RuntimeError(
+            f"Pickup silence prepend currently supports mp3_* final output formats, got: {output_format}"
+        )
+    return f"{match.group(1)}k"
+
+
+def _measure_duration_seconds(metadata: Dict[str, Any]) -> float:
+    """Compute the duration of one notated measure from score metadata."""
+    beats_per_measure = int(metadata.get("beats_per_measure") or 4)
+    beat_type = int(metadata.get("beat_type") or 4)
+    bpm = float(metadata.get("bpm") or 120.0)
+    if beat_type <= 0:
+        beat_type = 4
+    if bpm <= 0:
+        bpm = 120.0
+    quarter_notes_per_measure = float(beats_per_measure) * (4.0 / float(beat_type))
+    return quarter_notes_per_measure * 60.0 / bpm
+
+
+def _pcm_bytes_to_waveform(audio_bytes: bytes) -> np.ndarray:
+    """Decode raw 16-bit little-endian PCM bytes to float32 waveform."""
+    if not audio_bytes:
+        return np.zeros(0, dtype=np.float32)
+    pcm = np.frombuffer(audio_bytes, dtype="<i2").astype(np.float32)
+    channels = _infer_pcm_channel_count(audio_bytes)
+    waveform = pcm / 32768.0
+    if channels > 1:
+        waveform = waveform.reshape(-1, channels)
+    return waveform
+
+
+def _infer_pcm_channel_count(audio_bytes: bytes) -> int:
+    """Infer the channel count for ElevenLabs music PCM.
+
+    Music renders are stereo in practice. Fall back to mono if the buffer length does
+    not divide cleanly into stereo frames.
+    """
+    sample_count = len(audio_bytes) // 2
+    if sample_count % 2 == 0:
+        return 2
+    return 1
+
+
+def _save_backing_track_with_prepended_silence(
+    *,
+    audio_chunks,
+    output_path: Path,
+    requested_output_format: str,
+    metadata: Dict[str, Any],
+    keep_wav: bool,
+) -> Dict[str, Any]:
+    """Decode raw PCM, prepend one measure of silence, and save the final file."""
+    sample_rate = _parse_output_sample_rate(requested_output_format)
+    waveform = _pcm_bytes_to_waveform(b"".join(audio_chunks))
+    silence_samples = int(round(_measure_duration_seconds(metadata) * sample_rate))
+    if silence_samples > 0:
+        if waveform.ndim == 1:
+            silence = np.zeros(silence_samples, dtype=np.float32)
+        else:
+            silence = np.zeros((silence_samples, waveform.shape[1]), dtype=np.float32)
+        waveform = np.concatenate([silence, waveform.astype(np.float32)], axis=0)
+    return _save_waveform(
+        waveform=waveform,
+        output_path=output_path,
+        sample_rate=sample_rate,
+        requested_output_format=requested_output_format,
+        keep_wav=keep_wav,
+    )
+
+
+def _save_waveform(
+    *,
+    waveform: np.ndarray,
+    output_path: Path,
+    sample_rate: int,
+    requested_output_format: str,
+    keep_wav: bool,
+) -> Dict[str, Any]:
+    """Persist a mono or stereo waveform to the requested final format."""
+    fmt = str(requested_output_format).strip().lower()
+    channels = 1 if waveform.ndim == 1 else int(waveform.shape[1])
+    if fmt.startswith("mp3_"):
+        mp3_path = output_path.with_suffix(".mp3")
+        wav_path = output_path.with_suffix(".wav")
+        if keep_wav:
+            sf.write(str(wav_path), waveform, sample_rate)
+        _encode_mp3_waveform(waveform, sample_rate, mp3_path, _parse_mp3_bitrate(fmt), channels)
+        final_path = mp3_path
+    elif fmt.startswith("pcm_"):
+        final_path = output_path.with_suffix(".wav")
+        sf.write(str(final_path), waveform, sample_rate)
+    else:
+        raise RuntimeError(
+            f"Pickup silence prepend currently supports mp3_* or pcm_* final output formats, got: {requested_output_format}"
+        )
+    duration_seconds = waveform.shape[0] / float(sample_rate) if waveform.size else 0.0
+    return {
+        "path": str(final_path.resolve()),
+        "duration_seconds": duration_seconds,
+        "sample_rate": sample_rate,
+    }
+
+
+def _encode_mp3_waveform(
+    waveform: np.ndarray,
+    sample_rate: int,
+    output_path: Path,
+    bitrate: str,
+    channels: int,
+) -> None:
+    """Encode mono or stereo float32 waveform to MP3 using ffmpeg."""
+    if waveform.dtype != np.float32:
+        waveform = waveform.astype(np.float32)
+    try:
+        process = (
+            ffmpeg
+            .input("pipe:0", format="f32le", ac=channels, ar=sample_rate)
+            .output(str(output_path), format="mp3", audio_bitrate=bitrate)
+            .overwrite_output()
+            .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True)
+        )
+        process.stdin.write(waveform.tobytes(order="C"))
+        process.stdin.close()
+        stderr = process.stderr.read()
+        retcode = process.wait()
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg binary not found. Install ffmpeg to write mp3.") from exc
+    if retcode != 0:
+        message = stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"ffmpeg mp3 encoding failed: {message}")
 
 
 def _prompt_writer_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:

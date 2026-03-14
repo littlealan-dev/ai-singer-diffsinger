@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import numpy as np
 
 from src.backend.backing_track import generate_backing_track, write_backing_track_prompt
 from src.backend.config import Settings
@@ -12,7 +13,7 @@ def _settings() -> Settings:
     return Settings.from_env()
 
 
-def _metadata() -> dict:
+def _metadata(*, has_pickup: bool = True) -> dict:
     return {
         "title": "Happy Birthday to You - 4/4 - G key",
         "key_signature": "G major",
@@ -24,9 +25,9 @@ def _metadata() -> dict:
         "duration_seconds": 34.0,
         "duration_mmss": "0:34",
         "pickup": {
-            "has_pickup": True,
-            "starts_on_beat": 4,
-            "second_bar_downbeat_note": "E4",
+            "has_pickup": has_pickup,
+            "starts_on_beat": 4 if has_pickup else None,
+            "second_bar_downbeat_note": "E4" if has_pickup else None,
         },
         "chord_progression": [
             {"measure": 2, "chords": ["G"]},
@@ -94,7 +95,7 @@ def test_generate_backing_track_writes_audio_file(monkeypatch, tmp_path: Path) -
 
     monkeypatch.setattr(
         "src.backend.backing_track.extract_backing_track_metadata",
-        lambda file_path: _metadata(),
+        lambda file_path: _metadata(has_pickup=False),
     )
     monkeypatch.setattr(
         "src.backend.backing_track._compose_with_elevenlabs",
@@ -116,3 +117,41 @@ def test_generate_backing_track_writes_audio_file(monkeypatch, tmp_path: Path) -
     assert result.output_path.read_bytes().startswith(b"ID3")
     assert result.prompt == "Create an original instrumental jazz trio backing track."
     assert result.duration_seconds == 34.0
+
+
+def test_generate_backing_track_prepends_measure_silence_for_pickup(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "score.xml"
+    source.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        "src.backend.backing_track.extract_backing_track_metadata",
+        lambda file_path: _metadata(has_pickup=True),
+    )
+
+    def _fake_compose(**kwargs):
+        captured["output_format"] = kwargs["output_format"]
+        waveform = (np.ones((4410, 2), dtype=np.float32) * 0.25 * 32767.0).astype("<i2")
+        return [waveform.tobytes()]
+
+    monkeypatch.setattr(
+        "src.backend.backing_track._compose_with_elevenlabs",
+        _fake_compose,
+    )
+
+    result = generate_backing_track(
+        file_path=source,
+        output_path=tmp_path / "backing_track.mp3",
+        style_request="simple pop rock",
+        additional_requirements=None,
+        settings=_settings(),
+        llm_client=StaticLlmClient(
+            response_text='{"prompt":"Create an original instrumental pop rock backing track."}'
+        ),
+    )
+
+    assert captured["output_format"] == "pcm_44100"
+    assert result.output_path.exists()
+    assert result.output_path.suffix == ".mp3"
+    assert result.output_path.read_bytes().startswith(b"ID3")
+    assert 2.05 <= result.duration_seconds <= 2.15

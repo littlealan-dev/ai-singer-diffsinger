@@ -13,8 +13,17 @@ Rules:
 - Do not invent exact chord names when metadata does not provide them.
 - Incorporate the user's requested style/genre and additional requirements naturally.
 - Do not use the exact song title if it could be copyrighted or overly specific; use a safe generic purpose/theme instead.
-- Keep the prompt short, natural, and suitable for ElevenLabs music generation.
+- Keep the prompt short, direct, and keyword-oriented rather than verbose prose.
+- Prefer compact phrases like:
+  - `key: G major`
+  - `meter: 4/4`
+  - `tempo: 120 BPM`
+  - `duration: 34s`
+  - `style: simple pop rock, steady drums, warm bass, light rhythm guitar`
+  - `structure: 17 measures`
+- Prefer `duration: 34s` or `34 seconds long` over longer phrases like `lasting 34 seconds`.
+- Use simple separators such as commas, semicolons, or short clauses.
 - Do not mention JSON, tools, or internal metadata structures in the final prompt text.
 
 Example shape:
-Create an original instrumental backing track for {purpose} in the key of {key signature} with a {time signature} time signature and a tempo of {bpm} BPM. The track should be about {duration} long, featuring {style}. Use a chord progression as follows: C, C, G, G, C, C, F, C, G, C, G, G, C, C, F, C, C.
+Original instrumental backing track for {purpose}, key: {key signature}, meter: {time signature}, tempo: {bpm} BPM, duration: {duration}, style: {style}. Chords: C, C, G, G, C, C, F, C, G, C, G, G, C, C, F, C, C.
