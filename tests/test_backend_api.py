@@ -90,6 +90,8 @@ def _make_router_call_tool():
             abs_path = PROJECT_ROOT / rel_path
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_bytes(b"ID3BACKINGTRACK")
+            wav_path = abs_path.with_suffix(".wav")
+            wav_path.write_bytes(b"RIFFBACKINGWAV")
             return {
                 "status": "completed",
                 "output_path": rel_path,
@@ -97,6 +99,29 @@ def _make_router_call_tool():
                 "output_format": arguments.get("output_format") or "mp3_44100_128",
                 "backing_track_prompt": "Create an original instrumental backing track.",
                 "metadata": {"key_signature": "C major", "time_signature": "4/4", "bpm": 120},
+                "wav_output_path": str(wav_path.relative_to(PROJECT_ROOT)),
+            }
+        if name == "generate_combined_backing_track":
+            rel_path = arguments["output_path"]
+            abs_path = PROJECT_ROOT / rel_path
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_bytes(b"ID3COMBINEDTRACK")
+            backing_abs_path = abs_path.with_name(f"{abs_path.stem}.backing_source.mp3")
+            backing_abs_path.write_bytes(b"ID3BACKINGSOURCE")
+            backing_wav_path = backing_abs_path.with_suffix(".wav")
+            backing_wav_path.write_bytes(b"RIFFBACKINGSOURCE")
+            return {
+                "status": "completed",
+                "output_path": rel_path,
+                "duration_seconds": 0.34,
+                "output_format": arguments.get("output_format") or "mp3_44100_128",
+                "backing_track_prompt": "Create an original instrumental backing track.",
+                "metadata": {"key_signature": "C major", "time_signature": "4/4", "bpm": 120},
+                "backing_track_output_path": str(backing_abs_path.relative_to(PROJECT_ROOT)),
+                "backing_track_wav_output_path": str(backing_wav_path.relative_to(PROJECT_ROOT)),
+                "backing_track_duration_seconds": 0.34,
+                "reused_existing_backing_track": False,
+                "render_variant": "combined",
             }
         if name == "list_voicebanks":
             return [{"id": "Dummy", "name": "Dummy", "path": "assets/voicebanks/Dummy"}]
@@ -2431,6 +2456,60 @@ def test_chat_backing_track_response_with_llm_and_get_audio(client):
     assert snapshot["current_backing_track_audio"] is not None
 
 
+def test_chat_combined_backing_track_response_with_llm_and_get_audio(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    score_version = upload_payload["current_score"]["version"]
+    session_dir = app.state.settings.sessions_dir / session_id
+    singing_audio_path = session_dir / "audio-existing.mp3"
+    singing_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    singing_audio_path.write_bytes(b"ID3SINGING")
+    asyncio.run(app.state.sessions.set_audio(session_id, singing_audio_path, 0.5))
+    asyncio.run(
+        app.state.sessions.set_last_successful_singing_render(
+            session_id,
+            {
+                "score_version": score_version,
+                "job_id": "job-existing",
+                "audio_path": str(singing_audio_path.relative_to(app.state.settings.project_root)),
+                "duration_seconds": 0.5,
+                "voicebank": "Dummy",
+                "part_index": 0,
+                "voice_part_id": None,
+            },
+        )
+    )
+
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"generate_combined_backing_track","arguments":{"style_request":"simple pop rock"}}],'
+            '"final_message":"Let me create the combined melody and backing track...","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "generate one combined track with melody and simple pop rock backing"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert progress_payload["job_kind"] == "combined_backing_track"
+    audio_url = progress_payload["audio_url"]
+    audio_response = test_client.get(audio_url)
+    assert audio_response.status_code == 200
+    assert audio_response.content.startswith(b"ID3")
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["current_combined_backing_track_audio"] is not None
+    assert snapshot["current_backing_track_audio"] is not None
+
+
 def test_job_specific_progress_url_preserves_original_singing_audio_after_backing_track(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -2506,11 +2585,27 @@ def test_score_change_resets_backing_track_readiness(client):
     session_dir = app.state.settings.sessions_dir / session_id
     singing_audio_path = session_dir / "audio-existing.mp3"
     backing_track_path = session_dir / "backing-track-existing.mp3"
+    backing_track_wav_path = session_dir / "backing-track-existing.wav"
+    combined_backing_track_path = session_dir / "combined-backing-track-existing.mp3"
     singing_audio_path.parent.mkdir(parents=True, exist_ok=True)
     singing_audio_path.write_bytes(b"ID3SINGING")
     backing_track_path.write_bytes(b"ID3BACKING")
+    backing_track_wav_path.write_bytes(b"RIFFBACKING")
+    combined_backing_track_path.write_bytes(b"ID3COMBINED")
     asyncio.run(app.state.sessions.set_audio(session_id, singing_audio_path, 0.5))
-    asyncio.run(app.state.sessions.set_backing_track_audio(session_id, backing_track_path, 0.5))
+    asyncio.run(
+        app.state.sessions.set_backing_track_audio(
+            session_id,
+            backing_track_path,
+            0.5,
+            wav_path=backing_track_wav_path,
+        )
+    )
+    asyncio.run(
+        app.state.sessions.set_combined_backing_track_audio(
+            session_id, combined_backing_track_path, 0.6
+        )
+    )
     asyncio.run(
         app.state.sessions.set_last_successful_singing_render(
             session_id,
@@ -2529,6 +2624,7 @@ def test_score_change_resets_backing_track_readiness(client):
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["last_successful_singing_render"] is not None
     assert snapshot["current_backing_track_audio"] is not None
+    assert snapshot["current_combined_backing_track_audio"] is not None
 
     asyncio.run(
         app.state.sessions.set_score(
@@ -2539,6 +2635,7 @@ def test_score_change_resets_backing_track_readiness(client):
     refreshed = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert refreshed["last_successful_singing_render"] is None
     assert refreshed["current_backing_track_audio"] is None
+    assert refreshed["current_combined_backing_track_audio"] is None
 
 
 def test_app_check_rejects_query_param_only(monkeypatch):

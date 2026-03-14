@@ -1257,9 +1257,13 @@ _BACKING_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "description": "Effective ElevenLabs output format used for generation.",
         },
+        "wav_output_path": {
+            "type": ["string", "null"],
+            "description": "Project-relative WAV artifact path retained for reuse and mixing.",
+        },
         "backing_track_prompt": {
-            "type": "string",
-            "description": "Final prompt sent to ElevenLabs music.compose.",
+            "type": ["string", "null"],
+            "description": "Final prompt sent to ElevenLabs music.compose when a new backing track was generated.",
         },
         "metadata": {
             "type": "object",
@@ -1272,8 +1276,72 @@ _BACKING_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
         "output_path",
         "duration_seconds",
         "output_format",
-        "backing_track_prompt",
         "metadata",
+    ],
+    "additionalProperties": False,
+}
+
+_COMBINED_BACKING_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Generated combined melody+backing artifact and any reusable backing-track metadata.",
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "completed when the combined backing track was generated successfully.",
+        },
+        "output_path": {
+            "type": "string",
+            "description": "Project-relative combined output audio path.",
+        },
+        "duration_seconds": {
+            "type": "number",
+            "description": "Combined audio duration in seconds.",
+        },
+        "output_format": {
+            "type": "string",
+            "description": "Effective output format delivered to the client.",
+        },
+        "backing_track_prompt": {
+            "type": ["string", "null"],
+            "description": "Final prompt sent to ElevenLabs if a new pure backing track had to be generated.",
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Deterministic extracted score metadata used for prompt writing.",
+            "additionalProperties": True,
+        },
+        "backing_track_output_path": {
+            "type": "string",
+            "description": "Project-relative pure backing-track delivery artifact path reused or generated for mixing.",
+        },
+        "backing_track_wav_output_path": {
+            "type": "string",
+            "description": "Project-relative pure backing-track WAV path used for mixing.",
+        },
+        "backing_track_duration_seconds": {
+            "type": "number",
+            "description": "Duration of the pure backing-track artifact in seconds.",
+        },
+        "reused_existing_backing_track": {
+            "type": "boolean",
+            "description": "True when the combined tool reused an existing pure backing-track WAV instead of regenerating it.",
+        },
+        "render_variant": {
+            "type": "string",
+            "description": "Artifact variant identifier.",
+        },
+    },
+    "required": [
+        "status",
+        "output_path",
+        "duration_seconds",
+        "output_format",
+        "metadata",
+        "backing_track_output_path",
+        "backing_track_wav_output_path",
+        "backing_track_duration_seconds",
+        "reused_existing_backing_track",
+        "render_variant",
     ],
     "additionalProperties": False,
 }
@@ -1537,6 +1605,38 @@ TOOLS: List[Tool] = [
             "additionalProperties": False,
         },
         output_schema=_BACKING_TRACK_OUTPUT_SCHEMA,
+    ),
+    Tool(
+        name="generate_combined_backing_track",
+        description=(
+            "Generate one mixed audio file containing both the melody and the instrumental backing track. "
+            "Requires a successful singing render for the current score. In chat flow, backend injects "
+            "the score file context and any reusable backing-track artifacts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "style_request": {
+                    "type": "string",
+                    "description": "Natural-language style or genre request such as simple pop rock, bossa nova, or jazz trio.",
+                },
+                "additional_requirements": {
+                    "type": ["string", "null"],
+                    "description": "Optional extra arrangement or mood requirements from the user.",
+                },
+                "output_format": {
+                    "type": ["string", "null"],
+                    "description": "Optional final output format override such as mp3_44100_128.",
+                },
+                "seed": {
+                    "type": ["integer", "null"],
+                    "description": "Optional ElevenLabs music generation seed.",
+                },
+            },
+            "required": ["style_request"],
+            "additionalProperties": False,
+        },
+        output_schema=_COMBINED_BACKING_TRACK_OUTPUT_SCHEMA,
     ),
     Tool(
         name="list_voicebanks",

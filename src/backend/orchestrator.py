@@ -27,7 +27,7 @@ from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
-from src.backend.storage_client import copy_blob, upload_file
+from src.backend.storage_client import copy_blob, download_bytes, upload_file
 from src.api.voice_parts import (
     build_preprocessing_required_action,
     finalize_review_materialization,
@@ -73,6 +73,7 @@ class Orchestrator:
             "preprocess_voice_parts",
             "synthesize",
             "generate_backing_track",
+            "generate_combined_backing_track",
         }
         self._llm_tools = list_tools(self._llm_tool_allowlist)
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
@@ -544,6 +545,7 @@ class Orchestrator:
         try:
             set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_score_version = self._snapshot_score_version(snapshot)
             files = snapshot.get("files") or {}
             source_musicxml_path = score.get("source_musicxml_path") or files.get("musicxml_path")
             if not isinstance(source_musicxml_path, str) or not source_musicxml_path:
@@ -584,6 +586,11 @@ class Orchestrator:
                 raise RuntimeError(str(result.get("message") or "Backing track generation failed."))
 
             duration_seconds = float(result.get("duration_seconds") or 0.0)
+            wav_rel_path = result.get("wav_output_path")
+            wav_output_path = None
+            if isinstance(wav_rel_path, str) and wav_rel_path.strip():
+                wav_output_path = self._settings.project_root / wav_rel_path
+            wav_storage_path = None
             if self._settings.backend_use_storage and output_storage_path:
                 await asyncio.to_thread(
                     upload_file,
@@ -592,17 +599,31 @@ class Orchestrator:
                     output_storage_path,
                     "audio/mpeg",
                 )
+                if wav_output_path is not None and wav_output_path.exists():
+                    wav_storage_path = str(Path(output_storage_path).with_suffix(".wav"))
+                    await asyncio.to_thread(
+                        upload_file,
+                        self._settings.storage_bucket,
+                        wav_output_path,
+                        wav_storage_path,
+                        "audio/wav",
+                    )
                 await self._sessions.set_backing_track_audio(
                     session_id,
                     output_path,
                     duration_seconds,
                     storage_path=output_storage_path,
+                    wav_path=wav_output_path,
+                    wav_storage_path=wav_storage_path,
+                    score_version=current_score_version,
                 )
             else:
                 await self._sessions.set_backing_track_audio(
                     session_id,
                     output_path,
                     duration_seconds,
+                    wav_path=wav_output_path,
+                    score_version=current_score_version,
                 )
             await asyncio.to_thread(
                 self._job_store.update_job,
@@ -618,6 +639,7 @@ class Orchestrator:
                     "metadata": result.get("metadata"),
                     "backing_track_prompt": result.get("backing_track_prompt"),
                     "output_format": result.get("output_format"),
+                    "wav_output_path": wav_rel_path,
                 },
             )
         except Exception as exc:
@@ -635,6 +657,211 @@ class Orchestrator:
                 errorMessage=str(exc),
                 progress=1.0,
                 jobKind="backing_track",
+            )
+        finally:
+            clear_log_context()
+
+    async def _run_combined_backing_track_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        job_id: str,
+        user_id: str,
+        *,
+        output_storage_path: Optional[str],
+        generated_backing_storage_path: Optional[str],
+        generated_backing_wav_storage_path: Optional[str],
+    ) -> None:
+        """Execute combined melody+backing generation in the background and publish progress."""
+        try:
+            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_score_version = self._snapshot_score_version(snapshot)
+            files = snapshot.get("files") or {}
+            source_musicxml_path = score.get("source_musicxml_path") or files.get("musicxml_path")
+            if not isinstance(source_musicxml_path, str) or not source_musicxml_path:
+                raise RuntimeError("Current score is missing source MusicXML path.")
+            source_path = Path(source_musicxml_path)
+            if source_path.is_absolute():
+                source_rel_path = str(source_path.relative_to(self._settings.project_root))
+            else:
+                source_rel_path = source_musicxml_path
+
+            singing_render = snapshot.get("last_successful_singing_render")
+            if not isinstance(singing_render, dict):
+                raise RuntimeError(
+                    "Combined backing-track generation requires a successful singing render for the current score."
+                )
+            singing_audio_path = await self._ensure_local_audio_artifact(
+                session_id=session_id,
+                relative_path=singing_render.get("audio_path"),
+                storage_path=singing_render.get("storage_path"),
+            )
+            if singing_audio_path is None or not singing_audio_path.exists():
+                raise RuntimeError(
+                    "Could not read the singing audio needed for combined backing-track generation."
+                )
+
+            existing_backing = snapshot.get("current_backing_track_audio")
+            existing_backing_output_path = None
+            existing_backing_wav_path = None
+            if isinstance(existing_backing, dict):
+                backing_score_version = existing_backing.get("score_version")
+                backing_matches = (
+                    current_score_version is not None
+                    and (backing_score_version is None or backing_score_version == current_score_version)
+                )
+                if backing_matches:
+                    existing_backing_output_path = await self._ensure_local_audio_artifact(
+                        session_id=session_id,
+                        relative_path=existing_backing.get("path"),
+                        storage_path=existing_backing.get("storage_path"),
+                    )
+                    existing_backing_wav_path = await self._ensure_local_audio_artifact(
+                        session_id=session_id,
+                        relative_path=existing_backing.get("wav_path"),
+                        storage_path=existing_backing.get("wav_storage_path"),
+                    )
+
+            output_name = f"combined-backing-track-{uuid.uuid4().hex}.mp3"
+            output_path = self._sessions.session_dir(session_id) / output_name
+            output_rel_path = str(output_path.relative_to(self._settings.project_root))
+
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="analyze",
+                message="Preparing the melody and backing mix...",
+                progress=0.15,
+                jobKind="combined_backing_track",
+            )
+            tool_args = dict(arguments)
+            tool_args["file_path"] = source_rel_path
+            tool_args["output_path"] = output_rel_path
+            tool_args["singing_audio_path"] = str(
+                singing_audio_path.relative_to(self._settings.project_root)
+            )
+            if existing_backing_output_path is not None and existing_backing_output_path.exists():
+                tool_args["existing_backing_output_path"] = str(
+                    existing_backing_output_path.relative_to(self._settings.project_root)
+                )
+            if existing_backing_wav_path is not None and existing_backing_wav_path.exists():
+                tool_args["existing_backing_wav_path"] = str(
+                    existing_backing_wav_path.relative_to(self._settings.project_root)
+                )
+            result = await asyncio.to_thread(
+                self._router.call_tool,
+                "generate_combined_backing_track",
+                tool_args,
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    f"generate_combined_backing_track returned non-object result: {type(result).__name__}"
+                )
+            if result.get("status") != "completed":
+                raise RuntimeError(
+                    str(result.get("message") or "Combined backing-track generation failed.")
+                )
+
+            duration_seconds = float(result.get("duration_seconds") or 0.0)
+            if self._settings.backend_use_storage and output_storage_path:
+                await asyncio.to_thread(
+                    upload_file,
+                    self._settings.storage_bucket,
+                    output_path,
+                    output_storage_path,
+                    "audio/mpeg",
+                )
+                await self._sessions.set_combined_backing_track_audio(
+                    session_id,
+                    output_path,
+                    duration_seconds,
+                    storage_path=output_storage_path,
+                    score_version=current_score_version,
+                )
+            else:
+                await self._sessions.set_combined_backing_track_audio(
+                    session_id,
+                    output_path,
+                    duration_seconds,
+                    score_version=current_score_version,
+                )
+
+            reused_existing = bool(result.get("reused_existing_backing_track"))
+            backing_output_rel = result.get("backing_track_output_path")
+            backing_wav_rel = result.get("backing_track_wav_output_path")
+            if not reused_existing and isinstance(backing_output_rel, str) and isinstance(backing_wav_rel, str):
+                local_backing_output = self._settings.project_root / backing_output_rel
+                local_backing_wav = self._settings.project_root / backing_wav_rel
+                if self._settings.backend_use_storage and generated_backing_storage_path:
+                    await asyncio.to_thread(
+                        upload_file,
+                        self._settings.storage_bucket,
+                        local_backing_output,
+                        generated_backing_storage_path,
+                        "audio/mpeg",
+                    )
+                    if generated_backing_wav_storage_path:
+                        await asyncio.to_thread(
+                            upload_file,
+                            self._settings.storage_bucket,
+                            local_backing_wav,
+                            generated_backing_wav_storage_path,
+                            "audio/wav",
+                        )
+                    await self._sessions.set_backing_track_audio(
+                        session_id,
+                        local_backing_output,
+                        float(result.get("backing_track_duration_seconds") or 0.0),
+                        storage_path=generated_backing_storage_path,
+                        wav_path=local_backing_wav,
+                        wav_storage_path=generated_backing_wav_storage_path,
+                        score_version=current_score_version,
+                    )
+                else:
+                    await self._sessions.set_backing_track_audio(
+                        session_id,
+                        local_backing_output,
+                        float(result.get("backing_track_duration_seconds") or 0.0),
+                        wav_path=local_backing_wav,
+                        score_version=current_score_version,
+                    )
+
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="completed",
+                step="done",
+                message="Combined backing track ready.",
+                progress=1.0,
+                jobKind="combined_backing_track",
+                audioUrl=f"/sessions/{session_id}/audio?file={output_name}",
+                outputPath=output_storage_path or output_rel_path,
+                details={
+                    "metadata": result.get("metadata"),
+                    "backing_track_prompt": result.get("backing_track_prompt"),
+                    "output_format": result.get("output_format"),
+                    "render_variant": "combined",
+                    "reused_existing_backing_track": reused_existing,
+                },
+            )
+        except Exception as exc:
+            self._logger.exception(
+                "combined_backing_track_generation_failed session=%s error=%s",
+                session_id,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="failed",
+                step="error",
+                message="Couldn't finish the combined backing track.",
+                errorMessage=str(exc),
+                progress=1.0,
+                jobKind="combined_backing_track",
             )
         finally:
             clear_log_context()
@@ -700,6 +927,106 @@ class Orchestrator:
             "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
             "job_id": job_id,
         }
+
+    async def _start_combined_backing_track_job(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        *,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Create a background combined melody+backing job and return a pollable response."""
+        existing = self._backing_track_tasks.get(session_id)
+        if existing and not existing.done():
+            return {
+                "type": "chat_text",
+                "message": (
+                    "I am still generating the backing track from your previous request. "
+                    "Please wait for it to finish before sending another message."
+                ),
+            }
+        job_id = uuid.uuid4().hex
+        output_storage_path = None
+        generated_backing_storage_path = None
+        generated_backing_wav_storage_path = None
+        if self._settings.backend_use_storage:
+            output_storage_path = (
+                f"sessions/{user_id}/{session_id}/jobs/{job_id}/combined_backing_track.mp3"
+            )
+            generated_backing_storage_path = (
+                f"sessions/{user_id}/{session_id}/jobs/{job_id}/backing_track.mp3"
+            )
+            generated_backing_wav_storage_path = (
+                f"sessions/{user_id}/{session_id}/jobs/{job_id}/backing_track.wav"
+            )
+        await asyncio.to_thread(
+            self._job_store.create_job,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+            status="queued",
+            render_type="combined_backing_track",
+        )
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            status="queued",
+            step="queued",
+            message="Let me create the combined melody and backing track...",
+            progress=0.0,
+            jobKind="combined_backing_track",
+        )
+        task = asyncio.create_task(
+            self._run_combined_backing_track_job(
+                session_id,
+                copy.deepcopy(score),
+                dict(arguments),
+                job_id,
+                user_id,
+                output_storage_path=output_storage_path,
+                generated_backing_storage_path=generated_backing_storage_path,
+                generated_backing_wav_storage_path=generated_backing_wav_storage_path,
+            )
+        )
+        self._backing_track_tasks[session_id] = task
+
+        def _cleanup(_: asyncio.Task) -> None:
+            self._backing_track_tasks.pop(session_id, None)
+
+        task.add_done_callback(_cleanup)
+        return {
+            "type": "chat_progress",
+            "message": "Let me create the combined melody and backing track...",
+            "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+            "job_id": job_id,
+        }
+
+    async def _ensure_local_audio_artifact(
+        self,
+        *,
+        session_id: str,
+        relative_path: Any,
+        storage_path: Any,
+    ) -> Optional[Path]:
+        """Return a readable local path for a session audio artifact, downloading if needed."""
+        local_path: Optional[Path] = None
+        if isinstance(relative_path, str) and relative_path.strip():
+            local_path = (self._settings.project_root / relative_path).resolve()
+            if local_path.exists():
+                return local_path
+        if (
+            not self._settings.backend_use_storage
+            or not isinstance(storage_path, str)
+            or not storage_path.strip()
+        ):
+            return local_path if local_path and local_path.exists() else None
+        if local_path is None:
+            local_path = self._sessions.session_dir(session_id) / Path(storage_path).name
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        data = await asyncio.to_thread(download_bytes, self._settings.storage_bucket, storage_path)
+        await asyncio.to_thread(local_path.write_bytes, data)
+        return local_path
 
     @staticmethod
     def _release_result_allows_terminal_status(status: str) -> bool:
@@ -2991,7 +3318,9 @@ class Orchestrator:
             return {
                 "status": "missing_singing_render",
                 "ready_for_generate_backing_track": False,
+                "ready_for_generate_combined_backing_track": False,
                 "current_score_version": current_score_version,
+                "reusable_pure_backing_track_available": False,
             }
         render_score_version = singing_render.get("score_version")
         ready = (
@@ -2999,10 +3328,21 @@ class Orchestrator:
             and isinstance(render_score_version, int)
             and render_score_version == current_score_version
         )
+        current_backing = snapshot.get("current_backing_track_audio")
+        reusable_pure_backing_track_available = False
+        if isinstance(current_backing, dict):
+            backing_score_version = current_backing.get("score_version")
+            reusable_pure_backing_track_available = (
+                ready
+                and (backing_score_version is None or backing_score_version == current_score_version)
+                and bool(current_backing.get("wav_path") or current_backing.get("wav_storage_path"))
+            )
         return {
             "status": "ready" if ready else "stale_singing_render",
             "ready_for_generate_backing_track": ready,
+            "ready_for_generate_combined_backing_track": ready,
             "current_score_version": current_score_version,
+            "reusable_pure_backing_track_available": reusable_pure_backing_track_available,
             "last_successful_singing_render": {
                 "score_version": render_score_version,
                 "duration_seconds": singing_render.get("duration_seconds"),
@@ -3756,7 +4096,7 @@ class Orchestrator:
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 continue
-            if call.name == "generate_backing_track":
+            if call.name in {"generate_backing_track", "generate_combined_backing_track"}:
                 snapshot = await self._sessions.get_snapshot(session_id, user_id)
                 action_required = self._build_backing_track_prerequisite_error(
                     snapshot=snapshot
@@ -3769,12 +4109,20 @@ class Orchestrator:
                         action_required_payload=action_required,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
-                audio_response = await self._start_backing_track_job(
-                    session_id,
-                    current_score,
-                    dict(call.arguments),
-                    user_id=user_id,
-                )
+                if call.name == "generate_backing_track":
+                    audio_response = await self._start_backing_track_job(
+                        session_id,
+                        current_score,
+                        dict(call.arguments),
+                        user_id=user_id,
+                    )
+                else:
+                    audio_response = await self._start_combined_backing_track_job(
+                        session_id,
+                        current_score,
+                        dict(call.arguments),
+                        user_id=user_id,
+                    )
                 return ToolExecutionResult(
                     score=current_score,
                     audio_response=audio_response,

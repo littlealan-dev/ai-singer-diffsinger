@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import numpy as np
+import soundfile as sf
 
-from src.backend.backing_track import generate_backing_track, write_backing_track_prompt
+from src.backend.backing_track import (
+    generate_backing_track,
+    generate_combined_backing_track,
+    write_backing_track_prompt,
+)
 from src.backend.config import Settings
 from src.backend.llm_client import StaticLlmClient
 from src.backend.llm_prompt import PromptBundle
@@ -92,15 +97,19 @@ def test_write_backing_track_prompt_raises_on_invalid_llm_response() -> None:
 def test_generate_backing_track_writes_audio_file(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "score.xml"
     source.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+    captured: dict = {}
 
     monkeypatch.setattr(
         "src.backend.backing_track.extract_backing_track_metadata",
         lambda file_path: _metadata(has_pickup=False),
     )
-    monkeypatch.setattr(
-        "src.backend.backing_track._compose_with_elevenlabs",
-        lambda **kwargs: [b"ID3", b"TESTDATA"],
-    )
+
+    def _fake_compose(**kwargs):
+        captured["output_format"] = kwargs["output_format"]
+        waveform = (np.ones((4410, 2), dtype=np.float32) * 0.25 * 32767.0).astype("<i2")
+        return [waveform.tobytes()]
+
+    monkeypatch.setattr("src.backend.backing_track._compose_with_elevenlabs", _fake_compose)
 
     result = generate_backing_track(
         file_path=source,
@@ -113,10 +122,13 @@ def test_generate_backing_track_writes_audio_file(monkeypatch, tmp_path: Path) -
         ),
     )
 
+    assert captured["output_format"] == "pcm_44100"
     assert result.output_path.exists()
     assert result.output_path.read_bytes().startswith(b"ID3")
+    assert result.wav_output_path is not None
+    assert result.wav_output_path.exists()
     assert result.prompt == "Create an original instrumental jazz trio backing track."
-    assert result.duration_seconds == 34.0
+    assert 0.09 <= result.duration_seconds <= 0.11
 
 
 def test_generate_backing_track_prepends_measure_silence_for_pickup(monkeypatch, tmp_path: Path) -> None:
@@ -154,4 +166,82 @@ def test_generate_backing_track_prepends_measure_silence_for_pickup(monkeypatch,
     assert result.output_path.exists()
     assert result.output_path.suffix == ".mp3"
     assert result.output_path.read_bytes().startswith(b"ID3")
+    assert result.wav_output_path is not None
+    assert result.wav_output_path.exists()
     assert 2.05 <= result.duration_seconds <= 2.15
+
+
+def test_generate_combined_backing_track_reuses_existing_backing_wav(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "score.xml"
+    source.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+    singing_path = tmp_path / "singing.wav"
+    backing_wav_path = tmp_path / "existing_backing.wav"
+    backing_mp3_path = tmp_path / "existing_backing.mp3"
+    sf.write(str(singing_path), np.ones((2205, 2), dtype=np.float32) * 0.5, 44100)
+    sf.write(str(backing_wav_path), np.ones((2205, 2), dtype=np.float32) * 0.25, 44100)
+    backing_mp3_path.write_bytes(b"ID3EXISTING")
+
+    monkeypatch.setattr(
+        "src.backend.backing_track.extract_backing_track_metadata",
+        lambda file_path: _metadata(has_pickup=False),
+    )
+    monkeypatch.setattr(
+        "src.backend.backing_track._compose_with_elevenlabs",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("compose should not be called")),
+    )
+
+    result = generate_combined_backing_track(
+        file_path=source,
+        output_path=tmp_path / "combined.mp3",
+        singing_audio_path=singing_path,
+        existing_backing_output_path=backing_mp3_path,
+        existing_backing_wav_path=backing_wav_path,
+        style_request="simple pop rock",
+        additional_requirements=None,
+        settings=_settings(),
+        llm_client=StaticLlmClient(response_text='{"prompt":"unused"}'),
+    )
+
+    assert result.reused_existing_backing_track is True
+    assert result.output_path.exists()
+    assert result.output_path.read_bytes().startswith(b"ID3")
+    assert result.backing_track_wav_output_path == backing_wav_path.resolve()
+
+
+def test_generate_combined_backing_track_generates_backing_when_missing(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "score.xml"
+    source.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+    singing_path = tmp_path / "singing.wav"
+    sf.write(str(singing_path), np.ones((2205, 2), dtype=np.float32) * 0.5, 44100)
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        "src.backend.backing_track.extract_backing_track_metadata",
+        lambda file_path: _metadata(has_pickup=False),
+    )
+
+    def _fake_compose(**kwargs):
+        captured["output_format"] = kwargs["output_format"]
+        waveform = (np.ones((2205, 2), dtype=np.float32) * 0.25 * 32767.0).astype("<i2")
+        return [waveform.tobytes()]
+
+    monkeypatch.setattr("src.backend.backing_track._compose_with_elevenlabs", _fake_compose)
+
+    result = generate_combined_backing_track(
+        file_path=source,
+        output_path=tmp_path / "combined.mp3",
+        singing_audio_path=singing_path,
+        style_request="simple pop rock",
+        additional_requirements=None,
+        settings=_settings(),
+        llm_client=StaticLlmClient(
+            response_text='{"prompt":"Create an original instrumental pop rock backing track."}'
+        ),
+    )
+
+    assert captured["output_format"] == "pcm_44100"
+    assert result.reused_existing_backing_track is False
+    assert result.output_path.exists()
+    assert result.output_path.read_bytes().startswith(b"ID3")
+    assert result.backing_track_output_path.exists()
+    assert result.backing_track_wav_output_path.exists()

@@ -45,6 +45,7 @@ class TestMcpServer(unittest.TestCase):
         tools = response["result"]["tools"]
         self.assertTrue(any(tool["name"] == "parse_score" for tool in tools))
         self.assertTrue(any(tool["name"] == "reparse" for tool in tools))
+        self.assertTrue(any(tool["name"] == "generate_combined_backing_track" for tool in tools))
         self.assertFalse(any(tool["name"] == "modify_score" for tool in tools))
 
     def test_parse_score(self):
@@ -93,6 +94,13 @@ class TestMcpServer(unittest.TestCase):
         )
         self.assertEqual(result.get("status"), "action_required")
         self.assertEqual(result.get("code"), "deprecated_voice_id_input")
+
+    def test_generate_combined_backing_track_available_in_cpu_mode(self):
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        response = _handle_request(request, self.device, "cpu")
+        self.assertIn("result", response)
+        tools = response["result"]["tools"]
+        self.assertTrue(any(tool["name"] == "generate_combined_backing_track" for tool in tools))
 
     def test_modify_score_not_available_publicly(self):
         request = {

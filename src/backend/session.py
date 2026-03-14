@@ -37,6 +37,7 @@ class SessionState:
     score_summary: Optional[Dict[str, Any]] = None
     current_audio: Optional[Dict[str, Any]] = None
     current_backing_track_audio: Optional[Dict[str, Any]] = None
+    current_combined_backing_track_audio: Optional[Dict[str, Any]] = None
     last_successful_singing_render: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
@@ -62,6 +63,11 @@ class SessionState:
             "current_backing_track_audio": (
                 dict(self.current_backing_track_audio)
                 if self.current_backing_track_audio
+                else None
+            ),
+            "current_combined_backing_track_audio": (
+                dict(self.current_combined_backing_track_audio)
+                if self.current_combined_backing_track_audio
                 else None
             ),
             "last_successful_singing_render": (
@@ -191,6 +197,7 @@ class SessionStore:
             # Any newly parsed/reparsed/preprocessed score invalidates prior backing-track readiness.
             state.last_successful_singing_render = None
             state.current_backing_track_audio = None
+            state.current_combined_backing_track_audio = None
             state.last_active_at = _utcnow()
             return state.current_score_version
 
@@ -269,6 +276,10 @@ class SessionStore:
         path: Path,
         duration_s: float,
         storage_path: Optional[str] = None,
+        *,
+        wav_path: Optional[Path] = None,
+        wav_storage_path: Optional[str] = None,
+        score_version: Optional[int] = None,
     ) -> None:
         """Store backing-track audio metadata for the session."""
         async with self._lock:
@@ -281,6 +292,36 @@ class SessionStore:
             }
             if storage_path:
                 state.current_backing_track_audio["storage_path"] = storage_path
+            if wav_path:
+                state.current_backing_track_audio["wav_path"] = self._relative_path(wav_path)
+            if wav_storage_path:
+                state.current_backing_track_audio["wav_storage_path"] = wav_storage_path
+            if isinstance(score_version, int):
+                state.current_backing_track_audio["score_version"] = score_version
+            state.last_active_at = _utcnow()
+
+    async def set_combined_backing_track_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+        *,
+        score_version: Optional[int] = None,
+    ) -> None:
+        """Store combined melody+backing audio metadata for the session."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.current_combined_backing_track_audio = {
+                "path": self._relative_path(path),
+                "duration_s": duration_s,
+            }
+            if storage_path:
+                state.current_combined_backing_track_audio["storage_path"] = storage_path
+            if isinstance(score_version, int):
+                state.current_combined_backing_track_audio["score_version"] = score_version
             state.last_active_at = _utcnow()
 
     async def set_last_successful_singing_render(
@@ -313,6 +354,7 @@ class SessionStore:
             state.score_summary = None
             state.current_audio = None
             state.current_backing_track_audio = None
+            state.current_combined_backing_track_audio = None
             state.last_successful_singing_render = None
             state.last_active_at = _utcnow()
             session_dir = self.session_dir(session_id)
@@ -451,6 +493,7 @@ class FirestoreSessionStore:
             score_summary=data.get("scoreSummary"),
             current_audio=data.get("currentAudio"),
             current_backing_track_audio=data.get("currentBackingTrackAudio"),
+            current_combined_backing_track_audio=data.get("currentCombinedBackingTrackAudio"),
             last_successful_singing_render=data.get("lastSuccessfulSingingRender"),
         )
 
@@ -474,6 +517,7 @@ class FirestoreSessionStore:
                 "scoreSummary": None,
                 "currentAudio": None,
                 "currentBackingTrackAudio": None,
+                "currentCombinedBackingTrackAudio": None,
                 "lastSuccessfulSingingRender": None,
             }
             self._doc_ref(session_id).set(payload)
@@ -553,6 +597,7 @@ class FirestoreSessionStore:
                     "currentScoreVersion": version,
                     "lastSuccessfulSingingRender": None,
                     "currentBackingTrackAudio": None,
+                    "currentCombinedBackingTrackAudio": None,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
@@ -631,6 +676,10 @@ class FirestoreSessionStore:
         path: Path,
         duration_s: float,
         storage_path: Optional[str] = None,
+        *,
+        wav_path: Optional[Path] = None,
+        wav_storage_path: Optional[str] = None,
+        score_version: Optional[int] = None,
     ) -> None:
         """Store backing-track audio metadata in Firestore."""
         async with self._lock:
@@ -640,9 +689,41 @@ class FirestoreSessionStore:
             }
             if storage_path:
                 payload["storage_path"] = storage_path
+            if wav_path:
+                payload["wav_path"] = self._relative_path(wav_path)
+            if wav_storage_path:
+                payload["wav_storage_path"] = wav_storage_path
+            if isinstance(score_version, int):
+                payload["score_version"] = score_version
             self._doc_ref(session_id).update(
                 {
                     "currentBackingTrackAudio": payload,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def set_combined_backing_track_audio(
+        self,
+        session_id: str,
+        path: Path,
+        duration_s: float,
+        storage_path: Optional[str] = None,
+        *,
+        score_version: Optional[int] = None,
+    ) -> None:
+        """Store combined backing-track audio metadata in Firestore."""
+        async with self._lock:
+            payload = {
+                "path": self._relative_path(path),
+                "duration_s": duration_s,
+            }
+            if storage_path:
+                payload["storage_path"] = storage_path
+            if isinstance(score_version, int):
+                payload["score_version"] = score_version
+            self._doc_ref(session_id).update(
+                {
+                    "currentCombinedBackingTrackAudio": payload,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
@@ -678,6 +759,7 @@ class FirestoreSessionStore:
                     "scoreSummary": None,
                     "currentAudio": None,
                     "currentBackingTrackAudio": None,
+                    "currentCombinedBackingTrackAudio": None,
                     "lastSuccessfulSingingRender": None,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import json
 import logging
 import copy
@@ -38,6 +38,22 @@ class BackingTrackGenerationResult:
     prompt: str
     metadata: Dict[str, Any]
     output_format: str
+    wav_output_path: Optional[Path] = None
+
+
+@dataclass(frozen=True)
+class CombinedBackingTrackGenerationResult:
+    """Completed combined melody+backing artifact and reused backing metadata."""
+
+    output_path: Path
+    duration_seconds: float
+    output_format: str
+    metadata: Dict[str, Any]
+    backing_track_output_path: Path
+    backing_track_wav_output_path: Path
+    backing_track_duration_seconds: float
+    reused_existing_backing_track: bool
+    prompt: Optional[str] = None
 
 
 def generate_backing_track(
@@ -65,41 +81,119 @@ def generate_backing_track(
         llm_client=llm_client,
         logger=logger,
     )
-    prepend_silence = _should_prepend_pickup_silence(metadata)
-    compose_output_format = (
-        _compose_output_format_for_pickup(output_format)
-        if prepend_silence
-        else output_format
-    )
-    audio_chunks = _compose_with_elevenlabs(
+    waveform, sample_rate = _generate_backing_waveform(
         prompt=prompt,
-        music_length_ms=int(round(float(metadata["duration_seconds"]) * 1000.0)),
-        output_format=compose_output_format,
+        metadata=metadata,
+        output_format=output_format,
         seed=seed,
         settings=settings,
     )
-    if prepend_silence:
-        save_result = _save_backing_track_with_prepended_silence(
-            audio_chunks=audio_chunks,
-            output_path=resolved_output_path,
-            requested_output_format=output_format,
-            metadata=metadata,
-            keep_wav=bool(settings.backend_debug),
-        )
-        final_output_path = Path(save_result["path"])
-        duration_seconds = float(save_result["duration_seconds"])
-    else:
-        with resolved_output_path.open("wb") as handle:
-            for chunk in audio_chunks:
-                handle.write(chunk)
-        final_output_path = resolved_output_path
-        duration_seconds = float(metadata["duration_seconds"])
+    save_result = _save_waveform(
+        waveform=waveform,
+        output_path=resolved_output_path,
+        sample_rate=sample_rate,
+        requested_output_format=output_format,
+        keep_wav=True,
+    )
+    final_output_path = Path(save_result["path"])
+    duration_seconds = float(save_result["duration_seconds"])
+    wav_output_path = save_result.get("wav_path")
     return BackingTrackGenerationResult(
         output_path=final_output_path,
         duration_seconds=duration_seconds,
         prompt=prompt,
         metadata=metadata,
         output_format=output_format,
+        wav_output_path=Path(wav_output_path) if isinstance(wav_output_path, str) else None,
+    )
+
+
+def generate_combined_backing_track(
+    *,
+    file_path: str | Path,
+    output_path: str | Path,
+    singing_audio_path: str | Path,
+    style_request: str,
+    additional_requirements: Optional[str],
+    settings: Settings,
+    output_format: str = "mp3_44100_128",
+    seed: Optional[int] = None,
+    llm_client: Optional[LlmClient] = None,
+    logger: Optional[logging.Logger] = None,
+    existing_backing_output_path: Optional[str | Path] = None,
+    existing_backing_wav_path: Optional[str | Path] = None,
+) -> CombinedBackingTrackGenerationResult:
+    """Generate or reuse a backing track and return a combined melody+backing mix."""
+    resolved_output_path = Path(output_path).resolve()
+    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_singing_audio_path = Path(singing_audio_path).resolve()
+    if not resolved_singing_audio_path.exists():
+        raise RuntimeError("Singing audio source for combined backing track was not found.")
+
+    metadata = extract_backing_track_metadata(Path(file_path).resolve())
+    reused_existing = False
+    prompt: Optional[str] = None
+    backing_output_path_resolved = (
+        Path(existing_backing_output_path).resolve()
+        if existing_backing_output_path
+        else None
+    )
+    backing_wav_path_resolved = (
+        Path(existing_backing_wav_path).resolve()
+        if existing_backing_wav_path
+        else None
+    )
+    backing_duration_seconds = float(metadata.get("duration_seconds") or 0.0)
+
+    if backing_wav_path_resolved and backing_wav_path_resolved.exists():
+        reused_existing = True
+        if backing_output_path_resolved is None:
+            candidate = backing_wav_path_resolved.with_suffix(".mp3")
+            if candidate.exists():
+                backing_output_path_resolved = candidate
+            else:
+                backing_output_path_resolved = backing_wav_path_resolved
+    else:
+        backing_base_name = f"{resolved_output_path.stem}.backing_source.mp3"
+        generated_backing = generate_backing_track(
+            file_path=file_path,
+            output_path=resolved_output_path.with_name(backing_base_name),
+            style_request=style_request,
+            additional_requirements=additional_requirements,
+            settings=settings,
+            output_format=output_format,
+            seed=seed,
+            llm_client=llm_client,
+            logger=logger,
+        )
+        prompt = generated_backing.prompt
+        metadata = generated_backing.metadata
+        backing_output_path_resolved = generated_backing.output_path
+        backing_wav_path_resolved = generated_backing.wav_output_path
+        backing_duration_seconds = generated_backing.duration_seconds
+    if backing_wav_path_resolved is None or not backing_wav_path_resolved.exists():
+        raise RuntimeError("Reusable backing-track WAV was not available for combined generation.")
+
+    vocal_waveform = _load_audio_waveform(resolved_singing_audio_path)
+    backing_waveform = _load_audio_waveform(backing_wav_path_resolved)
+    mixed_waveform = _mix_vocal_and_backing(vocal_waveform, backing_waveform)
+    save_result = _save_waveform(
+        waveform=mixed_waveform,
+        output_path=resolved_output_path,
+        sample_rate=44100,
+        requested_output_format=output_format,
+        keep_wav=False,
+    )
+    return CombinedBackingTrackGenerationResult(
+        output_path=Path(save_result["path"]),
+        duration_seconds=float(save_result["duration_seconds"]),
+        output_format=output_format,
+        metadata=metadata,
+        backing_track_output_path=backing_output_path_resolved or backing_wav_path_resolved,
+        backing_track_wav_output_path=backing_wav_path_resolved,
+        backing_track_duration_seconds=backing_duration_seconds,
+        reused_existing_backing_track=reused_existing,
+        prompt=prompt,
     )
 
 
@@ -200,12 +294,6 @@ def _should_prepend_pickup_silence(metadata: Dict[str, Any]) -> bool:
     return isinstance(pickup, dict) and bool(pickup.get("has_pickup"))
 
 
-def _compose_output_format_for_pickup(requested_output_format: str) -> str:
-    """Return the ElevenLabs compose format to use before silence prepend."""
-    sample_rate = _parse_output_sample_rate(requested_output_format)
-    return f"pcm_{sample_rate}"
-
-
 def _parse_output_sample_rate(output_format: str) -> int:
     """Extract the sample rate component from an ElevenLabs output format string."""
     match = re.match(r"^[a-z0-9]+_(\d+)(?:_|$)", str(output_format).strip().lower())
@@ -237,6 +325,35 @@ def _measure_duration_seconds(metadata: Dict[str, Any]) -> float:
     return quarter_notes_per_measure * 60.0 / bpm
 
 
+def _generate_backing_waveform(
+    *,
+    prompt: str,
+    metadata: Dict[str, Any],
+    output_format: str,
+    seed: Optional[int],
+    settings: Settings,
+) -> Tuple[np.ndarray, int]:
+    """Generate raw backing-track waveform from ElevenLabs and apply pickup handling."""
+    sample_rate = _parse_output_sample_rate(output_format)
+    audio_chunks = _compose_with_elevenlabs(
+        prompt=prompt,
+        music_length_ms=int(round(float(metadata["duration_seconds"]) * 1000.0)),
+        output_format=f"pcm_{sample_rate}",
+        seed=seed,
+        settings=settings,
+    )
+    waveform = _pcm_bytes_to_waveform(b"".join(audio_chunks))
+    if _should_prepend_pickup_silence(metadata):
+        silence_samples = int(round(_measure_duration_seconds(metadata) * sample_rate))
+        if silence_samples > 0:
+            if waveform.ndim == 1:
+                silence = np.zeros(silence_samples, dtype=np.float32)
+            else:
+                silence = np.zeros((silence_samples, waveform.shape[1]), dtype=np.float32)
+            waveform = np.concatenate([silence, waveform.astype(np.float32)], axis=0)
+    return waveform, sample_rate
+
+
 def _pcm_bytes_to_waveform(audio_bytes: bytes) -> np.ndarray:
     """Decode raw 16-bit little-endian PCM bytes to float32 waveform."""
     if not audio_bytes:
@@ -259,33 +376,6 @@ def _infer_pcm_channel_count(audio_bytes: bytes) -> int:
     if sample_count % 2 == 0:
         return 2
     return 1
-
-
-def _save_backing_track_with_prepended_silence(
-    *,
-    audio_chunks,
-    output_path: Path,
-    requested_output_format: str,
-    metadata: Dict[str, Any],
-    keep_wav: bool,
-) -> Dict[str, Any]:
-    """Decode raw PCM, prepend one measure of silence, and save the final file."""
-    sample_rate = _parse_output_sample_rate(requested_output_format)
-    waveform = _pcm_bytes_to_waveform(b"".join(audio_chunks))
-    silence_samples = int(round(_measure_duration_seconds(metadata) * sample_rate))
-    if silence_samples > 0:
-        if waveform.ndim == 1:
-            silence = np.zeros(silence_samples, dtype=np.float32)
-        else:
-            silence = np.zeros((silence_samples, waveform.shape[1]), dtype=np.float32)
-        waveform = np.concatenate([silence, waveform.astype(np.float32)], axis=0)
-    return _save_waveform(
-        waveform=waveform,
-        output_path=output_path,
-        sample_rate=sample_rate,
-        requested_output_format=requested_output_format,
-        keep_wav=keep_wav,
-    )
 
 
 def _save_waveform(
@@ -318,6 +408,7 @@ def _save_waveform(
         "path": str(final_path.resolve()),
         "duration_seconds": duration_seconds,
         "sample_rate": sample_rate,
+        "wav_path": str(wav_path.resolve()) if fmt.startswith("mp3_") and keep_wav else None,
     }
 
 
@@ -348,6 +439,67 @@ def _encode_mp3_waveform(
     if retcode != 0:
         message = stderr.decode("utf-8", errors="ignore")
         raise RuntimeError(f"ffmpeg mp3 encoding failed: {message}")
+
+
+def _load_audio_waveform(
+    path: Path,
+    *,
+    sample_rate: int = 44100,
+    channels: int = 2,
+) -> np.ndarray:
+    """Decode an audio file to stereo float32 waveform at the target sample rate."""
+    try:
+        stdout, stderr = (
+            ffmpeg
+            .input(str(path))
+            .output(
+                "pipe:1",
+                format="f32le",
+                acodec="pcm_f32le",
+                ac=channels,
+                ar=sample_rate,
+            )
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg binary not found. Install ffmpeg to decode audio.") from exc
+    except ffmpeg.Error as exc:
+        message = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else str(exc)
+        raise RuntimeError(f"ffmpeg audio decode failed: {message}") from exc
+    waveform = np.frombuffer(stdout, dtype="<f4")
+    if waveform.size == 0:
+        return np.zeros((0, channels), dtype=np.float32)
+    if waveform.size % channels != 0:
+        raise RuntimeError(f"Decoded audio frame count is not divisible by channel count for {path}.")
+    return waveform.reshape(-1, channels).astype(np.float32)
+
+
+def _pad_waveform_to_length(waveform: np.ndarray, frame_count: int) -> np.ndarray:
+    """Right-pad a waveform with silence to the target number of frames."""
+    current_frames = waveform.shape[0]
+    if current_frames >= frame_count:
+        return waveform
+    pad_shape = (frame_count - current_frames, waveform.shape[1])
+    padding = np.zeros(pad_shape, dtype=np.float32)
+    return np.concatenate([waveform, padding], axis=0)
+
+
+def _mix_vocal_and_backing(
+    vocal_waveform: np.ndarray,
+    backing_waveform: np.ndarray,
+    *,
+    vocal_gain: float = 0.7,
+    backing_gain: float = 0.7,
+) -> np.ndarray:
+    """Mix two stereo waveforms with fixed pre-mix gain and peak protection."""
+    frame_count = max(vocal_waveform.shape[0], backing_waveform.shape[0])
+    vocal = _pad_waveform_to_length(vocal_waveform, frame_count) * float(vocal_gain)
+    backing = _pad_waveform_to_length(backing_waveform, frame_count) * float(backing_gain)
+    mixed = (vocal + backing).astype(np.float32)
+    peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+    if peak > 1.0:
+        mixed *= 0.98 / peak
+    return mixed
 
 
 def _prompt_writer_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:

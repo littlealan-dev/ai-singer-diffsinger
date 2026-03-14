@@ -70,8 +70,11 @@ Rules:
 - When you stop at a non-perfect but structurally valid candidate after exhausting the repair budget, explain the remaining issues concisely in `final_message` and ask the user to review/confirm or request revision.
 - For synthesize, omit score and voicebank to use defaults; include part_id (or part_index) for target selection.
 - For generate_backing_track, include `style_request` describing the requested genre/style. Add `additional_requirements` only for concrete extra arrangement constraints.
-- Do not call `generate_backing_track` before a successful singing render exists for the currently active score.
-- If Dynamic Context says `ready_for_generate_backing_track=true`, prefer `generate_backing_track` for a backing-track request instead of calling `synthesize` again.
+- For generate_combined_backing_track, include `style_request` describing the requested genre/style. Use this tool only when the user explicitly asks to combine or mix the melody and backing into one file.
+- If the user asks for a backing track but does not explicitly ask to combine or mix it with the melody, default to `generate_backing_track` and do not call `generate_combined_backing_track`.
+- Do not call `generate_backing_track` or `generate_combined_backing_track` before a successful singing render exists for the currently active score.
+- If Dynamic Context says `ready_for_generate_backing_track=true`, prefer `generate_backing_track` for instrumental-only accompaniment requests instead of calling `synthesize` again.
+- If Dynamic Context says `ready_for_generate_combined_backing_track=true`, prefer `generate_combined_backing_track` only when the user clearly asks for melody and backing together in one mixed file instead of calling `synthesize` again.
 - If Dynamic Context says the singing render is stale or missing, do not guess; follow that state exactly.
 - If backend returns `action_required` with `action=no_successful_singing_render`, explain that the user must generate the singing track first, then ask whether they want to do that now.
 - If backend returns `action_required` with `action=stale_singing_render_for_current_score`, explain that the score changed and the current score must be synthesized again before generating a backing track.

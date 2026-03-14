@@ -1,26 +1,44 @@
-# Backing Track Combined-Audio Fallback LLD
+# Backing Track Combined-Audio MCP Tool LLD
 
 ## Goal
 
-Provide a backend-only fallback mode for demo use:
+Add a separate MCP tool for a demo fallback where the backend returns one combined audio file containing:
 
-- if enabled by config, backing-track generation should return a single mixed audio file
-- the mixed file should contain both:
-  - the previously generated singing audio for the current score version
-  - the newly generated backing track
-- both sources should be attenuated to 70% of their original level before mixing
-- the UI should continue to receive one normal `audio_url` and should not require simultaneous dual-track playback support
+- the previously generated singing audio for the current score version
+- the newly generated instrumental backing track
 
-This is explicitly a backup plan for demo readiness. It is not intended to replace the longer-term UX of independent melody and backing-track playback.
+This replaces the earlier flag-based idea. The outer LLM should decide whether the user wants:
+
+- pure backing track only, or
+- a combined melody + backing-track output
+
+The UI should continue to receive a normal single `audio_url` and should not need multitrack playback support.
+
+## Product Decision
+
+Do not use a backend env flag to switch a single backing-track endpoint between two modes.
+
+Instead:
+
+- keep the existing MCP tool for pure backing track
+  - `generate_backing_track`
+- add a new MCP tool for combined output
+  - `generate_combined_backing_track`
+
+Reason:
+
+- user intent is semantic, not operational
+- the outer LLM is already responsible for tool selection
+- a separate tool keeps job meaning, logging, progress payloads, and UI labeling clean
+- this avoids one tool returning two different artifact types under the same name
 
 ## Non-Goals
 
-- no frontend changes
-- no multitrack playback in the browser
-- no per-track volume controls in UI
-- no stem export
-- no advanced mastering, limiting, ducking, or tempo correction
-- no attempt to time-stretch mismatched renders
+- no frontend multitrack playback
+- no per-track volume sliders
+- no advanced mastering, ducking, or stem control
+- no time-stretching or beat correction
+- no automatic fallback from one tool to the other
 
 ## Current State
 
@@ -30,441 +48,539 @@ Current backing-track flow:
 2. orchestrator starts a `backing_track` job
 3. MCP handler calls [generate_backing_track()](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py)
 4. backend writes one instrumental file to disk
-5. orchestrator stores that file as the job output and returns one `audio_url`
+5. orchestrator returns one `audio_url`
 
-Important existing session state:
+Relevant existing session state:
 
 - [last_successful_singing_render](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/session.py)
 - [current_backing_track_audio](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/session.py)
 
-Important current backing-track job output behavior:
+Current prerequisite gating for backing track already exists:
 
-- job output path currently assumes one MP3 artifact:
-  - [orchestrator.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/orchestrator.py#L663)
-- UI consumes only one `audio_url` from job progress:
-  - [orchestrator.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/orchestrator.py#L615)
+- a successful singing render must exist for the active score version
 
-## Proposed Config
+## Proposed Tool Surface
 
-Add one new backend setting:
+### Existing Tool
 
-- `BACKEND_BACKING_TRACK_OUTPUT_COMBINED_AUDIO`
+`generate_backing_track`
 
-Semantics:
+Purpose:
 
-- `false` or unset:
-  - current behavior
-  - backing-track job returns instrumental-only audio
-- `true`:
-  - after backing track is generated, backend mixes singing + backing track
-  - returned `audio_url` points to the mixed file
+- generate instrumental backing track only
 
-Optional future extension, not required for v1:
+### New Tool
 
-- `BACKEND_BACKING_TRACK_MIX_GAIN=0.7`
-- `BACKEND_BACKING_TRACK_VOCAL_GAIN=0.7`
+`generate_combined_backing_track`
 
-For this fallback design, both gains are fixed at `0.7`.
+Purpose:
+
+- generate instrumental backing track
+- mix it with the latest successful singing render for the current score version
+- return the mixed file as a single audio artifact
+
+## LLM Tool-Selection Policy
+
+The outer LLM should interpret user intent and choose the tool accordingly.
+
+### Use `generate_backing_track`
+
+When the user asks for:
+
+- a backing track
+- accompaniment only
+- instrumental only
+- karaoke track
+- backing music without the melody
+
+### Use `generate_combined_backing_track`
+
+When the user asks for:
+
+- both together
+- melody plus backing track
+- a demo mix
+- one combined audio file
+- accompaniment under the singing
+- a version that already includes the melody
+
+### Do Not Guess Wrong
+
+If the user intent is ambiguous, default to:
+
+- `generate_backing_track`
+
+Reason:
+
+- instrumental-only output is the current primary feature
+- combined output is a fallback/demo-oriented variant
 
 ## Preconditions
 
-Combined-audio output is only valid if all of the following are true:
+Both tools require:
 
-1. backing-track prerequisite is satisfied
-2. a `last_successful_singing_render` exists for the current score version
-3. that singing audio file is still readable from local disk or storage
-4. the backing track finishes successfully
+1. a successfully uploaded and parsed score
+2. a successful singing render for the current score version
 
-If combined mode is enabled but the singing render is missing or unreadable:
+The new combined tool additionally requires:
 
-- fail the backing-track job
-- surface a clear backend error message to the UI
-- do not silently fall back to instrumental-only output
+3. the latest successful singing render is readable from local disk or storage
+4. the newly generated backing track is readable for mixdown
 
-Reason:
+If prerequisites are not met:
 
-- for demo debugging, explicit failure is safer than producing the wrong artifact without notice
+- return a structured MCP error / action-required result
+- the outer LLM should explain naturally to the user what is missing
 
 ## High-Level Flow
 
-### Normal Mode
+### Pure Backing Track
 
-1. generate backing track
-2. save instrumental file
-3. return instrumental file as job audio
+1. generate instrumental backing track
+2. save it
+3. return instrumental artifact
 
-### Combined Mode
+### Combined Backing Track
 
-1. generate backing track
-2. locate the current session's valid singing render
-3. decode both audio files
-4. align them to a common sample rate / channel layout
-5. scale both waveforms to 70%
-6. pad shorter waveform with silence to match the longer one
-7. sum the waveforms
-8. apply peak protection to avoid hard clipping
-9. encode final mixed output as MP3
-10. return the mixed file as the job audio
+1. generate instrumental backing track
+2. resolve the latest valid singing render for the current score version
+3. if a pure backing-track WAV already exists for the same latest score version, reuse it
+4. otherwise generate the backing track first
+5. decode singing and backing audio
+6. normalize both to a common format
+7. attenuate both tracks to 70%
+8. right-pad the shorter waveform with silence if needed
+9. sum the waveforms
+10. protect against clipping
+11. encode mixed output as MP3
+12. return mixed artifact
 
-## Design Details
+## New MCP Tool Contract
 
-### 1. Source Selection
+### Name
 
-The mixed output must use:
+`generate_combined_backing_track`
 
-- singing source:
-  - from `last_successful_singing_render`
-- backing source:
-  - the newly generated backing-track artifact from the same job
+### Inputs
 
-The singing source must be validated against the active score version before mix.
+Recommended inputs:
 
-Required source fields from session state:
+- `style_request: string`
+- `additional_requirements?: string`
+- `file_path: string`
+- `output_path: string`
 
-- `path`
-- `storage_path` if applicable
-- `score_version`
-- `duration_seconds`
+These mirror the existing pure backing-track tool so the orchestrator integration stays parallel.
 
-If the render belongs to an old score version:
+### Output
 
-- reject the combined mix attempt
+```json
+{
+  "status": "completed",
+  "message": "Combined backing track ready.",
+  "output_path": "relative/path/to/backing_track_combined.mp3",
+  "duration_seconds": 36.0,
+  "backing_track_prompt": "Original instrumental backing track...",
+  "metadata": {},
+  "output_format": "mp3_44100_128",
+  "render_variant": "combined"
+}
+```
 
-## 2. Audio Decode
+Additional details recommended for debug/UI:
 
-Use backend-side decode to `float32` waveform for both tracks.
-
-Preferred implementation:
-
-- continue using `ffmpeg-python` and existing audio libs already present in [backing_track.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py)
-- decode both sources to:
-  - sample rate: `44100`
-  - channels: stereo
-  - sample format: `float32`
-
-Rationale:
-
-- current backing-track code already uses `ffmpeg`, `numpy`, and `soundfile`
-- this avoids introducing a second audio toolchain
-
-## 3. Alignment Logic
-
-Assumption for fallback mode:
-
-- the singing render and generated backing track are intended for the same score timing
-
-Mixing logic:
-
-1. decode both to stereo `float32`
-2. if lengths differ, right-pad the shorter one with silence
-3. no time-stretching
-4. no onset detection
-5. no beat alignment correction
-
-Why this is acceptable for the backup plan:
-
-- backend already controls pickup handling for backing tracks
-- both tracks target the same score duration
-- simple overlay is fast and robust enough for a demo fallback
-
-## 4. Gain Staging
-
-Apply fixed pre-mix attenuation:
-
-- singing waveform *= `0.7`
-- backing waveform *= `0.7`
-
-Then sum:
-
-- `mixed = vocal + backing`
-
-Peak protection:
-
-- if `max(abs(mixed)) > 1.0`
-  - normalize the mixed waveform down to a safe ceiling, for example `0.98`
-
-Reason:
-
-- two 70% tracks can still clip when summed
-- a simple peak normalization is enough for this fallback
-
-This is not intended to be transparent mastering; it is just safe mix output.
-
-## 5. Output Artifact Rules
-
-### Default Instrumental Mode
-
-- output file remains `backing_track.mp3`
-
-### Combined Mode
-
-Recommended output file name:
-
-- `backing_track_combined.mp3`
-
-Reason:
-
-- makes the artifact type obvious in logs, storage, and debugging
-
-The returned job should still expose:
-
-- one `audio_url`
-
-But the `details` block should include extra metadata:
-
-- `render_variant: "combined"`
 - `vocal_gain: 0.7`
 - `backing_gain: 0.7`
 - `source_singing_duration_seconds`
 - `source_backing_duration_seconds`
 - `mixed_duration_seconds`
 
-## 6. Storage Behavior
+## Audio Mixing Rules
 
-Local-only mode:
+### Decode Format
 
-- write the combined MP3 to the session jobs directory
+Decode both sources to:
 
-Storage-enabled mode:
+- sample rate: `44100`
+- channels: stereo
+- sample format: `float32`
 
-- upload only the final returned artifact
-- do not upload intermediate WAV/PCM decode artifacts unless `BACKEND_DEBUG=true`
+Preferred implementation:
 
-Optional debug behavior:
+- continue using `ffmpeg-python`
+- continue using `numpy`
+- continue using `soundfile`
 
-- when debug is enabled, retain:
-  - decoded backing WAV
-  - decoded singing WAV
-  - final mixed WAV
+This matches the current audio postprocessing stack already used in [backing_track.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py).
 
-This is useful for demo troubleshooting but should not be relied on in production.
+### Gain Staging
 
-## 7. Orchestrator Impact
+Before sum:
 
-Only the backing-track job path changes.
+- singing waveform *= `0.7`
+- backing waveform *= `0.7`
 
-Required behavior:
+Then:
 
-- if combined mode is disabled:
-  - no change
-- if combined mode is enabled:
-  - after backing-track generation succeeds, orchestrator or backing-track runtime must perform mix
-  - job output points to the combined file
+- `mixed = vocal + backing`
 
-Recommended ownership:
+### Clipping Protection
 
-- keep mix logic in [backing_track.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py)
+If the mixed waveform exceeds full scale:
+
+- normalize peak to a safe ceiling, for example `0.98`
+
+This is not intended as mastering. It is only safe mix protection.
+
+### Alignment
+
+For v1 fallback:
+
+- no time-stretching
+- no onset alignment
+- no beat-detection correction
+- if lengths differ, right-pad the shorter waveform with silence
+
+Assumption:
+
+- the singing render and backing track target the same score timing
+
+## Pickup Handling
+
+The combined tool should reuse the final backing-track artifact exactly as produced by the existing backing-track pipeline.
+
+That means:
+
+- if the backing-track generation path prepends pickup silence, mix against that final artifact
+- do not invent a second pickup-specific mix rule in the combined tool
 
 Reason:
 
-- it already owns backing-track artifact generation
-- it already owns pickup-specific postprocessing
-- it keeps audio postprocessing in one place instead of leaking into orchestrator
+- pickup handling should remain owned by the backing-track generation layer, not duplicated in the mix layer
 
-## 8. Session State Impact
+## Runtime Ownership
 
-No new session concept is required for v1 fallback.
+Recommended implementation ownership:
 
-Current state can remain:
+- keep backing-track generation and mixing logic in [backing_track.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py)
 
-- `last_successful_singing_render`
+Recommended public runtime surface:
+
+- `generate_backing_track(...)`
+- `generate_combined_backing_track(...)`
+
+Internally:
+
+- both may share a common helper that generates the backing-track source artifact first
+- the combined variant then performs mixdown
+
+Reason:
+
+- keeps audio-specific logic in one backend module
+- avoids leaking waveform/mixing logic into the orchestrator
+
+## Orchestrator Changes
+
+### Existing
+
+Current tool path already supports:
+
+- `generate_backing_track`
+
+### New
+
+Add a parallel flow for:
+
+- `generate_combined_backing_track`
+
+Recommended job semantics:
+
+- new `jobKind`: `combined_backing_track`
+- new MCP tool name routed by the orchestrator
+- separate user-facing progress message
+
+Suggested messages:
+
+- queued: `Let me create the combined melody and backing track...`
+- completed: `Combined backing track ready.`
+- failed: `Couldn't finish the combined backing track.`
+
+## Session State Impact
+
+Do not overload `current_backing_track_audio` with two meanings.
+
+Recommended addition:
+
+- `current_combined_backing_track_audio`
+
+Reason:
+
+- pure backing track and combined output are different artifacts
+- storing them separately avoids ambiguity
+- future UI can choose which artifact to present
+
+Existing state remains:
+
 - `current_backing_track_audio`
+- `last_successful_singing_render`
 
-But in combined mode, `current_backing_track_audio` will actually point to:
+New state:
 
-- the combined artifact returned to the client
+- `current_combined_backing_track_audio`
 
-This is acceptable for the fallback plan, but should be documented clearly:
+## Storage Behavior
 
-- in combined mode, "backing track audio" means "combined melody + backing artifact"
+Pure backing track:
 
-Optional future improvement:
+- keep current behavior
+- additionally retain the backing-track WAV artifact in storage after MP3 delivery encoding
+- do not delete the WAV after compressing/transcoding to MP3
 
-- add `current_combined_backing_track_audio`
+Combined backing track:
 
-Not required for v1.
+- write final artifact as something like `backing_track_combined.mp3`
+- upload only the final returned artifact in storage-enabled environments
 
-## 9. Error Handling
+For combined generation, also preserve and consult the latest pure backing-track WAV artifact for reuse.
 
-When combined mode is enabled, fail the job if:
+Optional debug outputs when `BACKEND_DEBUG=true`:
 
-- singing source is missing
-- singing source belongs to old score version
-- singing source file cannot be loaded
-- backing track cannot be decoded
-- sample-rate/channel normalization fails
-- final MP3 encode fails
+- decoded singing WAV
+- decoded backing WAV
+- final mixed WAV
 
-Recommended user-facing message:
+## UI Contract Impact
+
+The UI still receives:
+
+- one normal `audio_url`
+- one normal completed job
+
+But the progress payload should distinguish the new artifact type cleanly.
+
+Recommended progress payload markers:
+
+- `job_kind: "backing_track"` for pure instrumental
+- `job_kind: "combined_backing_track"` for combined output
+
+That is better than using one `job_kind` plus a nested `render_variant` string.
+
+## Error Handling
+
+### Pure Backing Track Errors
+
+No change from current design.
+
+### Combined Tool Errors
+
+Fail the job if:
+
+- no successful singing render exists
+- the singing render belongs to an old score version
+- the singing source cannot be read
+- the generated backing source cannot be read
+- decode/normalize/mix/encode fails
+
+Recommended internal errors:
+
+- `Combined backing-track generation requires a successful singing render for the current score version.`
+- `Could not read the singing audio needed for combined backing-track generation.`
+- `Could not mix singing and backing-track audio.`
+
+Recommended user-facing progress failure message:
 
 - `Couldn't finish the combined backing track.`
 
-Recommended internal error detail examples:
+## MCP Tool Definitions
 
-- `Combined backing-track output requires a successful singing render for the current score version.`
-- `Could not read the singing audio needed for combined backing-track output.`
-- `Could not mix the singing and backing-track audio.`
+### Existing Tool
 
-## 10. UI Contract
+Keep:
 
-No UI contract change is required.
+- `generate_backing_track`
 
-The frontend still receives:
+### New Tool
 
-- one `audio_url`
-- one normal completed audio job
+Add:
 
-So the current player and download behavior remain unchanged.
+- `generate_combined_backing_track`
 
-This is the main value of the fallback design.
+Tool description should explicitly say:
 
-## API / Config Summary
+- generates one mixed output containing both melody and accompaniment
+- requires a successful singing render for the current score version
 
-### New Env
+## System Prompt Updates
 
-```bash
-BACKEND_BACKING_TRACK_OUTPUT_COMBINED_AUDIO=false
-```
+Update the outer LLM system prompt so it knows:
 
-### Job Details Additions
+- `generate_backing_track` is for instrumental-only output
+- `generate_combined_backing_track` is for one mixed melody+backing result
+- both require a successful singing render for the current score version
+- if Dynamic Context shows readiness is satisfied, prefer the tool that matches user intent instead of calling `synthesize` again
 
-```json
-{
-  "render_variant": "combined",
-  "vocal_gain": 0.7,
-  "backing_gain": 0.7,
-  "source_singing_duration_seconds": 34.0,
-  "source_backing_duration_seconds": 34.0,
-  "mixed_duration_seconds": 36.0
-}
-```
+The prompt should also mention ambiguous intent handling:
+
+- if user requests "backing track" without asking for melody included, default to `generate_backing_track`
+
+## API / Job Summary
+
+### Pure Backing Track
+
+- MCP tool: `generate_backing_track`
+- job kind: `backing_track`
+- session artifact: `current_backing_track_audio`
+
+### Combined Backing Track
+
+- MCP tool: `generate_combined_backing_track`
+- job kind: `combined_backing_track`
+- session artifact: `current_combined_backing_track_audio`
 
 ## Implementation Sketch
 
-### New Helper Surface
+### New Runtime Helpers
 
 In [backing_track.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/backing_track.py):
 
-- `_should_output_combined_audio(settings) -> bool`
 - `_load_audio_waveform(path, sample_rate=44100, channels=2) -> np.ndarray`
 - `_pad_waveform_to_length(waveform, frame_count) -> np.ndarray`
 - `_mix_vocal_and_backing(vocal, backing, vocal_gain=0.7, backing_gain=0.7) -> np.ndarray`
 - `_save_mixed_mp3(waveform, output_path, sample_rate=44100, bitrate="128k") -> dict`
+- `_resolve_reusable_backing_track_wav(...)`
+- `generate_combined_backing_track(...)`
 
-### Updated Runtime Flow
-
-Pseudo-flow:
+### Pseudo-Flow
 
 ```python
-backing = generate backing track as before
-
-if not combined_mode:
-    return backing
-
-singing = resolve current valid singing render
-vocal_wave = load singing audio
-backing_wave = load backing audio
-mixed_wave = mix(vocal_wave * 0.7, backing_wave * 0.7)
-save mixed mp3
-return combined result
+def generate_combined_backing_track(...):
+    backing = resolve_reusable_backing_track_wav_for_current_score(...)
+    if backing is None:
+        backing = generate_backing_track(...)
+    singing = resolve_latest_valid_singing_render(...)
+    vocal_wave = load_audio_waveform(singing.path)
+    backing_wave = load_audio_waveform(backing.wav_path_or_output_path)
+    mixed_wave = mix(vocal_wave * 0.7, backing_wave * 0.7)
+    save mixed mp3
+    return combined result
 ```
+
+Reuse rule:
+
+- if a pure backing track exists for the same latest score version and a WAV artifact is available, reuse it directly
+- do not call ElevenLabs again in that case
+- only call ElevenLabs when no reusable backing-track WAV exists
+
+Likely trigger cases:
+
+- user first generated a pure backing track, then later asks for a combined version
+- user directly asks for a combined version after singing exists but no backing track has been generated yet
 
 ## Test Plan
 
 ### Unit Tests
 
-1. Combined mode disabled
-- backing-track output remains instrumental-only
-
-2. Combined mode enabled with valid singing render
-- returned artifact is mixed output
+1. `generate_combined_backing_track` with valid singing render
+- returns mixed artifact
 - file exists
 - duration equals max(vocal, backing)
 
-3. Combined mode enabled but no singing render
-- job fails with explicit error
+2. Missing singing render
+- explicit failure
 
-4. Combined mode enabled but stale singing score version
-- job fails with explicit error
+3. Stale singing render score version
+- explicit failure
 
-5. Gain staging
-- both tracks are attenuated before sum
+4. Reuse existing pure backing-track WAV
+- combined tool skips ElevenLabs call when reusable WAV exists for current score version
 
-6. Clipping protection
-- mixed output is peak-limited / normalized below 1.0
+5. No reusable backing-track WAV
+- combined tool generates backing track first, then mixes
+
+6. Gain staging
+- both tracks attenuated to 70% before sum
+
+7. Clipping protection
+- final mix peak stays below full scale
+
+8. Combined tool preserves current backing-track pickup-prepend behavior
 
 ### Integration Tests
 
-1. End-to-end chat flow:
-- synthesize singing
-- request backing track with combined mode on
-- completed job returns one `audio_url`
-- audio download succeeds
+1. Chat flow for pure backing track
+- user asks for accompaniment only
+- LLM chooses `generate_backing_track`
+- progress payload returns `job_kind: "backing_track"`
 
-2. Existing singing bubble isolation still works
-- prior singing message remains bound to its original job-specific progress URL
-- combined backing-track job does not overwrite the old singing message
+2. Chat flow for combined output
+- user asks for melody + backing together
+- LLM chooses `generate_combined_backing_track`
+- progress payload returns `job_kind: "combined_backing_track"`
+
+3. Existing singing bubble isolation still works
+- later combined job does not overwrite the earlier singing message
 
 ## Risks
 
-### 1. Timing mismatch
+### 1. LLM Tool Misclassification
 
-If the backing track drifts or phrase alignment is imperfect, the mixed output will expose that more clearly.
-
-Mitigation:
-
-- this fallback is only for demo use
-- keep using the pickup-prepend logic already implemented
-
-### 2. Clipping / muddy mix
-
-Two summed tracks may sound dense.
+The LLM may choose pure backing when the user meant combined, or vice versa.
 
 Mitigation:
 
-- fixed 70% attenuation
-- peak normalization after sum
+- clear tool descriptions
+- explicit system prompt guidance
+- default ambiguous requests to pure backing track
 
-### 3. Source availability
+### 2. Timing Mismatch
 
-If the stored singing audio is unavailable, combined mode cannot succeed.
+If singing and backing are not tightly aligned, the combined output will expose it.
 
 Mitigation:
 
-- explicit failure
-- no silent fallback
+- keep pickup handling inside backing-track generation
+- use this combined path only as demo fallback
+
+### 3. Session State Ambiguity
+
+If combined output is stored in the same slot as pure backing track, later UI behavior will become confusing.
+
+Mitigation:
+
+- add `current_combined_backing_track_audio`
 
 ## Rollout
 
 Phase 1:
 
-- implement env-gated combined mode locally
-- verify on demo score
+- implement separate MCP tool locally
+- verify tool selection and combined output on demo score
 
 Phase 2:
 
-- if UI dual-playback is not ready, enable the env for demo/prod
+- hand UI developer the updated `job_kind` contract
 
 Phase 3:
 
-- once UI dual playback exists, disable combined mode by default
+- use combined tool only when UI dual-playback is unavailable or user explicitly wants one mixed artifact
 
 ## Open Questions
 
-1. Should combined mode reuse the pickup-prepended backing-track output before mix, or mix first and prepend silence after mix?
+1. Should combined output also be exposed for download alongside pure backing track in future UI?
 
 Recommended answer:
 
-- reuse the final backing-track output exactly as generated, then mix with singing
+- yes, but not required for this backend-only fallback
 
-2. Should the final file still be stored under `current_backing_track_audio`?
-
-Recommended answer:
-
-- yes for v1, to minimize model changes
-
-3. Should the combined output message say "Backing track ready" or "Combined melody + backing track ready"?
+2. Should the combined tool reuse the exact backing-track prompt and metadata in job details?
 
 Recommended answer:
 
-- keep the user-facing copy simple unless demo feedback shows confusion
+- yes, plus mix-specific details such as gains and source durations
+
+3. Should a successful combined render also refresh `current_backing_track_audio`?
+
+Recommended answer:
+
+- no
+- keep pure backing and combined artifacts separate

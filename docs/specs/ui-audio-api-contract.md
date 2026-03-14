@@ -96,6 +96,17 @@ Backing-track example:
 }
 ```
 
+Combined melody + backing example:
+
+```json
+{
+  "type": "chat_progress",
+  "message": "Let me create the combined melody and backing track...",
+  "progress_url": "/sessions/SESSION_ID/progress?job_id=JOB_ID",
+  "job_id": "JOB_ID"
+}
+```
+
 Notes:
 
 - the UI should persist `progress_url` on the corresponding chat bubble/message
@@ -220,6 +231,16 @@ References:
 - [orchestrator.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/orchestrator.py#L569)
 - [orchestrator.py](/Users/alanchan/antigravity/ai-singer-diffsinger/src/backend/orchestrator.py#L614)
 
+### Combined Melody + Backing
+
+Combined melody + backing jobs explicitly set:
+
+```json
+{
+  "job_kind": "combined_backing_track"
+}
+```
+
 ### Singing Audio
 
 Current singing jobs do not set a specific `job_kind` on the normal completion path.
@@ -227,6 +248,7 @@ Current singing jobs do not set a specific `job_kind` on the normal completion p
 So for the UI today:
 
 - if `job_kind === "backing_track"`, treat as backing track
+- if `job_kind === "combined_backing_track"`, treat as combined melody + backing output
 - otherwise, if there is an `audio_url` for a completed render job, treat it as singing audio
 
 There is currently no separate type flag on the `/audio` endpoint itself.
@@ -252,6 +274,7 @@ The distinction is made from `/progress`, not from the binary audio route.
    - read `job_kind`
    - decide UI label:
      - `backing_track` -> backing track
+     - `combined_backing_track` -> combined melody + backing
      - otherwise -> singing audio
 
 ### Play Audio
@@ -293,6 +316,28 @@ The distinction is made from `/progress`, not from the binary audio route.
       "title": "Happy Birthday to You"
     },
     "backing_track_prompt": "Original instrumental backing track..."
+  }
+}
+```
+
+### Combined Melody + Backing Progress Complete
+
+```json
+{
+  "status": "done",
+  "step": "done",
+  "message": "Combined backing track ready.",
+  "progress": 1.0,
+  "audio_url": "/sessions/SESSION_ID/audio?file=combined-backing-track-123.mp3&playback_token=TOKEN",
+  "job_id": "JOB_ID",
+  "job_kind": "combined_backing_track",
+  "details": {
+    "metadata": {
+      "title": "Happy Birthday to You"
+    },
+    "backing_track_prompt": "Original instrumental backing track...",
+    "render_variant": "combined",
+    "reused_existing_backing_track": true
   }
 }
 ```

@@ -14,7 +14,7 @@ from src.api import (
     save_audio,
     synthesize,
 )
-from src.backend.backing_track import generate_backing_track
+from src.backend.backing_track import generate_backing_track, generate_combined_backing_track
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
 from src.backend.progress import write_progress
@@ -263,6 +263,89 @@ def handle_generate_backing_track(params: Dict[str, Any], device: str) -> Dict[s
         "output_format": result.output_format,
         "backing_track_prompt": result.prompt,
         "metadata": result.metadata,
+        "wav_output_path": (
+            str(result.wav_output_path.relative_to(settings.project_root))
+            if result.wav_output_path is not None
+            else None
+        ),
+    }
+
+
+def handle_generate_combined_backing_track(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle combined melody+backing generation."""
+    file_path_param = params.get("file_path")
+    if not isinstance(file_path_param, str) or not file_path_param.strip():
+        raise ValueError(
+            "generate_combined_backing_track requires file_path for backend/direct MCP calls."
+        )
+    style_request = str(params.get("style_request") or "").strip()
+    if not style_request:
+        return {
+            "status": "action_required",
+            "action": "missing_style_request",
+            "code": "missing_style_request",
+            "message": "Please describe the combined track style or genre first.",
+        }
+    output_path_param = params.get("output_path")
+    if not isinstance(output_path_param, str) or not output_path_param.strip():
+        raise ValueError(
+            "generate_combined_backing_track requires output_path for backend/direct MCP calls."
+        )
+    singing_audio_path_param = params.get("singing_audio_path")
+    if not isinstance(singing_audio_path_param, str) or not singing_audio_path_param.strip():
+        raise ValueError(
+            "generate_combined_backing_track requires singing_audio_path for backend/direct MCP calls."
+        )
+
+    file_path = resolve_project_path(file_path_param)
+    output_path = resolve_project_path(output_path_param)
+    singing_audio_path = resolve_project_path(singing_audio_path_param)
+    existing_backing_output_path = params.get("existing_backing_output_path")
+    if isinstance(existing_backing_output_path, str) and existing_backing_output_path.strip():
+        existing_backing_output_path = resolve_project_path(existing_backing_output_path)
+    else:
+        existing_backing_output_path = None
+    existing_backing_wav_path = params.get("existing_backing_wav_path")
+    if isinstance(existing_backing_wav_path, str) and existing_backing_wav_path.strip():
+        existing_backing_wav_path = resolve_project_path(existing_backing_wav_path)
+    else:
+        existing_backing_wav_path = None
+    output_format = str(params.get("output_format") or "").strip() or "mp3_44100_128"
+    seed = params.get("seed")
+    if seed is not None and not isinstance(seed, int):
+        raise ValueError("seed must be an integer when provided.")
+
+    settings = Settings.from_env()
+    llm_client = create_llm_client(settings)
+    result = generate_combined_backing_track(
+        file_path=file_path,
+        output_path=output_path,
+        singing_audio_path=singing_audio_path,
+        existing_backing_output_path=existing_backing_output_path,
+        existing_backing_wav_path=existing_backing_wav_path,
+        style_request=style_request,
+        additional_requirements=str(params.get("additional_requirements") or "").strip() or None,
+        settings=settings,
+        output_format=output_format,
+        seed=seed,
+        llm_client=llm_client,
+    )
+    return {
+        "status": "completed",
+        "output_path": str(result.output_path.relative_to(settings.project_root)),
+        "duration_seconds": result.duration_seconds,
+        "output_format": result.output_format,
+        "backing_track_prompt": result.prompt,
+        "metadata": result.metadata,
+        "backing_track_output_path": str(
+            result.backing_track_output_path.relative_to(settings.project_root)
+        ),
+        "backing_track_wav_output_path": str(
+            result.backing_track_wav_output_path.relative_to(settings.project_root)
+        ),
+        "backing_track_duration_seconds": result.backing_track_duration_seconds,
+        "reused_existing_backing_track": result.reused_existing_backing_track,
+        "render_variant": "combined",
     }
 
 
@@ -318,6 +401,7 @@ HANDLERS = {
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,
     "generate_backing_track": handle_generate_backing_track,
+    "generate_combined_backing_track": handle_generate_combined_backing_track,
     "list_voicebanks": handle_list_voicebanks,
     "get_voicebank_info": handle_get_voicebank_info,
 }
