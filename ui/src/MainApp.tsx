@@ -130,7 +130,6 @@ export default function MainApp() {
   const [showCreditsModal, setShowCreditsModal] = useState(false);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
-  const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [uploadStep, setUploadStep] = useState<'idle' | 'uploading' | 'parsing' | 'analyzing' | 'ready'>('idle');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [activeProgress, setActiveProgress] = useState<{
@@ -211,6 +210,27 @@ export default function MainApp() {
         URL.revokeObjectURL(audioObjectUrlsRef.current.backing);
       }
     };
+  }, []);
+
+  const clearLoadedTracks = useCallback(() => {
+    vocalWavesurferRef.current?.pause();
+    backingWavesurferRef.current?.pause();
+    if (audioObjectUrlsRef.current.vocal) {
+      URL.revokeObjectURL(audioObjectUrlsRef.current.vocal);
+      audioObjectUrlsRef.current.vocal = null;
+    }
+    if (audioObjectUrlsRef.current.backing) {
+      URL.revokeObjectURL(audioObjectUrlsRef.current.backing);
+      audioObjectUrlsRef.current.backing = null;
+    }
+    setVocalUrl(null);
+    setBackingUrl(null);
+    setVocalDownloadUrl(null);
+    setBackingDownloadUrl(null);
+    setBackingReplacementCount(0);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
   }, []);
   
   // Two waveform refs for vocal and backing tracks
@@ -724,13 +744,6 @@ export default function MainApp() {
     }));
   };
 
-  const toggleDiagnostics = (messageId: string) => {
-    setExpandedDiagnostics((prev) => ({
-      ...prev,
-      [messageId]: !prev[messageId],
-    }));
-  };
-
   const refreshScorePreview = async () => {
     if (!sessionId || !score) return;
     const data = await fetchScoreXml(sessionId);
@@ -836,6 +849,7 @@ export default function MainApp() {
     }
     
     setUploading(true);
+    clearLoadedTracks();
     setUploadStep('uploading');
     setUploadProgress(0);
     setError(null);
@@ -878,9 +892,9 @@ export default function MainApp() {
       
       // Add a welcome message
       const quickSuggestions: QuickSuggestion[] = [
-        { label: "Sing warmly", prompt: "Sing this with warmth and emotion" },
-        { label: "Energetic", prompt: "Give me a fast, energetic version" },
-        { label: "Gospel vibe", prompt: "Sing with gospel choir energy" },
+        { label: "Natural", prompt: "Sing this naturally" },
+        { label: "Softly", prompt: "Sing this softly" },
+        { label: "Energetic", prompt: "Give me a strong, energetic version" },
       ];
 
       appendMessage({
@@ -1138,8 +1152,7 @@ export default function MainApp() {
                       msg.content
                     );
                     const isExpanded = Boolean(expandedThoughts[msg.id]);
-                    const diagnosticsExpanded = Boolean(expandedDiagnostics[msg.id]);
-                    const diagnosticsText = formatDiagnostics(msg.details);
+                    const shouldHideProgressText = Boolean(msg.isProgress && !msg.audioUrl);
                     const followupAttempts = (msg.attemptMessages ?? []).filter(
                       (attempt) => attempt.attempt_number > 1
                     );
@@ -1224,40 +1237,16 @@ export default function MainApp() {
                             </div>
                           );
                         })}
-                        {trailingContent ? (
+                        {!shouldHideProgressText && trailingContent ? (
                           <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
                             {trailingContent}
                           </ReactMarkdown>
-                        ) : null}
-                        {diagnosticsText ? (
-                          <div className="thought-summary diagnostics-panel">
-                            <button
-                              type="button"
-                              className="thought-summary-toggle"
-                              onClick={() => toggleDiagnostics(msg.id)}
-                              aria-expanded={diagnosticsExpanded}
-                            >
-                              <span
-                                className={clsx(
-                                  "thought-summary-caret",
-                                  diagnosticsExpanded && "expanded"
-                                )}
-                                aria-hidden="true"
-                              >
-                                ▾
-                              </span>
-                              <span>Diagnostics</span>
-                            </button>
-                            {diagnosticsExpanded ? (
-                              <pre className="diagnostics-content">{diagnosticsText}</pre>
-                            ) : null}
-                          </div>
                         ) : null}
                       </>
                     );
                   })()
                 ) : (
-                  <p>{msg.content}</p>
+                  !msg.isProgress ? <p>{msg.content}</p> : null
                 )}
                 {msg.suggestions && msg.suggestions.length > 0 && (
                   <div className="quick-suggestion-row">
