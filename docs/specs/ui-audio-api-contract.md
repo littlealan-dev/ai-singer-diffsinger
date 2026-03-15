@@ -158,7 +158,6 @@ Current payload fields:
   },
   "updated_at": "..."
 }
-```
 
 Possible fields:
 
