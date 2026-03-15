@@ -440,18 +440,23 @@ def create_app() -> FastAPI:
         user_id = await _get_user_id_or_401(request)
         snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
         score_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
+        logger.info("get_score: resolved score_path from current_score: %s", score_path)
         if score_path is None:
             session = await _get_session_or_404(sessions, session_id, user_id)
             rel_path = session.files.get("musicxml_path")
+            logger.info("get_score: falling back to musicxml_path from session.files: %s", rel_path)
             if not rel_path:
                 raise HTTPException(status_code=404, detail="Score not found.")
             score_path = _resolve_allowlisted_score_path(settings, rel_path)
+            logger.info("get_score: resolved score_path from musicxml_path: %s", score_path)
         if not score_path.exists():
+            logger.error("get_score: score_path does not exist: %s", score_path)
             raise HTTPException(status_code=404, detail="Score file not found.")
         content = _read_musicxml_content(
             score_path,
             max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
         )
+        logger.info("get_score: read content length: %d bytes, first 100 chars: %s", len(content), content[:100])
         return Response(content=content, media_type="application/xml")
 
     return app
