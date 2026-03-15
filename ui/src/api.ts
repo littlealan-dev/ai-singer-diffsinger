@@ -36,6 +36,7 @@ export type ChatResponse =
       type: "chat_audio";
       message: string;
       audio_url: string;
+      job_kind?: string;
       current_score?: unknown;
       details?: unknown;
       warning?: string;
@@ -91,6 +92,15 @@ function withApiBase(url: string): string {
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
+function withNgrokBypass(headers?: HeadersInit): HeadersInit | undefined {
+  if (!API_BASE.includes("ngrok")) {
+    return headers;
+  }
+  const next = new Headers(headers ?? {});
+  next.set("ngrok-skip-browser-warning", "1");
+  return next;
+}
+
 async function withAppCheckHeaders(
   headers?: HeadersInit
 ): Promise<HeadersInit | undefined> {
@@ -120,6 +130,7 @@ async function withAuthHeaders(
 async function request<T>(path: string, options: RequestInit): Promise<T> {
   let headers = await withAppCheckHeaders(options.headers);
   headers = await withAuthHeaders(headers);
+  headers = withNgrokBypass(headers);
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!response.ok) {
     const text = await response.text();
@@ -151,6 +162,7 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
   form.append("file", file);
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
+  headers = withNgrokBypass(headers);
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/upload`, {
     method: "POST",
     body: form,
@@ -166,19 +178,47 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
 export async function fetchScoreXml(sessionId: string): Promise<string> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
+  headers = {
+    ...(headers ?? {}),
+    Accept: "application/xml, text/xml;q=0.9, */*;q=0.8",
+  };
+  headers = withNgrokBypass(headers);
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/score`, { headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || "Failed to load score.");
   }
-  return response.text();
+  const contentType = response.headers.get("content-type")?.toLowerCase();
+  const text = await response.text();
+  if (contentType?.includes("text/html")) {
+    console.error(
+      "fetchScoreXml: received HTML instead of MusicXML. Status:",
+      response.status,
+      "Redirected:",
+      response.redirected,
+      "URL:",
+      response.url,
+      "Preview:",
+      text.substring(0, 500)
+    );
+    throw new Error("Backend returned HTML instead of MusicXML. Check backend logs for errors.");
+  }
+  return text;
 }
 
-export async function chat(sessionId: string, message: string): Promise<ChatResponse> {
+export async function chat(
+  sessionId: string,
+  message: string,
+  selection?: { verse_number?: number; part_key?: string }
+): Promise<ChatResponse> {
+  const body: { message: string; selection?: object } = { message };
+  if (selection) {
+    body.selection = selection;
+  }
   const response = await request<ChatResponse>(`/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   });
   if (response.type === "chat_audio") {
     return {
@@ -198,7 +238,8 @@ export async function chat(sessionId: string, message: string): Promise<ChatResp
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetch(withApiBase(progressUrl), { headers });
+  headers = withNgrokBypass(headers);
+  const response = await fetch(progressUrl, { headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
@@ -208,4 +249,19 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
     payload.audio_url = withApiBase(payload.audio_url);
   }
   return payload;
+}
+
+export async function fetchAudioBlob(audioUrl: string): Promise<Blob> {
+  if (!audioUrl) {
+    throw new Error("Missing audio URL");
+  }
+  let headers = await withAppCheckHeaders();
+  headers = await withAuthHeaders(headers);
+  headers = withNgrokBypass(headers);
+  const response = await fetch(audioUrl, { headers });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Failed to fetch audio stream.");
+  }
+  return response.blob();
 }

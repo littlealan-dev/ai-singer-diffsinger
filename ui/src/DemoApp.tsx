@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Sparkles, UploadCloud, Minus, Plus, Info, User, ChevronDown } from "lucide-react";
+import { UploadCloud, Minus, Plus, Info, User, ChevronDown } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
-import { useAuth } from "./hooks/useAuth.tsx";
+import { useAuth } from "./hooks/useAuth";
 import { UserMenu } from "./components/UserMenu";
 import { AuthModal } from "./components/AuthModal";
 import { WaitlistModal } from "./components/WaitlistModal";
@@ -279,8 +279,8 @@ export default function DemoApp() {
   return (
     <div className="app-shell demo-app">
       <header className="app-header">
-        <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
-          <Sparkles className="brand-icon" />
+        <div className="brand" onClick={() => navigate("/app")}> 
+          <img src="/logo-hackaton.png" alt="SightSinger logo" className="brand-icon" />
           <div>
             <h1>SightSinger.app</h1>
             <p>Interactive Demo</p>
