@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import tempfile
 
 from src.api import phonemize
 from src.phonemizer import Phonemizer
@@ -80,6 +81,36 @@ class PhonemizerClassTests(unittest.TestCase):
         result = phonemizer.phonemize_tokens(["SP", "en/aa"])
         self.assertEqual(result.phonemes, ["SP", "en/aa"])
         self.assertEqual(result.language_ids, [0, 1])
+
+    def test_dictionary_phonemes_fall_back_to_bare_inventory_symbol(self) -> None:
+        """If en/x is missing but bare x exists, validation should use the bare symbol."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-en.yaml"
+            languages_path = root / "languages.json"
+
+            phonemes_path.write_text('{"SP": 0, "AP": 1, "hh": 2, "en/aw": 3}', encoding="utf8")
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: how\n"
+                "    phonemes: [en/hh, en/aw]\n",
+                encoding="utf8",
+            )
+            languages_path.write_text('{"en": 1}', encoding="utf8")
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                languages_path=languages_path,
+                language="en",
+                allow_g2p=False,
+            )
+
+            result = phonemizer.phonemize_tokens(["how"])
+            self.assertEqual(result.phonemes, ["hh", "en/aw"])
+            self.assertEqual(result.ids, [2, 3])
+            self.assertEqual(result.language_ids, [0, 1])
 
 
 class PhonemizeAPITests(unittest.TestCase):

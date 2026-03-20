@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 import json
 import os
+from unittest import mock
 
 from src.api import (
     parse_score,
@@ -20,6 +21,7 @@ from src.api import (
     get_voicebank_info,
     save_audio,
 )
+from src.api.voicebank import resolve_vocoder_model_path
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 from src.api.voice_parts import preprocess_voice_parts
 
@@ -482,6 +484,36 @@ class TestVoicebankAPIs(unittest.TestCase):
         self.assertIn("id", vb)
         self.assertIn("name", vb)
         self.assertIn("path", vb)
+
+    def test_list_voicebanks_only_returns_registered_voicebanks(self):
+        voicebanks = list_voicebanks(ROOT_DIR / "assets/voicebanks")
+        ids = {entry["id"] for entry in voicebanks}
+        self.assertEqual(
+            ids,
+            {
+                "Raine_Rena_2.01",
+                "Raine_Reizo_2.01",
+                "Katyusha_v170",
+                "Keiro_Revenant_v170",
+                "Liam_Thorne_v170",
+                "SAiFA_v170",
+            },
+        )
+
+    def test_list_voicebanks_discovers_nested_root_for_custom_search_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            search_root = Path(tmp_dir)
+            nested_root = search_root / "NestedBank" / "configs"
+            nested_root.mkdir(parents=True, exist_ok=True)
+            (nested_root / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
+            (nested_root / "character.yaml").write_text("name: Nested Bank\n", encoding="utf-8")
+
+            voicebanks = list_voicebanks(search_root)
+
+        self.assertEqual(len(voicebanks), 1)
+        self.assertEqual(voicebanks[0]["id"], "NestedBank")
+        self.assertEqual(voicebanks[0]["name"], "Nested Bank")
+        self.assertEqual(voicebanks[0]["path"], str(Path("NestedBank") / "configs"))
     
     def test_get_voicebank_info(self):
         """get_voicebank_info should return capabilities."""
@@ -499,6 +531,64 @@ class TestVoicebankAPIs(unittest.TestCase):
         if voice_colors:
             color_names = [entry.get("name") for entry in voice_colors]
             self.assertIn(info.get("default_voice_color"), color_names)
+
+    def test_get_voicebank_info_includes_registry_gender_and_voice_type(self):
+        if not VOICEBANK_PATH.exists():
+            self.skipTest(f"Voicebank not found at {VOICEBANK_PATH}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            registry_path = Path(tmp_dir) / "voicebank_registry.yaml"
+            registry_path.write_text(
+                "voicebanks:\n"
+                "  - id: Raine_Rena_2.01\n"
+                "    gender: female\n"
+                "    voice_type: alto\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VOICEBANK_REGISTRY_PATH": str(registry_path)}):
+                info = get_voicebank_info("Raine_Rena_2.01")
+
+        self.assertEqual(info["gender"], "female")
+        self.assertEqual(info["voice_type"], "alto")
+
+    def test_get_voicebank_info_includes_registry_metadata_for_nested_voicebank_path(self):
+        nested_voicebank_path = ROOT_DIR / "assets/voicebanks/Katyusha_v170/configs"
+        if not nested_voicebank_path.exists():
+            self.skipTest(f"Voicebank not found at {nested_voicebank_path}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            registry_path = Path(tmp_dir) / "voicebank_registry.yaml"
+            registry_path.write_text(
+                "voicebanks:\n"
+                "  - id: Katyusha_v170\n"
+                "    gender: female\n"
+                "    voice_type: soprano\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"VOICEBANK_REGISTRY_PATH": str(registry_path)}):
+                info = get_voicebank_info(nested_voicebank_path)
+
+        self.assertEqual(info["gender"], "female")
+        self.assertEqual(info["voice_type"], "soprano")
+
+    def test_resolve_vocoder_model_path_uses_shared_assets(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            voicebank_root = root / "assets" / "voicebanks" / "SharedVocoderBank"
+            shared_vocoder_dir = root / "assets" / "vocoders" / "pc_nsf_hifigan_44.1k"
+            voicebank_root.mkdir(parents=True, exist_ok=True)
+            shared_vocoder_dir.mkdir(parents=True, exist_ok=True)
+            (voicebank_root / "dsconfig.yaml").write_text(
+                "sample_rate: 44100\nvocoder: pc_nsf_hifigan_44.1k_hop512_128bin_2025.02\n",
+                encoding="utf-8",
+            )
+            shared_model = shared_vocoder_dir / "pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx"
+            shared_model.write_bytes(b"onnx")
+
+            with mock.patch("src.api.voicebank._project_root", return_value=root):
+                resolved = resolve_vocoder_model_path(voicebank_root)
+
+            self.assertEqual(resolved, shared_model.resolve())
 
 
 class TestSlurVelocityEnvelope(unittest.TestCase):

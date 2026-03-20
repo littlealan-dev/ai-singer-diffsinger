@@ -3,13 +3,12 @@ Vocoder API.
 """
 
 import logging
-import yaml
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from src.vocoder.model import Vocoder
-from src.api.voicebank import load_voicebank_config
+from src.api.voicebank import load_voicebank_config, resolve_vocoder_model_path
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -25,40 +24,9 @@ def _load_vocoder(voicebank_path: Path, device: str = "cpu") -> Vocoder:
     if cache_key in _vocoder_cache:
         return _vocoder_cache[cache_key]
 
-    conf = load_voicebank_config(voicebank_path)
-
-    # Try vocoder path from config.
-    if "vocoder" in conf:
-        vocoder_path = (voicebank_path / conf["vocoder"]).resolve()
-        if vocoder_path.is_dir():
-            vocoder_yaml = vocoder_path / "vocoder.yaml"
-            if vocoder_yaml.exists():
-                vocoder_conf = yaml.safe_load(vocoder_yaml.read_text())
-                model_name = vocoder_conf.get("model")
-                if model_name:
-                    vocoder_path = vocoder_path / model_name
-            else:
-                vocoder_path = vocoder_path / "vocoder.onnx"
-        voc = Vocoder(vocoder_path, device)
-        _vocoder_cache[cache_key] = voc
-        return voc
-    
-    # Try dsvocoder directory.
-    dsvocoder = voicebank_path / "dsvocoder"
-    if dsvocoder.exists():
-        vocoder_yaml = dsvocoder / "vocoder.yaml"
-        if vocoder_yaml.exists():
-            vocoder_conf = yaml.safe_load(vocoder_yaml.read_text())
-            model_name = vocoder_conf.get("model")
-            if model_name:
-                voc = Vocoder((dsvocoder / model_name).resolve(), device)
-                _vocoder_cache[cache_key] = voc
-                return voc
-        voc = Vocoder(dsvocoder / "vocoder.onnx", device)
-        _vocoder_cache[cache_key] = voc
-        return voc
-    
-    raise FileNotFoundError("Vocoder not found in voicebank")
+    voc = Vocoder(resolve_vocoder_model_path(voicebank_path), device)
+    _vocoder_cache[cache_key] = voc
+    return voc
 
 
 def vocode(

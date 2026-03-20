@@ -176,13 +176,25 @@ class Phonemizer:
         """Ensure phonemes are present in the voicebank inventory."""
         validated = []
         for phoneme in phonemes:
-            if phoneme not in self._phoneme_to_id:
+            resolved = self._resolve_inventory_phoneme(phoneme)
+            if resolved is None:
                 raise KeyError(
                     f"Unknown phoneme '{phoneme}' from token '{token}'. "
                     f"Check {self.phonemes_path} or update mappings."
                 )
-            validated.append(phoneme)
+            validated.append(resolved)
         return validated
+
+    def _resolve_inventory_phoneme(self, phoneme: str) -> Optional[str]:
+        """Resolve a phoneme against the inventory, allowing a narrow lang-prefix fallback."""
+        if phoneme in self._phoneme_to_id:
+            return phoneme
+        prefix = f"{self.language}/"
+        if phoneme.startswith(prefix):
+            bare = phoneme[len(prefix):]
+            if bare in self._phoneme_to_id:
+                return bare
+        return None
 
     @staticmethod
     def _load_phoneme_metadata(path: Path) -> Dict[str, Dict[str, float]]:

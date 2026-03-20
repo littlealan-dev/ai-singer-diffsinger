@@ -3211,6 +3211,8 @@ class Orchestrator:
                     {
                         "id": voicebank_id,
                         "name": info.get("name") or entry.get("name") or voicebank_id,
+                        "gender": info.get("gender"),
+                        "voice_type": info.get("voice_type"),
                         "voice_colors": info.get("voice_colors", []),
                         "default_voice_color": info.get("default_voice_color"),
                     }

@@ -193,3 +193,29 @@ def test_build_prompt_bundle_splits_static_and_dynamic_content() -> None:
     assert bundle.dynamic_prompt_text.startswith("Dynamic Context:\n")
     assert '"title": "My Tribute"' in bundle.dynamic_prompt_text
     assert "End Dynamic Context." in bundle.dynamic_prompt_text
+
+
+def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Katyusha_v170"],
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=[
+            {
+                "id": "Katyusha_v170",
+                "name": "Katyusha v170",
+                "gender": "female",
+                "voice_type": "soprano",
+                "voice_colors": [{"name": "01: standard", "suffix": "embeds/standard"}],
+                "default_voice_color": "01: standard",
+            }
+        ],
+    )
+    assert "Voicebank metadata (if available):" in bundle.dynamic_prompt_text
+    assert '"gender": "female"' in bundle.dynamic_prompt_text
+    assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text

@@ -117,7 +117,7 @@ def build_prompt_bundle(
         "Latest attempted preprocess plan (if available):\n"
         f"{last_preprocess_plan_text}\n"
         f"Available voicebanks (IDs): {voicebanks_text}\n"
-        "Voicebank color options (if any):\n"
+        "Voicebank metadata (if available):\n"
         f"{voicebank_details_text}\n"
         "End Dynamic Context."
     )

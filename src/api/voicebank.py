@@ -8,10 +8,25 @@ import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from src.api.voicebank_cache import is_prod_env, list_voicebank_ids, resolve_voicebank_path
+from src.api.voicebank_cache import (
+    discover_voicebank_root,
+    get_registered_voicebank_metadata,
+    is_prod_env,
+    list_voicebank_ids,
+    resolve_registered_voicebank_id,
+    resolve_voicebank_path,
+)
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _shared_vocoder_root() -> Path:
+    return _project_root() / "assets" / "vocoders"
 
 
 def _load_character_data(path: Path) -> Dict[str, Any]:
@@ -119,6 +134,77 @@ def load_voicebank_config(voicebank_path: Union[str, Path]) -> Dict[str, Any]:
     return config
 
 
+def _resolve_vocoder_model_from_dir(vocoder_dir: Path) -> Optional[Path]:
+    """Resolve a vocoder model file from a directory or its vocoder.yaml."""
+    vocoder_yaml = vocoder_dir / "vocoder.yaml"
+    if vocoder_yaml.exists():
+        vocoder_conf = yaml.safe_load(vocoder_yaml.read_text())
+        model_name = vocoder_conf.get("model")
+        if model_name:
+            return (vocoder_dir / model_name).resolve()
+    fallback = vocoder_dir / "vocoder.onnx"
+    if fallback.exists():
+        return fallback.resolve()
+    return None
+
+
+def _resolve_shared_vocoder_candidate(vocoder_ref: str) -> Optional[Path]:
+    """Resolve a shared vocoder asset by name or model filename."""
+    shared_root = _shared_vocoder_root()
+    if not shared_root.exists():
+        return None
+
+    direct = (shared_root / vocoder_ref).resolve()
+    if direct.exists():
+        if direct.is_dir():
+            return _resolve_vocoder_model_from_dir(direct)
+        return direct
+
+    direct_onnx = (shared_root / f"{vocoder_ref}.onnx").resolve()
+    if direct_onnx.exists():
+        return direct_onnx
+
+    max_depth = 2
+    matches: List[Path] = []
+    for candidate in shared_root.rglob(f"{vocoder_ref}.onnx"):
+        depth = len(candidate.relative_to(shared_root).parts) - 1
+        if depth <= max_depth:
+            matches.append(candidate)
+    if matches:
+        matches.sort()
+        return matches[0].resolve()
+    return None
+
+
+def resolve_vocoder_model_path(voicebank_path: Union[str, Path]) -> Path:
+    """Resolve the actual ONNX vocoder model path for a voicebank."""
+    path = Path(voicebank_path)
+    conf = load_voicebank_config(path)
+
+    vocoder_ref = conf.get("vocoder")
+    if isinstance(vocoder_ref, str) and vocoder_ref:
+        direct = (path / vocoder_ref).resolve()
+        if direct.exists():
+            if direct.is_dir():
+                model_path = _resolve_vocoder_model_from_dir(direct)
+                if model_path is not None:
+                    return model_path
+            else:
+                return direct
+
+        shared = _resolve_shared_vocoder_candidate(vocoder_ref)
+        if shared is not None:
+            return shared
+
+    dsvocoder = path / "dsvocoder"
+    if dsvocoder.exists():
+        model_path = _resolve_vocoder_model_from_dir(dsvocoder)
+        if model_path is not None:
+            return model_path
+
+    raise FileNotFoundError("Vocoder not found in voicebank or shared vocoder assets.")
+
+
 def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict[str, Any]]:
     """
     List available voicebanks.
@@ -137,7 +223,7 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
             "list_voicebanks input=%s",
             summarize_payload({"search_path": str(search_path) if search_path else None}),
         )
-    root_dir = Path(__file__).parent.parent.parent
+    root_dir = _project_root()
     if search_path is None and is_prod_env():
         # Production mode uses cached IDs to avoid filesystem scans.
         ids = list_voicebank_ids()
@@ -154,6 +240,26 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
     if not search_path.exists():
         return []
 
+    default_search = (root_dir / "assets" / "voicebanks").resolve()
+    if search_path.resolve() == default_search:
+        voicebanks = []
+        for voicebank_id in list_voicebank_ids():
+            resolved_item = resolve_voicebank_path(voicebank_id)
+            try:
+                relative_path = resolved_item.relative_to(root_dir.resolve())
+            except ValueError:
+                relative_path = resolved_item
+            info = {
+                "id": voicebank_id,
+                "path": str(relative_path),
+            }
+            char_data = _load_character_data(resolved_item)
+            info["name"] = char_data.get("name", voicebank_id) if char_data else voicebank_id
+            voicebanks.append(info)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("list_voicebanks output=%s", summarize_payload(voicebanks))
+        return voicebanks
+
     resolved_root = root_dir.resolve()
     resolved_search = search_path.resolve()
     if resolved_search == resolved_root or resolved_root in resolved_search.parents:
@@ -163,8 +269,11 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
 
     voicebanks = []
     for item in search_path.iterdir():
-        if item.is_dir() and (item / "dsconfig.yaml").exists():
-            resolved_item = item.resolve()
+        if item.is_dir():
+            discovered_root = discover_voicebank_root(item)
+            if discovered_root is None:
+                continue
+            resolved_item = discovered_root.resolve()
             try:
                 relative_path = resolved_item.relative_to(rel_base)
             except ValueError:
@@ -174,7 +283,7 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
                 "path": str(relative_path),
             }
             # Try to get name from character.yaml.
-            char_file = item / "character.yaml"
+            char_file = discovered_root / "character.yaml"
             if char_file.exists():
                 try:
                     char_data = yaml.safe_load(char_file.read_text())
@@ -248,7 +357,13 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
 
     voice_colors = _extract_voice_colors(path)
     default_voice_color = _resolve_default_voice_color(voice_colors)
-    
+    registry_voicebank_id = resolve_registered_voicebank_id(voicebank)
+    registry_metadata = (
+        get_registered_voicebank_metadata(registry_voicebank_id)
+        if registry_voicebank_id
+        else {}
+    )
+
     result = {
         "name": name,
         "path": str(path.resolve()),
@@ -262,6 +377,8 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),
+        "gender": registry_metadata.get("gender"),
+        "voice_type": registry_metadata.get("voice_type"),
     }
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("get_voicebank_info output=%s", summarize_payload(result))

@@ -12,6 +12,7 @@ from src.phonemizer.phonemizer import Phonemizer
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
 from src.vocoder.model import Vocoder
 from src.musicxml.parser import parse_musicxml, ScoreData, NoteEvent, TempoEvent
+from src.api.voicebank import resolve_vocoder_model_path
 
 
 @dataclass
@@ -291,30 +292,7 @@ class Pipeline:
         Inputs: none (uses self.root).
         Outputs: Vocoder instance.
         """
-        conf = yaml.safe_load((self.root / "dsconfig.yaml").read_text())
-        if "vocoder" in conf:
-            vocoder_path = (self.root / conf["vocoder"]).resolve()
-            if vocoder_path.is_dir():
-                vocoder_yaml = vocoder_path / "vocoder.yaml"
-                if vocoder_yaml.exists():
-                    vocoder_conf = yaml.safe_load(vocoder_yaml.read_text())
-                    model_name = vocoder_conf.get("model")
-                    if not model_name:
-                        raise FileNotFoundError(
-                            f"Missing 'model' in {vocoder_yaml}"
-                        )
-                    return Vocoder((vocoder_path / model_name).resolve(), self.device)
-            return Vocoder(vocoder_path, self.device)
-        dsvocoder = self.root / "dsvocoder"
-        if dsvocoder.exists():
-            vocoder_yaml = dsvocoder / "vocoder.yaml"
-            if vocoder_yaml.exists():
-                vocoder_conf = yaml.safe_load(vocoder_yaml.read_text())
-                model_name = vocoder_conf.get("model")
-                if model_name:
-                    return Vocoder((dsvocoder / model_name).resolve(), self.device)
-            return Vocoder(dsvocoder / "vocoder.onnx", self.device)
-        raise FileNotFoundError("Could not find Vocoder.")
+        return Vocoder(resolve_vocoder_model_path(self.root), self.device)
 
     def _resolve_dictionary_path(self) -> Path:
         """Resolve a phoneme dictionary path from known locations.

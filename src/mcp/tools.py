@@ -1217,6 +1217,14 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Default voice color/style when no explicit color is chosen.",
         },
+        "gender": {
+            "type": ["string", "null"],
+            "description": "Curated singer gender metadata from the backend registry, if available.",
+        },
+        "voice_type": {
+            "type": ["string", "null"],
+            "description": "Curated SATB-style voice type metadata from the backend registry, if available.",
+        },
         "sample_rate": {"type": "integer", "description": "Native output sample rate in Hz."},
         "hop_size": {"type": "integer", "description": "Model hop size used by the backend."},
         "use_lang_id": {"type": "boolean", "description": "Whether language-id conditioning is used."},
@@ -1230,6 +1238,8 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
         "speakers",
         "voice_colors",
         "default_voice_color",
+        "gender",
+        "voice_type",
         "sample_rate",
         "hop_size",
         "use_lang_id",

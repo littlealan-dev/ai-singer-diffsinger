@@ -17,16 +17,58 @@ class TestEndToEndAPI(unittest.TestCase):
         self.root_dir = Path(__file__).parent.parent
         self.voicebank_path = self.root_dir / "assets/voicebanks/Raine_Rena_2.01"
         self.voicebank_reizo_path = self.root_dir / "assets/voicebanks/Raine_Reizo_2.01"
+        self.voicebank_apollo_path = self.root_dir / "assets/voicebanks/Apollo DS 1.0"
+        self.voicebank_katyusha_path = self.root_dir / "assets/voicebanks/Katyusha_v170/configs"
+        self.voicebank_commissions_path = self.root_dir / "assets/voicebanks/commissionsv1noka/configs"
         self.score_path = self.root_dir / "assets/test_data/amazing-grace.mxl"
         self.output_dir = self.root_dir / "tests/output"
         self.output_dir.mkdir(exist_ok=True)
         self.output_wav = self.output_dir / "api_output.wav"
         self.output_wav_reizo = self.output_dir / "api_output_reizo.wav"
+        self.output_wav_apollo = self.output_dir / "api_output_apollo.wav"
+        self.output_wav_apollo_tenor = self.output_dir / "api_output_apollo_tenor.wav"
+        self.output_wav_katyusha = self.output_dir / "api_output_katyusha.wav"
+        self.output_wav_commissions = self.output_dir / "api_output_commissionsv1noka.wav"
         
         if not self.voicebank_path.exists():
             self.skipTest(f"Voicebank not found at {self.voicebank_path}")
         if not self.score_path.exists():
             self.skipTest(f"Test score not found at {self.score_path}")
+
+    def _run_full_synthesis_case(
+        self,
+        voicebank_path: Path,
+        output_wav: Path,
+        *,
+        label: str,
+        synth_kwargs: dict | None = None,
+    ) -> None:
+        if not voicebank_path.exists():
+            self.skipTest(f"Voicebank not found at {voicebank_path}")
+
+        print(f"\n=== Full Synthesis Test ({label}) ===")
+        print(f"Voicebank: {voicebank_path}")
+        print(f"Score: {self.score_path.name}")
+
+        print("Step 1: Parsing score...")
+        score = parse_score(self.score_path)
+        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
+
+        print("Step 2: Synthesizing audio...")
+        result = synthesize(score, voicebank_path, **(synth_kwargs or {}))
+        print(f"  Generated {result['duration_seconds']:.2f}s of audio")
+
+        print("Step 3: Saving audio...")
+        save_result = save_audio(
+            result["waveform"],
+            output_wav,
+            sample_rate=result["sample_rate"],
+        )
+        print(f"  Saved to: {save_result['path']}")
+
+        self.assertTrue(Path(save_result["path"]).exists())
+        self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
+        print("  ✓ Test passed!")
 
     def test_voicebank_info(self):
         """Test that voicebank info can be retrieved."""
@@ -53,63 +95,82 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_full_synthesis(self):
         """Test full pipeline: parse → synthesize → save."""
-        print(f"\n=== Full Synthesis Test ===")
-        print(f"Voicebank: {self.voicebank_path.name}")
-        print(f"Score: {self.score_path.name}")
-        
-        # Step 1: Parse score
-        print("Step 1: Parsing score...")
-        score = parse_score(self.score_path)
-        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
-        
-        # Step 2: Synthesize
-        print("Step 2: Synthesizing audio...")
-        result = synthesize(score, self.voicebank_path)
-        print(f"  Generated {result['duration_seconds']:.2f}s of audio")
-        
-        # Step 3: Save
-        print("Step 3: Saving audio...")
-        save_result = save_audio(
-            result["waveform"],
+        self._run_full_synthesis_case(
+            self.voicebank_path,
             self.output_wav,
-            sample_rate=result["sample_rate"],
+            label="Raine_Rena_2.01",
         )
-        print(f"  Saved to: {save_result['path']}")
-        
-        # Verify
-        self.assertTrue(Path(save_result["path"]).exists())
-        self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
-        print("  ✓ Test passed!")
 
     def test_full_synthesis_reizo(self):
         """Test full pipeline with Raine_Reizo_2.01."""
-        if not self.voicebank_reizo_path.exists():
-            self.skipTest(f"Voicebank not found at {self.voicebank_reizo_path}")
+        self._run_full_synthesis_case(
+            self.voicebank_reizo_path,
+            self.output_wav_reizo,
+            label="Raine_Reizo_2.01",
+            synth_kwargs={"voice_id": "soprano"},
+        )
 
-        print(f"\n=== Full Synthesis Test (Reizo) ===")
-        print(f"Voicebank: {self.voicebank_reizo_path.name}")
+    def test_full_synthesis_apollo(self):
+        """Test full pipeline with Apollo DS 1.0."""
+        self._run_full_synthesis_case(
+            self.voicebank_apollo_path,
+            self.output_wav_apollo,
+            label="Apollo DS 1.0",
+        )
+
+    def test_full_synthesis_katyusha(self):
+        """Test full pipeline with Katyusha_v170/configs."""
+        self._run_full_synthesis_case(
+            self.voicebank_katyusha_path,
+            self.output_wav_katyusha,
+            label="Katyusha_v170/configs",
+        )
+
+    def test_full_synthesis_commissionsv1noka(self):
+        """Test full pipeline with commissionsv1noka/configs."""
+        self._run_full_synthesis_case(
+            self.voicebank_commissions_path,
+            self.output_wav_commissions,
+            label="commissionsv1noka/configs",
+        )
+
+    def test_full_synthesis_apollo_tenor_amazing_grace(self):
+        """Test tenor verse 1 of Amazing Grace with Apollo DS 1.0."""
+        if not self.voicebank_apollo_path.exists():
+            self.skipTest(f"Voicebank not found at {self.voicebank_apollo_path}")
+
+        print(f"\n=== Full Synthesis Test (Tenor, Apollo) ===")
+        print(f"Voicebank: {self.voicebank_apollo_path.name}")
         print(f"Score: {self.score_path.name}")
 
-        # Step 1: Parse score
-        print("Step 1: Parsing score...")
-        score = parse_score(self.score_path)
-        print(f"  Parsed {len(score['parts'][0]['notes'])} notes")
+        print("Step 1: Parsing score summary...")
+        summary_score = parse_score(self.score_path)
+        parts = summary_score.get("score_summary", {}).get("parts", [])
+        tenor_part = next(
+            (part for part in parts if "tenor" in (part.get("part_name") or "").lower()),
+            None,
+        )
+        if tenor_part is None:
+            self.skipTest("Tenor part not found in score summary.")
 
-        # Step 2: Synthesize
-        print("Step 2: Synthesizing audio...")
-        result = synthesize(score, self.voicebank_reizo_path, voice_id="soprano")
+        tenor_index = tenor_part["part_index"]
+
+        print("Step 2: Parsing tenor verse 1...")
+        score = parse_score(self.score_path, verse_number="1")
+        print(f"  Parsed {len(score['parts'][tenor_index]['notes'])} notes")
+
+        print("Step 3: Synthesizing audio...")
+        result = synthesize(score, self.voicebank_apollo_path, part_index=tenor_index)
         print(f"  Generated {result['duration_seconds']:.2f}s of audio")
 
-        # Step 3: Save
-        print("Step 3: Saving audio...")
+        print("Step 4: Saving audio...")
         save_result = save_audio(
             result["waveform"],
-            self.output_wav_reizo,
+            self.output_wav_apollo_tenor,
             sample_rate=result["sample_rate"],
         )
         print(f"  Saved to: {save_result['path']}")
 
-        # Verify
         self.assertTrue(Path(save_result["path"]).exists())
         self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
         print("  ✓ Test passed!")
