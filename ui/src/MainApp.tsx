@@ -1089,8 +1089,8 @@ export default function MainApp() {
             {messages.length === 0 && !uploading && uploadStep === 'idle' && (
               <div className="empty-state-landing">
                 <div className="landing-content">
-                  <h1 className="landing-title">Sight Singer AI</h1>
-                  <p className="landing-subtitle">Upload a MusicXML file and describe how you want it sung</p>
+                  <h1 className="landing-title">SightSinger</h1>
+                  <p className="landing-subtitle">Drop me the score. Say a few words. I'll sing it for you.</p>
                   <div className="suggestion-chips">
                     <button className="suggestion-chip" onClick={() => sendMessage("Sing this with warmth and emotion")}>Sing with warmth</button>
                     <button className="suggestion-chip" onClick={() => sendMessage("Give me a fast, energetic version")}>Fast & energetic</button>
