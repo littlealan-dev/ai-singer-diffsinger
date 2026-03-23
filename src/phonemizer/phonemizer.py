@@ -248,16 +248,35 @@ class Phonemizer:
 
     @staticmethod
     def _load_phoneme_inventory(path: Path) -> Dict[str, int]:
-        """Load phoneme inventory from phonemes.json."""
+        """Load phoneme inventory from phonemes.json or phonemes.txt."""
         if not path.exists():
             raise FileNotFoundError(
                 f"Phoneme inventory not found at {path}. "
-                "Expected a phonemes.json from the voicebank."
+                "Expected a phonemes.json or phonemes.txt from the voicebank."
             )
-        data = yaml.safe_load(path.read_text(encoding="utf8"))
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid phonemes.json format at {path}.")
-        return {str(k): int(v) for k, v in data.items()}
+        raw_text = path.read_text(encoding="utf8")
+        try:
+            data = yaml.safe_load(raw_text)
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            return {str(k): int(v) for k, v in data.items()}
+        return Phonemizer._parse_text_phoneme_inventory(raw_text, path)
+
+    @staticmethod
+    def _parse_text_phoneme_inventory(raw_text: str, path: Path) -> Dict[str, int]:
+        """Load a line-based phoneme inventory from plain text."""
+        phoneme_to_id: Dict[str, int] = {}
+        for line in raw_text.splitlines():
+            symbol = line.strip()
+            if not symbol or symbol.startswith("#") or symbol.startswith(";"):
+                continue
+            if symbol in phoneme_to_id:
+                raise ValueError(f"Duplicate phoneme '{symbol}' in phoneme inventory at {path}.")
+            phoneme_to_id[symbol] = len(phoneme_to_id)
+        if not phoneme_to_id:
+            raise ValueError(f"Invalid phoneme inventory format at {path}.")
+        return phoneme_to_id
     
     @staticmethod
     def _load_language_map(path: Path) -> Dict[str, int]:

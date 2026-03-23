@@ -21,6 +21,7 @@ from src.api import (
     get_voicebank_info,
     save_audio,
 )
+from src.api.phonemize import _find_dictionary
 from src.api.voicebank import resolve_vocoder_model_path
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 from src.api.voice_parts import preprocess_voice_parts
@@ -228,6 +229,47 @@ class TestParseScore(unittest.TestCase):
         voice_part = next(part for part in density if part["part_id"] == "P1")
         measure_1 = next(m for m in voice_part["measures"] if m["measure_number"] == "1")
         self.assertEqual(measure_1["max_simultaneous_notes"], 1)
+
+
+class TestDictionarySelection(unittest.TestCase):
+    """Tests for language-aware dictionary resolution."""
+
+    def test_find_dictionary_prefers_language_specific_over_generic(self):
+        """English lookup should prefer dsdict-en.yaml when it exists."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "dsdur").mkdir()
+            generic = root / "dsdur" / "dsdict.yaml"
+            english = root / "dsdur" / "dsdict-en.yaml"
+            generic.write_text("entries: []\n", encoding="utf-8")
+            english.write_text("entries: []\n", encoding="utf-8")
+
+            resolved = _find_dictionary(root, language="en")
+            self.assertEqual(resolved, english.resolve())
+
+    def test_find_dictionary_falls_back_to_generic_when_language_specific_missing(self):
+        """Lookup should fall back to generic dsdict.yaml when needed."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "dsdur").mkdir()
+            generic = root / "dsdur" / "dsdict.yaml"
+            generic.write_text("entries: []\n", encoding="utf-8")
+
+            resolved = _find_dictionary(root, language="en")
+            self.assertEqual(resolved, generic.resolve())
+
+    def test_find_dictionary_supports_non_english_suffix(self):
+        """Hyphenated language codes should resolve dsdict-<lang>.yaml."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "dsdur").mkdir()
+            yue = root / "dsdur" / "dsdict-zh-yue.yaml"
+            generic = root / "dsdur" / "dsdict.yaml"
+            yue.write_text("entries: []\n", encoding="utf-8")
+            generic.write_text("entries: []\n", encoding="utf-8")
+
+            resolved = _find_dictionary(root, language="zh-yue")
+            self.assertEqual(resolved, yue.resolve())
 
     def test_preprocess_ready_with_warnings(self):
         """Propagation with 90% coverage should return ready_with_warnings."""

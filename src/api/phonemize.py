@@ -65,7 +65,7 @@ def phonemize(
         languages_path = (voicebank_path / config["languages"]).resolve()
     
     # Find dictionary for token-to-phoneme lookup.
-    dictionary_path = _find_dictionary(voicebank_path)
+    dictionary_path = _find_dictionary(voicebank_path, language=language)
     
     # Build phonemizer with fallback G2P enabled.
     phonemizer = Phonemizer(
@@ -100,17 +100,26 @@ def phonemize(
     return result
 
 
-def _find_dictionary(voicebank_path: Path) -> Path:
-    """Find phoneme dictionary in voicebank."""
-    candidates = [
+def _dictionary_candidates(voicebank_path: Path, language: str = "en") -> List[Path]:
+    """Return dictionary candidates in the order they should be checked."""
+    language = (language or "en").strip()
+    language_specific = f"dsdict-{language}.yaml" if language else "dsdict-en.yaml"
+    return [
+        voicebank_path / "dsvariance" / language_specific,
+        voicebank_path / "dsdur" / language_specific,
         voicebank_path / "dsvariance" / "dsdict.yaml",
         voicebank_path / "dsdur" / "dsdict.yaml",
-        voicebank_path / "dsdur" / "dsdict-en.yaml",
+        voicebank_path / language_specific,
         voicebank_path / "dsdict.yaml",
     ]
+
+
+def _find_dictionary(voicebank_path: Path, language: str = "en") -> Path:
+    """Find phoneme dictionary in voicebank."""
+    candidates = _dictionary_candidates(voicebank_path, language=language)
     for path in candidates:
         if path.exists():
             return path.resolve()
     raise FileNotFoundError(
-        f"Could not find phoneme dictionary in {voicebank_path}"
+        f"Could not find phoneme dictionary for language '{language}' in {voicebank_path}"
     )
