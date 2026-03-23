@@ -1,10 +1,4 @@
 voicebanks:
-  - id: Raine_Rena_2.01
-    gender: female
-    voice_type: alto
-  - id: Raine_Reizo_2.01
-    gender: male
-    voice_type: tenor
   - id: Katyusha_v170
     gender: female
     voice_type: soprano
