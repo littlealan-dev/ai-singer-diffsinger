@@ -4,10 +4,17 @@ End-to-end test using the new API module.
 Tests the full synthesis pipeline from MusicXML to WAV.
 """
 
+import os
 import unittest
 from pathlib import Path
 
 from src.api import parse_score, synthesize, save_audio, get_voicebank_info
+
+
+# Keep end-to-end synthesis tests on the live v2 syllable/timing path even
+# when this module is run directly outside pytest.
+os.environ.setdefault("SYLLABLE_ALIGNER_V2", "1")
+os.environ.setdefault("SYLLABLE_TIMING_V2", "1")
 
 
 class TestEndToEndAPI(unittest.TestCase):
@@ -20,6 +27,7 @@ class TestEndToEndAPI(unittest.TestCase):
         self.voicebank_apollo_path = self.root_dir / "assets/voicebanks/Apollo DS 1.0"
         self.voicebank_katyusha_path = self.root_dir / "assets/voicebanks/Katyusha_v170/configs"
         self.voicebank_commissions_path = self.root_dir / "assets/voicebanks/commissionsv1noka/configs"
+        self.voicebank_hoshino_path = self.root_dir / "assets/voicebanks/Hoshino Hanami v1.0"
         self.score_path = self.root_dir / "assets/test_data/amazing-grace.mxl"
         self.output_dir = self.root_dir / "tests/output"
         self.output_dir.mkdir(exist_ok=True)
@@ -29,6 +37,7 @@ class TestEndToEndAPI(unittest.TestCase):
         self.output_wav_apollo_tenor = self.output_dir / "api_output_apollo_tenor.wav"
         self.output_wav_katyusha = self.output_dir / "api_output_katyusha.wav"
         self.output_wav_commissions = self.output_dir / "api_output_commissionsv1noka.wav"
+        self.output_wav_hoshino_soprano = self.output_dir / "api_output_hoshino_hanami_soprano.wav"
         
         if not self.voicebank_path.exists():
             self.skipTest(f"Voicebank not found at {self.voicebank_path}")
@@ -209,6 +218,47 @@ class TestEndToEndAPI(unittest.TestCase):
         save_result = save_audio(
             result["waveform"],
             output_wav,
+            sample_rate=result["sample_rate"],
+        )
+        print(f"  Saved to: {save_result['path']}")
+
+        self.assertTrue(Path(save_result["path"]).exists())
+        self.assertGreater(Path(save_result["path"]).stat().st_size, 1000)
+        print("  ✓ Test passed!")
+
+    def test_full_synthesis_hoshino_hanami_soprano_amazing_grace(self):
+        """Test soprano verse 1 of Amazing Grace with Hoshino Hanami v1.0."""
+        if not self.voicebank_hoshino_path.exists():
+            self.skipTest(f"Voicebank not found at {self.voicebank_hoshino_path}")
+
+        print(f"\n=== Full Synthesis Test (Soprano, Hoshino Hanami) ===")
+        print(f"Voicebank: {self.voicebank_hoshino_path.name}")
+        print(f"Score: {self.score_path.name}")
+
+        print("Step 1: Parsing score summary...")
+        summary_score = parse_score(self.score_path)
+        parts = summary_score.get("score_summary", {}).get("parts", [])
+        soprano_part = next(
+            (part for part in parts if "soprano" in (part.get("part_name") or "").lower()),
+            None,
+        )
+        if soprano_part is None:
+            self.skipTest("Soprano part not found in score summary.")
+
+        soprano_index = soprano_part["part_index"]
+
+        print("Step 2: Parsing soprano verse 1...")
+        score = parse_score(self.score_path, verse_number="1")
+        print(f"  Parsed {len(score['parts'][soprano_index]['notes'])} notes")
+
+        print("Step 3: Synthesizing audio...")
+        result = synthesize(score, self.voicebank_hoshino_path, part_index=soprano_index)
+        print(f"  Generated {result['duration_seconds']:.2f}s of audio")
+
+        print("Step 4: Saving audio...")
+        save_result = save_audio(
+            result["waveform"],
+            self.output_wav_hoshino_soprano,
             sample_rate=result["sample_rate"],
         )
         print(f"  Saved to: {save_result['path']}")

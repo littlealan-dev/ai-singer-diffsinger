@@ -11,7 +11,7 @@ import json
 import time
 import numpy as np
 
-from src.api.phonemize import phonemize
+from src.api.phonemize import _find_dictionary, phonemize
 import src.api.syllable_alignment as syllable_alignment
 from src.api.inference import (
     predict_durations,
@@ -763,22 +763,6 @@ def _select_voice_notes(
     return notes
 
 
-def _find_dictionary(voicebank_path: Path) -> Path:
-    """Locate a phoneme dictionary within a voicebank."""
-    candidates = [
-        voicebank_path / "dsvariance" / "dsdict.yaml",
-        voicebank_path / "dsdur" / "dsdict.yaml",
-        voicebank_path / "dsdur" / "dsdict-en.yaml",
-        voicebank_path / "dsdict.yaml",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path.resolve()
-    raise FileNotFoundError(
-        f"Could not find phoneme dictionary in {voicebank_path}"
-    )
-
-
 def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
     """Create a phonemizer configured for a voicebank."""
     config = load_voicebank_config(voicebank_path)
@@ -786,7 +770,7 @@ def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
     languages_path = None
     if "languages" in config:
         languages_path = (voicebank_path / config["languages"]).resolve()
-    dictionary_path = _find_dictionary(voicebank_path)
+    dictionary_path = _find_dictionary(voicebank_path, language=language)
     return Phonemizer(
         phonemes_path=phonemes_path,
         dictionary_path=dictionary_path,

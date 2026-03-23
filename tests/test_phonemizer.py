@@ -112,6 +112,117 @@ class PhonemizerClassTests(unittest.TestCase):
             self.assertEqual(result.ids, [2, 3])
             self.assertEqual(result.language_ids, [0, 1])
 
+    def test_text_phoneme_inventory_loads_with_sequential_ids(self) -> None:
+        """Plain text phoneme inventories should assign ids by line order."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.txt"
+            dictionary_path = root / "dsdict-en.yaml"
+
+            phonemes_path.write_text("<PAD>\nSP\nAP\nhh\naw\n", encoding="utf8")
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: how\n"
+                "    phonemes: [hh, aw]\n",
+                encoding="utf8",
+            )
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                language="en",
+                allow_g2p=False,
+            )
+
+            self.assertEqual(phonemizer._phoneme_to_id["<PAD>"], 0)
+            self.assertEqual(phonemizer._phoneme_to_id["SP"], 1)
+            self.assertEqual(phonemizer._phoneme_to_id["AP"], 2)
+            result = phonemizer.phonemize_tokens(["how"])
+            self.assertEqual(result.phonemes, ["hh", "aw"])
+            self.assertEqual(result.ids, [3, 4])
+
+    def test_text_phoneme_inventory_ignores_comments_and_blank_lines(self) -> None:
+        """Text phoneme inventories should ignore comments and blank lines."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.txt"
+            dictionary_path = root / "dsdict-en.yaml"
+
+            phonemes_path.write_text(
+                "# comment\n"
+                "<PAD>\n"
+                "\n"
+                "; semicolon comment\n"
+                "SP\n"
+                "AP\n"
+                "hh\n",
+                encoding="utf8",
+            )
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: hush\n"
+                "    phonemes: [hh]\n",
+                encoding="utf8",
+            )
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                language="en",
+                allow_g2p=False,
+            )
+
+            self.assertEqual(phonemizer._phoneme_to_id, {"<PAD>": 0, "SP": 1, "AP": 2, "hh": 3})
+
+    def test_text_phoneme_inventory_rejects_duplicates(self) -> None:
+        """Duplicate symbols in a text phoneme inventory should fail loudly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.txt"
+            dictionary_path = root / "dsdict-en.yaml"
+
+            phonemes_path.write_text("<PAD>\nSP\nSP\n", encoding="utf8")
+            dictionary_path.write_text("entries: []\n", encoding="utf8")
+
+            with self.assertRaises(ValueError) as ctx:
+                Phonemizer(
+                    phonemes_path=phonemes_path,
+                    dictionary_path=dictionary_path,
+                    language="en",
+                    allow_g2p=False,
+                )
+            self.assertIn("Duplicate phoneme 'SP'", str(ctx.exception))
+
+    def test_text_inventory_dictionary_phonemes_fall_back_to_bare_inventory_symbol(self) -> None:
+        """Bare symbols in text inventory should satisfy en/x dictionary phonemes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.txt"
+            dictionary_path = root / "dsdict-en.yaml"
+            languages_path = root / "languages.json"
+
+            phonemes_path.write_text("<PAD>\nSP\nAP\nhh\nen/aw\n", encoding="utf8")
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: how\n"
+                "    phonemes: [en/hh, en/aw]\n",
+                encoding="utf8",
+            )
+            languages_path.write_text('{"en": 1}', encoding="utf8")
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                languages_path=languages_path,
+                language="en",
+                allow_g2p=False,
+            )
+
+            result = phonemizer.phonemize_tokens(["how"])
+            self.assertEqual(result.phonemes, ["hh", "en/aw"])
+            self.assertEqual(result.ids, [3, 4])
+            self.assertEqual(result.language_ids, [0, 1])
+
 
 class PhonemizeAPITests(unittest.TestCase):
     """Tests for the phonemize API function."""
