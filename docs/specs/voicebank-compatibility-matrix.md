@@ -1,0 +1,31 @@
+# Voicebank Compatibility Matrix
+
+This file summarizes voicebanks that were checked against the current codebase, whether they are runtime-compatible, and the main known blockers for incompatible banks.
+
+Status meanings:
+
+- `Compatible`: metadata loads and real synthesis completed successfully.
+- `Compatible, quality issue`: synthesis completed, but notable output quality issues remain.
+- `Not compatible`: synthesis does not complete with the current pipeline.
+
+| Voicebank | Voicebank Path | Status | Main Issue / Notes | Sample Audio |
+| --- | --- | --- | --- | --- |
+| Apollo DS 1.0 | [assets/voicebanks/Apollo DS 1.0](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Apollo%20DS%201.0) | Compatible | Works with current pipeline. | [default soprano](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_apollo.wav), [tenor](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_apollo_tenor.wav) |
+| Katyusha_v170 | [assets/voicebanks/Katyusha_v170/configs](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Katyusha_v170/configs) | Compatible | Works after mixed `en/hh` -> `hh` phoneme fallback support. | [default](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_katyusha.wav), [strong](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_katyusha_strong.wav), [delicate](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_katyusha_delicate.wav), [lullaby](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_katyusha_lullaby.wav) |
+| commissionsv1noka | [assets/voicebanks/commissionsv1noka/configs](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/commissionsv1noka/configs) | Compatible | Works after mixed `en/hh` -> `hh` phoneme fallback support. | [default](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_commissionsv1noka.wav) |
+| Keiro_Revenant_v170 | [assets/voicebanks/Keiro_Revenant_v170/configs](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Keiro_Revenant_v170/configs) | Compatible | Works with current pipeline. | [default](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_keiro_revenant.wav), [tenor](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_keiro_revenant_tenor.wav), [bass](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_keiro_revenant_bass.wav) |
+| SAiFA_v170 | [assets/voicebanks/SAiFA_v170/configs](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/SAiFA_v170/configs) | Compatible | Works with current pipeline. | [alto](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_saifa_alto.wav) |
+| Liam_Thorne_v170 | [assets/voicebanks/Liam_Thorne_v170/configs](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Liam_Thorne_v170/configs) | Compatible | Works with current pipeline. | [tenor](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_liam_thorne_tenor.wav) |
+| Hoshino Hanami v1.0 | [assets/voicebanks/Hoshino Hanami v1.0](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Hoshino%20Hanami%20v1.0) | Compatible, quality issue | Runs after text `phonemes.txt` support and dictionary-selection fix. Output pitch remains unstable; likely needs closer OpenUtau DiffSinger English phonemizer parity. | [default](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_hoshino_hanami_soprano.wav), [default after dict fix](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_hoshino_hanami_soprano_after_dict_fix.wav), [default v2](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_hoshino_hanami_soprano_v2.wav), [power](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_hoshino_hanami_power_soprano.wav) |
+| Kohaku Merry DiffSinger V2.0 | [assets/voicebanks/Kohaku Merry DiffSinger V2.0](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Kohaku%20Merry%20DiffSinger%20V2.0) | Compatible | Works with current pipeline. V2 render also verified. | [default](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_kohaku_merry_soprano.wav), [default v2](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_kohaku_merry_soprano_v2.wav), [soft v2](/Users/alanchan/antigravity/ai-singer-diffsinger/tests/output/api_output_kohaku_merry_soft_soprano_v2.wav) |
+| Mairu_Maishi_v2_0_0 2 | [assets/voicebanks/Mairu_Maishi_v2_0_0 2](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/Mairu_Maishi_v2_0_0%202) | Not compatible | Newer duration-side linguistic model expects `word_div` and `word_dur`; root vocoder ref `nsf_hifigan` also does not currently resolve to a shared/local asset. | None |
+| UFR-V1.0 / Hitsune_Kumi | [assets/voicebanks/UFR-V1.0/Hitsune_Kumi](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/UFR-V1.0/Hitsune_Kumi) | Not compatible | Speaker embedding suffix resolution fails for `.kumi.emb`; duration-side linguistic model also expects `languages`, `word_div`, and `word_dur`. | None |
+| KITANE_DS_2.0.0 | [assets/voicebanks/KITANE_DS_2.0.0](/Users/alanchan/antigravity/ai-singer-diffsinger/assets/voicebanks/KITANE_DS_2.0.0) | Not compatible | After local packaging fixes, remaining blocker is newer duration-side linguistic model expecting `word_div` and `word_dur`. | None |
+
+## Notes
+
+- The table reflects checks performed in the current local codebase as of March 2026.
+- For direct ad-hoc renders, both legacy and V2 syllable/timing paths were used during debugging. Files explicitly labeled `v2` were rendered with:
+  - `SYLLABLE_ALIGNER_V2=1`
+  - `SYLLABLE_TIMING_V2=1`
+- Some compatible banks may still benefit from quality tuning or better phonemizer parity, even if synthesis completes successfully.
