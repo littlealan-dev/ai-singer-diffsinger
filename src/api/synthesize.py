@@ -259,10 +259,17 @@ def _align_frame_curves(
     expected_frames: int,
     *,
     f0: List[float],
+    energy: Optional[List[float]],
     breathiness: Optional[List[float]],
     tension: Optional[List[float]],
     voicing: Optional[List[float]],
-) -> tuple[List[float], Optional[List[float]], Optional[List[float]], Optional[List[float]]]:
+) -> tuple[
+    List[float],
+    Optional[List[float]],
+    Optional[List[float]],
+    Optional[List[float]],
+    Optional[List[float]],
+]:
     """Ensure all frame-aligned curves match the expected length."""
     def _maybe_pad(name: str, values: Optional[List[float]]) -> Optional[List[float]]:
         if values is None:
@@ -278,10 +285,11 @@ def _align_frame_curves(
         return values
 
     f0 = _maybe_pad("f0", f0) or []
+    energy = _maybe_pad("energy", energy)
     breathiness = _maybe_pad("breathiness", breathiness)
     tension = _maybe_pad("tension", tension)
     voicing = _maybe_pad("voicing", voicing)
-    return f0, breathiness, tension, voicing
+    return f0, energy, breathiness, tension, voicing
 
 
 _PHONEME_MAP_CACHE: Dict[str, Dict[str, int]] = {}
@@ -1685,22 +1693,25 @@ def synthesize(
         device=device,
     )
     _log_step("variance", start)
+    energy = var_result["energy"]
     breathiness = _scale_curve(var_result["breathiness"], airiness)
     tension = _scale_curve(var_result["tension"], intensity)
     voicing = _scale_curve(var_result["voicing"], clarity)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            "frame_lengths_variance expected=%s breathiness=%s tension=%s voicing=%s",
+            "frame_lengths_variance expected=%s energy=%s breathiness=%s tension=%s voicing=%s",
             expected_frames,
+            len(energy) if energy else 0,
             len(breathiness) if breathiness else 0,
             len(tension) if tension else 0,
             len(voicing) if voicing else 0,
         )
     if expected_frames > 0:
         # Ensure all frame-aligned curves match the expected frame count.
-        pitch_result["f0"], breathiness, tension, voicing = _align_frame_curves(
+        pitch_result["f0"], energy, breathiness, tension, voicing = _align_frame_curves(
             expected_frames,
             f0=pitch_result["f0"],
+            energy=energy,
             breathiness=breathiness,
             tension=tension,
             voicing=voicing,
@@ -1714,6 +1725,7 @@ def synthesize(
         durations=durations,
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
+        energy=energy,
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,

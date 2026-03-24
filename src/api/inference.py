@@ -140,6 +140,33 @@ def _load_variance_config(voicebank_path: Path) -> Dict[str, Any]:
     return conf if isinstance(conf, dict) else {}
 
 
+def _extract_variance_outputs(
+    variance_model: VarianceModel,
+    variance_out: List[Any],
+    *,
+    predict_energy: bool,
+    predict_breathiness: bool,
+    predict_voicing: bool,
+    predict_tension: bool,
+) -> Dict[str, Optional[np.ndarray]]:
+    """Resolve variance outputs by ONNX output name, not by index order."""
+    output_map = dict(zip(variance_model.output_names, variance_out))
+
+    def _require(name: str) -> np.ndarray:
+        if name not in output_map:
+            raise ValueError(
+                f"Variance config requires {name!r}, but the variance model did not return it."
+            )
+        return np.squeeze(output_map[name]).astype(np.float32)
+
+    return {
+        "energy": _require("energy_pred") if predict_energy else None,
+        "breathiness": _require("breathiness_pred") if predict_breathiness else None,
+        "voicing": _require("voicing_pred") if predict_voicing else None,
+        "tension": _require("tension_pred") if predict_tension else None,
+    }
+
+
 def _load_acoustic_model(voicebank_path: Path, device: str = "cpu") -> AcousticModel:
     """Load acoustic model from voicebank."""
     conf = yaml.safe_load((voicebank_path / "dsconfig.yaml").read_text())
@@ -520,6 +547,7 @@ def predict_variance(
         
     Returns:
         Dict with:
+        - energy: Energy curve
         - breathiness: Breathiness curve (0.0-1.0 per frame)
         - tension: Tension curve
         - voicing: Voicing curve
@@ -547,6 +575,7 @@ def predict_variance(
     config = load_voicebank_config(voicebank_path)
     dsvariance_path = voicebank_path / "dsvariance"
     variance_stage_config = _load_stage_config(dsvariance_path)
+    variance_conf = _load_variance_config(voicebank_path)
     variance_language_map = _load_stage_language_map(
         dsvariance_path,
         variance_stage_config,
@@ -554,12 +583,22 @@ def predict_variance(
         config,
     )
 
+    predict_energy = bool(variance_conf.get("predict_energy", False))
+    predict_breathiness = bool(variance_conf.get("predict_breathiness", False))
+    predict_voicing = bool(variance_conf.get("predict_voicing", False))
+    predict_tension = bool(variance_conf.get("predict_tension", False))
+
     # Try to load variance model.
     variance_model = _load_variance_model(voicebank_path, device)
 
     if variance_model is None:
+        if predict_energy:
+            raise ValueError(
+                "Variance config requires energy prediction, but no variance model is available."
+            )
         # Fallback: zeros.
         result = {
+            "energy": [0.0] * n_frames,
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
             "voicing": [0.0] * n_frames,
@@ -568,7 +607,6 @@ def predict_variance(
             logger.debug("predict_variance output=%s", summarize_payload(result))
         return result
 
-    variance_conf = _load_variance_config(voicebank_path)
     variance_linguistic = _load_variance_linguistic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
@@ -595,8 +633,13 @@ def predict_variance(
         # Reuse encoder output from duration pass if provided.
         variance_encoder_out = encoder_out
     else:
+        if predict_energy:
+            raise ValueError(
+                "Variance config requires energy prediction, but no linguistic encoder output is available."
+            )
         # Fallback when no encoder output exists.
         result = {
+            "energy": [0.0] * n_frames,
             "breathiness": [0.0] * n_frames,
             "tension": [0.0] * n_frames,
             "voicing": [0.0] * n_frames,
@@ -610,10 +653,6 @@ def predict_variance(
     pitch_midi = pitch_midi.astype(np.float32)[None, :]
 
     # Enable only the variance heads configured in the model.
-    predict_energy = bool(variance_conf.get("predict_energy", False))
-    predict_breathiness = bool(variance_conf.get("predict_breathiness", False))
-    predict_voicing = bool(variance_conf.get("predict_voicing", False))
-    predict_tension = bool(variance_conf.get("predict_tension", False))
     num_variances = sum(
         [
             int(predict_energy),
@@ -641,28 +680,34 @@ def predict_variance(
         variance_inputs["energy"] = np.zeros((1, n_frames), dtype=np.float32)
 
     variance_out = variance_model.run(variance_inputs)
-    if predict_energy and len(variance_out) >= 4:
-        _, breathiness, voicing, tension = variance_out[:4]
-    elif len(variance_out) >= 3:
-        breathiness, voicing, tension = variance_out[:3]
-    else:
-        result = {
-            "breathiness": [0.0] * n_frames,
-            "tension": [0.0] * n_frames,
-            "voicing": [0.0] * n_frames,
-        }
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("predict_variance output=%s", summarize_payload(result))
-        return result
-
-    breathiness = np.squeeze(breathiness).astype(np.float32)
-    voicing = np.squeeze(voicing).astype(np.float32)
-    tension = np.squeeze(tension).astype(np.float32)
+    extracted = _extract_variance_outputs(
+        variance_model,
+        variance_out,
+        predict_energy=predict_energy,
+        predict_breathiness=predict_breathiness,
+        predict_voicing=predict_voicing,
+        predict_tension=predict_tension,
+    )
 
     result = {
-        "breathiness": breathiness.tolist(),
-        "tension": tension.tolist(),
-        "voicing": voicing.tolist(),
+        "energy": (
+            extracted["energy"].tolist() if extracted["energy"] is not None else [0.0] * n_frames
+        ),
+        "breathiness": (
+            extracted["breathiness"].tolist()
+            if extracted["breathiness"] is not None
+            else [0.0] * n_frames
+        ),
+        "tension": (
+            extracted["tension"].tolist()
+            if extracted["tension"] is not None
+            else [0.0] * n_frames
+        ),
+        "voicing": (
+            extracted["voicing"].tolist()
+            if extracted["voicing"] is not None
+            else [0.0] * n_frames
+        ),
     }
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("predict_variance output=%s", summarize_payload(result))
@@ -675,6 +720,7 @@ def synthesize_mel(
     f0: List[float],
     voicebank: Union[str, Path],
     *,
+    energy: Optional[List[float]] = None,
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
@@ -691,7 +737,7 @@ def synthesize_mel(
         durations: Frames per phoneme
         f0: Pitch curve in Hz
         voicebank: Voicebank path
-        breathiness, tension, voicing: Variance curves (optional)
+        energy, breathiness, tension, voicing: Variance curves (optional)
         language_ids: Language ID per phoneme (optional)
         speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
@@ -711,6 +757,7 @@ def synthesize_mel(
                     "durations": durations,
                     "f0": f0,
                     "voicebank": str(voicebank),
+                    "energy": energy,
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
@@ -727,6 +774,7 @@ def synthesize_mel(
     # Load acoustic model and speaker embedding for conditioning.
     acoustic = _load_acoustic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
+    variance_conf = _load_variance_config(voicebank_path)
 
     n_frames = len(f0)
 
@@ -740,6 +788,16 @@ def synthesize_mel(
     languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
     
     # Variance defaults.
+    use_energy_embed = bool(config.get("use_energy_embed", False))
+    predict_energy = bool(variance_conf.get("predict_energy", False))
+    if use_energy_embed and not predict_energy:
+        raise ValueError(
+            "The acoustic model requires energy (use_energy_embed=True), but the variance config does not enable predict_energy."
+        )
+    if use_energy_embed and energy is None:
+        raise ValueError(
+            "The acoustic model requires 'energy' (use_energy_embed=True), but the variance stage did not provide it."
+        )
     if breathiness is None:
         breathiness = [0.0] * n_frames
     if tension is None:
@@ -767,6 +825,12 @@ def synthesize_mel(
         "depth": np.array(depth, dtype=np.float32),
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
     }
+    if use_energy_embed:
+        if len(energy) != n_frames:
+            raise ValueError(
+                f"The acoustic model requires 'energy' with {n_frames} frames, got {len(energy)}."
+            )
+        acoustic_inputs["energy"] = np.array(energy, dtype=np.float32)[None, :]
     
     mel = acoustic.run(acoustic_inputs)[0]
     
@@ -786,6 +850,7 @@ def synthesize_audio(
     f0: List[float],
     voicebank: Union[str, Path],
     *,
+    energy: Optional[List[float]] = None,
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
@@ -803,7 +868,7 @@ def synthesize_audio(
         durations: Frames per phoneme
         f0: Pitch curve in Hz
         voicebank: Voicebank path or ID
-        breathiness, tension, voicing: Variance curves (optional)
+        energy, breathiness, tension, voicing: Variance curves (optional)
         language_ids: Language ID per phoneme (optional)
         vocoder_path: Optional explicit vocoder path
         speaker_name: Optional speaker embedding name/suffix
@@ -824,6 +889,7 @@ def synthesize_audio(
                     "durations": durations,
                     "f0": f0,
                     "voicebank": str(voicebank),
+                    "energy": energy,
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
@@ -841,6 +907,7 @@ def synthesize_audio(
         durations=durations,
         f0=f0,
         voicebank=voicebank,
+        energy=energy,
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,

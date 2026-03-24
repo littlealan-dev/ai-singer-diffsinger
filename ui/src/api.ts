@@ -16,6 +16,12 @@ export type ScoreSummary = {
   available_verses?: Array<string | number>;
 };
 
+export type ChatSelection = {
+  verse_number?: string | number;
+  part_index?: number;
+  part_id?: string;
+};
+
 export type UploadResponse = {
   session_id: string;
   parsed: boolean;
@@ -174,11 +180,17 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
   return response.text();
 }
 
-export async function chat(sessionId: string, message: string): Promise<ChatResponse> {
+export async function chat(
+  sessionId: string,
+  message: string,
+  selection?: ChatSelection
+): Promise<ChatResponse> {
   const response = await request<ChatResponse>(`/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(
+      selection ? { message, selection } : { message }
+    ),
   });
   if (response.type === "chat_audio") {
     return {

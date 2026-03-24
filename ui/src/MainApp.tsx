@@ -11,6 +11,7 @@ import {
   fetchScoreXml,
   fetchProgress,
   uploadScore,
+  type ChatSelection,
   type ProgressResponse,
   type ScoreSummary,
 } from "./api";
@@ -454,7 +455,7 @@ export default function MainApp() {
     }
   };
 
-  const sendMessage = async (content: string) => {
+  const sendMessage = async (content: string, selection?: ChatSelection) => {
     if (!content.trim() || !sessionId || creditsLocked) return;
     setStatus("Thinking...");
     setError(null);
@@ -465,7 +466,7 @@ export default function MainApp() {
     });
 
     try {
-      const response = await chat(sessionId, content);
+      const response = await chat(sessionId, content, selection);
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
         return;
@@ -537,7 +538,11 @@ export default function MainApp() {
         : `part ${selected.part_index + 1}`;
     const message = `Please sing ${partDescriptor}, verse ${selectedVerse}.`;
     setPendingSelection(false);
-    await sendMessage(message);
+    await sendMessage(message, {
+      part_index: selected.part_index,
+      part_id: selected.part_id,
+      verse_number: selectedVerse,
+    });
   };
 
   const canShowSelector =
