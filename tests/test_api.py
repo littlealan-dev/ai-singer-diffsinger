@@ -22,6 +22,7 @@ from src.api import (
     save_audio,
 )
 from src.api.phonemize import _find_dictionary
+from src.api.inference import _load_stage_language_map
 from src.api.voicebank import resolve_vocoder_model_path
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 from src.api.voice_parts import preprocess_voice_parts
@@ -257,6 +258,27 @@ class TestDictionarySelection(unittest.TestCase):
 
             resolved = _find_dictionary(root, language="en")
             self.assertEqual(resolved, generic.resolve())
+
+
+class TestLinguisticLanguageMapSelection(unittest.TestCase):
+    """Tests for stage/global languages.json fallback."""
+
+    def test_stage_language_map_falls_back_to_root_config(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            stage_dir = root / "dsdur"
+            stage_dir.mkdir()
+            languages = root / "languages.json"
+            languages.write_text('{"other": 1, "en": 2}\n', encoding="utf-8")
+
+            resolved = _load_stage_language_map(
+                stage_dir,
+                {},
+                root,
+                {"languages": "languages.json"},
+            )
+
+            self.assertEqual(resolved, {"other": 1, "en": 2})
 
     def test_find_dictionary_supports_non_english_suffix(self):
         """Hyphenated language codes should resolve dsdict-<lang>.yaml."""

@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
+from src.api.diffsinger_linguistic_inputs import (
+    DiffSingerLinguisticFeatures,
+    load_language_map,
+    run_linguistic_model,
+)
 from src.api.voicebank import load_voicebank_config, load_speaker_embed
 from src.api.vocode import vocode
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -18,6 +23,32 @@ logger = get_logger(__name__)
 
 # Cache for loaded models
 _model_cache: Dict[str, Any] = {}
+
+
+def _load_stage_config(stage_dir: Path) -> Dict[str, Any]:
+    """Load a stage-local dsconfig.yaml if present."""
+    config_path = stage_dir / "dsconfig.yaml"
+    if not config_path.exists():
+        return {}
+    config = yaml.safe_load(config_path.read_text())
+    return config if isinstance(config, dict) else {}
+
+
+def _load_stage_language_map(
+    stage_dir: Path,
+    stage_config: Dict[str, Any],
+    root_dir: Path,
+    root_config: Dict[str, Any],
+) -> Dict[str, int]:
+    """Load a language map, preferring stage-local config and falling back to root config."""
+    languages_ref = stage_config.get("languages") or root_config.get("languages")
+    if not languages_ref:
+        return {}
+    if stage_config.get("languages"):
+        candidate = (stage_dir / str(languages_ref)).resolve()
+    else:
+        candidate = (root_dir / str(languages_ref)).resolve()
+    return load_language_map(candidate)
 
 
 def _get_model(model_class, model_path: Path, device: str = "cpu"):
@@ -172,29 +203,35 @@ def predict_durations(
         )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
+    dsdur_path = voicebank_path / "dsdur"
+    duration_stage_config = _load_stage_config(dsdur_path)
+    duration_language_map = _load_stage_language_map(
+        dsdur_path,
+        duration_stage_config,
+        voicebank_path,
+        config,
+    )
 
     # Load model components and speaker embedding.
     linguistic = _load_linguistic_model(voicebank_path, device)
     duration = _load_duration_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
-    # Prepare tensors for model inputs.
-    tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
-    word_div_tensor = np.array(word_boundaries, dtype=np.int64)[None, :]
-    word_dur_tensor = np.array(word_durations, dtype=np.int64)[None, :]
-    
-    if language_ids is None:
-        language_ids = [0] * len(phoneme_ids)
-    languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
-    
     # Run linguistic encoder to produce phoneme-level representations.
-    ling_inputs = {
-        "tokens": tokens_tensor,
-        "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
-        "word_div": word_div_tensor,
-        "word_dur": word_dur_tensor,
-    }
-    ling_out = linguistic.run(ling_inputs)
+    ling_features = DiffSingerLinguisticFeatures(
+        phoneme_ids=phoneme_ids,
+        language_ids=language_ids,
+        word_boundaries=word_boundaries,
+        word_durations=[int(d) for d in word_durations],
+        language_map=duration_language_map,
+    )
+    ling_out = run_linguistic_model(
+        linguistic,
+        ling_features,
+        use_lang_id=bool(
+            duration_stage_config.get("use_lang_id", config.get("use_lang_id", False))
+        ),
+    )
     encoder_out = ling_out[0]
     x_masks = ling_out[1]
     
@@ -205,7 +242,7 @@ def predict_durations(
     ph_midi_tensor = np.array(ph_midi, dtype=np.int64)[None, :]
     
     # Prepare speaker embedding per-phoneme.
-    spk_embed_tokens = np.repeat(spk_embed[None, None, :], tokens_tensor.shape[1], axis=1).astype(np.float32)
+    spk_embed_tokens = np.repeat(spk_embed[None, None, :], len(phoneme_ids), axis=1).astype(np.float32)
 
     # Run duration predictor.
     duration_out = duration.forward(encoder_out, x_masks, ph_midi_tensor, spk_embed_tokens)
@@ -281,6 +318,8 @@ def _build_ph2word(word_div: List[int]) -> np.ndarray:
 def predict_pitch(
     phoneme_ids: List[int],
     durations: List[int],
+    word_boundaries: Optional[List[int]],
+    word_durations: Optional[List[int]],
     note_pitches: List[float],
     note_durations: List[int],
     note_rests: List[bool],
@@ -318,6 +357,8 @@ def predict_pitch(
                 {
                     "phoneme_ids": phoneme_ids,
                     "durations": durations,
+                    "word_boundaries": word_boundaries,
+                    "word_durations": word_durations,
                     "note_pitches": note_pitches,
                     "note_durations": note_durations,
                     "note_rests": note_rests,
@@ -331,6 +372,14 @@ def predict_pitch(
         )
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
+    dspitch_path = voicebank_path / "dspitch"
+    pitch_stage_config = _load_stage_config(dspitch_path)
+    pitch_language_map = _load_stage_language_map(
+        dspitch_path,
+        pitch_stage_config,
+        voicebank_path,
+        config,
+    )
     
     n_frames = sum(durations)
 
@@ -351,20 +400,25 @@ def predict_pitch(
     pitch_linguistic = _load_pitch_linguistic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
-    tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     durations_tensor = np.array(durations, dtype=np.int64)[None, :]
-    if language_ids is None:
-        language_ids = [0] * len(phoneme_ids)
-    languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
 
     if pitch_linguistic is not None:
         # Prefer pitch-specific linguistic encoder if available.
-        pitch_ling_inputs = {
-            "tokens": tokens_tensor,
-            "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
-            "ph_dur": durations_tensor,
-        }
-        pitch_encoder_out = pitch_linguistic.run(pitch_ling_inputs)[0]
+        pitch_features = DiffSingerLinguisticFeatures(
+            phoneme_ids=phoneme_ids,
+            language_ids=language_ids,
+            word_boundaries=word_boundaries,
+            word_durations=[int(d) for d in word_durations] if word_durations else None,
+            phoneme_durations=durations,
+            language_map=pitch_language_map,
+        )
+        pitch_encoder_out = run_linguistic_model(
+            pitch_linguistic,
+            pitch_features,
+            use_lang_id=bool(
+                pitch_stage_config.get("use_lang_id", config.get("use_lang_id", False))
+            ),
+        )[0]
     elif encoder_out is not None:
         # Reuse encoder output from duration pass if provided.
         pitch_encoder_out = encoder_out
@@ -441,6 +495,8 @@ def _hz_to_midi(f0: np.ndarray) -> np.ndarray:
 def predict_variance(
     phoneme_ids: List[int],
     durations: List[int],
+    word_boundaries: Optional[List[int]],
+    word_durations: Optional[List[int]],
     f0: List[float],
     voicebank: Union[str, Path],
     *,
@@ -475,6 +531,8 @@ def predict_variance(
                 {
                     "phoneme_ids": phoneme_ids,
                     "durations": durations,
+                    "word_boundaries": word_boundaries,
+                    "word_durations": word_durations,
                     "f0": f0,
                     "voicebank": str(voicebank),
                     "language_ids": language_ids,
@@ -486,6 +544,15 @@ def predict_variance(
         )
     voicebank_path = Path(voicebank)
     n_frames = len(f0)
+    config = load_voicebank_config(voicebank_path)
+    dsvariance_path = voicebank_path / "dsvariance"
+    variance_stage_config = _load_stage_config(dsvariance_path)
+    variance_language_map = _load_stage_language_map(
+        dsvariance_path,
+        variance_stage_config,
+        voicebank_path,
+        config,
+    )
 
     # Try to load variance model.
     variance_model = _load_variance_model(voicebank_path, device)
@@ -501,25 +568,29 @@ def predict_variance(
             logger.debug("predict_variance output=%s", summarize_payload(result))
         return result
 
-    config = load_voicebank_config(voicebank_path)
     variance_conf = _load_variance_config(voicebank_path)
     variance_linguistic = _load_variance_linguistic_model(voicebank_path, device)
     spk_embed = load_speaker_embed(voicebank_path, speaker_name=speaker_name)
 
-    tokens_tensor = np.array(phoneme_ids, dtype=np.int64)[None, :]
     durations_tensor = np.array(durations, dtype=np.int64)[None, :]
-    if language_ids is None:
-        language_ids = [0] * len(phoneme_ids)
-    languages_tensor = np.array(language_ids, dtype=np.int64)[None, :]
 
     if variance_linguistic is not None:
         # Prefer variance-specific linguistic encoder if available.
-        ling_inputs = {
-            "tokens": tokens_tensor,
-            "languages": languages_tensor if config.get("use_lang_id") else np.zeros_like(tokens_tensor),
-            "ph_dur": durations_tensor,
-        }
-        variance_encoder_out = variance_linguistic.run(ling_inputs)[0]
+        variance_features = DiffSingerLinguisticFeatures(
+            phoneme_ids=phoneme_ids,
+            language_ids=language_ids,
+            word_boundaries=word_boundaries,
+            word_durations=[int(d) for d in word_durations] if word_durations else None,
+            phoneme_durations=durations,
+            language_map=variance_language_map,
+        )
+        variance_encoder_out = run_linguistic_model(
+            variance_linguistic,
+            variance_features,
+            use_lang_id=bool(
+                variance_stage_config.get("use_lang_id", config.get("use_lang_id", False))
+            ),
+        )[0]
     elif encoder_out is not None:
         # Reuse encoder output from duration pass if provided.
         variance_encoder_out = encoder_out

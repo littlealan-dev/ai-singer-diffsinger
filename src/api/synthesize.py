@@ -1625,6 +1625,8 @@ def synthesize(
     pitch_result = predict_pitch(
         phoneme_ids=phoneme_ids,
         durations=durations,
+        word_boundaries=alignment["word_boundaries"],
+        word_durations=alignment["word_durations"],
         note_pitches=alignment["note_pitches"],
         note_durations=runtime_note_durations,
         note_rests=alignment["note_rests"],
@@ -1673,6 +1675,8 @@ def synthesize(
     var_result = predict_variance(
         phoneme_ids=phoneme_ids,
         durations=durations,
+        word_boundaries=alignment["word_boundaries"],
+        word_durations=alignment["word_durations"],
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
         language_ids=language_ids,
