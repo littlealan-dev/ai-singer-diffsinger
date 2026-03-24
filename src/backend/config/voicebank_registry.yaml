@@ -1,4 +1,7 @@
 voicebanks:
+#  - id: Hoshino Hanami v1.0
+#    gender: female
+#    voice_type: soprano
   - id: Katyusha_v170
     gender: female
     voice_type: soprano
