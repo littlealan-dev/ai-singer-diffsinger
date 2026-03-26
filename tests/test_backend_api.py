@@ -112,9 +112,11 @@ def _prepare_app(monkeypatch, overrides=None):
     data_dir = Path("tests/output/backend_data") / uuid.uuid4().hex
     data_dir.mkdir(parents=True, exist_ok=True)
     fake_jobs: dict[str, dict] = {}
+    fake_score_storage: dict[str, bytes] = {}
     monkeypatch.setenv("BACKEND_DATA_DIR", str(data_dir))
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
+    monkeypatch.setenv("STORAGE_BUCKET", "test-bucket")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
     import src.backend.main as backend_main
     backend_main._PLAYBACK_SECRET_CACHE.clear()
@@ -146,6 +148,16 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr(
         "src.backend.main.download_bytes",
         lambda bucket, storage_path: f"storage:{storage_path}".encode("utf-8"),
+    )
+    monkeypatch.setattr(
+        "src.backend.session.upload_bytes",
+        lambda bucket, data, dest_path, content_type=None: fake_score_storage.__setitem__(
+            dest_path, data
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.session.download_bytes",
+        lambda bucket, storage_path: fake_score_storage[storage_path],
     )
     monkeypatch.setattr("src.backend.orchestrator.upload_file", lambda *_, **__: None)
     monkeypatch.setattr("src.backend.orchestrator.copy_blob", lambda *_, **__: None)
@@ -2471,6 +2483,45 @@ def test_storage_backed_audio_uses_signed_resource_identity(client_with_env):
     replay_audio = test_client.get(audio_url)
     assert replay_audio.status_code == 200
     assert replay_audio.content == original_audio.content
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_storage_backed_session_scores_rehydrate_from_object_storage(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    stored_blobs: dict[str, bytes] = {}
+
+    def _fake_upload_bytes(bucket_name, data, dest_path, content_type=None):
+        stored_blobs[dest_path] = data
+
+    def _fake_download_bytes(bucket_name, object_path):
+        return stored_blobs[object_path]
+
+    monkeypatch.setattr("src.backend.session.upload_bytes", _fake_upload_bytes)
+    monkeypatch.setattr("src.backend.session.download_bytes", _fake_download_bytes)
+
+    session_id = _create_session(test_client)
+    response = _upload_score(test_client, session_id)
+    assert response.status_code == 200
+
+    state = app.state.sessions._sessions[session_id]
+    assert state.original_score_path == f"sessions/test-user/{session_id}/scores/original.json"
+    assert state.current_score_path == f"sessions/test-user/{session_id}/scores/current.v1.json"
+    assert state.original_score_path in stored_blobs
+    assert state.current_score_path in stored_blobs
+
+    state.original_score = None
+    state.current_score = None
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["original_score"]["source_musicxml_path"].endswith("score.xml")
+    assert snapshot["current_score"]["version"] == 1
+    assert snapshot["current_score"]["score"]["source_musicxml_path"].endswith("score.xml")
 
 
 @pytest.mark.parametrize(

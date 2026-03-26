@@ -7,12 +7,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import asyncio
+import json
 import shutil
 import uuid
 
 from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
+from src.backend.storage_client import download_bytes, upload_bytes
 
 def _utcnow() -> datetime:
     """Return current UTC time."""
@@ -29,10 +31,12 @@ class SessionState:
     history: List[Dict[str, str]] = field(default_factory=list)
     files: Dict[str, str] = field(default_factory=dict)
     original_score: Optional[Dict[str, Any]] = None
+    original_score_path: Optional[str] = None
     preprocess_plan_history: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_attempt_history: List[Dict[str, Any]] = field(default_factory=list)
     last_preprocess_plan: Optional[Dict[str, Any]] = None
     current_score: Optional[Dict[str, Any]] = None
+    current_score_path: Optional[str] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
     current_audio: Optional[Dict[str, Any]] = None
@@ -74,12 +78,17 @@ class SessionStore:
         sessions_dir: Path,
         ttl_seconds: int,
         max_sessions: int,
+        *,
+        backend_use_storage: bool = False,
+        storage_bucket: str = "",
     ) -> None:
         """Initialize the store with TTL and storage paths."""
         self._project_root = project_root
         self._sessions_dir = sessions_dir
         self._ttl = timedelta(seconds=ttl_seconds)
         self._max_sessions = max_sessions
+        self._backend_use_storage = backend_use_storage
+        self._storage_bucket = storage_bucket
         self._sessions: Dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
 
@@ -138,6 +147,8 @@ class SessionStore:
             if self._is_expired(state):
                 self._remove_session_locked(session_id)
                 raise KeyError(session_id)
+            if self._backend_use_storage:
+                self._hydrate_scores_locked(state)
             state.last_active_at = _utcnow()
             return state.snapshot()
 
@@ -174,8 +185,16 @@ class SessionStore:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            state.current_score = score
             state.current_score_version += 1
+            if self._backend_use_storage:
+                storage_path = _current_score_storage_path(
+                    state.user_id,
+                    session_id,
+                    state.current_score_version,
+                )
+                _store_score_to_storage(self._storage_bucket, storage_path, score)
+                state.current_score_path = storage_path
+            state.current_score = score
             state.last_active_at = _utcnow()
             return state.current_score_version
 
@@ -185,6 +204,10 @@ class SessionStore:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
+            if self._backend_use_storage:
+                storage_path = _original_score_storage_path(state.user_id, session_id)
+                _store_score_to_storage(self._storage_bucket, storage_path, score)
+                state.original_score_path = storage_path
             state.original_score = score
             state.last_active_at = _utcnow()
 
@@ -257,10 +280,12 @@ class SessionStore:
             state.history = []
             state.files = {}
             state.original_score = None
+            state.original_score_path = None
             state.preprocess_plan_history = []
             state.preprocess_attempt_history = []
             state.last_preprocess_plan = None
             state.current_score = None
+            state.current_score_path = None
             state.current_score_version = 0
             state.score_summary = None
             state.current_audio = None
@@ -338,6 +363,17 @@ class SessionStore:
                 latest = mtime
         return latest
 
+    def _hydrate_scores_locked(self, state: SessionState) -> None:
+        """Hydrate score payloads from object storage when pointer paths exist."""
+        if state.original_score_path and state.original_score is None:
+            state.original_score = _load_score_from_storage(
+                self._storage_bucket, state.original_score_path
+            )
+        if state.current_score_path and state.current_score is None:
+            state.current_score = _load_score_from_storage(
+                self._storage_bucket, state.current_score_path
+            )
+
 
 class FirestoreSessionStore:
     """Firestore-backed session store."""
@@ -347,12 +383,17 @@ class FirestoreSessionStore:
         sessions_dir: Path,
         ttl_seconds: int,
         max_sessions: int,
+        *,
+        backend_use_storage: bool = False,
+        storage_bucket: str = "",
     ) -> None:
         """Initialize Firestore-backed sessions."""
         self._project_root = project_root
         self._sessions_dir = sessions_dir
         self._ttl = timedelta(seconds=ttl_seconds)
         self._max_sessions = max_sessions
+        self._backend_use_storage = backend_use_storage
+        self._storage_bucket = storage_bucket
         self._collection = "sessions"
         self._client = get_firestore_client()
         self._lock = asyncio.Lock()
@@ -388,7 +429,10 @@ class FirestoreSessionStore:
             last_active_at=last_active,
             history=list(data.get("history") or []),
             files=dict(data.get("files") or {}),
-            original_score=data.get("originalScore"),
+            original_score=(
+                data.get("originalScore") if not self._backend_use_storage else None
+            ),
+            original_score_path=data.get("originalScorePath"),
             preprocess_plan_history=list(data.get("preprocessPlanHistory") or []),
             preprocess_attempt_history=list(data.get("preprocessAttemptHistory") or []),
             last_preprocess_plan=(
@@ -396,7 +440,10 @@ class FirestoreSessionStore:
                 if data.get("lastPreprocessPlan") is not None
                 else data.get("lastSuccessfulPreprocessPlan")
             ),
-            current_score=data.get("currentScore"),
+            current_score=(
+                data.get("currentScore") if not self._backend_use_storage else None
+            ),
+            current_score_path=data.get("currentScorePath"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
             current_audio=data.get("currentAudio"),
@@ -414,10 +461,12 @@ class FirestoreSessionStore:
                 "history": [],
                 "files": {},
                 "originalScore": None,
+                "originalScorePath": None,
                 "preprocessPlanHistory": [],
                 "preprocessAttemptHistory": [],
                 "lastPreprocessPlan": None,
                 "currentScore": None,
+                "currentScorePath": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
                 "currentAudio": None,
@@ -454,7 +503,17 @@ class FirestoreSessionStore:
             if user_id and data.get("userId") and data.get("userId") != user_id:
                 raise PermissionError(session_id)
             self._doc_ref(session_id).update({"lastActiveAt": firestore.SERVER_TIMESTAMP})
-            return self._state_from_doc(session_id, data).snapshot()
+            state = self._state_from_doc(session_id, data)
+            if self._backend_use_storage:
+                if state.original_score_path:
+                    state.original_score = _load_score_from_storage(
+                        self._storage_bucket, state.original_score_path
+                    )
+                if state.current_score_path:
+                    state.current_score = _load_score_from_storage(
+                        self._storage_bucket, state.current_score_path
+                    )
+            return state.snapshot()
 
     async def append_history(self, session_id: str, role: str, content: str) -> None:
         """Append a chat entry to Firestore history."""
@@ -488,26 +547,57 @@ class FirestoreSessionStore:
         """Update the score and increment its version in Firestore."""
         async with self._lock:
             doc_ref = self._doc_ref(session_id)
-            doc = doc_ref.get()
-            if not doc.exists:
-                raise KeyError(session_id)
-            data = doc.to_dict() or {}
-            version = int(data.get("currentScoreVersion") or 0) + 1
-            doc_ref.update(
-                {
-                    "currentScore": score,
-                    "currentScoreVersion": version,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+            if self._backend_use_storage:
+                version = self._reserve_next_score_version(doc_ref)
+                user_id = self._require_user_id(doc_ref.get().to_dict() or {}, session_id)
+                storage_path = _current_score_storage_path(user_id, session_id, version)
+                _store_score_to_storage(self._storage_bucket, storage_path, score)
+                doc_ref.update(
+                    {
+                        "currentScorePath": storage_path,
+                        "currentScoreStorage": "gcs",
+                        "currentScoreByteSize": len(_serialize_score(score)),
+                        "currentScore": firestore.DELETE_FIELD,
+                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                    }
+                )
+            else:
+                doc = doc_ref.get()
+                if not doc.exists:
+                    raise KeyError(session_id)
+                data = doc.to_dict() or {}
+                version = int(data.get("currentScoreVersion") or 0) + 1
+                doc_ref.update(
+                    {
+                        "currentScore": score,
+                        "currentScoreVersion": version,
+                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                    }
+                )
             return version
 
     async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
         """Persist the original parsed score baseline in Firestore."""
         async with self._lock:
-            self._doc_ref(session_id).update(
-                {"originalScore": score, "lastActiveAt": firestore.SERVER_TIMESTAMP}
-            )
+            doc_ref = self._doc_ref(session_id)
+            if self._backend_use_storage:
+                data = doc_ref.get().to_dict() or {}
+                user_id = self._require_user_id(data, session_id)
+                storage_path = _original_score_storage_path(user_id, session_id)
+                _store_score_to_storage(self._storage_bucket, storage_path, score)
+                doc_ref.update(
+                    {
+                        "originalScorePath": storage_path,
+                        "originalScoreStorage": "gcs",
+                        "originalScoreByteSize": len(_serialize_score(score)),
+                        "originalScore": firestore.DELETE_FIELD,
+                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                    }
+                )
+            else:
+                doc_ref.update(
+                    {"originalScore": score, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+                )
 
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Update the score summary in Firestore."""
@@ -577,11 +667,13 @@ class FirestoreSessionStore:
                     "history": [],
                     "files": {},
                     "originalScore": None,
+                    "originalScorePath": None,
                     "preprocessPlanHistory": [],
                     "preprocessAttemptHistory": [],
                     "lastPreprocessPlan": None,
                     "lastSuccessfulPreprocessPlan": None,
                     "currentScore": None,
+                    "currentScorePath": None,
                     "currentScoreVersion": 0,
                     "scoreSummary": None,
                     "currentAudio": None,
@@ -600,3 +692,67 @@ class FirestoreSessionStore:
     async def cleanup_expired_on_disk(self) -> int:
         """No-op for Firestore-backed sessions."""
         return 0
+
+    def _reserve_next_score_version(self, doc_ref) -> int:
+        """Atomically reserve the next current-score version."""
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _reserve(txn):
+            snapshot = doc_ref.get(transaction=txn)
+            if not snapshot.exists:
+                raise KeyError(doc_ref.id)
+            data = snapshot.to_dict() or {}
+            version = int(data.get("currentScoreVersion") or 0) + 1
+            txn.update(
+                doc_ref,
+                {
+                    "currentScoreVersion": version,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+            return version
+
+        return _reserve(transaction)
+
+    def _require_user_id(self, data: Dict[str, Any], session_id: str) -> str:
+        """Return the session user id or fail loudly."""
+        user_id = data.get("userId")
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"Missing userId for storage-backed session {session_id}.")
+        return user_id
+
+
+def _serialize_score(score: Dict[str, Any]) -> bytes:
+    """Serialize a score payload to UTF-8 JSON bytes."""
+    return json.dumps(score, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _load_score_from_storage(bucket_name: str, path: str) -> Dict[str, Any]:
+    """Load and deserialize a score payload from object storage."""
+    raw = download_bytes(bucket_name, path)
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Stored score payload is not a JSON object: {path}")
+    return data
+
+
+def _store_score_to_storage(bucket_name: str, path: str, score: Dict[str, Any]) -> int:
+    """Serialize and upload a score payload to object storage."""
+    payload = _serialize_score(score)
+    upload_bytes(bucket_name, payload, path, "application/json")
+    return len(payload)
+
+
+def _original_score_storage_path(user_id: Optional[str], session_id: str) -> str:
+    """Build the storage path for the original parsed score."""
+    if not user_id:
+        raise ValueError(f"Missing userId for storage-backed session {session_id}.")
+    return f"sessions/{user_id}/{session_id}/scores/original.json"
+
+
+def _current_score_storage_path(user_id: Optional[str], session_id: str, version: int) -> str:
+    """Build the storage path for the current score version."""
+    if not user_id:
+        raise ValueError(f"Missing userId for storage-backed session {session_id}.")
+    return f"sessions/{user_id}/{session_id}/scores/current.v{version}.json"

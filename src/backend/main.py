@@ -83,6 +83,8 @@ def create_app() -> FastAPI:
             sessions_dir=settings.sessions_dir,
             ttl_seconds=settings.session_ttl_seconds,
             max_sessions=settings.max_sessions,
+            backend_use_storage=settings.backend_use_storage,
+            storage_bucket=settings.storage_bucket,
         )
     else:
         # Use Firestore-backed sessions in production.
@@ -91,6 +93,8 @@ def create_app() -> FastAPI:
             sessions_dir=settings.sessions_dir,
             ttl_seconds=settings.session_ttl_seconds,
             max_sessions=settings.max_sessions,
+            backend_use_storage=settings.backend_use_storage,
+            storage_bucket=settings.storage_bucket,
         )
     job_store = JobStore()
     router = McpRouter(settings)
