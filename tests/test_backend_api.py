@@ -2490,6 +2490,74 @@ def test_storage_backed_audio_uses_signed_resource_identity(client_with_env):
     [{"BACKEND_USE_STORAGE": "true"}],
     indirect=True,
 )
+def test_storage_backed_audio_supports_byte_ranges(client_with_env):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+    audio_url = progress_payload["audio_url"]
+
+    range_response = test_client.get(audio_url, headers={"Range": "bytes=0-6"})
+    assert range_response.status_code == 206
+    assert range_response.headers["accept-ranges"] == "bytes"
+    assert range_response.headers["content-range"].startswith("bytes 0-6/")
+    assert range_response.content == b"storage"
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_storage_backed_audio_download_returns_attachment(client_with_env):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "render audio"}
+    )
+    assert response.status_code == 200
+    progress_payload = _wait_for_progress(test_client, response.json()["progress_url"])
+    audio_url = progress_payload["audio_url"]
+    parts = urlsplit(audio_url)
+    query = parse_qs(parts.query)
+    query["download"] = ["1"]
+    download_url = parts._replace(
+        query="&".join(f"{key}={value}" for key, values in query.items() for value in values)
+    ).geturl()
+
+    download_response = test_client.get(download_url)
+    assert download_response.status_code == 200
+    disposition = download_response.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="audio-')
+    assert disposition.endswith('.mp3"')
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
 def test_storage_backed_session_scores_rehydrate_from_object_storage(
     client_with_env, monkeypatch
 ):

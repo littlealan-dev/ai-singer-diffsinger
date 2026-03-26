@@ -337,7 +337,13 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="Invalid audio file name.")
             storage_path = claims.resource_path
             if settings.backend_use_storage and storage_path:
-                return await _stream_storage_audio(settings, storage_path)
+                return await _stream_storage_audio(
+                    request,
+                    settings,
+                    storage_path,
+                    download=bool(request.query_params.get("download")),
+                    file_name=file_name,
+                )
             audio_path = (session_dir / file_name).resolve()
             try:
                 audio_path.relative_to(session_dir)
@@ -350,7 +356,14 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="No audio available for this session.")
             storage_path = current_audio.get("storage_path")
             if settings.backend_use_storage and storage_path:
-                return await _stream_storage_audio(settings, storage_path)
+                current_file_name = Path(current_audio["path"]).name
+                return await _stream_storage_audio(
+                    request,
+                    settings,
+                    storage_path,
+                    download=bool(request.query_params.get("download")),
+                    file_name=current_file_name,
+                )
             audio_path = settings.project_root / current_audio["path"]
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found.")
@@ -742,17 +755,91 @@ def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> s
     return f"sessions/{user_id}/{session_id}/input{safe_suffix}"
 
 
-async def _stream_storage_audio(settings: Settings, storage_path: str) -> Response:
-    """Fetch audio bytes from storage and return a typed response."""
+def _audio_media_type(storage_path: str) -> str:
+    """Infer the audio media type from a file suffix."""
     suffix = Path(storage_path).suffix.lower()
     if suffix == ".wav":
-        media_type = "audio/wav"
-    elif suffix == ".mp3":
-        media_type = "audio/mpeg"
-    else:
-        media_type = "application/octet-stream"
+        return "audio/wav"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    return "application/octet-stream"
+
+
+def _audio_response_headers(*, download: bool, file_name: str | None) -> dict[str, str]:
+    """Build common headers for audio playback/download responses."""
+    headers = {"Accept-Ranges": "bytes"}
+    if download and file_name:
+        headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
+    return headers
+
+
+def _parse_byte_range(range_header: str | None, size: int) -> tuple[int, int] | None:
+    """Parse a single HTTP byte range."""
+    if not range_header:
+        return None
+    value = range_header.strip()
+    if not value.startswith("bytes="):
+        raise HTTPException(status_code=416, detail="Invalid Range header.")
+    spec = value[6:].strip()
+    if "," in spec:
+        raise HTTPException(status_code=416, detail="Multiple ranges are not supported.")
+    if "-" not in spec:
+        raise HTTPException(status_code=416, detail="Invalid Range header.")
+    start_text, end_text = spec.split("-", 1)
+    if not start_text:
+        try:
+            suffix_length = int(end_text)
+        except ValueError as exc:
+            raise HTTPException(status_code=416, detail="Invalid Range header.") from exc
+        if suffix_length <= 0:
+            raise HTTPException(status_code=416, detail="Invalid Range header.")
+        if suffix_length >= size:
+            return (0, size - 1)
+        return (size - suffix_length, size - 1)
+    try:
+        start = int(start_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail="Invalid Range header.") from exc
+    if start < 0 or start >= size:
+        raise HTTPException(status_code=416, detail="Requested range not satisfiable.")
+    if not end_text:
+        return (start, size - 1)
+    try:
+        end = int(end_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail="Invalid Range header.") from exc
+    if end < start:
+        raise HTTPException(status_code=416, detail="Requested range not satisfiable.")
+    return (start, min(end, size - 1))
+
+
+async def _stream_storage_audio(
+    request: Request,
+    settings: Settings,
+    storage_path: str,
+    *,
+    download: bool = False,
+    file_name: str | None = None,
+) -> Response:
+    """Fetch audio bytes from storage and return a typed response."""
+    media_type = _audio_media_type(storage_path)
     data = await asyncio.to_thread(download_bytes, settings.storage_bucket, storage_path)
-    return Response(content=data, media_type=media_type)
+    size = len(data)
+    headers = _audio_response_headers(download=download, file_name=file_name)
+    byte_range = _parse_byte_range(request.headers.get("range"), size)
+    if byte_range is None:
+        headers["Content-Length"] = str(size)
+        return Response(content=data, media_type=media_type, headers=headers)
+    start, end = byte_range
+    content = data[start : end + 1]
+    headers["Content-Length"] = str(len(content))
+    headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return Response(
+        content=content,
+        status_code=206,
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 def _read_musicxml_content(path: Path, *, max_mxl_uncompressed_bytes: int) -> str:

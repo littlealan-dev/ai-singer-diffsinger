@@ -420,8 +420,10 @@ export default function MainApp() {
         setError("No audio available to download.");
         return;
       }
+      const downloadUrl = new URL(nextAudioUrl, window.location.origin);
+      downloadUrl.searchParams.set("download", "1");
       const link = document.createElement("a");
-      link.href = nextAudioUrl;
+      link.href = downloadUrl.toString();
       link.download = "";
       link.rel = "noopener";
       document.body.appendChild(link);
