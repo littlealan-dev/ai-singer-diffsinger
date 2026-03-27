@@ -17,9 +17,6 @@ voicebanks:
   - id: PM-31_Commercial_Indigo
     gender: male
     voice_type: tenor
-  - id: PM-31_Commercial_Scarlet
-    gender: male
-    voice_type: tenor
   - id: SAiFA_v170
     gender: female
     voice_type: alto
