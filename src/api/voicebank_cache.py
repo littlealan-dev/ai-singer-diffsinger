@@ -3,6 +3,7 @@ from __future__ import annotations
 """Helpers for resolving and caching voicebanks locally or from storage."""
 
 from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 import os
@@ -146,6 +147,112 @@ def _voicebank_prefix() -> str:
 def _cache_root() -> Path:
     """Return the cache directory for downloaded voicebanks."""
     return Path(os.getenv("VOICEBANK_CACHE_DIR", "/tmp/voicebanks"))
+
+
+def _stage_subdir(stage: str) -> Optional[str]:
+    """Return the canonical subdirectory for a voicebank stage."""
+    normalized = (stage or "").strip().lower()
+    if normalized == "root":
+        return None
+    if normalized == "dur":
+        return "dsdur"
+    if normalized == "pitch":
+        return "dspitch"
+    if normalized == "variance":
+        return "dsvariance"
+    raise ValueError(f"Unsupported voicebank stage: {stage}")
+
+
+def _load_yaml_dict(path: Path) -> Dict[str, Any]:
+    """Load a YAML mapping or return an empty dict."""
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _resolve_stage_dir(voicebank_path: Path, stage: str) -> tuple[Path, bool]:
+    """Resolve the directory that owns a stage's config and assets."""
+    subdir = _stage_subdir(stage)
+    if subdir is None:
+        return voicebank_path, False
+    candidate = voicebank_path / subdir
+    if candidate.exists():
+        return candidate, True
+    return voicebank_path, False
+
+
+def _resolve_inventory_from_dir(stage_dir: Path, stage_config: Dict[str, Any]) -> Optional[Path]:
+    """Resolve a phoneme inventory path from one stage directory."""
+    phonemes_ref = stage_config.get("phonemes")
+    if isinstance(phonemes_ref, str) and phonemes_ref.strip():
+        explicit = (stage_dir / phonemes_ref).resolve()
+        if explicit.exists():
+            return explicit
+    for candidate in (
+        stage_dir / "phonemes.json",
+        stage_dir / "dsmain" / "phonemes.json",
+    ):
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+@lru_cache(maxsize=256)
+def _resolve_stage_phoneme_inventory_path_cached(voicebank_path: str, stage: str) -> str:
+    """Resolve the phoneme inventory path for one stage."""
+    voicebank_root = Path(voicebank_path).resolve()
+    stage_dir, stage_override_exists = _resolve_stage_dir(voicebank_root, stage)
+    stage_config = _load_yaml_dict(stage_dir / "dsconfig.yaml")
+    inventory_path = _resolve_inventory_from_dir(stage_dir, stage_config)
+    if inventory_path is not None:
+        return str(inventory_path)
+
+    normalized_stage = (stage or "").strip().lower()
+    if normalized_stage == "root":
+        raise FileNotFoundError(f"Root phoneme inventory not found for {voicebank_root}")
+
+    if normalized_stage == "dur":
+        return _resolve_stage_phoneme_inventory_path_cached(str(voicebank_root), "root")
+
+    if stage_override_exists:
+        raise FileNotFoundError(
+            f"Stage phoneme inventory not found for {normalized_stage} at {stage_dir}"
+        )
+
+    return _resolve_stage_phoneme_inventory_path_cached(str(voicebank_root), "root")
+
+
+def resolve_stage_phoneme_inventory_path(voicebank_path: Path | str, stage: str) -> Path:
+    """Return the resolved phoneme inventory path for a stage."""
+    return Path(
+        _resolve_stage_phoneme_inventory_path_cached(str(Path(voicebank_path).resolve()), stage)
+    )
+
+
+@lru_cache(maxsize=256)
+def _load_stage_phoneme_inventory_cached(
+    voicebank_path: str,
+    stage: str,
+) -> tuple[tuple[str, int], ...]:
+    """Load and cache a stage-local phoneme inventory."""
+    inventory_path = resolve_stage_phoneme_inventory_path(Path(voicebank_path), stage)
+    data = json.loads(inventory_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid phoneme inventory format at {inventory_path}")
+    normalized: List[tuple[str, int]] = []
+    for symbol, value in data.items():
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError(f"Invalid phoneme symbol in {inventory_path}")
+        normalized.append((symbol, int(value)))
+    return tuple(normalized)
+
+
+def get_stage_phoneme_inventory(voicebank_path: Path | str, stage: str) -> Dict[str, int]:
+    """Return a cached phoneme inventory mapping for one stage."""
+    return dict(
+        _load_stage_phoneme_inventory_cached(str(Path(voicebank_path).resolve()), stage)
+    )
 
 
 def resolve_voicebank_path(voicebank_id: str) -> Path:

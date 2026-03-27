@@ -19,6 +19,7 @@ from src.api.inference import (
     predict_variance,
     synthesize_audio,
 )
+from src.api.diffsinger_stage_tokens import build_stage_token_bundle
 from src.api.voicebank import (
     load_voicebank_config,
     resolve_default_voice_color,
@@ -314,6 +315,16 @@ def _get_silence_phoneme_id(voicebank_path: Path) -> int:
         return int(phoneme_map["SP"])
     if "AP" in phoneme_map:
         return int(phoneme_map["AP"])
+    raise KeyError("Missing SP/AP silence phoneme in phonemes.json.")
+
+
+def _get_silence_phoneme_symbol(voicebank_path: Path) -> str:
+    """Resolve the preferred silence phoneme symbol (SP/AP)."""
+    phoneme_map = _load_phoneme_map(voicebank_path)
+    if "SP" in phoneme_map:
+        return "SP"
+    if "AP" in phoneme_map:
+        return "AP"
     raise KeyError("Missing SP/AP silence phoneme in phonemes.json.")
 
 
@@ -674,26 +685,26 @@ def _apply_coda_tail_durations(
 
 
 def _apply_articulation_gaps(
-    phoneme_ids: List[int],
+    phoneme_symbols: List[str],
     language_ids: List[int],
     durations: List[int],
     word_boundaries: List[int],
     word_durations: List[int],
     voicebank_path: Path,
     articulation: float,
-) -> Tuple[List[int], List[int], List[int]]:
+) -> Tuple[List[str], List[int], List[int]]:
     """Insert silence gaps between words for negative articulation values."""
     if articulation >= 0.0:
-        return phoneme_ids, language_ids, durations
+        return phoneme_symbols, language_ids, durations
     gap_ratio = min(0.5, max(0.0, -0.5 * articulation))
-    silence_id = _get_silence_phoneme_id(voicebank_path)
-    new_phoneme_ids: List[int] = []
+    silence_symbol = _get_silence_phoneme_symbol(voicebank_path)
+    new_phoneme_symbols: List[str] = []
     new_language_ids: List[int] = []
     new_durations: List[int] = []
     offset = 0
     for word_idx, count in enumerate(word_boundaries):
         word_dur = word_durations[word_idx]
-        word_ids = phoneme_ids[offset:offset + count]
+        word_symbols = phoneme_symbols[offset:offset + count]
         word_lang = language_ids[offset:offset + count]
         word_dur_list = durations[offset:offset + count]
         offset += count
@@ -708,16 +719,16 @@ def _apply_articulation_gaps(
         scaled = _scale_durations(word_dur_list, scale)
         scaled = _adjust_durations_to_total(scaled, target)
 
-        new_phoneme_ids.extend(word_ids)
+        new_phoneme_symbols.extend(word_symbols)
         new_language_ids.extend(word_lang)
         new_durations.extend(scaled)
 
         if gap > 0:
-            new_phoneme_ids.append(silence_id)
+            new_phoneme_symbols.append(silence_symbol)
             new_language_ids.append(word_lang[-1] if word_lang else 0)
             new_durations.append(gap)
 
-    return new_phoneme_ids, new_language_ids, new_durations
+    return new_phoneme_symbols, new_language_ids, new_durations
 
 
 def _select_voice_notes(
@@ -1553,7 +1564,7 @@ def synthesize(
             voicebank_path,
             part_index=effective_part_index,
             voice_id=voice_id,
-            include_phonemes=False,
+            include_phonemes=True,
         )
     except InfeasibleAnchorError as exc:
         return build_infeasible_anchor_action_required(
@@ -1563,12 +1574,13 @@ def synthesize(
             voice_part_id=voice_part_id,
         )
     _log_step("align", start)
+    initial_stage_tokens = build_stage_token_bundle(voicebank_path, alignment["phonemes"])
     
     # Step 3: Predict durations.
     start = time.monotonic()
     use_timing_v2 = _env_flag_enabled("SYLLABLE_TIMING_V2")
     dur_result = predict_durations(
-        phoneme_ids=alignment["phoneme_ids"],
+        phoneme_ids=initial_stage_tokens.dur_ids,
         word_boundaries=alignment["word_boundaries"],
         word_durations=alignment["word_durations"],
         word_pitches=alignment["word_pitches"],
@@ -1579,7 +1591,7 @@ def synthesize(
         device=device,
     )
     _log_step("durations", start)
-    phoneme_ids = alignment["phoneme_ids"]
+    phoneme_symbols = list(alignment["phonemes"])
     language_ids = alignment["language_ids"]
     durations: List[int] = list(dur_result["durations"])
     if use_timing_v2:
@@ -1611,8 +1623,8 @@ def synthesize(
         )
     if articulation < 0.0:
         # Insert short gaps to increase articulation.
-        phoneme_ids, language_ids, durations = _apply_articulation_gaps(
-            phoneme_ids,
+        phoneme_symbols, language_ids, durations = _apply_articulation_gaps(
+            phoneme_symbols,
             language_ids,
             durations,
             alignment["word_boundaries"],
@@ -1620,6 +1632,11 @@ def synthesize(
             voicebank_path,
             articulation,
         )
+    stage_tokens = (
+        build_stage_token_bundle(voicebank_path, phoneme_symbols)
+        if phoneme_symbols != alignment["phonemes"]
+        else initial_stage_tokens
+    )
     runtime_note_durations = list(alignment["note_durations"])
     use_aligner_v2 = _env_flag_enabled("SYLLABLE_ALIGNER_V2")
     if use_aligner_v2:
@@ -1631,7 +1648,7 @@ def synthesize(
     # Step 4: Predict pitch.
     start = time.monotonic()
     pitch_result = predict_pitch(
-        phoneme_ids=phoneme_ids,
+        phoneme_ids=stage_tokens.pitch_ids,
         durations=durations,
         word_boundaries=alignment["word_boundaries"],
         word_durations=alignment["word_durations"],
@@ -1681,7 +1698,7 @@ def synthesize(
     # Step 5: Predict variance.
     start = time.monotonic()
     var_result = predict_variance(
-        phoneme_ids=phoneme_ids,
+        phoneme_ids=stage_tokens.variance_ids,
         durations=durations,
         word_boundaries=alignment["word_boundaries"],
         word_durations=alignment["word_durations"],
@@ -1721,7 +1738,7 @@ def synthesize(
     _notify("synthesize", "Taking a breath for the take...", 0.8)
     start = time.monotonic()
     audio_result = synthesize_audio(
-        phoneme_ids=phoneme_ids,
+        phoneme_ids=stage_tokens.root_ids,
         durations=durations,
         f0=pitch_result["f0"],
         voicebank=voicebank_path,
