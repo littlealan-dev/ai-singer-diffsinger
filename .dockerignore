@@ -26,6 +26,7 @@ marketing/
 tests/
 
 logs/
+reports/
 tests/output/
 outputs/
 runs/

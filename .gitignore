@@ -53,6 +53,7 @@ marketing/
 
 # Artifacts
 outputs/
+reports/
 tests/output/
 assets/
 logs/
