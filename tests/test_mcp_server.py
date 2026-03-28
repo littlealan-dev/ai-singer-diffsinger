@@ -179,6 +179,7 @@ class TestMcpServer(unittest.TestCase):
                 "get_voicebank_info", {"voicebank": self.voicebank_id}
             )
             self.assertEqual(result, {"name": "Raine Rena", "sample_rate": 44100})
+            mock_info.assert_called_once_with(self.voicebank_id)
 
 
 if __name__ == "__main__":

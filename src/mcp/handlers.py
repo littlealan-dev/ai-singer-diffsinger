@@ -212,8 +212,7 @@ def handle_list_voicebanks(params: Dict[str, Any], device: str) -> Any:
 
 def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     """Handle get_voicebank_info tool calls."""
-    voicebank_path = resolve_voicebank_id(params["voicebank"])
-    info = get_voicebank_info(voicebank_path)
+    info = get_voicebank_info(params["voicebank"])
     return _strip_path(info)
 
 
