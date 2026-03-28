@@ -2,9 +2,10 @@ __pycache__/
 *.py[cod]
 .venv/
 .venv310/
-env/
 venv/
 .env
+env/dev.env
+env/prod.env
 .DS_Store
 .agent/
 .pytest_cache/
@@ -37,7 +38,6 @@ data/
 docs/
 third_party/
 config/
-env/
 reviews/
 scripts/
 spec/

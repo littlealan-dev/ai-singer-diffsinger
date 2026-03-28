@@ -33,6 +33,8 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip && \
 RUN python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')"
 ENV NLTK_DATA=/root/nltk_data
 
+COPY env/voicebank_manifest.dev.json /app/env/voicebank_manifest.dev.json
+COPY env/voicebank_manifest.prod.json /app/env/voicebank_manifest.prod.json
 COPY src /app/src
 
 CMD ["python3", "-m", "uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug", "--access-log"]

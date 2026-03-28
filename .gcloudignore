@@ -4,9 +4,10 @@ __pycache__/
 *$py.class
 .venv/
 .venv310/
-env/
 venv/
 .env
+env/dev.env
+env/prod.env
 
 # MacOS
 .DS_Store
