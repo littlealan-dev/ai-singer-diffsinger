@@ -1,6 +1,7 @@
 import os
 import tarfile
 import unittest
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -32,8 +33,37 @@ class TestVoicebankCache(unittest.TestCase):
         with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
             gcs_root_path = Path(gcs_root)
             cache_root_path = Path(cache_root)
-            registry_path = gcs_root_path / "registry.yaml"
-            registry_path.write_text("voicebanks:\n  - id: TestBank\n", encoding="utf-8")
+            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [
+                            {
+                                "id": "TestBank",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/TestBank.tar.gz",
+                                "name": "TestBank",
+                                "path_hint": "TestBank",
+                                "languages": [],
+                                "has_duration_model": False,
+                                "has_pitch_model": False,
+                                "has_variance_model": False,
+                                "speakers": [],
+                                "voice_colors": [],
+                                "default_voice_color": None,
+                                "sample_rate": 44100,
+                                "hop_size": 512,
+                                "use_lang_id": False,
+                                "gender": None,
+                                "voice_type": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             source_dir = gcs_root_path / "tmp" / "TestBank"
             source_dir.mkdir(parents=True, exist_ok=True)
             (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
@@ -63,7 +93,7 @@ class TestVoicebankCache(unittest.TestCase):
                     "VOICEBANK_BUCKET": "dummy-bucket",
                     "VOICEBANK_PREFIX": "assets/voicebanks",
                     "VOICEBANK_CACHE_DIR": str(cache_root_path),
-                    "VOICEBANK_REGISTRY_PATH": str(registry_path),
+                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
                 },
                 clear=False,
             ), mock.patch(
@@ -79,8 +109,37 @@ class TestVoicebankCache(unittest.TestCase):
         with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
             gcs_root_path = Path(gcs_root)
             cache_root_path = Path(cache_root)
-            registry_path = gcs_root_path / "registry.yaml"
-            registry_path.write_text("voicebanks:\n  - id: NestedBank\n", encoding="utf-8")
+            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [
+                            {
+                                "id": "NestedBank",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/NestedBank.tar.gz",
+                                "name": "Nested Bank",
+                                "path_hint": "NestedBank/configs",
+                                "languages": [],
+                                "has_duration_model": False,
+                                "has_pitch_model": False,
+                                "has_variance_model": False,
+                                "speakers": [],
+                                "voice_colors": [],
+                                "default_voice_color": None,
+                                "sample_rate": 44100,
+                                "hop_size": 512,
+                                "use_lang_id": False,
+                                "gender": None,
+                                "voice_type": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             source_dir = gcs_root_path / "tmp" / "NestedBank" / "configs"
             source_dir.mkdir(parents=True, exist_ok=True)
             (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
@@ -110,7 +169,7 @@ class TestVoicebankCache(unittest.TestCase):
                     "VOICEBANK_BUCKET": "dummy-bucket",
                     "VOICEBANK_PREFIX": "assets/voicebanks",
                     "VOICEBANK_CACHE_DIR": str(cache_root_path),
-                    "VOICEBANK_REGISTRY_PATH": str(registry_path),
+                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
                 },
                 clear=False,
             ), mock.patch(
@@ -122,7 +181,7 @@ class TestVoicebankCache(unittest.TestCase):
             self.assertEqual(resolved.resolve(), (cache_root_path / "NestedBank" / "configs").resolve())
             self.assertTrue((resolved / "dsconfig.yaml").exists())
 
-    def test_dev_env_resolves_nested_registered_voicebank_root(self) -> None:
+    def test_dev_env_resolves_nested_manifest_voicebank_root(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
             voicebanks_root = tmp_root / "voicebanks"
@@ -130,20 +189,64 @@ class TestVoicebankCache(unittest.TestCase):
             nested_root.mkdir(parents=True, exist_ok=True)
             (nested_root / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
             (nested_root / "character.yaml").write_text("name: Nested Bank\n", encoding="utf-8")
-            registry_path = tmp_root / "registry.yaml"
-            registry_path.write_text("voicebanks:\n  - id: NestedBank\n", encoding="utf-8")
+            manifest_path = tmp_root / "voicebank_manifest.dev.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [
+                            {
+                                "id": "NestedBank",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/NestedBank.tar.gz",
+                                "name": "Nested Bank",
+                                "path_hint": "NestedBank/configs",
+                                "languages": [],
+                                "has_duration_model": False,
+                                "has_pitch_model": False,
+                                "has_variance_model": False,
+                                "speakers": [],
+                                "voice_colors": [],
+                                "default_voice_color": None,
+                                "sample_rate": 44100,
+                                "hop_size": 512,
+                                "use_lang_id": False,
+                                "gender": None,
+                                "voice_type": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with mock.patch.dict(
                 os.environ,
                 {
                     "APP_ENV": "dev",
-                    "VOICEBANK_REGISTRY_PATH": str(registry_path),
+                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
                 },
                 clear=False,
             ), mock.patch("src.api.voicebank_cache._local_voicebanks_root", return_value=voicebanks_root):
                 resolved = resolve_voicebank_path("NestedBank")
 
             self.assertEqual(resolved, nested_root.resolve())
+
+    def test_prod_env_errors_when_manifest_is_missing(self) -> None:
+        with TemporaryDirectory() as cache_root:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "prod",
+                    "VOICEBANK_BUCKET": "dummy-bucket",
+                    "VOICEBANK_CACHE_DIR": str(Path(cache_root)),
+                    "VOICEBANK_MANIFEST_PATH": str(Path(cache_root) / "missing.json"),
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "Voicebank manifest not found"):
+                    resolve_voicebank_path("TestBank")
 
 
 if __name__ == "__main__":

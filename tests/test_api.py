@@ -24,6 +24,7 @@ from src.api import (
 from src.api.phonemize import _find_dictionary
 from src.api.inference import _load_stage_language_map
 from src.api.voicebank import resolve_vocoder_model_path
+from src.api.voicebank_cache import get_enabled_manifest_voicebanks
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 from src.api.voice_parts import preprocess_voice_parts
 
@@ -549,20 +550,42 @@ class TestVoicebankAPIs(unittest.TestCase):
         self.assertIn("name", vb)
         self.assertIn("path", vb)
 
-    def test_list_voicebanks_only_returns_registered_voicebanks(self):
-        voicebanks = list_voicebanks(ROOT_DIR / "assets/voicebanks")
+    def test_list_voicebanks_only_returns_enabled_manifest_voicebanks(self):
+        voicebanks = list_voicebanks()
         ids = {entry["id"] for entry in voicebanks}
         self.assertEqual(
             ids,
-            {
-                "Raine_Rena_2.01",
-                "Raine_Reizo_2.01",
-                "Katyusha_v170",
-                "Keiro_Revenant_v170",
-                "Liam_Thorne_v170",
-                "SAiFA_v170",
-            },
+            {entry["id"] for entry in get_enabled_manifest_voicebanks()},
         )
+
+    def test_list_voicebanks_with_explicit_search_path_uses_filesystem(self):
+        voicebanks = list_voicebanks(ROOT_DIR / "assets/voicebanks")
+        self.assertGreater(len(voicebanks), 0)
+        self.assertTrue(all("path" in entry for entry in voicebanks))
+
+    def test_get_voicebank_info_errors_for_voicebank_missing_from_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manifest_path = Path(tmp_dir) / "voicebank_manifest.dev.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "dev",
+                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "Voicebank not declared in manifest"):
+                    get_voicebank_info("MissingBank")
 
     def test_list_voicebanks_discovers_nested_root_for_custom_search_path(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -596,40 +619,86 @@ class TestVoicebankAPIs(unittest.TestCase):
             color_names = [entry.get("name") for entry in voice_colors]
             self.assertIn(info.get("default_voice_color"), color_names)
 
-    def test_get_voicebank_info_includes_registry_gender_and_voice_type(self):
+    def test_get_voicebank_info_includes_manifest_gender_and_voice_type(self):
         if not VOICEBANK_PATH.exists():
             self.skipTest(f"Voicebank not found at {VOICEBANK_PATH}")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            registry_path = Path(tmp_dir) / "voicebank_registry.yaml"
-            registry_path.write_text(
-                "voicebanks:\n"
-                "  - id: Raine_Rena_2.01\n"
-                "    gender: female\n"
-                "    voice_type: alto\n",
+            manifest_path = Path(tmp_dir) / "voicebank_manifest.dev.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [
+                            {
+                                "id": "Raine_Rena_2.01",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/Raine_Rena_2.01.tar.gz",
+                                "name": "Raine Rena",
+                                "path_hint": "Raine_Rena_2.01",
+                                "languages": [],
+                                "has_duration_model": True,
+                                "has_pitch_model": True,
+                                "has_variance_model": True,
+                                "speakers": [],
+                                "voice_colors": [],
+                                "default_voice_color": None,
+                                "sample_rate": 44100,
+                                "hop_size": 512,
+                                "use_lang_id": True,
+                                "gender": "female",
+                                "voice_type": "alto",
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, {"VOICEBANK_REGISTRY_PATH": str(registry_path)}):
+            with mock.patch.dict(os.environ, {"VOICEBANK_MANIFEST_PATH": str(manifest_path)}):
                 info = get_voicebank_info("Raine_Rena_2.01")
 
         self.assertEqual(info["gender"], "female")
         self.assertEqual(info["voice_type"], "alto")
 
-    def test_get_voicebank_info_includes_registry_metadata_for_nested_voicebank_path(self):
+    def test_get_voicebank_info_includes_manifest_metadata_for_nested_voicebank_path(self):
         nested_voicebank_path = ROOT_DIR / "assets/voicebanks/Katyusha_v170/configs"
         if not nested_voicebank_path.exists():
             self.skipTest(f"Voicebank not found at {nested_voicebank_path}")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            registry_path = Path(tmp_dir) / "voicebank_registry.yaml"
-            registry_path.write_text(
-                "voicebanks:\n"
-                "  - id: Katyusha_v170\n"
-                "    gender: female\n"
-                "    voice_type: soprano\n",
+            manifest_path = Path(tmp_dir) / "voicebank_manifest.dev.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "generated_at": "2026-03-27T00:00:00Z",
+                        "voicebanks": [
+                            {
+                                "id": "Katyusha_v170",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/Katyusha_v170.tar.gz",
+                                "name": "Katyusha v170",
+                                "path_hint": "Katyusha_v170/configs",
+                                "languages": [],
+                                "has_duration_model": True,
+                                "has_pitch_model": True,
+                                "has_variance_model": True,
+                                "speakers": [],
+                                "voice_colors": [],
+                                "default_voice_color": None,
+                                "sample_rate": 44100,
+                                "hop_size": 512,
+                                "use_lang_id": True,
+                                "gender": "female",
+                                "voice_type": "soprano",
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, {"VOICEBANK_REGISTRY_PATH": str(registry_path)}):
+            with mock.patch.dict(os.environ, {"VOICEBANK_MANIFEST_PATH": str(manifest_path)}):
                 info = get_voicebank_info(nested_voicebank_path)
 
         self.assertEqual(info["gender"], "female")

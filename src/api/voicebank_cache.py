@@ -38,75 +38,100 @@ def _local_voicebanks_root() -> Path:
     return _project_root() / "assets" / "voicebanks"
 
 
-def _voicebank_registry_path() -> Path:
-    """Return the registered-voicebank config path."""
-    override = os.getenv("VOICEBANK_REGISTRY_PATH")
+def _voicebank_manifest_path() -> Path:
+    """Return the active environment-specific voicebank manifest path."""
+    override = os.getenv("VOICEBANK_MANIFEST_PATH")
     if override:
         return Path(override)
-    return _project_root() / "src" / "backend" / "config" / "voicebank_registry.yaml"
+    env_name = _app_env().lower()
+    suffix = "prod" if env_name not in {"dev", "development", "local", "test"} else "dev"
+    return _project_root() / "env" / f"voicebank_manifest.{suffix}.json"
 
 
 @lru_cache(maxsize=1)
-def _load_registered_voicebank_entries_for_path(registry_path: str) -> List[Dict[str, Any]]:
-    """Return the configured registered voicebank entries."""
-    path = Path(registry_path)
+def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
+    """Return the parsed voicebank manifest."""
+    path = Path(manifest_path)
     if not path.exists():
-        return []
+        raise FileNotFoundError(f"Voicebank manifest not found: {path}")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("voicebank_registry_unreadable path=%s", path)
-        return []
-    entries = data.get("voicebanks") if isinstance(data, dict) else None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Voicebank manifest unreadable: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Voicebank manifest must be an object: {path}")
+    entries = data.get("voicebanks")
     if not isinstance(entries, list):
-        return []
+        raise ValueError(f"Voicebank manifest missing voicebanks list: {path}")
+    seen: Set[str] = set()
     normalized: List[Dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
-            continue
+            raise ValueError(f"Voicebank manifest contains non-object entry: {path}")
         voicebank_id = entry.get("id")
-        if isinstance(voicebank_id, str) and voicebank_id:
-            normalized.append(dict(entry))
-    return normalized
+        enabled = entry.get("enabled")
+        if not isinstance(voicebank_id, str) or not voicebank_id:
+            raise ValueError(f"Voicebank manifest entry missing id: {path}")
+        if not isinstance(enabled, bool):
+            raise ValueError(f"Voicebank manifest entry {voicebank_id} missing boolean enabled flag")
+        if voicebank_id in seen:
+            raise ValueError(f"Duplicate voicebank id in manifest: {voicebank_id}")
+        seen.add(voicebank_id)
+        normalized.append(dict(entry))
+    return {
+        "version": data.get("version"),
+        "generated_at": data.get("generated_at"),
+        "voicebanks": normalized,
+    }
 
 
 @lru_cache(maxsize=1)
-def _load_registered_voicebank_ids_for_path(registry_path: str) -> List[str]:
-    """Return the configured allowlist of supported voicebank IDs."""
+def _load_manifest_voicebank_ids_for_path(manifest_path: str) -> List[str]:
+    """Return all voicebank IDs declared in the manifest."""
     return [
         str(entry["id"])
-        for entry in _load_registered_voicebank_entries_for_path(registry_path)
+        for entry in _load_voicebank_manifest_for_path(manifest_path)["voicebanks"]
         if isinstance(entry.get("id"), str) and entry.get("id")
     ]
 
 
-def _load_registered_voicebank_ids() -> List[str]:
-    return _load_registered_voicebank_ids_for_path(str(_voicebank_registry_path().resolve()))
+def _load_manifest_voicebank_ids() -> List[str]:
+    return _load_manifest_voicebank_ids_for_path(str(_voicebank_manifest_path().resolve()))
 
 
-def get_registered_voicebank_metadata(voicebank_id: str) -> Dict[str, Any]:
-    """Return manual registry metadata for one voicebank id."""
+def get_manifest_voicebank_metadata(voicebank_id: str) -> Dict[str, Any]:
+    """Return manifest metadata for one voicebank id."""
     if not voicebank_id:
         return {}
-    registry_path = str(_voicebank_registry_path().resolve())
-    for entry in _load_registered_voicebank_entries_for_path(registry_path):
+    manifest_path = str(_voicebank_manifest_path().resolve())
+    for entry in _load_voicebank_manifest_for_path(manifest_path)["voicebanks"]:
         if entry.get("id") == voicebank_id:
-            return {k: v for k, v in entry.items() if k != "id"}
+            return dict(entry)
     return {}
 
 
-def resolve_registered_voicebank_id(voicebank: str | Path) -> Optional[str]:
-    """Resolve a registry voicebank id from a plain id or a nested voicebank path."""
-    registered_ids = set(_load_registered_voicebank_ids())
-    if not registered_ids:
+def get_enabled_manifest_voicebanks() -> List[Dict[str, Any]]:
+    """Return manifest entries that are enabled for the active environment."""
+    manifest_path = str(_voicebank_manifest_path().resolve())
+    return [
+        dict(entry)
+        for entry in _load_voicebank_manifest_for_path(manifest_path)["voicebanks"]
+        if entry.get("enabled") is True
+    ]
+
+
+def resolve_manifest_voicebank_id(voicebank: str | Path) -> Optional[str]:
+    """Resolve a manifest voicebank id from a plain id or a nested voicebank path."""
+    manifest_ids = set(_load_manifest_voicebank_ids())
+    if not manifest_ids:
         return None
 
     if isinstance(voicebank, str) and "/" not in voicebank and "\\" not in voicebank:
-        return voicebank if voicebank in registered_ids else None
+        return voicebank if voicebank in manifest_ids else None
 
     path = Path(voicebank).resolve()
     for candidate in (path, *path.parents):
-        if candidate.name in registered_ids:
+        if candidate.name in manifest_ids:
             return candidate.name
     return None
 
@@ -261,9 +286,9 @@ def resolve_voicebank_path(voicebank_id: str) -> Path:
         raise ValueError("voicebank is required.")
     if "/" in voicebank_id or "\\" in voicebank_id:
         raise ValueError("voicebank must be an ID (directory name).")
-    registered_ids = _load_registered_voicebank_ids()
-    if registered_ids and voicebank_id not in registered_ids:
-        raise FileNotFoundError(f"Voicebank not registered: {voicebank_id}")
+    manifest_ids = _load_manifest_voicebank_ids()
+    if manifest_ids and voicebank_id not in manifest_ids:
+        raise FileNotFoundError(f"Voicebank not declared in manifest: {voicebank_id}")
     if is_prod_env():
         return _ensure_cached_voicebank(voicebank_id)
     return _resolve_local_voicebank(voicebank_id)
@@ -293,10 +318,11 @@ def _list_voicebank_ids_local() -> List[str]:
     root = _local_voicebanks_root()
     if not root.exists():
         return []
-    registered_ids = _load_registered_voicebank_ids()
-    if registered_ids:
+    manifest_entries = get_enabled_manifest_voicebanks()
+    manifest_ids = [str(entry["id"]) for entry in manifest_entries if isinstance(entry.get("id"), str)]
+    if manifest_ids:
         ids = []
-        for voicebank_id in registered_ids:
+        for voicebank_id in manifest_ids:
             candidate = root / voicebank_id
             if candidate.is_dir() and discover_voicebank_root(candidate) is not None:
                 ids.append(voicebank_id)
@@ -309,30 +335,14 @@ def _list_voicebank_ids_local() -> List[str]:
 
 
 def _list_voicebank_ids_gcs() -> List[str]:
-    """Return voicebank IDs by scanning storage for tarball archives."""
-    bucket = _voicebank_bucket()
-    if not bucket:
-        raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
-    prefix = _voicebank_prefix()
-    if prefix:
-        prefix = f"{prefix}/"
-    ids: Set[str] = set()
-    for blob in list_blobs(bucket, prefix=prefix):
-        name = blob.name
-        if not name.startswith(prefix):
-            continue
-        remainder = name[len(prefix):]
-        if not remainder or "/" in remainder:
-            continue
-        if not remainder.endswith(".tar.gz"):
-            continue
-        voicebank_id = remainder[: -len(".tar.gz")]
-        if voicebank_id:
-            ids.add(voicebank_id)
-    registered_ids = _load_registered_voicebank_ids()
-    if registered_ids:
-        return sorted([voicebank_id for voicebank_id in registered_ids if voicebank_id in ids])
-    return sorted(ids)
+    """Return enabled voicebank IDs from the active manifest."""
+    return sorted(
+        [
+            str(entry["id"])
+            for entry in get_enabled_manifest_voicebanks()
+            if isinstance(entry.get("id"), str)
+        ]
+    )
 
 
 def _ensure_cached_voicebank(voicebank_id: str) -> Path:
@@ -348,9 +358,11 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
     bucket = _voicebank_bucket()
     if not bucket:
         raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
-    prefix = _voicebank_prefix()
-    archive_name = f"{voicebank_id}.tar.gz"
-    archive_object = f"{prefix}/{archive_name}" if prefix else archive_name
+    manifest_entry = get_manifest_voicebank_metadata(voicebank_id)
+    archive_object = manifest_entry.get("storage_object") if isinstance(manifest_entry, dict) else None
+    if not isinstance(archive_object, str) or not archive_object.strip():
+        raise ValueError(f"Manifest entry missing storage_object for voicebank: {voicebank_id}")
+    archive_name = Path(archive_object).name
     blob = None
     for candidate in list_blobs(bucket, prefix=archive_object):
         if candidate.name == archive_object:

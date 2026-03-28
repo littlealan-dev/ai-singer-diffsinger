@@ -1219,11 +1219,11 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
         },
         "gender": {
             "type": ["string", "null"],
-            "description": "Curated singer gender metadata from the backend registry, if available.",
+            "description": "Curated singer gender metadata from the active voicebank manifest, if available.",
         },
         "voice_type": {
             "type": ["string", "null"],
-            "description": "Curated SATB-style voice type metadata from the backend registry, if available.",
+            "description": "Curated SATB-style voice type metadata from the active voicebank manifest, if available.",
         },
         "sample_rate": {"type": "integer", "description": "Native output sample rate in Hz."},
         "hop_size": {"type": "integer", "description": "Model hop size used by the backend."},

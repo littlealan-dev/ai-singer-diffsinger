@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.api.voicebank_cache import (
     discover_voicebank_root,
-    get_registered_voicebank_metadata,
-    is_prod_env,
+    get_manifest_voicebank_metadata,
+    get_enabled_manifest_voicebanks,
     list_voicebank_ids,
-    resolve_registered_voicebank_id,
+    resolve_manifest_voicebank_id,
     resolve_voicebank_path,
 )
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -224,17 +224,20 @@ def list_voicebanks(search_path: Optional[Union[str, Path]] = None) -> List[Dict
             summarize_payload({"search_path": str(search_path) if search_path else None}),
         )
     root_dir = _project_root()
-    if search_path is None and is_prod_env():
-        # Production mode uses cached IDs to avoid filesystem scans.
-        ids = list_voicebank_ids()
-        voicebanks = [{"id": voicebank_id, "name": voicebank_id, "path": voicebank_id} for voicebank_id in ids]
+    if search_path is None:
+        manifest_entries = get_enabled_manifest_voicebanks()
+        voicebanks = [
+            {
+                "id": str(entry["id"]),
+                "name": str(entry.get("name") or entry["id"]),
+                "path": str(entry["id"]),
+            }
+            for entry in manifest_entries
+            if isinstance(entry.get("id"), str) and entry.get("id")
+        ]
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("list_voicebanks output=%s", summarize_payload(voicebanks))
         return voicebanks
-
-    if search_path is None:
-        # Default to assets/voicebanks relative to project root
-        search_path = root_dir / "assets" / "voicebanks"
 
     search_path = Path(search_path)
     if not search_path.exists():
@@ -324,8 +327,28 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         )
     path = Path(voicebank)
     if isinstance(voicebank, str) and not path.exists() and "/" not in voicebank and "\\" not in voicebank:
-        # Treat plain IDs as cached production voicebanks.
-        path = resolve_voicebank_path(voicebank)
+        manifest_entry = get_manifest_voicebank_metadata(voicebank)
+        if manifest_entry:
+            result = {
+                "name": manifest_entry.get("name") or voicebank,
+                "path": voicebank,
+                "languages": manifest_entry.get("languages", []),
+                "has_duration_model": manifest_entry.get("has_duration_model", False),
+                "has_pitch_model": manifest_entry.get("has_pitch_model", False),
+                "has_variance_model": manifest_entry.get("has_variance_model", False),
+                "speakers": manifest_entry.get("speakers", []),
+                "voice_colors": manifest_entry.get("voice_colors", []),
+                "default_voice_color": manifest_entry.get("default_voice_color"),
+                "sample_rate": manifest_entry.get("sample_rate", 44100),
+                "hop_size": manifest_entry.get("hop_size", 512),
+                "use_lang_id": manifest_entry.get("use_lang_id", False),
+                "gender": manifest_entry.get("gender"),
+                "voice_type": manifest_entry.get("voice_type"),
+            }
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("get_voicebank_info output=%s", summarize_payload(result))
+            return result
+        raise FileNotFoundError(f"Voicebank not declared in manifest: {voicebank}")
     config = load_voicebank_config(path)
 
     # Check for sub-models.
@@ -357,10 +380,10 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
 
     voice_colors = _extract_voice_colors(path)
     default_voice_color = _resolve_default_voice_color(voice_colors)
-    registry_voicebank_id = resolve_registered_voicebank_id(voicebank)
-    registry_metadata = (
-        get_registered_voicebank_metadata(registry_voicebank_id)
-        if registry_voicebank_id
+    manifest_voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    manifest_metadata = (
+        get_manifest_voicebank_metadata(manifest_voicebank_id)
+        if manifest_voicebank_id
         else {}
     )
 
@@ -377,8 +400,8 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),
-        "gender": registry_metadata.get("gender"),
-        "voice_type": registry_metadata.get("voice_type"),
+        "gender": manifest_metadata.get("gender"),
+        "voice_type": manifest_metadata.get("voice_type"),
     }
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("get_voicebank_info output=%s", summarize_payload(result))
