@@ -42,6 +42,19 @@ class PromptBundle:
     static_prompt_text: str
     dynamic_prompt_text: str
 
+    @property
+    def full_prompt_text(self) -> str:
+        """Return the full prompt text for legacy string-based callers."""
+        return f"{self.static_prompt_text}\n\n---\n\n{self.dynamic_prompt_text}"
+
+    def __str__(self) -> str:
+        """Render the bundle as a single prompt string when coerced."""
+        return self.full_prompt_text
+
+    def __contains__(self, value: object) -> bool:
+        """Support string containment checks for backwards-compatible tests/clients."""
+        return isinstance(value, str) and value in self.full_prompt_text
+
 
 def build_prompt_bundle(
     tools: List[Dict[str, Any]],
@@ -53,7 +66,7 @@ def build_prompt_bundle(
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
-) -> str:
+) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
     for tool in tools:
@@ -150,9 +163,7 @@ def build_system_prompt(
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
     )
-    return (
-        f"{bundle.static_prompt_text}\n\n---\n\n{bundle.dynamic_prompt_text}"
-    )
+    return bundle.full_prompt_text
 
 
 def _load_system_prompt() -> str:

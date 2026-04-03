@@ -195,6 +195,22 @@ def test_build_prompt_bundle_splits_static_and_dynamic_content() -> None:
     assert "End Dynamic Context." in bundle.dynamic_prompt_text
 
 
+def test_build_prompt_bundle_supports_legacy_string_containment() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary={"title": "My Tribute"},
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan={"targets": []},
+        voicebank_details=None,
+    )
+    assert "Latest attempted preprocess plan (if available):" in bundle
+    assert '"title": "My Tribute"' in str(bundle)
+
+
 def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
     bundle = build_prompt_bundle(
         tools=[],

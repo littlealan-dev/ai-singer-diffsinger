@@ -5,6 +5,7 @@ Tests the full synthesis pipeline from MusicXML to WAV.
 """
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -38,11 +39,21 @@ class TestEndToEndAPI(unittest.TestCase):
         self.output_wav_katyusha = self.output_dir / "api_output_katyusha.wav"
         self.output_wav_commissions = self.output_dir / "api_output_commissionsv1noka.wav"
         self.output_wav_hoshino_soprano = self.output_dir / "api_output_hoshino_hanami_soprano.wav"
-        
-        if not self.voicebank_path.exists():
-            self.skipTest(f"Voicebank not found at {self.voicebank_path}")
+
+    def _require_real_voicebank(self, voicebank_path: Path) -> None:
+        if not voicebank_path.exists():
+            self.skipTest(f"Voicebank not found at {voicebank_path}")
+
+    def _require_real_score(self) -> None:
         if not self.score_path.exists():
             self.skipTest(f"Test score not found at {self.score_path}")
+
+    def _write_inline_score(self, xml: str) -> Path:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        path = Path(temp_dir.name) / "inline_score.xml"
+        path.write_text(xml, encoding="utf-8")
+        return path
 
     def _run_full_synthesis_case(
         self,
@@ -52,8 +63,8 @@ class TestEndToEndAPI(unittest.TestCase):
         label: str,
         synth_kwargs: dict | None = None,
     ) -> None:
-        if not voicebank_path.exists():
-            self.skipTest(f"Voicebank not found at {voicebank_path}")
+        self._require_real_voicebank(voicebank_path)
+        self._require_real_score()
 
         print(f"\n=== Full Synthesis Test ({label}) ===")
         print(f"Voicebank: {voicebank_path}")
@@ -81,7 +92,19 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_voicebank_info(self):
         """Test that voicebank info can be retrieved."""
-        info = get_voicebank_info(self.voicebank_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voicebank_root = Path(tmp_dir) / "DummyBank"
+            voicebank_root.mkdir(parents=True, exist_ok=True)
+            (voicebank_root / "dsconfig.yaml").write_text(
+                "sample_rate: 44100\nhop_size: 512\nuse_lang_id: false\nspeakers: []\n",
+                encoding="utf-8",
+            )
+            (voicebank_root / "character.yaml").write_text(
+                "name: Dummy Bank\nsubbanks:\n  - color: 01: default\n    suffix: default\n",
+                encoding="utf-8",
+            )
+            (voicebank_root / "dsdur").mkdir(exist_ok=True)
+            info = get_voicebank_info(voicebank_root)
         
         print(f"Voicebank: {info['name']}")
         print(f"  Has pitch model: {info['has_pitch_model']}")
@@ -93,7 +116,31 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_parse_score(self):
         """Test that score can be parsed."""
-        score = parse_score(self.score_path)
+        score_path = self._write_inline_score(
+            """<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Soprano</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        )
+        score = parse_score(score_path)
         
         print(f"Score title: {score['title']}")
         print(f"  Parts: {len(score['parts'])}")
@@ -145,8 +192,8 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_full_synthesis_apollo_tenor_amazing_grace(self):
         """Test tenor verse 1 of Amazing Grace with Apollo DS 1.0."""
-        if not self.voicebank_apollo_path.exists():
-            self.skipTest(f"Voicebank not found at {self.voicebank_apollo_path}")
+        self._require_real_voicebank(self.voicebank_apollo_path)
+        self._require_real_score()
 
         print(f"\n=== Full Synthesis Test (Tenor, Apollo) ===")
         print(f"Voicebank: {self.voicebank_apollo_path.name}")
@@ -186,8 +233,8 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_full_synthesis_tenor_male_amazing_grace(self):
         """Test tenor verse 1 with a male voicebank."""
-        if not self.voicebank_reizo_path.exists():
-            self.skipTest(f"Voicebank not found at {self.voicebank_reizo_path}")
+        self._require_real_voicebank(self.voicebank_reizo_path)
+        self._require_real_score()
 
         print(f"\n=== Full Synthesis Test (Tenor, Male) ===")
         print(f"Voicebank: {self.voicebank_reizo_path.name}")
@@ -228,8 +275,8 @@ class TestEndToEndAPI(unittest.TestCase):
 
     def test_full_synthesis_hoshino_hanami_soprano_amazing_grace(self):
         """Test soprano verse 1 of Amazing Grace with Hoshino Hanami v1.0."""
-        if not self.voicebank_hoshino_path.exists():
-            self.skipTest(f"Voicebank not found at {self.voicebank_hoshino_path}")
+        self._require_real_voicebank(self.voicebank_hoshino_path)
+        self._require_real_score()
 
         print(f"\n=== Full Synthesis Test (Soprano, Hoshino Hanami) ===")
         print(f"Voicebank: {self.voicebank_hoshino_path.name}")

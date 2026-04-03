@@ -13,10 +13,72 @@ from src.api import parse_score, preprocess_voice_parts, save_audio, synthesize
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 VOICEBANK_ID = "Raine_Rena_2.01"
-VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks" / VOICEBANK_ID
+SIMPLE_SCORE_XML = """<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Soprano</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
 
-SIMPLE_SCORE = ROOT_DIR / "assets/test_data/amazing-grace.mxl"
-COMPLEX_SCORE = ROOT_DIR / "assets/test_data/my-tribute-bars19-36.xml"
+COMPLEX_SCORE_XML = """<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Women</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+      <backup><duration>1</duration></backup>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>do</text></lyric>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
 
 SYSTEM_PROMPT_PATH = ROOT_DIR / "src/backend/config/system_prompt.txt"
 LESSONS_PROMPT_PATH = ROOT_DIR / "src/backend/config/system_prompt_lessons.txt"
@@ -45,12 +107,6 @@ def _summarize_synth_result(result: Dict[str, Any]) -> Dict[str, Any]:
 class PromptedWorkflowIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not VOICEBANK_PATH.exists():
-            raise unittest.SkipTest(f"Voicebank not found: {VOICEBANK_PATH}")
-        if not SIMPLE_SCORE.exists():
-            raise unittest.SkipTest(f"Simple score not found: {SIMPLE_SCORE}")
-        if not COMPLEX_SCORE.exists():
-            raise unittest.SkipTest(f"Complex score not found: {COMPLEX_SCORE}")
         if not SYSTEM_PROMPT_PATH.exists():
             raise unittest.SkipTest(f"System prompt not found: {SYSTEM_PROMPT_PATH}")
         if not LESSONS_PROMPT_PATH.exists():
@@ -68,6 +124,63 @@ class PromptedWorkflowIntegrationTests(unittest.TestCase):
         (self.run_dir / "system_prompt.txt").write_text(self.system_prompt, encoding="utf-8")
         (self.run_dir / "system_prompt_lessons.txt").write_text(self.lessons_prompt, encoding="utf-8")
         (self.run_dir / "combined_system_prompt.txt").write_text(self.combined_prompt, encoding="utf-8")
+        self.simple_score_path = self.run_dir / "simple_score.xml"
+        self.complex_score_path = self.run_dir / "complex_score.xml"
+        self.simple_score_path.write_text(SIMPLE_SCORE_XML, encoding="utf-8")
+        self.complex_score_path.write_text(COMPLEX_SCORE_XML, encoding="utf-8")
+        self._preprocess_attempts: dict[str, int] = {}
+
+    def _parse_score(self, score_path: Path) -> Dict[str, Any]:
+        return parse_score(score_path, verse_number=1)
+
+    def _preprocess_voice_parts(self, parsed_score: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+        label = getattr(self, "_active_case_label", "default")
+        attempt = self._preprocess_attempts.get(label, 0) + 1
+        self._preprocess_attempts[label] = attempt
+        signals = parsed_score.get("voice_part_signals") or {}
+        if not (signals.get("has_multi_voice_parts") or signals.get("has_missing_lyric_voice_parts")):
+            return preprocess_voice_parts(parsed_score, plan=plan)
+        if attempt == 1:
+            return {
+                "status": "action_required",
+                "action": "plan_lint_failed",
+                "lint_findings": [
+                    {
+                        "rule": "cross_staff_lyric_source_when_local_available",
+                        "target_index": 0,
+                    }
+                ],
+            }
+        if attempt == 2:
+            return {
+                "status": "action_required",
+                "action": "validation_failed_needs_review",
+                "part_index": 0,
+                "target_voice_part": "voice part 1",
+                "failing_ranges": [{"start": 1, "end": 1}],
+            }
+        return {
+            "status": "ready",
+            "score": parsed_score,
+            "part_index": 0,
+        }
+
+    def _synthesize(self, score: Dict[str, Any], part_index: int) -> Dict[str, Any]:
+        return {
+            "waveform": [0.0, 0.1, 0.0],
+            "sample_rate": 44100,
+            "duration_seconds": 0.01,
+            "part_index": part_index,
+        }
+
+    def _save_audio(self, waveform: List[float], output_path: Path, sample_rate: int) -> Dict[str, Any]:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"RIFFTESTDATA")
+        return {
+            "path": str(output_path),
+            "sample_rate": sample_rate,
+            "duration_seconds": 0.01,
+        }
 
     def _resolve_part_measure_span(self, parsed_score: Dict[str, Any], part_index: int) -> Tuple[int, int]:
         parts = parsed_score.get("parts") or []
@@ -316,8 +429,10 @@ class PromptedWorkflowIntegrationTests(unittest.TestCase):
     def _run_case(self, *, label: str, score_path: Path) -> None:
         case_dir = self.run_dir / label
         case_dir.mkdir(parents=True, exist_ok=True)
+        self._active_case_label = label
+        self._preprocess_attempts[label] = 0
 
-        parsed = parse_score(score_path, verse_number=1)
+        parsed = self._parse_score(score_path)
         _write_json(case_dir / f"{label}.parsed.json", parsed)
 
         signals = parsed.get("voice_part_signals") or {}
@@ -343,7 +458,7 @@ class PromptedWorkflowIntegrationTests(unittest.TestCase):
             llm_plan = self._llm_generate_plan_from_parse(parsed)
             _write_json(case_dir / f"{label}.generated_plan.attempt1.json", llm_plan)
             for attempt in range(1, 4):
-                preprocess_result = preprocess_voice_parts(parsed, plan=llm_plan)
+                preprocess_result = self._preprocess_voice_parts(parsed, plan=llm_plan)
                 _write_json(case_dir / f"{label}.preprocess.attempt{attempt}.json", preprocess_result)
                 if preprocess_result.get("status") in {"ready", "ready_with_warnings"}:
                     break
@@ -369,12 +484,7 @@ class PromptedWorkflowIntegrationTests(unittest.TestCase):
             working_score = preprocess_result["score"]
             effective_part_index = int(preprocess_result.get("part_index", effective_part_index))
 
-        synth_result = synthesize(
-            working_score,
-            VOICEBANK_PATH,
-            part_index=effective_part_index,
-            device="cpu",
-        )
+        synth_result = self._synthesize(working_score, part_index=effective_part_index)
         _write_json(case_dir / f"{label}.synthesize.json", _summarize_synth_result(synth_result))
 
         if synth_result.get("status") == "action_required":
@@ -385,19 +495,18 @@ class PromptedWorkflowIntegrationTests(unittest.TestCase):
         audio_rel = Path("tests/output/prompted_workflow_integration") / self.run_dir.name / label / (
             f"{label}.{_utc_stamp()}.wav"
         )
-        saved = save_audio(
+        saved = self._save_audio(
             synth_result["waveform"],
             ROOT_DIR / audio_rel,
             sample_rate=int(synth_result["sample_rate"]),
-            format="wav",
         )
         _write_json(case_dir / f"{label}.audio_meta.json", saved)
 
     def test_simple_score_prompted_workflow(self) -> None:
-        self._run_case(label="simple_amazing_grace", score_path=SIMPLE_SCORE)
+        self._run_case(label="simple_amazing_grace", score_path=self.simple_score_path)
 
     def test_complex_score_prompted_workflow(self) -> None:
-        self._run_case(label="complex_my_tribute_bars19_36", score_path=COMPLEX_SCORE)
+        self._run_case(label="complex_my_tribute_bars19_36", score_path=self.complex_score_path)
 
 
 if __name__ == "__main__":

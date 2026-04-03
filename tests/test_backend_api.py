@@ -35,6 +35,78 @@ from src.backend.credits import (
 )
 
 
+VERSED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Soprano</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric number='1'><text>O</text></lyric>
+        <lyric number='2'><text>Lo</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric number='1'><text>night</text></lyric>
+        <lyric number='2'><text>light</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+
+ZIPPED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Soprano</part-name></score-part>
+    <score-part id='P2'><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>ah</text></lyric>
+      </note>
+    </measure>
+  </part>
+  <part id='P2'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>oh</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+
 def _make_router_call_tool():
     def _call_tool(name, arguments):
         if name == "parse_score":
@@ -1032,9 +1104,6 @@ def test_upload_rejects_oversized_mxl_archive(client_with_env):
 
 def test_upload_returns_score_summary_with_verses(client):
     test_client, app = client
-    score_path = PROJECT_ROOT / "assets/test_data/o-holy-night.xml"
-    if not score_path.exists():
-        pytest.skip(f"Test score not found at {score_path}")
 
     def call_tool(name, arguments):
         if name == "parse_score":
@@ -1049,7 +1118,7 @@ def test_upload_returns_score_summary_with_verses(client):
 
     app.state.router.call_tool = call_tool
     session_id = _create_session(test_client)
-    files = {"file": ("o-holy-night.xml", score_path.read_bytes(), "application/xml")}
+    files = {"file": ("o-holy-night.xml", VERSED_SCORE_XML, "application/xml")}
     response = test_client.post(f"/sessions/{session_id}/upload", files=files)
     assert response.status_code == 200
     payload = response.json()
@@ -1058,6 +1127,7 @@ def test_upload_returns_score_summary_with_verses(client):
     assert summary.get("parts")
     assert any(part.get("has_lyrics") for part in summary["parts"])
     assert "1" in summary.get("available_verses", [])
+    assert "2" in summary.get("available_verses", [])
 
 
 def test_build_workflow_candidate_classifies_reviewable_postflight_result(client):
@@ -2252,10 +2322,6 @@ def test_orchestrator_builds_verse_change_action_required(client):
 
 def test_upload_parses_zipped_musicxml(client):
     test_client, app = client
-    mxl_path = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-zipped.mxl"
-    if not mxl_path.exists():
-        pytest.skip(f"Test score not found at {mxl_path}")
-
     def call_tool(name, arguments):
         if name == "parse_score":
             file_path = resolve_project_path(arguments["file_path"])
@@ -2272,7 +2338,7 @@ def test_upload_parses_zipped_musicxml(client):
     files = {
         "file": (
             "amazing-grace-satb-zipped.mxl",
-            mxl_path.read_bytes(),
+            _build_mxl_archive(score_xml=ZIPPED_SCORE_XML),
             "application/vnd.recordare.musicxml",
         )
     }
