@@ -30,14 +30,34 @@ from src.api.voice_parts import preprocess_voice_parts
 
 
 ROOT_DIR = Path(__file__).parent.parent
+VOICEBANKS_DIR = ROOT_DIR / "assets/voicebanks"
 VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
 TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
 TEST_MULTI_VERSE_XML = ROOT_DIR / "assets/test_data/o-holy-night.xml"
 OUTPUT_DIR = ROOT_DIR / "tests/output"
 
 
+def _has_voicebank_fixtures() -> bool:
+    return VOICEBANKS_DIR.is_dir() and any(VOICEBANKS_DIR.iterdir())
+
+
 class TestParseScore(unittest.TestCase):
     """Tests for parse_score API."""
+
+    _primary_score_methods = {
+        "test_parse_returns_dict",
+        "test_parse_has_required_keys",
+        "test_parse_extracts_title",
+        "test_parse_extracts_notes",
+        "test_parse_note_has_required_fields",
+        "test_parse_exposes_voice_part_signals",
+        "test_parse_exposes_extended_voice_part_signals",
+        "test_preprocess_invalid_plan_returns_action_required",
+    }
+
+    def setUp(self):
+        if self._testMethodName in self._primary_score_methods and not TEST_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_XML}")
     
     def test_parse_returns_dict(self):
         """parse_score should return a JSON-serializable dict."""
@@ -409,6 +429,10 @@ class TestLinguisticLanguageMapSelection(unittest.TestCase):
 
 class TestModifyScore(unittest.TestCase):
     """Tests for modify_score API."""
+
+    def setUp(self):
+        if not TEST_XML.exists():
+            self.skipTest(f"Test score not found: {TEST_XML}")
     
     def test_modify_transposes_notes(self):
         """modify_score should be able to transpose notes."""
@@ -497,6 +521,8 @@ class TestAlignPhonemesToNotes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if not TEST_XML.exists():
+            raise unittest.SkipTest(f"Test score not found: {TEST_XML}")
         if not VOICEBANK_PATH.exists():
             raise unittest.SkipTest(f"Voicebank not found at {VOICEBANK_PATH}")
 
@@ -535,6 +561,16 @@ class TestAlignPhonemesToNotes(unittest.TestCase):
 
 class TestVoicebankAPIs(unittest.TestCase):
     """Tests for list_voicebanks and get_voicebank_info APIs."""
+
+    _filesystem_voicebank_methods = {
+        "test_list_voicebanks",
+        "test_list_voicebanks_has_required_fields",
+        "test_list_voicebanks_with_explicit_search_path_uses_filesystem",
+    }
+
+    def setUp(self):
+        if self._testMethodName in self._filesystem_voicebank_methods and not _has_voicebank_fixtures():
+            self.skipTest(f"Voicebank fixtures not found under {VOICEBANKS_DIR}")
     
     def test_list_voicebanks(self):
         """list_voicebanks should return a list."""

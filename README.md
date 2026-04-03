@@ -138,6 +138,9 @@ End-to-end synthesis:
 .venv/bin/python -m pytest tests/test_end_to_end.py -k test_full_synthesis -vv
 ```
 
+Backend validation bootstrap and fixture expectations:
+- `docs/runbooks/backend-validation-fixtures.md`
+
 
 ## Docs
 

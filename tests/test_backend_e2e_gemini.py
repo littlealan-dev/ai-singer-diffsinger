@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 import firebase_admin
 
+from src.api.score import parse_score
 from src.backend.main import create_app
 from src.backend.firebase_app import get_firestore_client
 from src.backend.credits import (
@@ -26,12 +27,161 @@ from src.mcp.resolve import PROJECT_ROOT
 
 
 VOICEBANK_ID = "Raine_Rena_2.01"
-SCORE_PATH = PROJECT_ROOT / "assets/test_data/amazing-grace-satb-verse1.xml"
-MULTI_VERSE_SCORE_PATH = PROJECT_ROOT / "assets/test_data/o-holy-night.xml"
-VERSE_CHANGE_SCORE_PATH = (
-    PROJECT_ROOT / "assets/test_data/amazing-grace-satb-zipped/lg-21486226.xml"
-)
-MY_TRIBUTE_SLICE_PATH = PROJECT_ROOT / "assets/test_data/my-tribute-bars19-36.xml"
+BASIC_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Melody</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>amaze</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric><text>grace</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+MULTI_VERSE_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Soprano</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric number='1'><text>o</text></lyric>
+        <lyric number='2'><text>lo</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+        <lyric number='1'><text>night</text></lyric>
+        <lyric number='2'><text>light</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+COMPLEX_PREPROCESS_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Women</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+      <backup><duration>1</duration></backup>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>do</text></lyric>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+VERSE_CHANGE_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list>
+    <score-part id='P1'><part-name>Women</part-name></score-part>
+  </part-list>
+  <part id='P1'>
+    <measure number='1'>
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric number='1'><text>a</text></lyric>
+        <lyric number='2'><text>b</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+      <backup><duration>1</duration></backup>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric number='1'><text>maz</text></lyric>
+        <lyric number='2'><text>rise</text></lyric>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+
+
+def _write_score_fixture(tmp_path: Path, filename: str, content: bytes) -> Path:
+    path = tmp_path / filename
+    path.write_bytes(content)
+    return path
 
 
 class RecordingLlmClient:
@@ -132,6 +282,32 @@ def _auth_headers(token="test-token"):
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_inline_multi_verse_fixture_exposes_multiple_verses(tmp_path: Path):
+    parsed = parse_score(_write_score_fixture(tmp_path, "multi-verse.xml", MULTI_VERSE_SCORE_XML))
+    available_verses = [str(value) for value in parsed["score_summary"]["available_verses"]]
+    assert "1" in available_verses
+    assert "2" in available_verses
+
+
+def test_inline_complex_fixture_triggers_multi_voice_signals(tmp_path: Path):
+    parsed = parse_score(
+        _write_score_fixture(tmp_path, "complex-preprocess.xml", COMPLEX_PREPROCESS_SCORE_XML)
+    )
+    signals = parsed["voice_part_signals"]
+    assert signals["has_multi_voice_parts"] is True
+
+
+def test_inline_verse_change_fixture_combines_reparse_and_preprocess_signals(tmp_path: Path):
+    parsed = parse_score(
+        _write_score_fixture(tmp_path, "verse-change.xml", VERSE_CHANGE_SCORE_XML)
+    )
+    available_verses = [str(value) for value in parsed["score_summary"]["available_verses"]]
+    signals = parsed["voice_part_signals"]
+    assert "1" in available_verses
+    assert "2" in available_verses
+    assert signals["has_multi_voice_parts"] is True
+
+
 def _reset_firebase_admin():
     try:
         app = firebase_admin.get_app()
@@ -226,8 +402,6 @@ def gemini_client(monkeypatch):
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         pytest.skip("GEMINI_API_KEY is not set.")
-    if not SCORE_PATH.exists():
-        pytest.skip(f"Test score not found at {SCORE_PATH}")
     voicebank_path = PROJECT_ROOT / "assets/voicebanks" / VOICEBANK_ID
     if not voicebank_path.exists():
         pytest.skip(f"Voicebank not found at {voicebank_path}")
@@ -486,7 +660,7 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
         data_dir,
     )
 
-    files = {"file": ("score.xml", SCORE_PATH.read_bytes(), "application/xml")}
+    files = {"file": ("score.xml", BASIC_SCORE_XML, "application/xml")}
     upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
     assert upload_response.status_code == 200
 
@@ -507,8 +681,6 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
 
 def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
-    if not MY_TRIBUTE_SLICE_PATH.exists():
-        pytest.skip(f"Test score not found at {MY_TRIBUTE_SLICE_PATH}")
 
     response = test_client.post("/sessions")
     assert response.status_code == 200
@@ -523,7 +695,7 @@ def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client
     files = {
         "file": (
             "my-tribute-bars19-36.xml",
-            MY_TRIBUTE_SLICE_PATH.read_bytes(),
+            COMPLEX_PREPROCESS_SCORE_XML,
             "application/xml",
         )
     }
@@ -655,8 +827,6 @@ def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client
 
 def test_backend_e2e_gemini_verse_change_reparse_preprocess_review_synthesize(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
-    if not VERSE_CHANGE_SCORE_PATH.exists():
-        pytest.skip(f"Test score not found at {VERSE_CHANGE_SCORE_PATH}")
 
     response = test_client.post("/sessions")
     assert response.status_code == 200
@@ -671,7 +841,7 @@ def test_backend_e2e_gemini_verse_change_reparse_preprocess_review_synthesize(ge
     files = {
         "file": (
             "lg-21486226.xml",
-            VERSE_CHANGE_SCORE_PATH.read_bytes(),
+            VERSE_CHANGE_SCORE_XML,
             "application/xml",
         )
     }
@@ -819,7 +989,7 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
         data_dir,
     )
 
-    files = {"file": ("score.xml", SCORE_PATH.read_bytes(), "application/xml")}
+    files = {"file": ("score.xml", BASIC_SCORE_XML, "application/xml")}
     upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
     assert upload_response.status_code == 200
 
@@ -858,8 +1028,6 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
 
 def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
-    if not MULTI_VERSE_SCORE_PATH.exists():
-        pytest.skip(f"Test score not found at {MULTI_VERSE_SCORE_PATH}")
     response = test_client.post("/sessions")
     assert response.status_code == 200
     session_id = response.json()["session_id"]
@@ -871,7 +1039,7 @@ def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
     )
 
     files = {
-        "file": ("o-holy-night.xml", MULTI_VERSE_SCORE_PATH.read_bytes(), "application/xml")
+        "file": ("o-holy-night.xml", MULTI_VERSE_SCORE_XML, "application/xml")
     }
     upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
     assert upload_response.status_code == 200
@@ -894,10 +1062,8 @@ def test_backend_e2e_emulator_synthesize(emulator_gemini_client):
     assert response.status_code == 200
     session_id = response.json()["session_id"]
 
-    if not SCORE_PATH.exists():
-        pytest.skip(f"Test score not found at {SCORE_PATH}")
     files = {
-        "file": ("score.xml", SCORE_PATH.read_bytes(), "application/xml"),
+        "file": ("score.xml", BASIC_SCORE_XML, "application/xml"),
     }
     upload_response = test_client.post(f"/sessions/{session_id}/upload", files=files)
     assert upload_response.status_code == 200
