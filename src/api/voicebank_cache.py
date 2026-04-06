@@ -216,7 +216,9 @@ def _resolve_inventory_from_dir(stage_dir: Path, stage_config: Dict[str, Any]) -
             return explicit
     for candidate in (
         stage_dir / "phonemes.json",
+        stage_dir / "phonemes.txt",
         stage_dir / "dsmain" / "phonemes.json",
+        stage_dir / "dsmain" / "phonemes.txt",
     ):
         if candidate.exists():
             return candidate.resolve()
@@ -262,15 +264,38 @@ def _load_stage_phoneme_inventory_cached(
 ) -> tuple[tuple[str, int], ...]:
     """Load and cache a stage-local phoneme inventory."""
     inventory_path = resolve_stage_phoneme_inventory_path(Path(voicebank_path), stage)
-    data = json.loads(inventory_path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"Invalid phoneme inventory format at {inventory_path}")
+    content = inventory_path.read_text(encoding="utf-8")
+    
+    # Attempt to parse as YAML/JSON mapping first (robust detection)
+    try:
+        data = yaml.safe_load(content)
+        if isinstance(data, dict):
+            items = list(data.items())
+        else:
+            # Fallback to plain text list
+            items = _parse_text_phoneme_inventory(content)
+    except Exception:
+        # Fallback for any parsing error
+        items = _parse_text_phoneme_inventory(content)
+
     normalized: List[tuple[str, int]] = []
-    for symbol, value in data.items():
+    for symbol, value in items:
         if not isinstance(symbol, str) or not symbol:
             raise ValueError(f"Invalid phoneme symbol in {inventory_path}")
         normalized.append((symbol, int(value)))
     return tuple(normalized)
+
+
+def _parse_text_phoneme_inventory(content: str) -> List[tuple[str, int]]:
+    """Parse a line-based phoneme inventory from plain text."""
+    items: List[tuple[str, int]] = []
+    for line in content.splitlines():
+        symbol = line.strip()
+        if not symbol or symbol.startswith("#") or symbol.startswith(";"):
+            continue
+        # Index is the current length of the list (0-based)
+        items.append((symbol, len(items)))
+    return items
 
 
 def get_stage_phoneme_inventory(voicebank_path: Path | str, stage: str) -> Dict[str, int]:

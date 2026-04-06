@@ -42,7 +42,15 @@ fi
 : "${BACKEND_LOG_LEVEL:=debug}"
 : "${BACKEND_BUILD_ID:=dev-$(date +%s)}"
 
-PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/.venv310/bin/python}"
+# Find python from .venv310 in current or parent/sibling project
+if [[ -f "${ROOT_DIR}/.venv310/bin/python" ]]; then
+  DEFAULT_PYTHON="${ROOT_DIR}/.venv310/bin/python"
+elif [[ -f "${ROOT_DIR}/../ai-singer-diffsinger/.venv310/bin/python" ]]; then
+  DEFAULT_PYTHON="${ROOT_DIR}/../ai-singer-diffsinger/.venv310/bin/python"
+else
+  DEFAULT_PYTHON="${ROOT_DIR}/.venv310/bin/python" # fallback default
+fi
+PYTHON_BIN="${PYTHON_BIN:-${DEFAULT_PYTHON}}"
 
 mkdir -p "${LOG_DIR}"
 

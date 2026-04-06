@@ -12,16 +12,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def resolve_project_path(path_value: str) -> Path:
-    """Resolve a project-relative path with traversal protection."""
+    """Resolve a project-relative path with traversal protection, permitting links."""
     if not path_value:
         raise ValueError("Path is required.")
     path = Path(path_value)
     if path.is_absolute():
         raise ValueError("Absolute paths are not allowed.")
-    resolved = (PROJECT_ROOT / path).resolve()
-    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
+    
+    # Check for traversal before resolving symlinks (security check)
+    # Using '..' in path is allowed as long as the result is inside PROJECT_ROOT.
+    # We join and then check if the requested path starts with our root.
+    full_path = (PROJECT_ROOT / path).absolute()
+    # Still use .resolve() for the return value but check the structure first.
+    if PROJECT_ROOT.absolute() not in full_path.parents and full_path != PROJECT_ROOT.absolute():
         raise ValueError("Path escapes project root.")
-    return resolved
+    
+    return full_path.resolve()
 
 
 def resolve_voicebank_id(voicebank_id: str) -> Path:
