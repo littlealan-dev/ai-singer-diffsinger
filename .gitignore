@@ -55,7 +55,7 @@ marketing/
 outputs/
 reports/
 tests/output/
-assets/
+assets
 logs/
 runs/
 checkpoints/
