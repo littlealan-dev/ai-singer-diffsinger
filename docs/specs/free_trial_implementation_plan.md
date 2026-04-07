@@ -56,11 +56,12 @@ flowchart TD
     H -->|No| M[Show Error]
     M --> D
     
-    L -->|Yes| N[Create User Record + 20 Credits]
+    L -->|Yes| N[Create User Record + 20 Credits + trial_reset_v1=true]
     L -->|No| O[Load Existing Credits]
-    
-    N --> P[Studio /app with Credits Header]
-    O --> P
+    O --> OA{trial_reset_v1 == true?}
+    OA -->|No| OB[Reset Balance to 20, Expiry to 30d, trial_reset_v1=true]
+    OA -->|Yes| P
+    OB --> P
     
     P --> Q{Credits Available?}
     Q -->|Yes| R[Upload Score]
@@ -425,6 +426,9 @@ Test cases:
 - `test_release_credits` - Releases reservation on failure/cancel
 - `test_overdraft_lockout` - Blocks new synthesis when overdrafted
 - `test_reservation_timeout` - Releases after 900s
+- `test_trial_reset_v1_existing_user` - Verifies existing user is reset to 20/30-days once
+- `test_trial_reset_v1_only_once` - Verifies reset doesn't happen repeatedly
+- `test_new_user_starts_with_reset_flag` - Verifies new users are marked as reset
 
 ---
 

@@ -5,8 +5,11 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
-      // credits field is modified only by the server (Admin SDK)
-      allow write: if false; 
+      // Allow users to update their own notification metadata, but nothing else. 
+      // Credits are managed by the server.
+      allow update: if request.auth != null && request.auth.uid == uid 
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['metadata']);
+      allow create, delete: if false; 
     }
 
     match /credit_reservations/{jobId} {

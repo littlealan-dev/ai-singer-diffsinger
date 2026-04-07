@@ -13,6 +13,14 @@ Core Rules
 - If `available_balance < estimated_credits`, synthesis is rejected (no capped audio).
 - Expiry lock: once a reservation is created, expiry does not invalidate that reservation.
 - Settlement: compute actual credits from server-measured audio duration.
+
+## 3. Trial Reset Migration (Trial Reset v1)
+A one-time reset mechanism for existing trial users to update their balance to 20 and expiry to 30 days.
+
+- **Check**: `get_or_create_credits` checks for `trial_reset_v1: true` in the user document.
+- **Trigger**: If the flag is missing or false, perform a one-time update of `balance`, `expiresAt`, and `overdrafted`.
+- **Log**: Create a `credit_ledger` entry with `type: "trial_reset"`.
+- **New Users**: New accounts are created with `trial_reset_v1: true` set immediately.
 - Overdraft: if balance becomes negative after settlement, the account is locked.
 - Overdraft lockout: no upload/chat/modify/synthesize; allow play/download existing audio.
 - Overdraft is permanent until subscription credits bring balance back to >= 0.
@@ -27,7 +35,8 @@ Collection: `users/{uid}`
     "reserved": 0,              // integer reserved credits
     "expiresAt": "2026-01-22T00:00:00Z",
     "overdrafted": false,       // true when balance < 0 after settlement
-    "trialGrantedAt": "2026-01-15T00:00:00Z"
+    "trialGrantedAt": "2026-01-15T00:00:00Z",
+    "trial_reset_v1": true      // true if one-time reset was applied or user is new
   }
 }
 ```

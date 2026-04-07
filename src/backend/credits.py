@@ -29,6 +29,7 @@ class UserCredits:
     expires_at: datetime
     overdrafted: bool
     trial_granted_at: Optional[datetime] = None
+    trial_reset_v1: bool = False
 
     @property
     def available_balance(self) -> int:
@@ -149,12 +150,45 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
             data = snapshot.to_dict() or {}
             credits_data = data.get("credits")
             if credits_data:
+                # Check for one-time reset (v1)
+                if not credits_data.get("trial_reset_v1", False):
+                    now = datetime.now(timezone.utc)
+                    expires_at = now + timedelta(days=TRIAL_EXPIRY_DAYS)
+                    transaction.update(user_ref, {
+                        "credits.balance": TRIAL_CREDIT_AMOUNT,
+                        "credits.reserved": 0,
+                        "credits.expiresAt": expires_at,
+                        "credits.overdrafted": False,
+                        "credits.trial_reset_v1": True
+                    })
+
+                    # Log reset to ledger
+                    ledger_ref = db.collection("credit_ledger").document()
+                    transaction.set(ledger_ref, {
+                        "userId": uid,
+                        "type": "trial_reset",
+                        "amount": TRIAL_CREDIT_AMOUNT,
+                        "balanceAfter": TRIAL_CREDIT_AMOUNT,
+                        "createdAt": now,
+                        "reason": "One-time trial reset v1"
+                    })
+
+                    return UserCredits(
+                        balance=TRIAL_CREDIT_AMOUNT,
+                        reserved=0,
+                        expires_at=expires_at,
+                        overdrafted=False,
+                        trial_granted_at=credits_data.get("trialGrantedAt"),
+                        trial_reset_v1=True
+                    )
+
                 return UserCredits(
                     balance=credits_data.get("balance", 0),
                     reserved=credits_data.get("reserved", 0),
                     expires_at=credits_data.get("expiresAt"),
                     overdrafted=credits_data.get("overdrafted", False),
-                    trial_granted_at=credits_data.get("trialGrantedAt")
+                    trial_granted_at=credits_data.get("trialGrantedAt"),
+                    trial_reset_v1=credits_data.get("trial_reset_v1", False)
                 )
         
         # Create trial credits
@@ -166,12 +200,16 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
             "reserved": 0,
             "expiresAt": expires_at,
             "overdrafted": False,
-            "trialGrantedAt": now
+            "trialGrantedAt": now,
+            "trial_reset_v1": True
         }
         
         transaction.set(user_ref, {
             "email": email,
             "credits": credits_data,
+            "metadata": {
+                "lastSeenAnnouncementId": "trial_reset_v1"
+            },
             "createdAt": now
         }, merge=True)
         
@@ -180,7 +218,8 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
             reserved=0,
             expires_at=expires_at,
             overdrafted=False,
-            trial_granted_at=now
+            trial_granted_at=now,
+            trial_reset_v1=True
         )
 
     transaction = db.transaction()

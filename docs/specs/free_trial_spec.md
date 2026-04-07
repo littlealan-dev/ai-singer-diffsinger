@@ -14,6 +14,8 @@ Assumptions and Definitions
 - Auth methods: Google OAuth or email magic link.
 - "Join Waiting List": available only to signed-in users.
 - "Free Trial" eligibility: first-time trial grant per user.
+- Trial Reset v1: A one-time reset for existing trial users to 20 credits and 30-day expiry, tracked via `trial_reset_v1` flag.
+
 
 UI Flow
 -------
@@ -134,6 +136,10 @@ Phase 2: Auth and trial grant
 1) Implement Google OAuth and email magic link flows.
 2) On first login, grant 20 credits and set expiry at now + 30 days.
 3) Ensure idempotent grant logic.
+4) Trial Reset v1 (Migration):
+   - Existing users without the `trial_reset_v1` flag are reset to 20 credits and 30-day expiry on their next login.
+   - New users are initialized with `trial_reset_v1: true`.
+
 
 Phase 3: Credit usage and enforcement
 1) Compute required credits per synthesis request:

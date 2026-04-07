@@ -43,6 +43,7 @@ def test_trial_grant():
     # Second call should return the same
     credits2 = get_or_create_credits(uid, email)
     assert credits2.balance == TRIAL_CREDIT_AMOUNT
+    # Note: depends on get_or_create_credits correctly mapping trialGrantedAt to trial_granted_at
     assert credits2.trial_granted_at == credits.trial_granted_at
 
 def test_estimate_credits():
@@ -104,14 +105,14 @@ def test_settle_credits_overdraft():
     job_id = "job-4"
     reserve_credits(uid, job_id, 5)
     
-    # Settle with 12 credits (360s) -> should overdraft
-    result = settle_credits(uid, job_id, 360.0)
+    # Settle with 25 credits (750s) -> should overdraft now that trial is 20
+    result = settle_credits(uid, job_id, 750.0)
     assert result.status == "settled"
-    assert result.actual_credits == 12
+    assert result.actual_credits == 25
     assert result.overdrafted
     
     credits = get_or_create_credits(uid, "test5@example.com")
-    assert credits.balance == TRIAL_CREDIT_AMOUNT - 12
+    assert credits.balance == TRIAL_CREDIT_AMOUNT - 25
     assert credits.overdrafted
 
 def test_release_credits():
@@ -139,7 +140,8 @@ def test_expired_credits():
             "balance": TRIAL_CREDIT_AMOUNT,
             "reserved": 0,
             "expiresAt": now - timedelta(days=1),
-            "overdrafted": False
+            "overdrafted": False,
+            "trial_reset_v1": True
         }
     })
     
@@ -257,3 +259,58 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     credits_after_retry = get_or_create_credits(uid, email)
     assert credits_after_retry.balance == TRIAL_CREDIT_AMOUNT - 3
     assert credits_after_retry.reserved == 0
+
+def test_trial_reset_v1_existing_user():
+    uid = "old-user-1"
+    email = "old@example.com"
+    db = get_firestore_client()
+    
+    # Manually create user with old credits (e.g. 5) and NO reset flag
+    db.collection("users").document(uid).set({
+        "credits": {
+            "balance": 5,
+            "reserved": 0,
+            "expiresAt": datetime.now(timezone.utc) + timedelta(days=5),
+            "overdrafted": False
+        }
+    })
+    
+    # Call get_or_create_credits - should trigger reset
+    credits = get_or_create_credits(uid, email)
+    assert credits.balance == TRIAL_CREDIT_AMOUNT
+    assert credits.trial_reset_v1 is True
+    
+    # Check ledger for reset entry
+    ledger = list(db.collection("credit_ledger").where("userId", "==", uid).where("type", "==", "trial_reset").stream())
+    assert len(ledger) == 1
+    assert ledger[0].to_dict()["amount"] == TRIAL_CREDIT_AMOUNT
+
+def test_trial_reset_v1_only_once():
+    uid = "old-user-2"
+    email = "old2@example.com"
+    
+    # First call triggers reset
+    credits1 = get_or_create_credits(uid, email)
+    assert credits1.balance == TRIAL_CREDIT_AMOUNT
+    
+    # Modify credits manually to simulate usage
+    db = get_firestore_client()
+    db.collection("users").document(uid).update({"credits.balance": 10})
+    
+    # Second call should NOT trigger reset
+    credits2 = get_or_create_credits(uid, email)
+    assert credits2.balance == 10
+    assert credits2.trial_reset_v1 is True
+
+def test_new_user_starts_with_reset_flag():
+    uid = "new-user-99"
+    email = "new@example.com"
+    
+    credits = get_or_create_credits(uid, email)
+    assert credits.balance == TRIAL_CREDIT_AMOUNT
+    assert credits.trial_reset_v1 is True
+    
+    # Ledger should NOT have a "reset" entry for new users (it's initial grant)
+    db = get_firestore_client()
+    ledger = list(db.collection("credit_ledger").where("userId", "==", uid).where("type", "==", "trial_reset").stream())
+    assert len(ledger) == 0

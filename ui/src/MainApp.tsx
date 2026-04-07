@@ -18,7 +18,9 @@ import {
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
 import { useCredits } from "./hooks/useCredits";
+import { useAnnouncements } from "./hooks/useAnnouncements";
 import { WaitlistModal } from "./components/WaitlistModal";
+import AnnouncementModal from "./components/AnnouncementModal";
 import type { WaitlistSource } from "./components/WaitingListForm";
 
 type Role = "user" | "assistant";
@@ -138,6 +140,13 @@ export default function MainApp() {
     loading: creditsLoading,
   } = useCredits();
   const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
+
+  const {
+      showAnnouncement,
+      currentAnnouncement,
+      markAsSeen
+  } = useAnnouncements();
+
   const estimatedDuration = scoreSummary?.duration_seconds;
   const estimatedDurationLabel =
     typeof estimatedDuration === "number" && estimatedDuration > 0
@@ -995,6 +1004,12 @@ export default function MainApp() {
           </div>
         </section>
       </main>
+      {showAnnouncement && currentAnnouncement && (
+        <AnnouncementModal 
+          announcement={currentAnnouncement} 
+          onClose={() => markAsSeen(currentAnnouncement.id)} 
+        />
+      )}
     </div>
   );
 }
