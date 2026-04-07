@@ -5,47 +5,139 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
-  "hosting": {
-    "public": "ui/dist",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ],
-    "rewrites": [
-      {
-        "source": "/__/auth/**",
-        "destination": "/__/auth/handler"
-      },
-      {
-        "source": "/__/firebase/**",
-        "destination": "/__/firebase/init.json"
-      },
-      {
-        "source": "/app",
-        "destination": "/app.html"
-      },
-      {
-        "source": "/app/**",
-        "destination": "/app.html"
-      },
-      {
-        "source": "/demo",
-        "destination": "/app.html"
-      },
-      {
-        "source": "/demo/**",
-        "destination": "/app.html"
-      },
-      {
-        "source": "**",
-        "run": {
-          "serviceId": "sightsinger-marketing-be",
-          "region": "us-east4"
+ "hosting": {
+  "public": "ui/dist",
+  "ignore": [
+    "firebase.json",
+    "**/.*",
+    "**/node_modules/**"
+  ],
+  "headers": [
+    {
+      "source": "/",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
         }
+      ]
+    },
+    {
+      "source": "/faq",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/pricing",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/learn",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/learn/**",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/tools",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/tools/**",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/waitlist/confirmed",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/what-it-does",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/who-for",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/__/auth/**",
+      "destination": "/__/auth/handler"
+    },
+    {
+      "source": "/__/firebase/**",
+      "destination": "/__/firebase/init.json"
+    },
+    {
+      "source": "/app",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/app/**",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/demo",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/demo/**",
+      "destination": "/app.html"
+    },
+    {
+      "source": "**",
+      "run": {
+        "serviceId": "sightsinger-marketing-be",
+        "region": "us-east4"
       }
-    ]
-  },
+    }
+  ]
+},
   "storage": {
     "rules": "storage.rules"
   },
