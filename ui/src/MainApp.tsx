@@ -153,6 +153,12 @@ export default function MainApp() {
       ? `Estimated duration: ${formatDuration(estimatedDuration)}`
       : null;
 
+  const estimatedCost = 
+    typeof estimatedDuration === "number" && estimatedDuration > 0
+      ? Math.ceil(estimatedDuration / 30)
+      : null;
+  const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
+
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
@@ -969,6 +975,9 @@ export default function MainApp() {
                 </span>
                 {estimatedDurationLabel && (
                   <span className="score-estimate">{estimatedDurationLabel}</span>
+                )}
+                {estimatedCostLabel && (
+                  <span className="score-estimate">{estimatedCostLabel}</span>
                 )}
               </div>
               <div className="zoom-controls">
