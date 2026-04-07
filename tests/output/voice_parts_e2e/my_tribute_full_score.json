@@ -32457,8 +32457,10 @@
         "part_name": "Pipe Organ"
       }
     ],
+    "selected_verse_number": "1",
     "title": "My Tribute"
   },
+  "selected_verse_number": "1",
   "source_musicxml_path": "/Users/alanchan/antigravity/ai-singer-diffsinger/assets/test_data/my-tribute.mxl/score.xml",
   "structure": {
     "endings": [],
@@ -38372,6 +38374,710 @@
         "part_name": "Pipe Organ"
       }
     ],
+    "measure_chord_density": [
+      {
+        "measures": [
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "1"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "2"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "3"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "4"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "5"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "6"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "7"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "8"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "9"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "10"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "11"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "12"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "13"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "14"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "15"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "16"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "17"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "18"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "19"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "20"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "21"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "22"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "23"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "24"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "25"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "26"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "27"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "28"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "29"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "30"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "31"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "32"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "33"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "34"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "35"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "36"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "37"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "38"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "39"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "40"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "41"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "42"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "43"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "44"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "45"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "46"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "47"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "48"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "49"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "50"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "51"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "52"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "53"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "54"
+          },
+          {
+            "max_simultaneous_notes": 3,
+            "measure_number": "55"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "56"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "57"
+          }
+        ],
+        "part_id": "P1",
+        "part_name": "Women"
+      },
+      {
+        "measures": [
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "1"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "2"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "3"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "4"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "5"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "6"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "7"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "8"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "9"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "10"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "11"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "12"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "13"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "14"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "15"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "16"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "17"
+          },
+          {
+            "max_simultaneous_notes": 0,
+            "measure_number": "18"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "19"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "20"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "21"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "22"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "23"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "24"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "25"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "26"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "27"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "28"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "29"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "30"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "31"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "32"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "33"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "34"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "35"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "36"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "37"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "38"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "39"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "40"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "41"
+          },
+          {
+            "max_simultaneous_notes": 1,
+            "measure_number": "42"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "43"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "44"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "45"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "46"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "47"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "48"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "49"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "50"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "51"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "52"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "53"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "54"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "55"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "56"
+          },
+          {
+            "max_simultaneous_notes": 2,
+            "measure_number": "57"
+          }
+        ],
+        "part_id": "P2",
+        "part_name": "Men"
+      },
+      {
+        "measures": [
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "1"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "2"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "3"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "4"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "5"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "6"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "7"
+          },
+          {
+            "max_simultaneous_notes": 3,
+            "measure_number": "8"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "9"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "10"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "11"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "12"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "13"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "14"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "15"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "16"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "17"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "18"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "19"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "20"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "21"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "22"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "23"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "24"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "25"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "26"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "27"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "28"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "29"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "30"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "31"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "32"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "33"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "34"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "35"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "36"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "37"
+          },
+          {
+            "max_simultaneous_notes": 5,
+            "measure_number": "38"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "39"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "40"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "41"
+          },
+          {
+            "max_simultaneous_notes": 4,
+            "measure_number": "42"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "43"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "44"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "45"
+          },
+          {
+            "max_simultaneous_notes": 8,
+            "measure_number": "46"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "47"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "48"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "49"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "50"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "51"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "52"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "53"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "54"
+          },
+          {
+            "max_simultaneous_notes": 7,
+            "measure_number": "55"
+          },
+          {
+            "max_simultaneous_notes": 6,
+            "measure_number": "56"
+          },
+          {
+            "max_simultaneous_notes": 8,
+            "measure_number": "57"
+          }
+        ],
+        "part_id": "P3",
+        "part_name": "Pipe Organ"
+      }
+    ],
     "measure_staff_voice_map": [
       {
         "measures": [
@@ -40835,6 +41541,8 @@
     ],
     "parts": [
       {
+        "has_missing_lyric_voice_parts": false,
+        "is_potentially_complex_for_preprocess": true,
         "lyric_source_candidates": [
           {
             "source_part_index": 0,
@@ -42334,6 +43042,8 @@
         }
       },
       {
+        "has_missing_lyric_voice_parts": true,
+        "is_potentially_complex_for_preprocess": true,
         "lyric_source_candidates": [
           {
             "source_part_index": 0,
@@ -43564,6 +44274,8 @@
         }
       },
       {
+        "has_missing_lyric_voice_parts": true,
+        "is_potentially_complex_for_preprocess": true,
         "lyric_source_candidates": [
           {
             "source_part_index": 0,
@@ -45071,6 +45783,8 @@
         }
       },
       {
+        "has_missing_lyric_voice_parts": true,
+        "is_potentially_complex_for_preprocess": true,
         "lyric_source_candidates": [
           {
             "source_part_index": 0,

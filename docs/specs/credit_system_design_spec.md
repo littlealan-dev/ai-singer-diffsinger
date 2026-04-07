@@ -8,7 +8,7 @@ Define the technical design for free-trial credits, including reservation, settl
 Core Rules
 ----------
 - 1 credit = 30 seconds of audio, charged as `ceil(actual_seconds / 30)`.
-- Trial grant: 10 credits on first successful sign-in; expires in 14 days.
+- Trial grant: 20 credits on first successful sign-in; expires in 30 days.
 - Reservation gate: user must have `available_balance >= estimated_credits` to start synthesis.
 - If `available_balance < estimated_credits`, synthesis is rejected (no capped audio).
 - Expiry lock: once a reservation is created, expiry does not invalidate that reservation.
@@ -23,7 +23,7 @@ Collection: `users/{uid}`
 ```
 {
   "credits": {
-    "balance": 10,              // integer credits remaining (can go negative)
+    "balance": 20,              // integer credits remaining (can go negative)
     "reserved": 0,              // integer reserved credits
     "expiresAt": "2026-01-22T00:00:00Z",
     "overdrafted": false,       // true when balance < 0 after settlement

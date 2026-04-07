@@ -7,7 +7,7 @@ This document outlines the implementation plan for the Free Trial system includi
 ## Goals
 
 1. **Authentication**: Allow users to sign in via Google Account (redirect) or Email Magic Link
-2. **Free Trial Credits**: Grant 10 credits (30 seconds each = 300 seconds total) on first sign-in, expiring in 14 days
+2. **Free Trial Credits**: Grant 20 credits (30 seconds each = 600 seconds total) on first sign-in, expiring in 30 days
 3. **Waiting List**: Allow signed-in users to join a waiting list for future features/capacity
 
 ---
@@ -56,7 +56,7 @@ flowchart TD
     H -->|No| M[Show Error]
     M --> D
     
-    L -->|Yes| N[Create User Record + 10 Credits]
+    L -->|Yes| N[Create User Record + 20 Credits]
     L -->|No| O[Load Existing Credits]
     
     N --> P[Studio /app with Credits Header]
@@ -97,8 +97,8 @@ flowchart TD
 │                                          │
 │        ✨ Start Your Free Trial          │
 │                                          │
-│   Get 10 credits (5 minutes of audio)    │
-│        Valid for 14 days                  │
+│   Get 20 credits (10 minutes of audio)   │
+│        Valid for 30 days                  │
 │                                          │
 ├──────────────────────────────────────────┤
 │                                          │
@@ -137,7 +137,7 @@ flowchart TD
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ ✨ SightSinger.ai          CREDITS: 8/10 │ 5d 12h remaining │
+│ ✨ SightSinger.ai          CREDITS: 18/20 │ 25d 12h remaining │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -417,7 +417,7 @@ pytest tests/test_credits.py -v
 ```
 
 Test cases:
-- `test_create_credits_for_new_user` - 10 credits allocated, expires in 14 days
+- `test_create_credits_for_new_user` - 20 credits allocated, expires in 30 days
 - `test_estimate_credits` - Returns estimate + balance info, ceil(duration/30)
 - `test_reserve_credits_success` - Atomically reserves credits
 - `test_reserve_credits_insufficient` - Raises error when estimated > available
@@ -432,8 +432,8 @@ Test cases:
 
 | Test | Steps | Expected |
 |------|-------|----------|
-| Google Sign-In | Landing → "Start Free Trial" → "Continue with Google" | Redirects to Google, returns to `/app` with 10 credits |
-| Email Magic Link | Enter email → Click email link | Redirects to `/app` with 10 credits |
+| Google Sign-In | Landing → "Start Free Trial" → "Continue with Google" | Redirects to Google, returns to `/app` with 20 credits |
+| Email Magic Link | Enter email → Click email link | Redirects to `/app` with 20 credits |
 | Credit Estimate | Upload score | Shows estimated cost before generation |
 | Credit Consumption | Generate audio | Actual credits deducted based on duration |
 | Credits Exhausted | Use all credits → Try generate | Shows exhausted modal |

@@ -149,7 +149,7 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
                 <div className="auth-modal-content">
                     <h2 className="auth-modal-title">✨ Start Your Free Trial</h2>
                     <p className="auth-modal-subtitle">
-                        Get 10 credits (5 minutes of audio)
+                        Get 20 credits (10 minutes of audio)
                         <br />
                         Valid for {TRIAL_EXPIRY_DAYS} days
                     </p>

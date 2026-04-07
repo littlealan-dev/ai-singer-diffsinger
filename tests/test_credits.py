@@ -136,7 +136,7 @@ def test_expired_credits():
     # Manually create expired user
     db.collection("users").document(uid).set({
         "credits": {
-            "balance": 10,
+            "balance": TRIAL_CREDIT_AMOUNT,
             "reserved": 0,
             "expiresAt": now - timedelta(days=1),
             "overdrafted": False
