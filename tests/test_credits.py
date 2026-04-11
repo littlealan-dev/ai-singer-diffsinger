@@ -314,3 +314,14 @@ def test_new_user_starts_with_reset_flag():
     db = get_firestore_client()
     ledger = list(db.collection("credit_ledger").where("userId", "==", uid).where("type", "==", "trial_reset").stream())
     assert len(ledger) == 0
+
+def test_new_user_does_not_auto_mark_announcement_seen():
+    uid = "new-user-announcement"
+    email = "announce@example.com"
+
+    get_or_create_credits(uid, email)
+
+    db = get_firestore_client()
+    user_data = db.collection("users").document(uid).get().to_dict()
+    metadata = user_data.get("metadata", {})
+    assert "lastSeenAnnouncementId" not in metadata

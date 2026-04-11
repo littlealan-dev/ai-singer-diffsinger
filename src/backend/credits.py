@@ -207,9 +207,6 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
         transaction.set(user_ref, {
             "email": email,
             "credits": credits_data,
-            "metadata": {
-                "lastSeenAnnouncementId": "trial_reset_v1"
-            },
             "createdAt": now
         }, merge=True)
         
