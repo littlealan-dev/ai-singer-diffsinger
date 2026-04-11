@@ -75,7 +75,6 @@ export function useCredits(): UserCredits {
                     overdrafted,
                     isExpired,
                 });
-                setLoading(false);
             }
             setHasSnapshot(true);
         }, (error) => {
@@ -88,10 +87,20 @@ export function useCredits(): UserCredits {
     }, [user]);
 
     useEffect(() => {
-        if (ensureDone && hasSnapshot && !hasCreditsDoc) {
+        if (!hasSnapshot) {
+            return;
+        }
+        if (!hasCreditsDoc) {
+            if (ensureDone) {
+                setLoading(false);
+            }
+            return;
+        }
+        const creditsLocked = credits.overdrafted || credits.isExpired || credits.available <= 0;
+        if (!creditsLocked || ensureDone) {
             setLoading(false);
         }
-    }, [ensureDone, hasSnapshot, hasCreditsDoc]);
+    }, [credits.available, credits.isExpired, credits.overdrafted, ensureDone, hasSnapshot, hasCreditsDoc]);
 
     return { ...credits, loading };
 }

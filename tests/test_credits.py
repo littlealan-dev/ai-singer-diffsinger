@@ -279,6 +279,8 @@ def test_trial_reset_v1_existing_user():
     credits = get_or_create_credits(uid, email)
     assert credits.balance == TRIAL_CREDIT_AMOUNT
     assert credits.trial_reset_v1 is True
+    user_data = db.collection("users").document(uid).get().to_dict()
+    assert user_data["metadata"]["pendingAnnouncementId"] == "trial_reset_v1"
     
     # Check ledger for reset entry
     ledger = list(db.collection("credit_ledger").where("userId", "==", uid).where("type", "==", "trial_reset").stream())
@@ -314,6 +316,9 @@ def test_new_user_starts_with_reset_flag():
     db = get_firestore_client()
     ledger = list(db.collection("credit_ledger").where("userId", "==", uid).where("type", "==", "trial_reset").stream())
     assert len(ledger) == 0
+    user_data = db.collection("users").document(uid).get().to_dict()
+    metadata = user_data.get("metadata", {})
+    assert "pendingAnnouncementId" not in metadata
 
 def test_new_user_does_not_auto_mark_announcement_seen():
     uid = "new-user-announcement"

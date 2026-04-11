@@ -14,6 +14,7 @@ export interface UseAnnouncementsResult {
 export function useAnnouncements(): UseAnnouncementsResult {
     const { user } = useAuth();
     const [lastSeenId, setLastSeenId] = useState<string | null>(null);
+    const [pendingAnnouncementId, setPendingAnnouncementId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -27,8 +28,10 @@ export function useAnnouncements(): UseAnnouncementsResult {
             if (snapshot.exists()) {
                 const data = snapshot.data();
                 setLastSeenId(data.metadata?.lastSeenAnnouncementId || null);
+                setPendingAnnouncementId(data.metadata?.pendingAnnouncementId || null);
             } else {
                 setLastSeenId(null);
+                setPendingAnnouncementId(null);
             }
             setLoading(false);
         }, (error) => {
@@ -45,7 +48,8 @@ export function useAnnouncements(): UseAnnouncementsResult {
         try {
             await updateDoc(userDocRef, {
                 'metadata.lastSeenAnnouncementId': announcementId,
-                'metadata.lastSeenAnnouncementDate': serverTimestamp()
+                'metadata.lastSeenAnnouncementDate': serverTimestamp(),
+                'metadata.pendingAnnouncementId': null,
             });
         } catch (error) {
             console.error("Error marking announcement as seen:", error);
@@ -80,6 +84,7 @@ export function useAnnouncements(): UseAnnouncementsResult {
     const showAnnouncement = 
         !loading && 
         !!user && 
+        pendingAnnouncementId === LATEST_ANNOUNCEMENT_ID &&
         lastSeenId !== LATEST_ANNOUNCEMENT_ID && 
         !!currentAnnouncement && 
         isWithinEffectiveRange(currentAnnouncement);

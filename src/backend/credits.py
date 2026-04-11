@@ -159,7 +159,8 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
                         "credits.reserved": 0,
                         "credits.expiresAt": expires_at,
                         "credits.overdrafted": False,
-                        "credits.trial_reset_v1": True
+                        "credits.trial_reset_v1": True,
+                        "metadata.pendingAnnouncementId": "trial_reset_v1",
                     })
 
                     # Log reset to ledger
