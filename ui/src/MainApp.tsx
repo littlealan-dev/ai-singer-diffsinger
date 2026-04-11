@@ -18,6 +18,7 @@ import {
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
 import { useCredits } from "./hooks/useCredits";
+import { useAuth } from "./hooks/useAuth";
 import { useAnnouncements } from "./hooks/useAnnouncements";
 import { WaitlistModal } from "./components/WaitlistModal";
 import AnnouncementModal from "./components/AnnouncementModal";
@@ -97,6 +98,7 @@ const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
 
 export default function MainApp() {
   const navigate = useNavigate();
+  const { user, isAuthenticated } = useAuth();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -128,6 +130,8 @@ export default function MainApp() {
   const shouldAutoScrollRef = useRef(true);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
+  const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
+  const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -135,6 +139,7 @@ export default function MainApp() {
   );
   const {
     available,
+    expiresAt,
     overdrafted,
     isExpired,
     loading: creditsLoading,
@@ -168,22 +173,57 @@ export default function MainApp() {
   } | null>(null);
 
   useEffect(() => {
-    let alive = true;
-    createSession()
+    activeUserIdRef.current = user?.uid ?? null;
+  }, [user?.uid]);
+
+  const ensureSession = async (): Promise<string> => {
+    if (sessionId) {
+      return sessionId;
+    }
+    if (sessionInitPromiseRef.current) {
+      return sessionInitPromiseRef.current;
+    }
+    if (!user || !isAuthenticated) {
+      throw new Error("Authentication required.");
+    }
+
+    const requestUserId = user.uid;
+    const promise = createSession()
       .then((data) => {
-        if (alive) {
+        if (activeUserIdRef.current === requestUserId) {
           setSessionId(data.session_id);
         }
+        return data.session_id;
       })
       .catch((err) => {
-        if (alive) {
-          setError(err.message || "Failed to create session.");
+        if (activeUserIdRef.current === requestUserId) {
+          setError(err?.message || "Failed to create session.");
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (sessionInitPromiseRef.current === promise) {
+          sessionInitPromiseRef.current = null;
         }
       });
-    return () => {
-      alive = false;
-    };
-  }, []);
+
+    sessionInitPromiseRef.current = promise;
+    return promise;
+  };
+
+  useEffect(() => {
+    if (!isAuthenticated || !user) {
+      setSessionId(null);
+      sessionInitPromiseRef.current = null;
+      return;
+    }
+    if (sessionId || sessionInitPromiseRef.current) {
+      return;
+    }
+    void ensureSession().catch(() => {
+      // Error is stored in component state and retried on the next session-dependent action.
+    });
+  }, [ensureSession, isAuthenticated, sessionId, user]);
 
   useEffect(() => {
     if (creditsLoading) return;
@@ -450,11 +490,12 @@ export default function MainApp() {
   };
 
   const handleUpload = async (file: File) => {
-    if (!sessionId || creditsLocked) return;
+    if (creditsLocked) return;
     setUploading(true);
     setError(null);
     try {
-      const uploadResponse = await uploadScore(sessionId, file);
+      const activeSessionId = sessionId ?? await ensureSession();
+      const uploadResponse = await uploadScore(activeSessionId, file);
       const summary = uploadResponse.score_summary ?? null;
       setScoreSummary(summary);
       setPendingSelection(shouldPromptSelection(summary));
@@ -463,7 +504,7 @@ export default function MainApp() {
       const nextVerseOptions = buildVerseOptions(summary);
       setSelectedPartKey(nextPartOptions[0]?.key ?? null);
       setSelectedVerse(nextVerseOptions[0] ?? null);
-      const data = await fetchScoreXml(sessionId);
+      const data = await fetchScoreXml(activeSessionId);
       setScore({ name: file.name, data });
     } catch (err: any) {
       setError(err?.message || "Upload failed.");
@@ -473,7 +514,7 @@ export default function MainApp() {
   };
 
   const sendMessage = async (content: string, selection?: ChatSelection) => {
-    if (!content.trim() || !sessionId || creditsLocked) return;
+    if (!content.trim() || creditsLocked) return;
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -483,7 +524,8 @@ export default function MainApp() {
     });
 
     try {
-      const response = await chat(sessionId, content, selection);
+      const activeSessionId = sessionId ?? await ensureSession();
+      const response = await chat(activeSessionId, content, selection);
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
         return;
@@ -538,7 +580,7 @@ export default function MainApp() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !sessionId || creditsLocked) return;
+    if (!input.trim() || creditsLocked) return;
     const content = input.trim();
     setInput("");
     await sendMessage(content);
@@ -636,7 +678,13 @@ export default function MainApp() {
           </div>
         </div>
         <div className="header-actions">
-          <CreditsHeader />
+          <CreditsHeader
+            available={available}
+            expiresAt={expiresAt}
+            isExpired={isExpired}
+            overdrafted={overdrafted}
+            loading={creditsLoading}
+          />
           <div className="status-pill">{status ?? "Ready"}</div>
           <button
             className="btn-primary-inline app-join-button"
@@ -929,7 +977,7 @@ export default function MainApp() {
               <input
                 type="file"
                 accept=".xml,.mxl"
-                disabled={!sessionId || uploading || creditsLocked}
+                disabled={uploading || creditsLocked}
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) handleUpload(file);
@@ -944,12 +992,12 @@ export default function MainApp() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") handleSend();
                 }}
-                disabled={!sessionId || creditsLocked}
+                disabled={creditsLocked}
               />
               <button
                 onClick={handleSend}
                 className="send-button"
-                disabled={!input.trim() || !sessionId || creditsLocked}
+                disabled={!input.trim() || creditsLocked}
               >
                 <Send size={18} />
               </button>

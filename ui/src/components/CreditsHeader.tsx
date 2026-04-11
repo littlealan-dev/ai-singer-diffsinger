@@ -1,10 +1,20 @@
 import React from 'react';
-import { useCredits } from '../hooks/useCredits';
+import type { UserCredits } from '../hooks/useCredits';
 import { Calendar, Flame, AlertCircle } from 'lucide-react';
 import './CreditsHeader.css';
 
-const CreditsHeader: React.FC = () => {
-    const { available, expiresAt, isExpired, overdrafted, loading } = useCredits();
+type CreditsHeaderProps = Pick<
+    UserCredits,
+    'available' | 'expiresAt' | 'isExpired' | 'overdrafted' | 'loading'
+>;
+
+const CreditsHeader: React.FC<CreditsHeaderProps> = ({
+    available,
+    expiresAt,
+    isExpired,
+    overdrafted,
+    loading,
+}) => {
 
     if (loading) return <div className="credits-pill loading">...</div>;
 

@@ -27,6 +27,7 @@ export function useCredits(): UserCredits {
     const [loading, setLoading] = useState(true);
     const [ensureDone, setEnsureDone] = useState(false);
     const [hasSnapshot, setHasSnapshot] = useState(false);
+    const [hasCreditsDoc, setHasCreditsDoc] = useState(false);
 
     useEffect(() => {
         if (!user) {
@@ -36,6 +37,7 @@ export function useCredits(): UserCredits {
         setLoading(true);
         setEnsureDone(false);
         setHasSnapshot(false);
+        setHasCreditsDoc(false);
 
         const ensureCreditsOnce = async () => {
             try {
@@ -52,6 +54,8 @@ export function useCredits(): UserCredits {
         const userDocRef = doc(db, 'users', user.uid);
 
         const unsubscribe = onSnapshot(userDocRef, (snapshot) => {
+            const docExists = snapshot.exists();
+            setHasCreditsDoc(docExists);
             if (snapshot.exists()) {
                 const data = snapshot.data();
                 const creditsData = data?.credits || {};
@@ -71,6 +75,7 @@ export function useCredits(): UserCredits {
                     overdrafted,
                     isExpired,
                 });
+                setLoading(false);
             }
             setHasSnapshot(true);
         }, (error) => {
@@ -83,10 +88,10 @@ export function useCredits(): UserCredits {
     }, [user]);
 
     useEffect(() => {
-        if (ensureDone && hasSnapshot) {
+        if (ensureDone && hasSnapshot && !hasCreditsDoc) {
             setLoading(false);
         }
-    }, [ensureDone, hasSnapshot]);
+    }, [ensureDone, hasSnapshot, hasCreditsDoc]);
 
     return { ...credits, loading };
 }
