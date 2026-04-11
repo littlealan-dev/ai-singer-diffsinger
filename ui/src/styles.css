@@ -405,7 +405,7 @@ body.legal-active #root {
 }
 
 .brand h1 {
-  font-family: "Fraunces", "Space Grotesk", sans-serif;
+  font-family: "Space Grotesk", system-ui, sans-serif;
   font-size: 28px;
   margin: 0;
 }
