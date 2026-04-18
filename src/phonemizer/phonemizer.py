@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -69,6 +70,31 @@ class PhonemeResult:
     language_ids: Sequence[int]
 
 
+@dataclass(frozen=True)
+class DictionaryBundle:
+    """Loaded dictionary entries and symbol metadata."""
+    dictionary: Dict[str, List[str]]
+    vowels: set[str]
+    glides: set[str]
+    load_strategy: str
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an integer environment variable with fallback."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def get_large_dict_threshold_bytes() -> int:
+    """Return the active oversized-dictionary threshold."""
+    return _env_int("VOICEBANK_LARGE_DICT_THRESHOLD_BYTES", 5_000_000)
+
+
 class Phonemizer:
     """Phonemizer that uses dictionary lookup with optional G2P fallback."""
     def __init__(
@@ -79,6 +105,7 @@ class Phonemizer:
         languages_path: Optional[Path] = None,
         language: str = "en",
         allow_g2p: bool = True,
+        needed_graphemes: Optional[set[str]] = None,
     ) -> None:
         """Initialize phoneme inventory, dictionary, and optional G2P."""
         if language != "en":
@@ -90,10 +117,21 @@ class Phonemizer:
         self.phonemes_path = Path(phonemes_path)
         self.dictionary_path = Path(dictionary_path)
         self.languages_path = Path(languages_path) if languages_path else None
+        self._needed_graphemes = {
+            self._normalize_grapheme(value)
+            for value in (needed_graphemes or set())
+            if self._normalize_grapheme(value)
+        }
         
         self._phoneme_to_id = self._load_phoneme_inventory(self.phonemes_path)
-        self._dictionary = self._load_dictionary(self.dictionary_path)
-        self._vowel_symbols, self._glide_symbols = self._load_symbol_types(self.dictionary_path)
+        dictionary_bundle = self._load_dictionary_bundle(
+            self.dictionary_path,
+            needed_graphemes=self._needed_graphemes or None,
+        )
+        self._dictionary = dictionary_bundle.dictionary
+        self._vowel_symbols = dictionary_bundle.vowels
+        self._glide_symbols = dictionary_bundle.glides
+        self._dictionary_load_strategy = dictionary_bundle.load_strategy
         self._language_map = self._load_language_map(self.languages_path) if self.languages_path else {}
         self._phoneme_meta = self._load_phoneme_metadata(
             self.phonemes_path.with_name("phoneme_metadata.json")
@@ -293,11 +331,31 @@ class Phonemizer:
 
     def _load_dictionary(self, path: Path) -> Dict[str, List[str]]:
         """Load grapheme-to-phoneme entries from dsdict.yaml."""
+        return self._load_dictionary_bundle(path, needed_graphemes=None).dictionary
+
+    def _load_symbol_types(self, path: Path) -> tuple[set[str], set[str]]:
+        """Load vowel/glide symbol sets from dsdict.yaml."""
+        bundle = self._load_dictionary_bundle(path, needed_graphemes=None)
+        return bundle.vowels, bundle.glides
+
+    def _load_dictionary_bundle(
+        self,
+        path: Path,
+        *,
+        needed_graphemes: Optional[set[str]],
+    ) -> DictionaryBundle:
+        """Load dictionary entries and symbol metadata using adaptive strategy."""
         if not path.exists():
             raise FileNotFoundError(
                 f"Phoneme dictionary not found at {path}. "
                 "Expected an OpenUtau dsdict.yaml (e.g. voicebank/dsvariance/dsdict.yaml)."
             )
+        if needed_graphemes and path.stat().st_size > get_large_dict_threshold_bytes():
+            return self._load_dictionary_bundle_selective(path, needed_graphemes=needed_graphemes)
+        return self._load_dictionary_bundle_eager(path)
+
+    def _load_dictionary_bundle_eager(self, path: Path) -> DictionaryBundle:
+        """Load the full dictionary with YAML parsing for normal-sized files."""
         data = yaml.safe_load(path.read_text(encoding="utf8"))
         entries = data.get("entries", []) if isinstance(data, dict) else []
         dictionary: Dict[str, List[str]] = {}
@@ -313,13 +371,6 @@ class Phonemizer:
             key = self._normalize_grapheme(grapheme)
             if key not in dictionary:
                 dictionary[key] = [str(p) for p in phonemes]
-        return dictionary
-
-    def _load_symbol_types(self, path: Path) -> tuple[set[str], set[str]]:
-        """Load vowel/glide symbol sets from dsdict.yaml."""
-        if not path.exists():
-            return set(), set()
-        data = yaml.safe_load(path.read_text(encoding="utf8"))
         symbols = data.get("symbols", []) if isinstance(data, dict) else []
         vowels = {"SP", "AP"}
         glides = set()
@@ -334,7 +385,92 @@ class Phonemizer:
                 vowels.add(symbol)
             if symbol_type in ("semivowel", "liquid"):
                 glides.add(symbol)
-        return vowels, glides
+        return DictionaryBundle(
+            dictionary=dictionary,
+            vowels=vowels,
+            glides=glides,
+            load_strategy="eager",
+        )
+
+    def _load_dictionary_bundle_selective(
+        self,
+        path: Path,
+        *,
+        needed_graphemes: set[str],
+    ) -> DictionaryBundle:
+        """Line-scan an oversized OpenUtau dictionary and keep only needed entries."""
+        dictionary: Dict[str, List[str]] = {}
+        vowels = {"SP", "AP"}
+        glides = set()
+        in_symbols = False
+        in_entries = False
+        current_symbol: Optional[str] = None
+        current_grapheme: Optional[str] = None
+        current_key: Optional[str] = None
+        current_phonemes: Optional[List[str]] = None
+        remaining = set(needed_graphemes)
+
+        def finalize_entry() -> None:
+            nonlocal current_grapheme, current_key, current_phonemes, remaining
+            if current_grapheme and current_key and current_phonemes:
+                if self._phonemes_match_language(current_phonemes) and current_key not in dictionary:
+                    dictionary[current_key] = list(current_phonemes)
+                    remaining.discard(current_key)
+            current_grapheme = None
+            current_key = None
+            current_phonemes = None
+
+        with path.open("r", encoding="utf8", errors="replace") as handle:
+            for raw in handle:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                if stripped == "symbols:":
+                    in_symbols = True
+                    in_entries = False
+                    current_symbol = None
+                    continue
+                if stripped == "entries:":
+                    if current_symbol is not None:
+                        current_symbol = None
+                    in_symbols = False
+                    in_entries = True
+                    continue
+                if in_symbols:
+                    if stripped.startswith("- symbol:"):
+                        current_symbol = stripped[len("- symbol:"):].strip()
+                        continue
+                    if stripped.startswith("type:") and current_symbol:
+                        symbol_type = stripped[len("type:"):].strip().lower()
+                        if symbol_type == "vowel":
+                            vowels.add(current_symbol)
+                        if symbol_type in ("semivowel", "liquid"):
+                            glides.add(current_symbol)
+                        current_symbol = None
+                    continue
+                if not in_entries:
+                    continue
+                if stripped.startswith("- grapheme:"):
+                    finalize_entry()
+                    if not remaining:
+                        break
+                    grapheme = stripped[len("- grapheme:"):].strip()
+                    current_grapheme = grapheme
+                    current_key = self._normalize_grapheme(grapheme)
+                    current_phonemes = [] if current_key in needed_graphemes else None
+                    continue
+                if stripped.startswith("phonemes:"):
+                    continue
+                if stripped.startswith("- ") and current_phonemes is not None:
+                    current_phonemes.append(stripped[2:].strip())
+                    continue
+            finalize_entry()
+        return DictionaryBundle(
+            dictionary=dictionary,
+            vowels=vowels,
+            glides=glides,
+            load_strategy="selective",
+        )
 
     def _phonemes_match_language(self, phonemes: Iterable[str]) -> bool:
         """Return True if phonemes match the current language prefix."""

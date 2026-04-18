@@ -411,7 +411,7 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
 def load_speaker_embed(
     voicebank: Union[str, Path],
     speaker_name: Optional[str] = None,
-) -> np.ndarray:
+) -> Optional[np.ndarray]:
     """
     Load a speaker embedding from a voicebank.
     
@@ -420,7 +420,8 @@ def load_speaker_embed(
         speaker_name: Optional speaker name (uses first if not specified)
         
     Returns:
-        Speaker embedding as numpy array
+        Speaker embedding as numpy array, or None for single-speaker banks
+        that do not ship external embeddings
     """
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -437,7 +438,7 @@ def load_speaker_embed(
     
     speakers = config.get("speakers", [])
     if not speakers:
-        raise FileNotFoundError("No speaker embeddings in voicebank")
+        return None
     
     # Select speaker.
     chosen = speakers[0]

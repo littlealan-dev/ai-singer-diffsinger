@@ -3,6 +3,7 @@ Inference APIs for duration, pitch, variance, and mel synthesis.
 """
 
 import logging
+import time
 import yaml
 import numpy as np
 from pathlib import Path
@@ -23,6 +24,21 @@ logger = get_logger(__name__)
 
 # Cache for loaded models
 _model_cache: Dict[str, Any] = {}
+
+
+def _log_inference_boundary(
+    label: str,
+    *,
+    start_time: float,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "label": label,
+        "elapsed_ms": round((time.monotonic() - start_time) * 1000.0, 2),
+    }
+    if extra:
+        payload.update(extra)
+    logger.info("inference_boundary %s", summarize_payload(payload))
 
 
 def _load_stage_config(stage_dir: Path) -> Dict[str, Any]:
@@ -54,9 +70,42 @@ def _load_stage_language_map(
 def _get_model(model_class, model_path: Path, device: str = "cpu"):
     """Get or create a cached model instance."""
     cache_key = f"{model_class.__name__}:{model_path}"
+    start = time.monotonic()
     if cache_key not in _model_cache:
         # Cache instantiated models to avoid repeated disk loading.
+        logger.info(
+            "model_load_start %s",
+            summarize_payload(
+                {
+                    "model_class": model_class.__name__,
+                    "model_path": str(model_path),
+                    "device": device,
+                    "cache_hit": False,
+                }
+            ),
+        )
         _model_cache[cache_key] = model_class(model_path, device)
+        _log_inference_boundary(
+            "model_load_done",
+            start_time=start,
+            extra={
+                "model_class": model_class.__name__,
+                "model_path": str(model_path),
+                "device": device,
+                "cache_hit": False,
+            },
+        )
+    else:
+        _log_inference_boundary(
+            "model_cache_hit",
+            start_time=start,
+            extra={
+                "model_class": model_class.__name__,
+                "model_path": str(model_path),
+                "device": device,
+                "cache_hit": True,
+            },
+        )
     return _model_cache[cache_key]
 
 
@@ -269,10 +318,35 @@ def predict_durations(
     ph_midi_tensor = np.array(ph_midi, dtype=np.int64)[None, :]
     
     # Prepare speaker embedding per-phoneme.
-    spk_embed_tokens = np.repeat(spk_embed[None, None, :], len(phoneme_ids), axis=1).astype(np.float32)
+    spk_embed_tokens = (
+        np.repeat(spk_embed[None, None, :], len(phoneme_ids), axis=1).astype(np.float32)
+        if spk_embed is not None
+        else None
+    )
 
     # Run duration predictor.
+    start = time.monotonic()
+    logger.info(
+        "duration_infer_start %s",
+        summarize_payload(
+            {
+                "phoneme_count": len(phoneme_ids),
+                "word_count": len(word_boundaries),
+                "ph_midi_shape": list(ph_midi_tensor.shape),
+                "encoder_out_shape": list(encoder_out.shape),
+                "x_masks_shape": list(x_masks.shape),
+            }
+        ),
+    )
     duration_out = duration.forward(encoder_out, x_masks, ph_midi_tensor, spk_embed_tokens)
+    _log_inference_boundary(
+        "duration_infer_done",
+        start_time=start,
+        extra={
+            "phoneme_count": len(phoneme_ids),
+            "output_shape": list(np.asarray(duration_out).shape),
+        },
+    )
     ph_dur_pred = duration_out[0]
     
     ph_raw = np.maximum(ph_dur_pred, 0.0).astype(np.float32)
@@ -466,7 +540,11 @@ def predict_pitch(
     pitch = np.full((1, n_frames), 60.0, dtype=np.float32)
     expr = np.ones((1, n_frames), dtype=np.float32)
     retake = np.ones((1, n_frames), dtype=bool)
-    spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+    spk_embed_frames = (
+        np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+        if spk_embed is not None
+        else None
+    )
 
     # Build pitch model inputs with frame-level features and embeddings.
     pitch_inputs = {
@@ -478,11 +556,36 @@ def predict_pitch(
         "pitch": pitch,
         "expr": expr,
         "retake": retake,
-        "spk_embed": spk_embed_frames,
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
     }
+    if spk_embed_frames is not None:
+        pitch_inputs["spk_embed"] = spk_embed_frames
 
+    start = time.monotonic()
+    logger.info(
+        "pitch_infer_start %s",
+        summarize_payload(
+            {
+                "phoneme_count": len(phoneme_ids),
+                "frame_count": n_frames,
+                "note_count": len(note_pitches),
+                "encoder_out_shape": list(pitch_encoder_out.shape),
+                "ph_dur_shape": list(durations_tensor.shape),
+                "note_midi_shape": list(note_midi.shape),
+                "note_dur_shape": list(note_dur.shape),
+            }
+        ),
+    )
     pitch_pred = pitch_model.run(pitch_inputs)[0]
+    _log_inference_boundary(
+        "pitch_infer_done",
+        start_time=start,
+        extra={
+            "phoneme_count": len(phoneme_ids),
+            "frame_count": n_frames,
+            "output_shape": list(np.asarray(pitch_pred).shape),
+        },
+    )
     pitch_midi = pitch_pred.astype(np.float32)
     f0 = 440.0 * (2.0 ** ((pitch_midi - 69.0) / 12.0))
     result = {
@@ -664,7 +767,11 @@ def predict_variance(
     if num_variances <= 0:
         num_variances = 3
 
-    spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+    spk_embed_frames = (
+        np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+        if spk_embed is not None
+        else None
+    )
     variance_inputs = {
         "encoder_out": variance_encoder_out,
         "ph_dur": durations_tensor,
@@ -673,13 +780,40 @@ def predict_variance(
         "voicing": np.zeros((1, n_frames), dtype=np.float32),
         "tension": np.zeros((1, n_frames), dtype=np.float32),
         "retake": np.ones((1, n_frames, num_variances), dtype=bool),
-        "spk_embed": spk_embed_frames,
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
     }
+    if spk_embed_frames is not None:
+        variance_inputs["spk_embed"] = spk_embed_frames
     if predict_energy:
         variance_inputs["energy"] = np.zeros((1, n_frames), dtype=np.float32)
 
+    start = time.monotonic()
+    logger.info(
+        "variance_infer_start %s",
+        summarize_payload(
+            {
+                "phoneme_count": len(phoneme_ids),
+                "frame_count": n_frames,
+                "encoder_out_shape": list(variance_encoder_out.shape),
+                "ph_dur_shape": list(durations_tensor.shape),
+                "pitch_shape": list(pitch_midi.shape),
+                "predict_energy": predict_energy,
+                "predict_breathiness": predict_breathiness,
+                "predict_voicing": predict_voicing,
+                "predict_tension": predict_tension,
+            }
+        ),
+    )
     variance_out = variance_model.run(variance_inputs)
+    _log_inference_boundary(
+        "variance_infer_done",
+        start_time=start,
+        extra={
+            "phoneme_count": len(phoneme_ids),
+            "frame_count": n_frames,
+            "output_count": len(variance_out),
+        },
+    )
     extracted = _extract_variance_outputs(
         variance_model,
         variance_out,
@@ -807,7 +941,11 @@ def synthesize_mel(
     if velocity is None:
         velocity = [1.0] * n_frames
     
-    spk_embed_frames = np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+    spk_embed_frames = (
+        np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)
+        if spk_embed is not None
+        else None
+    )
     depth = float(config.get("max_depth", 1.0)) if config.get("use_variable_depth") else 1.0
 
     # Assemble acoustic model inputs.
@@ -821,10 +959,11 @@ def synthesize_mel(
         "tension": np.array(tension, dtype=np.float32)[None, :],
         "gender": np.zeros((1, n_frames), dtype=np.float32),
         "velocity": np.array(velocity, dtype=np.float32)[None, :],
-        "spk_embed": spk_embed_frames,
         "depth": np.array(depth, dtype=np.float32),
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
     }
+    if spk_embed_frames is not None:
+        acoustic_inputs["spk_embed"] = spk_embed_frames
     if use_energy_embed:
         if len(energy) != n_frames:
             raise ValueError(
@@ -832,7 +971,30 @@ def synthesize_mel(
             )
         acoustic_inputs["energy"] = np.array(energy, dtype=np.float32)[None, :]
     
+    start = time.monotonic()
+    logger.info(
+        "acoustic_infer_start %s",
+        summarize_payload(
+            {
+                "phoneme_count": len(phoneme_ids),
+                "frame_count": n_frames,
+                "tokens_shape": list(tokens_tensor.shape),
+                "durations_shape": list(durations_tensor.shape),
+                "f0_shape": list(f0_tensor.shape),
+                "use_energy_embed": use_energy_embed,
+            }
+        ),
+    )
     mel = acoustic.run(acoustic_inputs)[0]
+    _log_inference_boundary(
+        "acoustic_infer_done",
+        start_time=start,
+        extra={
+            "phoneme_count": len(phoneme_ids),
+            "frame_count": n_frames,
+            "mel_shape": list(np.asarray(mel).shape),
+        },
+    )
     
     result = {
         "mel": mel.tolist(),
@@ -902,6 +1064,16 @@ def synthesize_audio(
             ),
         )
     # Synthesize mel then run vocoder to get waveform.
+    logger.info(
+        "synthesize_audio_stage_start %s",
+        summarize_payload(
+            {
+                "phoneme_count": len(phoneme_ids),
+                "frame_count": len(f0),
+                "voicebank": str(voicebank),
+            }
+        ),
+    )
     mel_result = synthesize_mel(
         phoneme_ids=phoneme_ids,
         durations=durations,
@@ -916,12 +1088,32 @@ def synthesize_audio(
         speaker_name=speaker_name,
         device=device,
     )
+    logger.info(
+        "vocoder_stage_start %s",
+        summarize_payload(
+            {
+                "mel_frames": len(mel_result["mel"]),
+                "f0_frames": len(f0),
+                "voicebank": str(voicebank),
+                "vocoder_path": str(vocoder_path) if vocoder_path else None,
+            }
+        ),
+    )
+    start = time.monotonic()
     audio_result = vocode(
         mel=mel_result["mel"],
         f0=f0,
         voicebank=voicebank,
         vocoder_path=vocoder_path,
         device=device,
+    )
+    _log_inference_boundary(
+        "vocoder_stage_done",
+        start_time=start,
+        extra={
+            "waveform_samples": len(audio_result["waveform"]),
+            "sample_rate": audio_result["sample_rate"],
+        },
     )
     result = {
         "waveform": audio_result["waveform"],

@@ -782,7 +782,12 @@ def _select_voice_notes(
     return notes
 
 
-def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
+def _init_phonemizer(
+    voicebank_path: Path,
+    language: str = "en",
+    *,
+    needed_graphemes: Optional[set[str]] = None,
+) -> Phonemizer:
     """Create a phonemizer configured for a voicebank."""
     config = load_voicebank_config(voicebank_path)
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
@@ -796,12 +801,25 @@ def _init_phonemizer(voicebank_path: Path, language: str = "en") -> Phonemizer:
         languages_path=languages_path,
         language=language,
         allow_g2p=True,
+        needed_graphemes=needed_graphemes,
     )
 
 
 def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Proxy to shared grouping logic used by V2 aligner."""
     return syllable_alignment._group_notes(notes)
+
+
+def _collect_needed_graphemes_from_groups(word_groups: List[Dict[str, Any]]) -> set[str]:
+    """Collect normalized lyric graphemes from grouped notes."""
+    needed: set[str] = set()
+    for group in word_groups:
+        if group.get("is_rest"):
+            continue
+        normalized = Phonemizer._normalize_grapheme(_resolve_group_lyric(group))
+        if normalized:
+            needed.add(normalized)
+    return needed
 
 
 def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1312,7 +1330,11 @@ def align_phonemes_to_notes(
             pitch_end_frames,
         )
 
-    phonemizer = _init_phonemizer(voicebank_path)
+    needed_graphemes = _collect_needed_graphemes_from_groups(_group_notes(notes))
+    phonemizer = _init_phonemizer(
+        voicebank_path,
+        needed_graphemes=needed_graphemes,
+    )
     if use_v2_aligner:
         ph_result = syllable_alignment.align(
             notes=notes,
@@ -1558,6 +1580,17 @@ def synthesize(
     start_total = time.monotonic()
 
     start = time.monotonic()
+    logger.info(
+        "synthesize_stage_start %s",
+        summarize_payload(
+            {
+                "step": "align",
+                "voicebank": str(voicebank_path),
+                "part_index": effective_part_index,
+                "voice_id": voice_id,
+            }
+        ),
+    )
     try:
         alignment = align_phonemes_to_notes(
             working_score,
@@ -1578,6 +1611,16 @@ def synthesize(
     
     # Step 3: Predict durations.
     start = time.monotonic()
+    logger.info(
+        "synthesize_stage_start %s",
+        summarize_payload(
+            {
+                "step": "durations",
+                "phoneme_count": len(alignment["phoneme_ids"]),
+                "word_count": len(alignment["word_boundaries"]),
+            }
+        ),
+    )
     use_timing_v2 = _env_flag_enabled("SYLLABLE_TIMING_V2")
     dur_result = predict_durations(
         phoneme_ids=initial_stage_tokens.dur_ids,
@@ -1647,6 +1690,17 @@ def synthesize(
     
     # Step 4: Predict pitch.
     start = time.monotonic()
+    logger.info(
+        "synthesize_stage_start %s",
+        summarize_payload(
+            {
+                "step": "pitch",
+                "phoneme_count": len(phoneme_symbols),
+                "duration_frames": int(sum(durations)),
+                "note_count": len(alignment["note_pitches"]),
+            }
+        ),
+    )
     pitch_result = predict_pitch(
         phoneme_ids=stage_tokens.pitch_ids,
         durations=durations,
@@ -1697,6 +1751,17 @@ def synthesize(
     
     # Step 5: Predict variance.
     start = time.monotonic()
+    logger.info(
+        "synthesize_stage_start %s",
+        summarize_payload(
+            {
+                "step": "variance",
+                "phoneme_count": len(phoneme_symbols),
+                "duration_frames": expected_frames,
+                "f0_frames": len(pitch_result["f0"]),
+            }
+        ),
+    )
     var_result = predict_variance(
         phoneme_ids=stage_tokens.variance_ids,
         durations=durations,
@@ -1737,6 +1802,17 @@ def synthesize(
     # Step 6: Synthesize audio.
     _notify("synthesize", "Taking a breath for the take...", 0.8)
     start = time.monotonic()
+    logger.info(
+        "synthesize_stage_start %s",
+        summarize_payload(
+            {
+                "step": "synthesize_audio",
+                "phoneme_count": len(phoneme_symbols),
+                "duration_frames": expected_frames,
+                "f0_frames": len(pitch_result["f0"]),
+            }
+        ),
+    )
     audio_result = synthesize_audio(
         phoneme_ids=stage_tokens.root_ids,
         durations=durations,

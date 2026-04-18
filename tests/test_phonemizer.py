@@ -4,6 +4,7 @@ Tests for the phonemize API and underlying Phonemizer class.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 import tempfile
@@ -222,6 +223,97 @@ class PhonemizerClassTests(unittest.TestCase):
             self.assertEqual(result.phonemes, ["hh", "en/aw"])
             self.assertEqual(result.ids, [3, 4])
             self.assertEqual(result.language_ids, [0, 1])
+
+    def test_small_dictionary_keeps_eager_load_strategy(self) -> None:
+        """Normal-sized dictionaries should preserve the eager YAML load path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-en.yaml"
+            languages_path = root / "languages.json"
+
+            phonemes_path.write_text('{"SP": 0, "AP": 1, "en/hh": 2, "en/aw": 3}', encoding="utf8")
+            dictionary_path.write_text(
+                "symbols:\n"
+                "  - symbol: SP\n"
+                "    type: vowel\n"
+                "  - symbol: AP\n"
+                "    type: vowel\n"
+                "entries:\n"
+                "  - grapheme: how\n"
+                "    phonemes: [en/hh, en/aw]\n",
+                encoding="utf8",
+            )
+            languages_path.write_text('{"en": 1}', encoding="utf8")
+
+            with unittest.mock.patch.dict(os.environ, {"VOICEBANK_LARGE_DICT_THRESHOLD_BYTES": "1000000"}, clear=False):
+                phonemizer = Phonemizer(
+                    phonemes_path=phonemes_path,
+                    dictionary_path=dictionary_path,
+                    languages_path=languages_path,
+                    language="en",
+                    allow_g2p=False,
+                    needed_graphemes={"how"},
+                )
+
+            self.assertEqual(phonemizer._dictionary_load_strategy, "eager")
+            result = phonemizer.phonemize_tokens(["how"])
+            self.assertEqual(result.phonemes, ["en/hh", "en/aw"])
+
+    def test_large_dictionary_uses_selective_load_strategy(self) -> None:
+        """Oversized dictionaries should load only requested graphemes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-en.yaml"
+            languages_path = root / "languages.json"
+
+            phonemes_path.write_text(
+                '{"SP": 0, "AP": 1, "en/hh": 2, "en/aw": 3, "en/w": 4, "en/er": 5, "en/l": 6, "en/d": 7}',
+                encoding="utf8",
+            )
+            dictionary_path.write_text(
+                "symbols:\n"
+                "  - symbol: SP\n"
+                "    type: vowel\n"
+                "  - symbol: AP\n"
+                "    type: vowel\n"
+                "  - symbol: en/aw\n"
+                "    type: vowel\n"
+                "  - symbol: en/er\n"
+                "    type: vowel\n"
+                "entries:\n"
+                "  - grapheme: how\n"
+                "    phonemes:\n"
+                "      - en/hh\n"
+                "      - en/aw\n"
+                "  - grapheme: world\n"
+                "    phonemes:\n"
+                "      - en/w\n"
+                "      - en/er\n"
+                "      - en/l\n"
+                "      - en/d\n"
+                + ("# filler to force selective path\n" * 100),
+                encoding="utf8",
+            )
+            languages_path.write_text('{"en": 1}', encoding="utf8")
+
+            with unittest.mock.patch.dict(os.environ, {"VOICEBANK_LARGE_DICT_THRESHOLD_BYTES": "1"}, clear=False):
+                phonemizer = Phonemizer(
+                    phonemes_path=phonemes_path,
+                    dictionary_path=dictionary_path,
+                    languages_path=languages_path,
+                    language="en",
+                    allow_g2p=False,
+                    needed_graphemes={"how"},
+                )
+
+            self.assertEqual(phonemizer._dictionary_load_strategy, "selective")
+            self.assertEqual(phonemizer._dictionary, {"how": ["en/hh", "en/aw"]})
+            self.assertTrue(phonemizer.is_vowel("SP"))
+            self.assertTrue(phonemizer.is_vowel("en/aw"))
+            result = phonemizer.phonemize_tokens(["how"])
+            self.assertEqual(result.phonemes, ["en/hh", "en/aw"])
 
 
 class PhonemizeAPITests(unittest.TestCase):

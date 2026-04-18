@@ -13,6 +13,15 @@ from src.mcp.logging_utils import get_logger, summarize_payload
 logger = get_logger(__name__)
 
 
+def _collect_needed_graphemes(lyrics: List[str]) -> set[str]:
+    """Collect normalized lyric graphemes required for one phonemize call."""
+    return {
+        Phonemizer._normalize_grapheme(lyric)
+        for lyric in lyrics
+        if Phonemizer._normalize_grapheme(lyric)
+    }
+
+
 def phonemize(
     lyrics: List[str],
     voicebank: Union[str, Path],
@@ -74,6 +83,7 @@ def phonemize(
         languages_path=languages_path,
         language=language,
         allow_g2p=True,
+        needed_graphemes=_collect_needed_graphemes(lyrics),
     )
     
     all_phonemes: List[str] = []
