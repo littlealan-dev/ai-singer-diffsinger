@@ -72,6 +72,10 @@ class WaitlistSubscribeRequest(BaseModel):
     source: str
 
 
+class BillingCheckoutRequest(BaseModel):
+    planKey: str
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     configure_logging()
@@ -413,10 +417,72 @@ def create_app() -> FastAPI:
             "balance": user_credits.balance,
             "reserved": user_credits.reserved,
             "available": user_credits.available_balance,
-            "expires_at": user_credits.expires_at.isoformat(),
+            "expires_at": user_credits.expires_at.isoformat() if user_credits.expires_at else None,
             "overdrafted": user_credits.overdrafted,
-            "is_expired": user_credits.is_expired
+            "is_expired": user_credits.is_expired,
+            "monthly_allowance": user_credits.monthly_allowance,
+            "last_grant_type": user_credits.last_grant_type,
+            "last_grant_at": (
+                user_credits.last_grant_at.isoformat() if user_credits.last_grant_at else None
+            ),
         }
+
+    @app.post("/billing/checkout-session")
+    async def create_billing_checkout_session(
+        body: BillingCheckoutRequest,
+        request: Request,
+    ) -> Dict[str, str]:
+        user_id, user_email = await _get_user_context_or_401(request)
+        from src.backend.billing_checkout import create_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            url = await asyncio.to_thread(
+                create_checkout_session,
+                user_id,
+                user_email,
+                body.planKey,
+            )
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return {"url": url}
+
+    @app.post("/billing/portal-session")
+    async def create_billing_portal_session(request: Request) -> Dict[str, str]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_portal import create_portal_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            url = await asyncio.to_thread(create_portal_session, user_id)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return {"url": url}
+
+    @app.post("/billing/webhook")
+    async def stripe_billing_webhook(request: Request) -> Dict[str, str]:
+        from src.backend.billing_types import BillingHttpError
+        from src.backend.billing_webhooks import construct_stripe_event, handle_event
+
+        signature = request.headers.get("Stripe-Signature")
+        if not signature:
+            raise HTTPException(status_code=400, detail="Missing Stripe-Signature header.")
+        payload = await request.body()
+        try:
+            event = await asyncio.to_thread(construct_stripe_event, payload, signature)
+            await asyncio.to_thread(handle_event, event)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        except Exception as exc:
+            logger.exception("stripe_webhook_failed")
+            raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
+        return {"status": "ok"}
+
+    @app.post("/billing/refresh")
+    async def refresh_billing_credits() -> Dict[str, int]:
+        from src.backend.billing_refresh import run_credit_refresh
+
+        return await asyncio.to_thread(run_credit_refresh)
 
     @app.post("/waitlist/subscribe")
     async def waitlist_subscribe(
@@ -597,6 +663,8 @@ async def _require_app_check(request: Request) -> None:
 def _should_require_app_check(request: Request) -> bool:
     """Skip App Check only for signed audio playback routes."""
     path = request.url.path
+    if path == "/billing/webhook":
+        return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 
 

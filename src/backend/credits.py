@@ -10,6 +10,7 @@ import math
 
 from google.cloud import firestore
 from src.backend.firebase_app import get_firestore_client
+from src.backend.billing_migration import FREE_TIER_MONTHLY_ALLOWANCE, ensure_billing_state_for_login
 from src.backend.message_catalog import backend_message
 from src.mcp.logging_utils import get_logger
 
@@ -18,7 +19,8 @@ logger = get_logger(__name__)
 # Constants
 CREDIT_DURATION_SECONDS = 30
 _CREDIT_DURATION_PRECISION_SECONDS = 0.001
-TRIAL_CREDIT_AMOUNT = 20
+FREE_TIER_CREDIT_AMOUNT = FREE_TIER_MONTHLY_ALLOWANCE
+TRIAL_CREDIT_AMOUNT = FREE_TIER_CREDIT_AMOUNT
 TRIAL_EXPIRY_DAYS = 30
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
 
@@ -26,10 +28,14 @@ DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
 class UserCredits:
     balance: int
     reserved: int
-    expires_at: datetime
+    expires_at: Optional[datetime]
     overdrafted: bool
     trial_granted_at: Optional[datetime] = None
     trial_reset_v1: bool = False
+    monthly_allowance: Optional[int] = None
+    last_grant_type: Optional[str] = None
+    last_grant_at: Optional[datetime] = None
+    last_grant_invoice_id: Optional[str] = None
 
     @property
     def available_balance(self) -> int:
@@ -37,6 +43,8 @@ class UserCredits:
 
     @property
     def is_expired(self) -> bool:
+        if self.expires_at is None:
+            return False
         return datetime.now(timezone.utc) > self.expires_at
 
 
@@ -138,90 +146,21 @@ def mark_reservation_reconciliation_required(
         return False
 
 def get_or_create_credits(uid: str, email: str) -> UserCredits:
-    """Fetch user credits, granting trial credits if first sign-in."""
-    db = get_firestore_client()
-    user_ref = db.collection("users").document(uid)
-    
-    @firestore.transactional
-    def _transactional_get_or_create(transaction):
-        snapshot = user_ref.get(transaction=transaction)
-        
-        if snapshot.exists:
-            data = snapshot.to_dict() or {}
-            credits_data = data.get("credits")
-            if credits_data:
-                # Check for one-time reset (v1)
-                if not credits_data.get("trial_reset_v1", False):
-                    now = datetime.now(timezone.utc)
-                    expires_at = now + timedelta(days=TRIAL_EXPIRY_DAYS)
-                    transaction.update(user_ref, {
-                        "credits.balance": TRIAL_CREDIT_AMOUNT,
-                        "credits.reserved": 0,
-                        "credits.expiresAt": expires_at,
-                        "credits.overdrafted": False,
-                        "credits.trial_reset_v1": True,
-                        "metadata.pendingAnnouncementId": "trial_reset_v1",
-                    })
-
-                    # Log reset to ledger
-                    ledger_ref = db.collection("credit_ledger").document()
-                    transaction.set(ledger_ref, {
-                        "userId": uid,
-                        "type": "trial_reset",
-                        "amount": TRIAL_CREDIT_AMOUNT,
-                        "balanceAfter": TRIAL_CREDIT_AMOUNT,
-                        "createdAt": now,
-                        "reason": "One-time trial reset v1"
-                    })
-
-                    return UserCredits(
-                        balance=TRIAL_CREDIT_AMOUNT,
-                        reserved=0,
-                        expires_at=expires_at,
-                        overdrafted=False,
-                        trial_granted_at=credits_data.get("trialGrantedAt"),
-                        trial_reset_v1=True
-                    )
-
-                return UserCredits(
-                    balance=credits_data.get("balance", 0),
-                    reserved=credits_data.get("reserved", 0),
-                    expires_at=credits_data.get("expiresAt"),
-                    overdrafted=credits_data.get("overdrafted", False),
-                    trial_granted_at=credits_data.get("trialGrantedAt"),
-                    trial_reset_v1=credits_data.get("trial_reset_v1", False)
-                )
-        
-        # Create trial credits
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(days=TRIAL_EXPIRY_DAYS)
-        
-        credits_data = {
-            "balance": TRIAL_CREDIT_AMOUNT,
-            "reserved": 0,
-            "expiresAt": expires_at,
-            "overdrafted": False,
-            "trialGrantedAt": now,
-            "trial_reset_v1": True
-        }
-        
-        transaction.set(user_ref, {
-            "email": email,
-            "credits": credits_data,
-            "createdAt": now
-        }, merge=True)
-        
-        return UserCredits(
-            balance=TRIAL_CREDIT_AMOUNT,
-            reserved=0,
-            expires_at=expires_at,
-            overdrafted=False,
-            trial_granted_at=now,
-            trial_reset_v1=True
-        )
-
-    transaction = db.transaction()
-    return _transactional_get_or_create(transaction)
+    """Fetch user credits after ensuring billing bootstrap or migration is applied."""
+    data = ensure_billing_state_for_login(uid, email)
+    credits_data = data.get("credits") or {}
+    return UserCredits(
+        balance=int(credits_data.get("balance", 0) or 0),
+        reserved=int(credits_data.get("reserved", 0) or 0),
+        expires_at=credits_data.get("expiresAt"),
+        overdrafted=bool(credits_data.get("overdrafted", False)),
+        trial_granted_at=credits_data.get("trialGrantedAt"),
+        trial_reset_v1=bool(credits_data.get("trial_reset_v1", False)),
+        monthly_allowance=credits_data.get("monthlyAllowance"),
+        last_grant_type=credits_data.get("lastGrantType"),
+        last_grant_at=credits_data.get("lastGrantAt"),
+        last_grant_invoice_id=credits_data.get("lastGrantInvoiceId"),
+    )
 
 def estimate_credits(duration_seconds: float) -> int:
     """Calculate estimated credits for a given duration."""
