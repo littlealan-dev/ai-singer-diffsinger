@@ -32,12 +32,18 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     const hasStartParam = useRef(
         typeof window !== "undefined" && searchParams ? searchParams.has("start") : false
     ).current;
+    const checkoutPlan = searchParams?.get("checkoutPlan") ?? null;
+    const hasCheckoutPlan = Boolean(checkoutPlan);
+    const currentRedirectPath =
+        typeof window !== "undefined"
+            ? `${window.location.pathname}${window.location.search}${window.location.hash}`
+            : "/app";
 
     useEffect(() => {
-        if (!loading && !isAuthenticated && !hasAuthLinkParams && !hasStartParam) {
+        if (!loading && !isAuthenticated && !hasAuthLinkParams && !hasStartParam && !hasCheckoutPlan) {
             navigate("/", { replace: true });
         }
-    }, [loading, isAuthenticated, navigate, hasAuthLinkParams, hasStartParam]);
+    }, [loading, isAuthenticated, navigate, hasAuthLinkParams, hasStartParam, hasCheckoutPlan]);
 
     // Show loading while checking auth state
     if (loading) {
@@ -50,7 +56,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     }
 
     if (!isAuthenticated) {
-        if (hasStartParam) {
+        if (hasStartParam || hasCheckoutPlan) {
             return (
                 <>
                     <div className="protected-route-loading">
@@ -60,7 +66,8 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
                     <AuthModal
                         isOpen={true}
                         onClose={() => { }}
-                        onSuccess={() => navigate("/app")}
+                        onSuccess={() => navigate(hasCheckoutPlan ? `/app?checkoutPlan=${checkoutPlan}` : "/app")}
+                        redirectPath={currentRedirectPath}
                     />
                 </>
             );

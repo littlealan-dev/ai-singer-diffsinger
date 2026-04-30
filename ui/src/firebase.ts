@@ -220,13 +220,14 @@ const EMAIL_STORAGE_KEY = "emailForSignIn";
  * Send a magic link to the user's email for passwordless sign-in.
  * @param email User's email address
  */
-export async function sendMagicLink(email: string): Promise<void> {
+export async function sendMagicLink(email: string, redirectPath?: string | null): Promise<void> {
   if (!auth) {
     throw new Error("Firebase Auth not initialized");
   }
   const appBaseUrl = resolveAppBaseUrl();
+  const sanitizedRedirect = sanitizeRedirectPath(redirectPath);
   const actionCodeSettings = {
-    url: `${appBaseUrl}/app?finishSignIn=true`,
+    url: `${appBaseUrl}${sanitizedRedirect}${sanitizedRedirect.includes("?") ? "&" : "?"}finishSignIn=true`,
     handleCodeInApp: true,
   };
   await sendSignInLinkToEmail(auth, email, actionCodeSettings);

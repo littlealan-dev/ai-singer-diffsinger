@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, LogOut, Users } from "lucide-react";
+import { ChevronDown, CreditCard, LogOut, Users } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.tsx";
 import { logOut } from "../firebase";
 
@@ -21,9 +21,10 @@ const resolveMarketingBaseUrl = (value?: string): string => {
 
 type UserMenuProps = {
   onJoinWaitlist?: () => void;
+  onBilling?: () => void;
 };
 
-export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
+export function UserMenu({ onJoinWaitlist, onBilling }: UserMenuProps) {
   const { user, isAuthenticated } = useAuth();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -90,6 +91,19 @@ export function UserMenu({ onJoinWaitlist }: UserMenuProps) {
             <div className="user-menu-name">{displayName}</div>
             {email && <div className="user-menu-email">{email}</div>}
           </div>
+          {onBilling && (
+            <button
+              className="user-menu-item"
+              type="button"
+              onClick={() => {
+                onBilling();
+                setOpen(false);
+              }}
+            >
+              <CreditCard size={16} />
+              Billing
+            </button>
+          )}
           {onJoinWaitlist && (
             <button
               className="user-menu-item user-menu-item-mobile-only"

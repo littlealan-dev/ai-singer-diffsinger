@@ -40,8 +40,11 @@ def _missing_realtime_env() -> list[str]:
     required = [
         "STRIPE_SECRET_KEY",
         "STRIPE_PORTAL_CONFIGURATION_ID",
+        "STRIPE_PRODUCT_STARTER",
         "STRIPE_PRODUCT_SOLO",
         "STRIPE_PRODUCT_CHOIR",
+        "STRIPE_PRICE_STARTER_MONTHLY",
+        "STRIPE_PRICE_STARTER_ANNUAL",
         "STRIPE_PRICE_SOLO_MONTHLY",
         "STRIPE_PRICE_SOLO_ANNUAL",
         "STRIPE_PRICE_CHOIR_EARLY_MONTHLY",
@@ -75,7 +78,10 @@ def cleanup_firestore(monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_backend_integration")
     for name in [
         "STRIPE_PRODUCT_SOLO",
+        "STRIPE_PRODUCT_STARTER",
         "STRIPE_PRODUCT_CHOIR",
+        "STRIPE_PRICE_STARTER_MONTHLY",
+        "STRIPE_PRICE_STARTER_ANNUAL",
         "STRIPE_PRICE_SOLO_MONTHLY",
         "STRIPE_PRICE_SOLO_ANNUAL",
         "STRIPE_PRICE_CHOIR_EARLY_MONTHLY",

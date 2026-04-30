@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -18,11 +18,23 @@ import {
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
 import { useCredits } from "./hooks/useCredits";
+import { useBillingState } from "./hooks/useBillingState";
 import { useAuth } from "./hooks/useAuth";
 import { useAnnouncements } from "./hooks/useAnnouncements";
 import { WaitlistModal } from "./components/WaitlistModal";
 import AnnouncementModal from "./components/AnnouncementModal";
 import type { WaitlistSource } from "./components/WaitingListForm";
+import {
+  BillingPaywallModal,
+  type PaywallTrigger,
+} from "./components/billing/BillingPaywallModal";
+import { startCheckout } from "./billing/api";
+import {
+  clearPendingCheckoutPlan,
+  getStoredPendingCheckoutPlan,
+  isPaidPlanKey,
+  type BillingPlanKey,
+} from "./billing/plans";
 
 type Role = "user" | "assistant";
 
@@ -96,6 +108,19 @@ const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
   return (parts.length > 1 || verses.length > 1) && parts.length > 0 && verses.length > 0;
 };
 
+const MOCK_VOICE_OPTIONS = [
+  { name: "Hitsune Kumi", image: "/voicebanks/hitsune_kumi.png" },
+  { name: "Katyusha", image: "/voicebanks/katyusha.webp" },
+  { name: "Keiro Revenant", image: "/voicebanks/keiro_revenant.webp" },
+  { name: "Liam Thorne", image: "/voicebanks/liam_thorne.webp" },
+  { name: "Printto Magicbeat Indigo", image: "/voicebanks/printto_magicbeat_indigo.png" },
+  { name: "Qixuan (绮萱)", image: "/voicebanks/qixuan.png" },
+  { name: "SAiFA", image: "/voicebanks/saifa.webp" },
+] as const;
+
+const isInsufficientCreditError = (message: string): boolean =>
+  /insufficient credits|requires ~?\d+ credits|out of credits/i.test(message);
+
 export default function MainApp() {
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth();
@@ -116,10 +141,14 @@ export default function MainApp() {
   const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState(false);
   const [selectorShown, setSelectorShown] = useState(false);
+  const [selectedVoiceName, setSelectedVoiceName] = useState<string>(MOCK_VOICE_OPTIONS[0].name);
+  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [showWaitlistModal, setShowWaitlistModal] = useState(false);
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
   const [showCreditsModal, setShowCreditsModal] = useState(false);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
+  const [paywallTrigger, setPaywallTrigger] = useState<PaywallTrigger | null>(null);
+  const [paywallDetail, setPaywallDetail] = useState<string | null>(null);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [activeProgress, setActiveProgress] = useState<{
@@ -132,6 +161,8 @@ export default function MainApp() {
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
+  const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
+  const pendingCheckoutStartedRef = useRef(false);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -144,6 +175,7 @@ export default function MainApp() {
     isExpired,
     loading: creditsLoading,
   } = useCredits();
+  const billing = useBillingState();
   const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
 
   const {
@@ -163,6 +195,8 @@ export default function MainApp() {
       ? Math.ceil(estimatedDuration / 30)
       : null;
   const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
+  const selectedVoice =
+    MOCK_VOICE_OPTIONS.find((voice) => voice.name === selectedVoiceName) ?? MOCK_VOICE_OPTIONS[0];
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
@@ -225,20 +259,60 @@ export default function MainApp() {
     });
   }, [ensureSession, isAuthenticated, sessionId, user]);
 
+  const openPaywall = (trigger: PaywallTrigger, detail?: string | null) => {
+    setPaywallTrigger(trigger);
+    setPaywallDetail(detail ?? null);
+  };
+
   useEffect(() => {
-    if (creditsLoading) return;
-    if (isExpired && !showTrialExpiredModal) {
-      setShowTrialExpiredModal(true);
-      setWaitlistSource("trial_expired");
-      setShowWaitlistModal(true);
+    if (creditsLoading || billing.loading) return;
+    let trigger: PaywallTrigger | null = null;
+    if (overdrafted || available < 0) {
+      trigger = "overdrafted";
+    } else if (isExpired) {
+      trigger = "trial_migrated";
+    } else if (available <= 0) {
+      trigger = "credits_exhausted";
+    }
+    if (!trigger) return;
+    const key = `${trigger}:${user?.uid ?? "anon"}`;
+    if (autoPaywallTriggersRef.current.has(key)) return;
+    autoPaywallTriggersRef.current.add(key);
+    openPaywall(trigger);
+  }, [available, billing.loading, creditsLoading, isExpired, overdrafted, user?.uid]);
+
+  useEffect(() => {
+    if (billing.loading || !isAuthenticated || pendingCheckoutStartedRef.current) return;
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const queryPlan = params.get("checkoutPlan");
+    const storedPlan = getStoredPendingCheckoutPlan();
+    const planKey = isPaidPlanKey(queryPlan) ? queryPlan : storedPlan;
+    const returnedFromCheckout =
+      params.get("checkout") === "success" ||
+      params.get("billing") === "sync" ||
+      params.has("session_id");
+
+    if (returnedFromCheckout) {
+      openPaywall("checkout_sync");
+    }
+
+    if (!planKey) return;
+    pendingCheckoutStartedRef.current = true;
+    clearPendingCheckoutPlan();
+
+    if (billing.activePlanKey !== "free") {
+      openPaywall("billing_menu");
       return;
     }
-    if ((available <= 0 || overdrafted) && !isExpired && !showCreditsModal) {
-      setShowCreditsModal(true);
-      setWaitlistSource("credits_exhausted");
-      setShowWaitlistModal(true);
-    }
-  }, [available, creditsLoading, isExpired, overdrafted, showCreditsModal, showTrialExpiredModal]);
+
+    void startCheckout(planKey as BillingPlanKey).then((url) => {
+      window.location.assign(url);
+    }).catch((err) => {
+      pendingCheckoutStartedRef.current = false;
+      openPaywall("billing_menu", err instanceof Error ? err.message : "Could not start Checkout.");
+    });
+  }, [billing.activePlanKey, billing.loading, isAuthenticated]);
 
   useEffect(() => {
     if (!scoreRef.current || !score) return;
@@ -490,7 +564,10 @@ export default function MainApp() {
   };
 
   const handleUpload = async (file: File) => {
-    if (creditsLocked) return;
+    if (creditsLocked) {
+      openPaywall("upload_blocked");
+      return;
+    }
     setUploading(true);
     setError(null);
     try {
@@ -507,14 +584,22 @@ export default function MainApp() {
       const data = await fetchScoreXml(activeSessionId);
       setScore({ name: file.name, data });
     } catch (err: any) {
-      setError(err?.message || "Upload failed.");
+      const message = err?.message || "Upload failed.";
+      if (isInsufficientCreditError(message)) {
+        openPaywall("insufficient_credits", message);
+      }
+      setError(message);
     } finally {
       setUploading(false);
     }
   };
 
   const sendMessage = async (content: string, selection?: ChatSelection) => {
-    if (!content.trim() || creditsLocked) return;
+    if (!content.trim()) return;
+    if (creditsLocked) {
+      openPaywall(selection ? "selection_blocked" : "chat_blocked");
+      return;
+    }
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -573,21 +658,33 @@ export default function MainApp() {
         setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to send message.");
+      const message = err?.message || "Failed to send message.";
+      if (isInsufficientCreditError(message)) {
+        openPaywall("insufficient_credits", message);
+      }
+      setError(message);
     } finally {
       setStatus(null);
     }
   };
 
   const handleSend = async () => {
-    if (!input.trim() || creditsLocked) return;
+    if (!input.trim()) return;
+    if (creditsLocked) {
+      openPaywall("chat_blocked");
+      return;
+    }
     const content = input.trim();
     setInput("");
     await sendMessage(content);
   };
 
   const handleSelectionSend = async () => {
-    if (!selectedPartKey || !selectedVerse || creditsLocked) return;
+    if (!selectedPartKey || !selectedVerse) return;
+    if (creditsLocked) {
+      openPaywall("selection_blocked");
+      return;
+    }
     const selected = partOptions.find((option) => option.key === selectedPartKey);
     if (!selected) return;
     const partDescriptor = selected.part_name
@@ -625,7 +722,10 @@ export default function MainApp() {
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (creditsLocked) return;
+    if (creditsLocked) {
+      openPaywall("drag_blocked");
+      return;
+    }
     setIsDragging(false);
     const file = event.dataTransfer.files?.[0];
     if (file) handleUpload(file);
@@ -660,6 +760,10 @@ export default function MainApp() {
     setShowWaitlistModal(true);
   };
 
+  const handleOpenBilling = () => {
+    openPaywall("billing_menu");
+  };
+
   const marketingBaseUrl =
     (import.meta.env.VITE_MARKETING_BASE_URL as string | undefined) ?? "/";
   const handleBrandClick = () => {
@@ -688,11 +792,11 @@ export default function MainApp() {
           <div className="status-pill">{status ?? "Ready"}</div>
           <button
             className="btn-primary-inline app-join-button"
-            onClick={() => handleJoinWaitlist("studio_menu")}
+            onClick={handleOpenBilling}
           >
-            Join Waiting List
+            Upgrade
           </button>
-          <UserMenu onJoinWaitlist={() => handleJoinWaitlist("studio_menu")} />
+          <UserMenu onBilling={handleOpenBilling} onJoinWaitlist={() => handleJoinWaitlist("studio_menu")} />
         </div>
       </header>
 
@@ -709,6 +813,13 @@ export default function MainApp() {
               ? "You're out of credits. Join the waiting list to get notified."
               : undefined
         }
+      />
+      <BillingPaywallModal
+        isOpen={paywallTrigger !== null}
+        trigger={paywallTrigger ?? "billing_menu"}
+        billing={billing}
+        detail={paywallDetail}
+        onClose={() => setPaywallTrigger(null)}
       />
 
       <main
@@ -971,7 +1082,15 @@ export default function MainApp() {
             )}
           </div>
           <div className="chat-input">
-            <label className="upload-button">
+            <label
+              className="upload-button"
+              onClick={(event) => {
+                if (creditsLocked) {
+                  event.preventDefault();
+                  openPaywall("upload_blocked");
+                }
+              }}
+            >
               <UploadCloud size={18} />
               <span>{uploading ? "Uploading..." : "Upload Score"}</span>
               <input
@@ -984,7 +1103,55 @@ export default function MainApp() {
                 }}
               />
             </label>
-            <div className="input-row">
+            <div className="input-row composer-row">
+              <div className="voice-picker">
+                {voiceMenuOpen ? (
+                  <div className="voice-picker-menu" role="listbox" aria-label="Select AI voice">
+                    {MOCK_VOICE_OPTIONS.map((voice) => {
+                      const isSelected = voice.name === selectedVoice.name;
+                      return (
+                        <button
+                          key={voice.name}
+                          type="button"
+                          className={clsx("voice-picker-option", { selected: isSelected })}
+                          onClick={() => {
+                            setSelectedVoiceName(voice.name);
+                            setVoiceMenuOpen(false);
+                          }}
+                        >
+                          <img
+                            src={voice.image}
+                            alt=""
+                            className="voice-picker-option-avatar"
+                            aria-hidden="true"
+                          />
+                          <span className="voice-picker-option-name">{voice.name}</span>
+                          {isSelected ? <Check size={14} aria-hidden="true" /> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className={clsx("voice-picker-trigger", { open: voiceMenuOpen })}
+                  aria-haspopup="listbox"
+                  aria-expanded={voiceMenuOpen}
+                  onClick={() => setVoiceMenuOpen((open) => !open)}
+                >
+                  <img
+                    src={selectedVoice.image}
+                    alt=""
+                    className="voice-picker-trigger-avatar"
+                    aria-hidden="true"
+                  />
+                  <span className="voice-picker-trigger-copy">
+                    <span className="voice-picker-trigger-label">Voice</span>
+                    <span className="voice-picker-trigger-name">{selectedVoice.name}</span>
+                  </span>
+                  <ChevronsUpDown size={16} aria-hidden="true" />
+                </button>
+              </div>
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
@@ -997,7 +1164,8 @@ export default function MainApp() {
               <button
                 onClick={handleSend}
                 className="send-button"
-                disabled={!input.trim() || creditsLocked}
+                disabled={!input.trim()}
+                aria-disabled={creditsLocked}
               >
                 <Send size={18} />
               </button>

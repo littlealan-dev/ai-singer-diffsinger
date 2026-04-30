@@ -6,6 +6,7 @@ import pytest
 from src.backend.billing_checkout import create_checkout_session
 from src.backend.billing_config import get_billing_config, get_stripe_client
 from src.backend.billing_migration import ensure_billing_state_for_login
+from src.backend.billing_plans import get_plan_catalog
 from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh
 from src.backend.billing_store import get_billing_state
@@ -70,8 +71,11 @@ class _FakeStripeClient:
 def billing_env(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_123")
+    monkeypatch.setenv("STRIPE_PRODUCT_STARTER", "prod_starter")
     monkeypatch.setenv("STRIPE_PRODUCT_SOLO", "prod_solo")
     monkeypatch.setenv("STRIPE_PRODUCT_CHOIR", "prod_choir")
+    monkeypatch.setenv("STRIPE_PRICE_STARTER_MONTHLY", "price_starter_monthly")
+    monkeypatch.setenv("STRIPE_PRICE_STARTER_ANNUAL", "price_starter_annual")
     monkeypatch.setenv("STRIPE_PRICE_SOLO_MONTHLY", "price_solo_monthly")
     monkeypatch.setenv("STRIPE_PRICE_SOLO_ANNUAL", "price_solo_annual")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_EARLY_MONTHLY", "price_choir_early_monthly")
@@ -118,6 +122,20 @@ def test_create_checkout_session_creates_customer_and_session():
     billing = get_billing_state("user-1")
     assert billing["stripeCustomerId"] == "cus_test_123"
     assert billing["stripeCheckoutSessionId"] == "cs_test_123"
+
+
+def test_starter_plan_catalog_maps_price_and_allowance():
+    catalog = get_plan_catalog(get_billing_config())
+
+    starter_monthly = catalog["starter_monthly"]
+    starter_annual = catalog["starter_annual"]
+
+    assert starter_monthly.family == "starter"
+    assert starter_monthly.monthly_allowance == 15
+    assert starter_monthly.stripe_price_id == "price_starter_monthly"
+    assert starter_annual.family == "starter"
+    assert starter_annual.monthly_allowance == 15
+    assert starter_annual.stripe_price_id == "price_starter_annual"
 
 
 def test_create_portal_session_requires_existing_customer():

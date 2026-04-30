@@ -18,8 +18,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
 class BillingConfig:
     stripe_secret_key: str
     stripe_webhook_secret: str
+    stripe_product_starter: str
     stripe_product_solo: str
     stripe_product_choir: str
+    stripe_price_starter_monthly: str
+    stripe_price_starter_annual: str
     stripe_price_solo_monthly: str
     stripe_price_solo_annual: str
     stripe_price_choir_early_monthly: str
@@ -46,8 +49,11 @@ def get_billing_config() -> BillingConfig:
     return BillingConfig(
         stripe_secret_key=_required_env("STRIPE_SECRET_KEY"),
         stripe_webhook_secret=_required_env("STRIPE_WEBHOOK_SECRET"),
+        stripe_product_starter=_required_env("STRIPE_PRODUCT_STARTER"),
         stripe_product_solo=_required_env("STRIPE_PRODUCT_SOLO"),
         stripe_product_choir=_required_env("STRIPE_PRODUCT_CHOIR"),
+        stripe_price_starter_monthly=_required_env("STRIPE_PRICE_STARTER_MONTHLY"),
+        stripe_price_starter_annual=_required_env("STRIPE_PRICE_STARTER_ANNUAL"),
         stripe_price_solo_monthly=_required_env("STRIPE_PRICE_SOLO_MONTHLY"),
         stripe_price_solo_annual=_required_env("STRIPE_PRICE_SOLO_ANNUAL"),
         stripe_price_choir_early_monthly=_required_env("STRIPE_PRICE_CHOIR_EARLY_MONTHLY"),

@@ -86,6 +86,14 @@ export type WaitlistSubscribeResponse = {
   requires_confirmation: boolean;
 };
 
+export type BillingCheckoutResponse = {
+  url: string;
+};
+
+export type BillingPortalResponse = {
+  url: string;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 function withApiBase(url: string): string {
@@ -140,6 +148,18 @@ export async function createSession(): Promise<{ session_id: string }> {
 
 export async function ensureCredits(): Promise<unknown> {
   return request("/credits", { method: "GET" });
+}
+
+export async function createCheckoutSession(planKey: string): Promise<BillingCheckoutResponse> {
+  return request("/billing/checkout-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ planKey }),
+  });
+}
+
+export async function createPortalSession(): Promise<BillingPortalResponse> {
+  return request("/billing/portal-session", { method: "POST" });
 }
 
 export async function subscribeToWaitlist(

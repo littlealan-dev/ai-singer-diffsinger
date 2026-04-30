@@ -11,6 +11,7 @@ export interface AuthModalProps {
     isOpen: boolean;
     onClose: () => void;
     onSuccess?: () => void;
+    redirectPath?: string | null;
 }
 
 type AuthModalState =
@@ -23,7 +24,7 @@ type AuthModalState =
 /**
  * Modal for Google and Email magic link authentication.
  */
-export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
+export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModalProps) {
     const [state, setState] = useState<AuthModalState>("idle");
     const [email, setEmail] = useState("");
     const [error, setError] = useState<string | null>(null);
@@ -62,7 +63,7 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
         setState("signingInGoogle");
         setError(null);
         try {
-            await signInWithGoogleRedirect();
+            await signInWithGoogleRedirect(redirectPath);
             // Page will redirect to Google, so we don't need to do anything else
         } catch (err) {
             setState("error");
@@ -77,7 +78,7 @@ export function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps) {
         setState("sendingEmail");
         setError(null);
         try {
-            await sendMagicLink(email.trim());
+            await sendMagicLink(email.trim(), redirectPath);
             setSentEmail(email.trim());
             setState("emailSent");
         } catch (err) {

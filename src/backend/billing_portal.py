@@ -20,7 +20,8 @@ def create_portal_session(
     if not stripe_customer_id:
         raise BillingHttpError(409, "Stripe customer is not set up for this account.")
     billing_config = config or get_billing_config()
-    client = stripe_client or get_stripe_v1_client()
+    raw_client = stripe_client or get_stripe_v1_client()
+    client = getattr(raw_client, "v1", None) or raw_client
     session = client.billing_portal.sessions.create(
         params={
             "customer": stripe_customer_id,

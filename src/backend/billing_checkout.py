@@ -31,7 +31,8 @@ def create_checkout_session(
     if has_active_paid_entitlement(billing):
         raise BillingHttpError(409, "Active paid subscription already exists.")
 
-    client = stripe_client or get_stripe_v1_client()
+    raw_client = stripe_client or get_stripe_v1_client()
+    client = getattr(raw_client, "v1", None) or raw_client
     stripe_customer_id = billing.get("stripeCustomerId")
     if not stripe_customer_id:
         customer = client.customers.create(

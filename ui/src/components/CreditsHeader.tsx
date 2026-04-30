@@ -37,7 +37,10 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
     }
 
     return (
-        <div className={`credits-pill ${statusClass}`} title={isExpired ? "Credits have expired" : overdrafted ? "Account locked due to negative balance" : ""}>
+        <div
+            className={`credits-pill ${statusClass}`}
+            title={isExpired ? "Credits have expired" : overdrafted ? "Account locked due to negative balance" : "Credit balance"}
+        >
             <div className="credits-main">
                 {icon}
                 <span className="credits-label">{label}</span>

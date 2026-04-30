@@ -11,6 +11,8 @@
     color: #e2e8f0;
     transition: all 0.2s ease;
     height: 32px;
+    cursor: default;
+    font-family: inherit;
 }
 
 .credits-pill.loading {
@@ -54,11 +56,6 @@
 }
 
 /* Status Variants */
-
-.credits-pill.normal:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(59, 130, 246, 0.3);
-}
 
 .credits-pill.warning {
     border-color: rgba(245, 158, 11, 0.4);
