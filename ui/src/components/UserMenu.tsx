@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, CreditCard, LogOut, Users } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.tsx";
 import { logOut } from "../firebase";
+import { formatPlanBadge, type BillingPlanKey } from "../billing/plans";
 
 const getInitials = (name: string) => {
   const parts = name.trim().split(/\s+/);
@@ -22,15 +23,23 @@ const resolveMarketingBaseUrl = (value?: string): string => {
 type UserMenuProps = {
   onJoinWaitlist?: () => void;
   onBilling?: () => void;
+  activePlanKey?: BillingPlanKey;
+  stripeCustomerId?: string | null;
 };
 
-export function UserMenu({ onJoinWaitlist, onBilling }: UserMenuProps) {
+export function UserMenu({
+  onJoinWaitlist,
+  onBilling,
+  activePlanKey = "free",
+  stripeCustomerId = null,
+}: UserMenuProps) {
   const { user, isAuthenticated } = useAuth();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const displayName = user?.displayName?.trim() || "Signed in";
   const email = user?.email?.trim() || "";
+  const planBadge = formatPlanBadge(activePlanKey);
   const resolvedMarketingBaseUrl = resolveMarketingBaseUrl(
     import.meta.env.VITE_MARKETING_BASE_URL as string | undefined
   );
@@ -88,10 +97,13 @@ export function UserMenu({ onJoinWaitlist, onBilling }: UserMenuProps) {
       {open && (
         <div className="user-menu-dropdown" role="menu">
           <div className="user-menu-profile">
-            <div className="user-menu-name">{displayName}</div>
+            <div className="user-menu-name-row">
+              <div className="user-menu-name">{displayName}</div>
+              <span className="user-menu-plan-badge">{planBadge}</span>
+            </div>
             {email && <div className="user-menu-email">{email}</div>}
           </div>
-          {onBilling && (
+          {onBilling && stripeCustomerId && (
             <button
               className="user-menu-item"
               type="button"

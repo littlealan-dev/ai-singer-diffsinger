@@ -111,7 +111,7 @@ export function useBillingState(): BillingState {
 }
 
 function normalizeFamily(value: unknown): PlanFamily {
-  return value === "starter" || value === "solo" || value === "choir" ? value : "free";
+  return value === "solo" || value === "choir" ? value : "free";
 }
 
 function normalizeInterval(value: unknown): BillingState["billingInterval"] {

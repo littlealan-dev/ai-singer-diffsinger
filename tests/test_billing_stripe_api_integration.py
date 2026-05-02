@@ -11,14 +11,17 @@ from fastapi.testclient import TestClient
 import stripe
 
 from src.backend.billing_config import get_billing_config, get_stripe_client, get_stripe_v1_client
+from src.backend.billing_plans import get_plan_catalog
 from src.backend.credits import get_or_create_credits
 from src.backend.firebase_app import get_firestore_client
 from src.backend.main import create_app
 
 
 def _load_local_env_file(path: str) -> None:
+    if not path:
+        return
     env_path = Path(path)
-    if not env_path.exists():
+    if not env_path.is_file():
         return
     for raw_line in env_path.read_text().splitlines():
         line = raw_line.strip()
@@ -34,17 +37,16 @@ def _load_local_env_file(path: str) -> None:
 _load_local_env_file(".env")
 _load_local_env_file("env/local.env")
 _load_local_env_file("env/dev.env")
+_load_local_env_file(os.getenv("BILLING_STRIPE_ENV_FILE", ""))
 
 
 def _missing_realtime_env() -> list[str]:
     required = [
         "STRIPE_SECRET_KEY",
+        "STRIPE_WEBHOOK_SECRET",
         "STRIPE_PORTAL_CONFIGURATION_ID",
-        "STRIPE_PRODUCT_STARTER",
         "STRIPE_PRODUCT_SOLO",
         "STRIPE_PRODUCT_CHOIR",
-        "STRIPE_PRICE_STARTER_MONTHLY",
-        "STRIPE_PRICE_STARTER_ANNUAL",
         "STRIPE_PRICE_SOLO_MONTHLY",
         "STRIPE_PRICE_SOLO_ANNUAL",
         "STRIPE_PRICE_CHOIR_EARLY_MONTHLY",
@@ -74,14 +76,11 @@ def cleanup_firestore(monkeypatch):
     monkeypatch.setenv("BACKEND_DATA_DIR", "tests/output/billing_stripe_api")
     monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", os.getenv("FIRESTORE_EMULATOR_HOST", "localhost:8080"))
     monkeypatch.setenv("GCLOUD_PROJECT", os.getenv("GCLOUD_PROJECT", "demo-project"))
-    monkeypatch.setenv("STRIPE_SECRET_KEY", os.getenv("STRIPE_SECRET_KEY", "sk_test_dummy"))
-    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_backend_integration")
     for name in [
+        "STRIPE_SECRET_KEY",
+        "STRIPE_WEBHOOK_SECRET",
         "STRIPE_PRODUCT_SOLO",
-        "STRIPE_PRODUCT_STARTER",
         "STRIPE_PRODUCT_CHOIR",
-        "STRIPE_PRICE_STARTER_MONTHLY",
-        "STRIPE_PRICE_STARTER_ANNUAL",
         "STRIPE_PRICE_SOLO_MONTHLY",
         "STRIPE_PRICE_SOLO_ANNUAL",
         "STRIPE_PRICE_CHOIR_EARLY_MONTHLY",
@@ -125,7 +124,8 @@ def _signed_webhook_headers(payload: bytes, secret: str) -> dict[str, str]:
     }
 
 
-def _post_webhook(client: TestClient, event: dict, *, secret: str = "whsec_test_backend_integration"):
+def _post_webhook(client: TestClient, event: dict, *, secret: str | None = None):
+    secret = secret or os.environ["STRIPE_WEBHOOK_SECRET"]
     payload_event = {"object": "event", **event}
     payload = json.dumps(payload_event, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return client.post(
@@ -133,6 +133,55 @@ def _post_webhook(client: TestClient, event: dict, *, secret: str = "whsec_test_
         content=payload,
         headers=_signed_webhook_headers(payload, secret),
     )
+
+
+def _stripe_value(resource, key: str):
+    if isinstance(resource, dict):
+        return resource[key]
+    return getattr(resource, key)
+
+
+def _stripe_id(resource) -> str:
+    if isinstance(resource, str):
+        return resource
+    return str(_stripe_value(resource, "id"))
+
+
+def test_configured_stripe_prices_match_current_plan_catalog():
+    config = get_billing_config()
+    stripe.api_key = config.stripe_secret_key
+    if hasattr(stripe, "api_version"):
+        stripe.api_version = config.stripe_api_version
+
+    catalog = get_plan_catalog(config)
+    assert set(catalog) == {
+        "free",
+        "solo_monthly",
+        "solo_annual",
+        "choir_early_monthly",
+        "choir_early_annual",
+        "choir_monthly",
+        "choir_annual",
+    }
+
+    expected = {
+        "solo_monthly": (699, "month", config.stripe_product_solo),
+        "solo_annual": (6900, "year", config.stripe_product_solo),
+        "choir_early_monthly": (1999, "month", config.stripe_product_choir),
+        "choir_early_annual": (19900, "year", config.stripe_product_choir),
+        "choir_monthly": (2499, "month", config.stripe_product_choir),
+        "choir_annual": (24900, "year", config.stripe_product_choir),
+    }
+
+    for plan_key, (unit_amount, interval, product_id) in expected.items():
+        plan = catalog[plan_key]
+        assert plan.stripe_price_id
+        price = stripe.Price.retrieve(plan.stripe_price_id, expand=["product"])
+        recurring = _stripe_value(price, "recurring")
+        assert _stripe_value(price, "currency") == "usd"
+        assert _stripe_value(price, "unit_amount") == unit_amount
+        assert _stripe_value(recurring, "interval") == interval
+        assert _stripe_id(_stripe_value(price, "product")) == product_id
 
 
 def test_checkout_and_portal_with_real_stripe_api():
@@ -265,6 +314,7 @@ def test_webhook_subscription_updated_route_updates_mirror():
                         "object": "subscription",
                         "customer": "cus_backend_123",
                         "status": "active",
+                        "billing_cycle_anchor": current_period_start,
                         "cancel_at_period_end": True,
                         "canceled_at": None,
                         "current_period_start": current_period_start,
@@ -282,6 +332,8 @@ def test_webhook_subscription_updated_route_updates_mirror():
         assert billing["stripeSubscriptionStatus"] == "active"
         assert billing["stripeSubscriptionId"] == "sub_backend_456"
         assert billing["cancelAtPeriodEnd"] is True
+        assert billing["creditRefreshAnchor"] == datetime.fromtimestamp(current_period_start, tz=timezone.utc)
+        assert billing["nextCreditRefreshAt"] == datetime.fromtimestamp(current_period_end, tz=timezone.utc)
 
 
 def test_webhook_subscription_deleted_route_reverts_to_free_and_preserves_anchor():

@@ -27,6 +27,22 @@ export default defineConfig({
         target: "http://127.0.0.1:9099",
         changeOrigin: true,
       },
+      "/sessions": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/credits": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/billing": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/waitlist/subscribe": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
     },
   },
 });

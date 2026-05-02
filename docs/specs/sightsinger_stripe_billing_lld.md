@@ -374,6 +374,55 @@ After session creation, store:
 
 This field is advisory only and must not be used as the subscription source of truth.
 
+## 9.5 Checkout return sync fallback
+
+Stripe webhooks remain the primary billing update path. The app may also expose an authenticated checkout-return reconciliation endpoint for hosted Checkout success redirects:
+
+- `POST /billing/checkout-session/sync`
+
+Request body:
+
+```json
+{
+  "sessionId": "cs_test_..."
+}
+```
+
+Response:
+
+```json
+{
+  "synced": true,
+  "status": "complete",
+  "activePlanKey": "solo_annual"
+}
+```
+
+Purpose:
+
+- repair local development when Stripe webhook forwarding is not running
+- reduce user-visible waiting after a successful hosted Checkout redirect
+- reconcile Firestore from verified Stripe state if webhook delivery is delayed
+
+Rules:
+
+- require Firebase auth
+- retrieve the Checkout Session from Stripe by `sessionId`
+- verify the retrieved session belongs to the authenticated user using `client_reference_id` / `metadata.firebaseUserId`
+- require a stored Firestore linkage for the authenticated user:
+  - `billing.stripeCheckoutSessionId` must match the retrieved Checkout Session, or
+  - `billing.stripeCustomerId` must match the retrieved Checkout Session customer
+- reject metadata-only matches that have no stored checkout/customer linkage
+- reject non-subscription Checkout Sessions
+- reject sessions that are not `complete` or whose payment status is not paid / no-payment-required
+- reject subscriptions whose current Stripe status is not `active`, `trialing`, or `past_due`
+- retrieve or expand the subscription and map its recurring price through the shared plan catalog
+- use Stripe subscription and invoice data as the source of truth for Firestore reconciliation
+- do not create a new Stripe customer or user from this path
+- keep webhook idempotency semantics by using the same deterministic invoice grant key, `grant_invoice_<stripeInvoiceId>`, whenever the endpoint applies a paid-cycle grant
+
+This endpoint is a backend repair/reconciliation path. The success page must not grant access locally; it may call this endpoint and then continue to observe Firestore billing state.
+
 ## 10. Portal Flow
 
 ## 10.1 Preconditions
@@ -409,6 +458,41 @@ Portal configuration rule:
 - disable subscription price/product switching
 
 The backend should pass the explicit portal configuration ID when creating sessions so the v1 “no self-serve plan switching” rule is enforced by configuration, not only by UI convention.
+
+## 10.3 Portal return sync fallback
+
+Stripe webhooks remain the primary source of subscription changes from Billing Portal. The app may also expose an authenticated portal-return reconciliation endpoint:
+
+- `POST /billing/subscription/sync`
+
+Response:
+
+```json
+{
+  "synced": true,
+  "status": "active",
+  "activePlanKey": "solo_monthly"
+}
+```
+
+Purpose:
+
+- repair local development when Stripe webhook forwarding is not running
+- reduce user-visible delay after Billing Portal actions
+- reconcile Firestore from Stripe after cancellation, cancellation-at-period-end, payment-status changes, or portal-driven subscription updates
+
+Rules:
+
+- require Firebase auth
+- require existing `billing.stripeCustomerId`; do not create a Stripe customer from this path
+- list the authenticated user's Stripe subscriptions for that customer using server-side Stripe credentials
+- prefer the currently stored `billing.stripeSubscriptionId` when present; otherwise prefer a paid/status-relevant subscription
+- for `active`, `trialing`, `past_due`, `unpaid`, or `incomplete`, map the subscription price through the shared plan catalog and update the billing mirror
+- for `canceled` or `incomplete_expired`, revert the billing mirror to free while preserving the current credit refresh anchor
+- for `cancel_at_period_end=true`, keep paid entitlement active and set `billing.cancelAtPeriodEnd=true`
+- reject unknown subscription prices or unsupported statuses rather than guessing
+
+`STRIPE_PORTAL_RETURN_URL` should include a UI signal such as `?billing=sync` so the app can call this endpoint after returning from Billing Portal and then continue observing Firestore billing state.
 
 ## 11. Webhook Processing
 
@@ -943,7 +1027,9 @@ Add Firestore-backed integration tests for:
 
 - checkout creating one Stripe customer per Firebase user
 - checkout blocking second paid subscription
+- authenticated checkout-return sync accepting only the owning user's completed Checkout Session
 - portal session requiring existing `stripeCustomerId`
+- portal return sync reflecting cancellation-at-period-end and immediate cancellation
 - webhook state transitions for:
   - `checkout.session.completed`
   - `invoice.paid`

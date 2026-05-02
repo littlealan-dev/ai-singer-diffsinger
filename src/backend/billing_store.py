@@ -164,25 +164,28 @@ def sync_paid_subscription_state(
     cancel_at_period_end: bool,
     canceled_at: datetime | None,
     is_early_supporter: bool,
+    billing_cycle_anchor: datetime | None = None,
 ) -> None:
     from src.backend.billing_config import get_billing_config
     from src.backend.billing_plans import get_plan
 
     plan = get_plan(plan_key, get_billing_config())
-    get_firestore_client().collection("users").document(uid).set(
-        {
-            "billing": {
-                "stripeSubscriptionId": stripe_subscription_id,
-                "activePlanKey": plan_key,
-                "stripeSubscriptionStatus": stripe_subscription_status,
-                "family": plan.family,
-                "billingInterval": plan.billing_interval,
-                "currentPeriodStart": current_period_start,
-                "currentPeriodEnd": current_period_end,
-                "cancelAtPeriodEnd": cancel_at_period_end,
-                "canceledAt": canceled_at,
-                "isEarlySupporter": is_early_supporter,
-            }
-        },
-        merge=True,
-    )
+    billing_payload = {
+        "stripeSubscriptionId": stripe_subscription_id,
+        "activePlanKey": plan_key,
+        "stripeSubscriptionStatus": stripe_subscription_status,
+        "family": plan.family,
+        "billingInterval": plan.billing_interval,
+        "currentPeriodStart": current_period_start,
+        "currentPeriodEnd": current_period_end,
+        "cancelAtPeriodEnd": cancel_at_period_end,
+        "canceledAt": canceled_at,
+        "isEarlySupporter": is_early_supporter,
+    }
+    if billing_cycle_anchor is not None:
+        billing_payload["creditRefreshAnchor"] = billing_cycle_anchor
+        billing_payload["nextCreditRefreshAt"] = current_period_end or compute_next_monthly_refresh(
+            billing_cycle_anchor,
+            datetime.now(timezone.utc),
+        )
+    get_firestore_client().collection("users").document(uid).set({"billing": billing_payload}, merge=True)

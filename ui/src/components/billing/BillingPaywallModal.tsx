@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { Check, Loader2, X } from "lucide-react";
-import { startBillingPortal, startCheckout } from "../../billing/api";
+import {
+  startBillingPortal,
+  startCheckout,
+} from "../../billing/api";
 import {
   getDisplayPlans,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
@@ -47,7 +50,6 @@ export function BillingPaywallModal({
   const [interval, setInterval] = useState<BillingInterval>("annual");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncTimedOut, setSyncTimedOut] = useState(false);
   const plans = useMemo(() => getDisplayPlans(interval), [interval]);
   const activePaid = billing.activePlanKey !== "free" && paidStatuses.has(billing.stripeSubscriptionStatus || "active");
   const copy = getTriggerCopy(trigger, billing);
@@ -56,24 +58,7 @@ export function BillingPaywallModal({
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
-    setSyncTimedOut(false);
   }, [isOpen, trigger]);
-
-  useEffect(() => {
-    if (!isOpen || trigger !== "checkout_sync") return;
-    if (billing.activePlanKey !== "free") {
-      setSyncTimedOut(false);
-      return;
-    }
-    const timeout = window.setTimeout(() => setSyncTimedOut(true), 30000);
-    const poll = window.setInterval(() => {
-      // Firestore snapshots are the source of truth; this timer keeps the UI state deterministic.
-    }, 2000);
-    return () => {
-      window.clearTimeout(timeout);
-      window.clearInterval(poll);
-    };
-  }, [billing.activePlanKey, isOpen, trigger]);
 
   if (!isOpen) return null;
 
@@ -152,14 +137,6 @@ export function BillingPaywallModal({
               )}
             </div>
           )}
-          {syncTimedOut ? (
-            <div className="billing-status-note">
-              Payment received. Your plan is still syncing. Refresh in a moment.
-              <button type="button" onClick={() => window.location.reload()}>
-                Refresh status
-              </button>
-            </div>
-          ) : null}
         </header>
 
         <div className="billing-interval-toggle" role="group" aria-label="Billing interval">
@@ -263,7 +240,12 @@ function PlanCard({
         <span className="billing-price-suffix">{plan.priceSuffix}</span>
         {plan.savingsLabel ? <span className="billing-savings">{plan.savingsLabel}</span> : null}
       </div>
-      {plan.secondaryPrice ? <p className="billing-secondary-price">{plan.secondaryPrice}</p> : null}
+      {plan.secondaryPrice ? (
+        <p className="billing-secondary-price">
+          {plan.originalSecondaryPrice ? <del>{plan.originalSecondaryPrice}</del> : null}
+          <span>{plan.secondaryPrice}</span>
+        </p>
+      ) : null}
       <div className="billing-credit-line">
         <div>
           <strong>{plan.creditsAmountLabel}</strong>

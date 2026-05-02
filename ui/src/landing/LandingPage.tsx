@@ -122,7 +122,10 @@ export default function LandingPage() {
                                 {plan.savingsLabel ? <em>{plan.savingsLabel}</em> : null}
                             </div>
                             {plan.secondaryPrice ? (
-                                <p className="landing-plan-secondary">{plan.secondaryPrice}</p>
+                                <p className="landing-plan-secondary">
+                                    {plan.originalSecondaryPrice ? <del>{plan.originalSecondaryPrice}</del> : null}
+                                    <span>{plan.secondaryPrice}</span>
+                                </p>
                             ) : null}
                             <div className="landing-plan-credits">
                                 <div>

@@ -2,8 +2,6 @@ export type BillingInterval = "annual" | "monthly";
 
 export type BillingPlanKey =
   | "free"
-  | "starter_monthly"
-  | "starter_annual"
   | "solo_monthly"
   | "solo_annual"
   | "choir_early_monthly"
@@ -11,9 +9,9 @@ export type BillingPlanKey =
   | "choir_monthly"
   | "choir_annual";
 
-export type PlanFamily = "free" | "starter" | "solo" | "choir";
+export type PlanFamily = "free" | "solo" | "choir";
 
-export type PlanCardKey = "free" | "starter" | "solo" | "choir";
+export type PlanCardKey = "free" | "solo" | "choir";
 
 type PaidPrice = {
   monthlyCents: number;
@@ -42,6 +40,7 @@ export type DisplayPlan = PlanBase & {
   priceSuffix: string;
   originalPriceLabel?: string;
   secondaryPrice?: string;
+  originalSecondaryPrice?: string;
   savingsLabel?: string;
   creditsAmountLabel: string;
   creditsLabel: string;
@@ -71,21 +70,6 @@ const BASE_PLANS: PlanBase[] = [
     features: ["About 1 full song per month", "Access to limited AI voices"],
   },
   {
-    cardKey: "starter",
-    family: "starter",
-    name: "Starter",
-    subtitle: "For casual singers",
-    monthlyCredits: 15,
-    audioMinutes: 7.5,
-    features: ["About 2 full songs per month", "Full commercial rights", "Access to all AI voices"],
-    price: {
-      monthlyCents: 499,
-      annualCents: 4900,
-      monthlyPlanKey: "starter_monthly",
-      annualPlanKey: "starter_annual",
-    },
-  },
-  {
     cardKey: "solo",
     family: "solo",
     name: "Solo",
@@ -95,8 +79,8 @@ const BASE_PLANS: PlanBase[] = [
     features: ["Roughly 3-4 full songs per month", "Full commercial rights", "Access to all AI voices"],
     badge: "Most Popular",
     price: {
-      monthlyCents: 999,
-      annualCents: 9900,
+      monthlyCents: 699,
+      annualCents: 6900,
       monthlyPlanKey: "solo_monthly",
       annualPlanKey: "solo_annual",
     },
@@ -118,8 +102,6 @@ const BASE_PLANS: PlanBase[] = [
 ];
 
 const paidPlanKeys = new Set<BillingPlanKey>([
-  "starter_monthly",
-  "starter_annual",
   "solo_monthly",
   "solo_annual",
   "choir_early_monthly",
@@ -168,6 +150,8 @@ export function getDisplayPlans(
       originalPriceLabel: originalMonthlyEquivalentCents
         ? formatPrice(originalMonthlyEquivalentCents, { wholeDollars: isAnnual })
         : undefined,
+      originalSecondaryPrice:
+        isAnnual && price.originalAnnualCents ? formatPrice(price.originalAnnualCents) : undefined,
       secondaryPrice: isAnnual ? `${formatPrice(price.annualCents)} billed yearly` : undefined,
       savingsLabel: isAnnual ? `Save ${savings}%` : undefined,
       creditsAmountLabel: `${plan.monthlyCredits} credits`,
@@ -188,9 +172,6 @@ export function isBillingPlanKey(planKey: string | null | undefined): planKey is
 export function isCurrentPlanCard(activePlanKey: BillingPlanKey | null | undefined, plan: DisplayPlan): boolean {
   if (!activePlanKey) return false;
   if (plan.cardKey === "free") return activePlanKey === "free";
-  if (plan.cardKey === "starter") {
-    return activePlanKey === "starter_monthly" || activePlanKey === "starter_annual";
-  }
   if (plan.cardKey === "solo") return activePlanKey === "solo_monthly" || activePlanKey === "solo_annual";
   return (
     activePlanKey === "choir_early_monthly" ||
@@ -202,10 +183,6 @@ export function isCurrentPlanCard(activePlanKey: BillingPlanKey | null | undefin
 
 export function formatPlanName(planKey: BillingPlanKey | null | undefined): string {
   switch (planKey) {
-    case "starter_monthly":
-      return "Starter monthly";
-    case "starter_annual":
-      return "Starter annual";
     case "solo_monthly":
       return "Solo monthly";
     case "solo_annual":
@@ -219,6 +196,21 @@ export function formatPlanName(planKey: BillingPlanKey | null | undefined): stri
     default:
       return "Free";
   }
+}
+
+export function formatPlanBadge(planKey: BillingPlanKey | null | undefined): "Free" | "Solo" | "Pro" {
+  if (planKey === "solo_monthly" || planKey === "solo_annual") {
+    return "Solo";
+  }
+  if (
+    planKey === "choir_early_monthly" ||
+    planKey === "choir_early_annual" ||
+    planKey === "choir_monthly" ||
+    planKey === "choir_annual"
+  ) {
+    return "Pro";
+  }
+  return "Free";
 }
 
 function getChoirPrice(earlySupporterEnabled: boolean): PaidPrice {

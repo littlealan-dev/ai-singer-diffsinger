@@ -76,6 +76,10 @@ class BillingCheckoutRequest(BaseModel):
     planKey: str
 
 
+class BillingCheckoutSyncRequest(BaseModel):
+    sessionId: str
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     configure_logging()
@@ -447,6 +451,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}
 
+    @app.post("/billing/checkout-session/sync")
+    async def sync_billing_checkout_session(
+        body: BillingCheckoutSyncRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_checkout_sync import sync_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(sync_checkout_session, user_id, body.sessionId)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     @app.post("/billing/portal-session")
     async def create_billing_portal_session(request: Request) -> Dict[str, str]:
         user_id, _ = await _get_user_context_or_401(request)
@@ -458,6 +476,17 @@ def create_app() -> FastAPI:
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}
+
+    @app.post("/billing/subscription/sync")
+    async def sync_billing_subscription(request: Request) -> Dict[str, Any]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_subscription_sync import sync_current_subscription
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(sync_current_subscription, user_id)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     @app.post("/billing/webhook")
     async def stripe_billing_webhook(request: Request) -> Dict[str, str]:

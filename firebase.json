@@ -114,6 +114,34 @@
       "destination": "/__/firebase/init.json"
     },
     {
+      "source": "/sessions/**",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/credits",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/billing/**",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/waitlist/subscribe",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
       "source": "/app",
       "destination": "/app.html"
     },

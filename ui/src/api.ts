@@ -94,6 +94,18 @@ export type BillingPortalResponse = {
   url: string;
 };
 
+export type BillingCheckoutSyncResponse = {
+  synced: boolean;
+  status: string;
+  activePlanKey?: string | null;
+};
+
+export type BillingSubscriptionSyncResponse = {
+  synced: boolean;
+  status: string;
+  activePlanKey?: string | null;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 function withApiBase(url: string): string {
@@ -156,6 +168,18 @@ export async function createCheckoutSession(planKey: string): Promise<BillingChe
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ planKey }),
   });
+}
+
+export async function syncCheckoutSession(sessionId: string): Promise<BillingCheckoutSyncResponse> {
+  return request("/billing/checkout-session/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+}
+
+export async function syncBillingSubscription(): Promise<BillingSubscriptionSyncResponse> {
+  return request("/billing/subscription/sync", { method: "POST" });
 }
 
 export async function createPortalSession(): Promise<BillingPortalResponse> {

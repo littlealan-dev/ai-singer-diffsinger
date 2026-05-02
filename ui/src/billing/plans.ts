@@ -13,6 +13,7 @@ export type {
 } from "../../../shared/billingPlans";
 
 export {
+  formatPlanBadge,
   formatPlanName,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
   isBillingPlanKey,
@@ -51,8 +52,6 @@ export function clearPendingCheckoutPlan(): void {
 
 function isPaidCheckoutPlan(planKey: string | null | undefined): boolean {
   return (
-    planKey === "starter_monthly" ||
-    planKey === "starter_annual" ||
     planKey === "solo_monthly" ||
     planKey === "solo_annual" ||
     planKey === "choir_early_monthly" ||

@@ -28,7 +28,14 @@ import {
   BillingPaywallModal,
   type PaywallTrigger,
 } from "./components/billing/BillingPaywallModal";
-import { startCheckout } from "./billing/api";
+import {
+  clearPendingBillingPortalSync,
+  hasPendingBillingPortalSync,
+  startCheckout,
+  startBillingPortal,
+  syncBillingSubscription,
+  syncCheckoutSession,
+} from "./billing/api";
 import {
   clearPendingCheckoutPlan,
   getStoredPendingCheckoutPlan,
@@ -163,6 +170,9 @@ export default function MainApp() {
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
   const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
   const pendingCheckoutStartedRef = useRef(false);
+  const billingSyncInFlightRef = useRef(false);
+  const lastBillingSyncAtRef = useRef(0);
+  const checkoutReturnSyncStartedRef = useRef(false);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -265,6 +275,82 @@ export default function MainApp() {
   };
 
   useEffect(() => {
+    if (!isAuthenticated || billing.loading || !billing.stripeCustomerId) return;
+
+    const syncIfNeeded = () => {
+      const pendingPortalSync = hasPendingBillingPortalSync();
+      const paidPlanMayNeedRefresh = billing.activePlanKey !== "free";
+      const now = Date.now();
+      if (!pendingPortalSync && !paidPlanMayNeedRefresh) return;
+      if (!pendingPortalSync && now - lastBillingSyncAtRef.current < 30000) return;
+      if (billingSyncInFlightRef.current) return;
+
+      billingSyncInFlightRef.current = true;
+      lastBillingSyncAtRef.current = now;
+      void syncBillingSubscription()
+        .then(() => clearPendingBillingPortalSync())
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : "Could not sync billing status.";
+          setError(message);
+        })
+        .finally(() => {
+          billingSyncInFlightRef.current = false;
+        });
+    };
+
+    syncIfNeeded();
+    const onFocus = () => syncIfNeeded();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") syncIfNeeded();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [billing.activePlanKey, billing.loading, billing.stripeCustomerId, isAuthenticated]);
+
+  useEffect(() => {
+    if (billing.loading || !isAuthenticated || checkoutReturnSyncStartedRef.current) return;
+    if (typeof window === "undefined") return;
+
+    const url = new URL(window.location.href);
+    const checkoutStatus = url.searchParams.get("checkout");
+    const sessionId = url.searchParams.get("session_id");
+    const billingSync = url.searchParams.get("billing") === "sync";
+    const returnedFromCheckout = checkoutStatus === "success" || Boolean(sessionId);
+    const returnedFromPortal = billingSync || hasPendingBillingPortalSync();
+    if (!returnedFromCheckout && !returnedFromPortal) return;
+
+    checkoutReturnSyncStartedRef.current = true;
+    const cleanupReturnUrl = () => {
+      url.searchParams.delete("checkout");
+      url.searchParams.delete("session_id");
+      url.searchParams.delete("billing");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    };
+
+    const syncPromise =
+      returnedFromCheckout && sessionId
+        ? syncCheckoutSession(sessionId)
+        : syncBillingSubscription().then(() => clearPendingBillingPortalSync());
+
+    void syncPromise
+      .then(() => {
+        cleanupReturnUrl();
+        clearPendingCheckoutPlan();
+        clearPendingBillingPortalSync();
+        setPaywallTrigger(null);
+        setPaywallDetail(null);
+      })
+      .catch((err) => {
+        cleanupReturnUrl();
+        openPaywall("billing_menu", err instanceof Error ? err.message : "Could not sync billing status.");
+      });
+  }, [billing.loading, isAuthenticated]);
+
+  useEffect(() => {
     if (creditsLoading || billing.loading) return;
     let trigger: PaywallTrigger | null = null;
     if (overdrafted || available < 0) {
@@ -288,15 +374,13 @@ export default function MainApp() {
     const queryPlan = params.get("checkoutPlan");
     const storedPlan = getStoredPendingCheckoutPlan();
     const planKey = isPaidPlanKey(queryPlan) ? queryPlan : storedPlan;
-    const returnedFromCheckout =
+    const returnedFromHostedBilling =
       params.get("checkout") === "success" ||
       params.get("billing") === "sync" ||
-      params.has("session_id");
+      params.has("session_id") ||
+      hasPendingBillingPortalSync();
 
-    if (returnedFromCheckout) {
-      openPaywall("checkout_sync");
-    }
-
+    if (returnedFromHostedBilling) return;
     if (!planKey) return;
     pendingCheckoutStartedRef.current = true;
     clearPendingCheckoutPlan();
@@ -764,6 +848,16 @@ export default function MainApp() {
     openPaywall("billing_menu");
   };
 
+  const handleOpenBillingPortal = () => {
+    void startBillingPortal()
+      .then((url) => {
+        window.location.assign(url);
+      })
+      .catch((err) => {
+        openPaywall("billing_menu", err instanceof Error ? err.message : "Could not open Billing.");
+      });
+  };
+
   const marketingBaseUrl =
     (import.meta.env.VITE_MARKETING_BASE_URL as string | undefined) ?? "/";
   const handleBrandClick = () => {
@@ -796,7 +890,12 @@ export default function MainApp() {
           >
             Upgrade
           </button>
-          <UserMenu onBilling={handleOpenBilling} onJoinWaitlist={() => handleJoinWaitlist("studio_menu")} />
+          <UserMenu
+            activePlanKey={billing.activePlanKey}
+            stripeCustomerId={billing.stripeCustomerId}
+            onBilling={handleOpenBillingPortal}
+            onJoinWaitlist={() => handleJoinWaitlist("studio_menu")}
+          />
         </div>
       </header>
 

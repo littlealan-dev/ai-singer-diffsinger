@@ -6,6 +6,7 @@ LOG_DIR="${ROOT_DIR}/logs"
 PID_FILE="${LOG_DIR}/backend_dev.pid"
 LOG_FILE="${LOG_DIR}/backend_dev.log"
 ENV_FILE="${ROOT_DIR}/env/dev.env"
+LOCAL_ENV_FILE="${ROOT_DIR}/env/local.env"
 BACKEND_AUTH_DISABLED_OVERRIDE="${BACKEND_AUTH_DISABLED-}"
 BACKEND_DEV_USER_ID_OVERRIDE="${BACKEND_DEV_USER_ID-}"
 BACKEND_DEV_USER_EMAIL_OVERRIDE="${BACKEND_DEV_USER_EMAIL-}"
@@ -14,6 +15,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   set -a
   # shellcheck source=/dev/null
   . "${ENV_FILE}"
+  set +a
+fi
+if [[ -f "${LOCAL_ENV_FILE}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "${LOCAL_ENV_FILE}"
   set +a
 fi
 

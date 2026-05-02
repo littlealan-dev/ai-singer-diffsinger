@@ -4,12 +4,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.backend.billing_checkout import create_checkout_session
+from src.backend.billing_checkout_sync import sync_checkout_session
 from src.backend.billing_config import get_billing_config, get_stripe_client
 from src.backend.billing_migration import ensure_billing_state_for_login
-from src.backend.billing_plans import get_plan_catalog
 from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh
 from src.backend.billing_store import get_billing_state
+from src.backend.billing_subscription_sync import sync_current_subscription
 from src.backend.billing_webhooks import handle_event
 from src.backend.credits import get_or_create_credits
 from src.backend.firebase_app import get_firestore_client
@@ -34,15 +35,22 @@ class _FakeStripeClient:
         self.created_customers = []
         self.created_checkout_sessions = []
         self.created_portal_sessions = []
+        self.checkout_session_payload = None
+        self.subscription_payload = None
+        self.subscription_list_payload = []
         self.v1 = type("V1Api", (), {})()
         self.v1.customers = type("CustomersApi", (), {})()
         self.v1.checkout = type("CheckoutApi", (), {})()
         self.v1.checkout.sessions = type("CheckoutSessionsApi", (), {})()
         self.v1.billing_portal = type("PortalApi", (), {})()
         self.v1.billing_portal.sessions = type("PortalSessionsApi", (), {})()
+        self.v1.subscriptions = type("SubscriptionsApi", (), {})()
         self.v1.customers.create = self._create_customer
         self.v1.checkout.sessions.create = self._create_checkout_session
+        self.v1.checkout.sessions.retrieve = self._retrieve_checkout_session
         self.v1.billing_portal.sessions.create = self._create_portal_session
+        self.v1.subscriptions.retrieve = self._retrieve_subscription
+        self.v1.subscriptions.list = self._list_subscriptions
 
     def _create_customer(self, *, params):
         self.created_customers.append(params)
@@ -55,6 +63,17 @@ class _FakeStripeClient:
     def _create_portal_session(self, *, params):
         self.created_portal_sessions.append(params)
         return _FakeSession("bps_test_123", "https://billing.stripe.test/session")
+
+    def _retrieve_checkout_session(self, session_id, *, params=None):
+        assert session_id
+        return self.checkout_session_payload
+
+    def _retrieve_subscription(self, subscription_id, *, params=None):
+        assert subscription_id
+        return self.subscription_payload
+
+    def _list_subscriptions(self, *, params=None):
+        return {"data": self.subscription_list_payload}
 
     def create(self, **kwargs):
         if "params" in kwargs and "line_items" in kwargs["params"]:
@@ -71,11 +90,8 @@ class _FakeStripeClient:
 def billing_env(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_123")
-    monkeypatch.setenv("STRIPE_PRODUCT_STARTER", "prod_starter")
     monkeypatch.setenv("STRIPE_PRODUCT_SOLO", "prod_solo")
     monkeypatch.setenv("STRIPE_PRODUCT_CHOIR", "prod_choir")
-    monkeypatch.setenv("STRIPE_PRICE_STARTER_MONTHLY", "price_starter_monthly")
-    monkeypatch.setenv("STRIPE_PRICE_STARTER_ANNUAL", "price_starter_annual")
     monkeypatch.setenv("STRIPE_PRICE_SOLO_MONTHLY", "price_solo_monthly")
     monkeypatch.setenv("STRIPE_PRICE_SOLO_ANNUAL", "price_solo_annual")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_EARLY_MONTHLY", "price_choir_early_monthly")
@@ -124,24 +140,253 @@ def test_create_checkout_session_creates_customer_and_session():
     assert billing["stripeCheckoutSessionId"] == "cs_test_123"
 
 
-def test_starter_plan_catalog_maps_price_and_allowance():
-    catalog = get_plan_catalog(get_billing_config())
+def test_sync_checkout_session_updates_paid_state_and_grants_credits():
+    uid = "user-checkout-sync"
+    get_or_create_credits(uid, "sync@example.com")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set(
+        {"billing": {"stripeCustomerId": "cus_test_123", "stripeCheckoutSessionId": "cs_test_123"}},
+        merge=True,
+    )
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.checkout_session_payload = {
+        "id": "cs_test_123",
+        "mode": "subscription",
+        "status": "complete",
+        "payment_status": "paid",
+        "customer": "cus_test_123",
+        "client_reference_id": uid,
+        "metadata": {"firebaseUserId": uid},
+        "subscription": {
+            "id": "sub_test_123",
+            "status": "active",
+            "billing_cycle_anchor": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "current_period_start": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "current_period_end": int(datetime(2027, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "cancel_at_period_end": False,
+            "items": {"data": [{"price": {"id": "price_solo_annual"}}]},
+            "latest_invoice": {
+                "id": "in_checkout_sync_123",
+                "created": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+                "status_transitions": {
+                    "paid_at": int(datetime(2026, 4, 25, 12, 1, tzinfo=timezone.utc).timestamp())
+                },
+            },
+        },
+    }
 
-    starter_monthly = catalog["starter_monthly"]
-    starter_annual = catalog["starter_annual"]
+    result = sync_checkout_session(
+        uid,
+        "cs_test_123",
+        config=get_billing_config(),
+        stripe_client=fake_stripe,
+    )
 
-    assert starter_monthly.family == "starter"
-    assert starter_monthly.monthly_allowance == 15
-    assert starter_monthly.stripe_price_id == "price_starter_monthly"
-    assert starter_annual.family == "starter"
-    assert starter_annual.monthly_allowance == 15
-    assert starter_annual.stripe_price_id == "price_starter_annual"
+    assert result["synced"] is True
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "solo_annual"
+    assert user["billing"]["stripeSubscriptionId"] == "sub_test_123"
+    assert user["billing"]["creditRefreshAnchor"] == datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["nextCreditRefreshAt"] == datetime(2027, 4, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["credits"]["balance"] == 30
+    assert user["credits"]["lastGrantInvoiceId"] == "in_checkout_sync_123"
+    assert db.collection("credit_ledger").document("grant_invoice_in_checkout_sync_123").get().exists
+
+
+def test_sync_checkout_session_rejects_other_user_session():
+    uid = "user-checkout-owner"
+    get_or_create_credits(uid, "owner@example.com")
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.checkout_session_payload = {
+        "id": "cs_wrong_user",
+        "mode": "subscription",
+        "status": "complete",
+        "payment_status": "paid",
+        "client_reference_id": "other-user",
+        "metadata": {"firebaseUserId": "other-user"},
+        "subscription": "sub_test_123",
+    }
+
+    with pytest.raises(Exception):
+        sync_checkout_session(
+            uid,
+            "cs_wrong_user",
+            config=get_billing_config(),
+            stripe_client=fake_stripe,
+        )
+
+
+def test_sync_checkout_session_rejects_metadata_only_session_without_stored_link():
+    uid = "user-checkout-metadata-only"
+    get_or_create_credits(uid, "metadata-only@example.com")
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.checkout_session_payload = {
+        "id": "cs_metadata_only",
+        "mode": "subscription",
+        "status": "complete",
+        "payment_status": "paid",
+        "customer": "cus_unlinked",
+        "client_reference_id": uid,
+        "metadata": {"firebaseUserId": uid},
+        "subscription": {
+            "id": "sub_metadata_only",
+            "status": "active",
+            "items": {"data": [{"price": {"id": "price_solo_monthly"}}]},
+            "latest_invoice": {
+                "id": "in_metadata_only",
+                "created": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            },
+        },
+    }
+
+    with pytest.raises(Exception):
+        sync_checkout_session(
+            uid,
+            "cs_metadata_only",
+            config=get_billing_config(),
+            stripe_client=fake_stripe,
+        )
 
 
 def test_create_portal_session_requires_existing_customer():
     ensure_billing_state_for_login("user-2", "user2@example.com")
     with pytest.raises(Exception):
         create_portal_session("user-2", config=get_billing_config(), stripe_client=_FakeStripeClient())
+
+
+def test_subscription_sync_updates_cancel_at_period_end_from_portal():
+    uid = "user-portal-cancel-later"
+    get_or_create_credits(uid, "portal@example.com")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": "cus_portal_123",
+                "stripeSubscriptionId": "sub_portal_123",
+                "activePlanKey": "solo_monthly",
+                "stripeSubscriptionStatus": "active",
+                "family": "solo",
+                "billingInterval": "month",
+            }
+        },
+        merge=True,
+    )
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.subscription_list_payload = [
+        {
+            "id": "sub_portal_123",
+            "status": "active",
+            "billing_cycle_anchor": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "created": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "current_period_start": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "current_period_end": int(datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "cancel_at_period_end": True,
+            "canceled_at": int(datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc).timestamp()),
+            "items": {"data": [{"price": {"id": "price_solo_monthly"}}]},
+        }
+    ]
+
+    result = sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert result["activePlanKey"] == "solo_monthly"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "solo_monthly"
+    assert user["billing"]["cancelAtPeriodEnd"] is True
+    assert user["billing"]["creditRefreshAnchor"] == datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["nextCreditRefreshAt"] == datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["stripeSubscriptionStatus"] == "active"
+
+
+def test_subscription_sync_treats_cancel_at_as_scheduled_cancel():
+    uid = "user-portal-cancel-at"
+    get_or_create_credits(uid, "portal-cancel-at@example.com")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": "cus_portal_cancel_at",
+                "stripeSubscriptionId": "sub_portal_cancel_at",
+                "activePlanKey": "solo_monthly",
+                "stripeSubscriptionStatus": "active",
+                "family": "solo",
+                "billingInterval": "month",
+            }
+        },
+        merge=True,
+    )
+    fake_stripe = _FakeStripeClient()
+    period_end = int(datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc).timestamp())
+    fake_stripe.subscription_list_payload = [
+        {
+            "id": "sub_portal_cancel_at",
+            "status": "active",
+            "billing_cycle_anchor": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "created": int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "cancel_at": period_end,
+            "cancel_at_period_end": False,
+            "canceled_at": None,
+            "items": {
+                "data": [
+                    {
+                        "current_period_start": int(
+                            datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+                        ),
+                        "current_period_end": period_end,
+                        "price": {"id": "price_solo_monthly"},
+                    }
+                ]
+            },
+        }
+    ]
+
+    result = sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert result["activePlanKey"] == "solo_monthly"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "solo_monthly"
+    assert user["billing"]["cancelAtPeriodEnd"] is True
+    assert user["billing"]["creditRefreshAnchor"] == datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["currentPeriodEnd"] == datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["nextCreditRefreshAt"] == datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["stripeSubscriptionStatus"] == "active"
+
+
+def test_subscription_sync_reverts_to_free_after_immediate_portal_cancel():
+    uid = "user-portal-cancel-now"
+    get_or_create_credits(uid, "portal-now@example.com")
+    db = get_firestore_client()
+    anchor = datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": "cus_portal_now",
+                "stripeSubscriptionId": "sub_portal_now",
+                "activePlanKey": "solo_monthly",
+                "stripeSubscriptionStatus": "active",
+                "family": "solo",
+                "billingInterval": "month",
+                "creditRefreshAnchor": anchor,
+            }
+        },
+        merge=True,
+    )
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.subscription_list_payload = [
+        {
+            "id": "sub_portal_now",
+            "status": "canceled",
+            "created": int(anchor.timestamp()),
+            "items": {"data": [{"price": {"id": "price_solo_monthly"}}]},
+        }
+    ]
+
+    result = sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert result["activePlanKey"] == "free"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "free"
+    assert user["billing"]["stripeSubscriptionId"] is None
+    assert user["billing"]["creditRefreshAnchor"] == anchor
 
 
 def test_invoice_paid_immediately_grants_monthly_plan_and_reanchors():

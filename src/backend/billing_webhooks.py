@@ -164,11 +164,12 @@ def _handle_subscription_updated(payload: dict[str, Any], *, config: BillingConf
         plan_key=plan_key,
         stripe_subscription_id=_get_string(payload, "id"),
         stripe_subscription_status=_get_string(payload, "status"),
-        current_period_start=_timestamp_to_datetime(payload.get("current_period_start")),
-        current_period_end=_timestamp_to_datetime(payload.get("current_period_end")),
-        cancel_at_period_end=bool(payload.get("cancel_at_period_end", False)),
+        current_period_start=_subscription_period_datetime(payload, "current_period_start"),
+        current_period_end=_subscription_period_datetime(payload, "current_period_end"),
+        cancel_at_period_end=_has_scheduled_cancel(payload),
         canceled_at=_timestamp_to_datetime(payload.get("canceled_at")),
         is_early_supporter=plan_key.startswith("choir_early"),
+        billing_cycle_anchor=_timestamp_to_datetime(payload.get("billing_cycle_anchor")),
     )
 
 
@@ -311,7 +312,19 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "customer": payload.get("customer"),
         "subscription": payload.get("subscription"),
         "status": payload.get("status"),
+        "billing_cycle_anchor": payload.get("billing_cycle_anchor"),
+        "cancel_at": payload.get("cancel_at"),
+        "cancel_at_period_end": payload.get("cancel_at_period_end"),
+        "canceled_at": payload.get("canceled_at"),
+        "current_period_end": payload.get("current_period_end"),
     }
+
+
+def _has_scheduled_cancel(payload: dict[str, Any]) -> bool:
+    if bool(payload.get("cancel_at_period_end", False)):
+        return True
+    status = _get_string(payload, "status")
+    return status not in {"canceled", "incomplete_expired"} and payload.get("cancel_at") is not None
 
 
 def _get_string(payload: dict[str, Any], key: str) -> str | None:
@@ -326,6 +339,18 @@ def _timestamp_to_datetime(value: Any) -> datetime | None:
         return _to_utc(value)
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    return None
+
+
+def _subscription_period_datetime(payload: dict[str, Any], key: str) -> datetime | None:
+    value = _timestamp_to_datetime(payload.get(key))
+    if value is not None:
+        return value
+    items = ((payload.get("items") or {}).get("data") or [])
+    for item in items:
+        value = _timestamp_to_datetime((item or {}).get(key))
+        if value is not None:
+            return value
     return None
 
 

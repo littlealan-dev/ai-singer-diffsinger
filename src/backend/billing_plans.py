@@ -26,22 +26,6 @@ class PlanDefinition:
 def get_plan_catalog(config: BillingConfig) -> dict[PlanKey, PlanDefinition]:
     return {
         "free": PlanDefinition("free", "free", "none", 8, None, None),
-        "starter_monthly": PlanDefinition(
-            "starter_monthly",
-            "starter",
-            "month",
-            15,
-            config.stripe_price_starter_monthly,
-            config.stripe_product_starter,
-        ),
-        "starter_annual": PlanDefinition(
-            "starter_annual",
-            "starter",
-            "year",
-            15,
-            config.stripe_price_starter_annual,
-            config.stripe_product_starter,
-        ),
         "solo_monthly": PlanDefinition(
             "solo_monthly",
             "solo",

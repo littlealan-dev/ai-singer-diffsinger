@@ -351,6 +351,33 @@ body.legal-active #root {
   font-weight: 600;
 }
 
+.user-menu-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-menu-name-row .user-menu-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu-plan-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(196, 181, 253, 0.32);
+  color: #f3e8ff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
 .user-menu-email {
   font-size: 0.85rem;
   color: var(--text-muted);

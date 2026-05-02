@@ -8,8 +8,6 @@ from typing import Any, Literal, TypedDict
 
 PlanKey = Literal[
     "free",
-    "starter_monthly",
-    "starter_annual",
     "solo_monthly",
     "solo_annual",
     "choir_early_monthly",
@@ -27,7 +25,7 @@ StripeSubscriptionStatus = Literal[
     "unpaid",
 ]
 
-PlanFamily = Literal["free", "starter", "solo", "choir"]
+PlanFamily = Literal["free", "solo", "choir"]
 BillingInterval = Literal["none", "month", "year"]
 
 
