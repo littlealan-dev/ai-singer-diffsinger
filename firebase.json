@@ -5,6 +5,29 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
+  "functions": [
+    {
+      "source": ".",
+      "codebase": "billing",
+      "runtime": "python311",
+      "ignore": [
+        ".git",
+        ".firebase",
+        ".pytest_cache",
+        "**/__pycache__/**",
+        "**/.next/**",
+        "**/node_modules/**",
+        "data",
+        "logs",
+        "reports",
+        "reviews",
+        "ui/dist",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "firestore-debug.log"
+      ]
+    }
+  ],
  "hosting": {
   "public": "ui/dist",
   "ignore": [

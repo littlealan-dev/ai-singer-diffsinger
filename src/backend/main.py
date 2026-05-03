@@ -507,12 +507,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
         return {"status": "ok"}
 
-    @app.post("/billing/refresh")
-    async def refresh_billing_credits() -> Dict[str, int]:
-        from src.backend.billing_refresh import run_credit_refresh
-
-        return await asyncio.to_thread(run_credit_refresh)
-
     @app.post("/waitlist/subscribe")
     async def waitlist_subscribe(
         request_body: WaitlistSubscribeRequest,

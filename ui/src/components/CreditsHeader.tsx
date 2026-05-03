@@ -5,12 +5,14 @@ import './CreditsHeader.css';
 
 type CreditsHeaderProps = Pick<
     UserCredits,
-    'available' | 'expiresAt' | 'isExpired' | 'overdrafted' | 'loading'
->;
+    'available' | 'isExpired' | 'overdrafted' | 'loading'
+> & {
+    nextCreditRefreshAt: Date | null;
+};
 
 const CreditsHeader: React.FC<CreditsHeaderProps> = ({
     available,
-    expiresAt,
+    nextCreditRefreshAt,
     isExpired,
     overdrafted,
     loading,
@@ -18,9 +20,9 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
 
     if (loading) return <div className="credits-pill loading">...</div>;
 
-    const daysLeft = expiresAt
-        ? Math.ceil((expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-        : 0;
+    const daysUntilReset = nextCreditRefreshAt
+        ? Math.max(0, Math.ceil((nextCreditRefreshAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+        : null;
 
     let statusClass = 'normal';
     let icon = <Flame size={14} className="icon" />;
@@ -51,7 +53,7 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
             {!overdrafted && !isExpired && (
                 <div className="credits-expiry">
                     <Calendar size={12} className="icon-small" />
-                    <span>{daysLeft}d left</span>
+                    <span>{daysUntilReset === null ? "--" : `${daysUntilReset}d to reset`}</span>
                 </div>
             )}
         </div>

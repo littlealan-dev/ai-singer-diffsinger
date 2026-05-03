@@ -15,6 +15,7 @@ from src.backend.billing_plans import get_plan_for_price_id
 from src.backend.billing_store import get_billing_state, sync_paid_subscription_state
 from src.backend.billing_types import BillingHttpError
 from src.backend.billing_webhooks import _apply_paid_invoice
+from src.backend.firebase_app import get_firestore_client
 
 SYNCABLE_SUBSCRIPTION_STATUSES = {"active", "trialing", "past_due"}
 
@@ -47,10 +48,19 @@ def sync_checkout_session(
     )
     billing = get_billing_state(uid)
     _assert_session_belongs_to_user(uid, session, billing)
+    get_firestore_client().collection("users").document(uid).set(
+        {
+            "billing": {
+                "latestCheckoutSessionStatus": session.get("status"),
+                "latestCheckoutPaymentStatus": session.get("payment_status"),
+            }
+        },
+        merge=True,
+    )
 
     if session.get("mode") != "subscription":
         raise BillingHttpError(409, "Checkout session is not a subscription checkout.")
-    if session.get("status") != "complete" or session.get("payment_status") not in {"paid", "no_payment_required"}:
+    if session.get("status") != "complete" or session.get("payment_status") != "paid":
         return {"synced": False, "status": str(session.get("status") or "open"), "activePlanKey": None}
 
     subscription = _subscription_payload(client, session)
@@ -86,6 +96,8 @@ def sync_checkout_session(
             invoice_paid_at=paid_at,
             plan_key=plan_key,
             stripe_subscription_id=_get_string(subscription, "id"),
+            invoice_status=_get_string(invoice, "status") or "paid",
+            payment_intent_status=_payment_intent_status(invoice),
         )
 
     return {
@@ -135,6 +147,13 @@ def _invoice_payload(subscription: dict[str, Any]) -> dict[str, Any]:
     if isinstance(invoice, str) and invoice:
         return {"id": invoice}
     return {}
+
+
+def _payment_intent_status(invoice: dict[str, Any]) -> str | None:
+    payment_intent = invoice.get("payment_intent")
+    if isinstance(payment_intent, dict):
+        return _get_string(payment_intent, "status")
+    return None
 
 
 def _plan_key_from_subscription(subscription: dict[str, Any], config: BillingConfig) -> str | None:

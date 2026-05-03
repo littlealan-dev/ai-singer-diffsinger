@@ -471,6 +471,48 @@ body.legal-active #root {
   color: #ff9b9b;
 }
 
+.billing-warning-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  color: #f8d58a;
+}
+
+.billing-warning-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.billing-warning-banner button {
+  height: 30px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(248, 213, 138, 0.45);
+  background: rgba(248, 213, 138, 0.12);
+  color: #fff3c4;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.billing-warning-banner button:hover {
+  background: rgba(248, 213, 138, 0.2);
+}
+
+.billing-warning-banner .billing-warning-close {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+  display: inline-flex;
+  align-items: center;
+}
+
 .message-box {
   margin: 0 2rem 1rem;
   padding: 12px 18px;

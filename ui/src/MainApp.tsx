@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -156,6 +156,7 @@ export default function MainApp() {
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
   const [paywallTrigger, setPaywallTrigger] = useState<PaywallTrigger | null>(null);
   const [paywallDetail, setPaywallDetail] = useState<string | null>(null);
+  const [dismissedBillingWarningStatus, setDismissedBillingWarningStatus] = useState<string | null>(null);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [activeProgress, setActiveProgress] = useState<{
@@ -180,13 +181,17 @@ export default function MainApp() {
   );
   const {
     available,
-    expiresAt,
     overdrafted,
     isExpired,
     loading: creditsLoading,
   } = useCredits();
   const billing = useBillingState();
   const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
+  const billingWarningStatus = hasBillingPaymentIssue(billing)
+    ? `${billing.stripeSubscriptionStatus || "unknown"}:${billing.latestInvoiceId || ""}:${billing.latestPaymentIntentStatus || ""}:${billing.latestPaymentFailureCode || ""}`
+    : null;
+  const billingNeedsAttention =
+    Boolean(billingWarningStatus) && dismissedBillingWarningStatus !== billingWarningStatus;
 
   const {
       showAnnouncement,
@@ -878,10 +883,10 @@ export default function MainApp() {
         <div className="header-actions">
           <CreditsHeader
             available={available}
-            expiresAt={expiresAt}
+            nextCreditRefreshAt={billing.nextCreditRefreshAt}
             isExpired={isExpired}
             overdrafted={overdrafted}
-            loading={creditsLoading}
+            loading={creditsLoading || billing.loading}
           />
           <div className="status-pill">{status ?? "Ready"}</div>
           <button
@@ -899,6 +904,24 @@ export default function MainApp() {
         </div>
       </header>
 
+      {billingNeedsAttention && (
+        <div className="billing-warning-banner" role="alert">
+          <span>Payment issue. Manage Billing to avoid service interruption.</span>
+          <div className="billing-warning-actions">
+            <button type="button" onClick={handleOpenBillingPortal}>
+              Manage Billing
+            </button>
+            <button
+              type="button"
+              className="billing-warning-close"
+              onClick={() => setDismissedBillingWarningStatus(billingWarningStatus)}
+              aria-label="Dismiss billing warning"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
       {error && <div className="error-banner">{error}</div>}
       <WaitlistModal
         isOpen={showWaitlistModal}
@@ -1336,6 +1359,16 @@ export default function MainApp() {
       )}
     </div>
   );
+}
+
+function hasBillingPaymentIssue(billing: ReturnType<typeof useBillingState>): boolean {
+  if (["past_due", "unpaid", "paused"].includes(billing.stripeSubscriptionStatus || "")) {
+    return true;
+  }
+  if (billing.latestPaymentFailureCode || billing.latestPaymentFailureMessage) {
+    return true;
+  }
+  return billing.latestInvoiceStatus === "open" && billing.latestPaymentIntentStatus === "requires_payment_method";
 }
 
 function formatDuration(totalSeconds: number): string {

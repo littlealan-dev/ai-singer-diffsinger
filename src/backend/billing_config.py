@@ -14,6 +14,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
 @dataclass(frozen=True)
 class BillingConfig:
     stripe_secret_key: str
@@ -32,6 +39,14 @@ class BillingConfig:
     portal_return_url: str
     portal_configuration_id: str
     stripe_api_version: str
+
+
+@dataclass(frozen=True)
+class BillingRefreshConfig:
+    schedule: str
+    max_due_users: int
+    timeout_seconds: int
+    metrics_enabled: bool
 
 
 def _required_env(name: str) -> str:
@@ -62,6 +77,22 @@ def get_billing_config() -> BillingConfig:
         portal_return_url=_required_env("STRIPE_PORTAL_RETURN_URL"),
         portal_configuration_id=_required_env("STRIPE_PORTAL_CONFIGURATION_ID"),
         stripe_api_version=os.getenv("STRIPE_API_VERSION", "2026-02-25.clover").strip(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_billing_refresh_config() -> BillingRefreshConfig:
+    max_due_users = _env_int("BILLING_REFRESH_MAX_DUE_USERS", 300)
+    if max_due_users < 1 or max_due_users > 1000:
+        raise ValueError("BILLING_REFRESH_MAX_DUE_USERS must be between 1 and 1000.")
+    timeout_seconds = _env_int("BILLING_REFRESH_TIMEOUT_SECONDS", 300)
+    if timeout_seconds < 30 or timeout_seconds > 540:
+        raise ValueError("BILLING_REFRESH_TIMEOUT_SECONDS must be between 30 and 540.")
+    return BillingRefreshConfig(
+        schedule=os.getenv("BILLING_REFRESH_SCHEDULE", "every 2 hours").strip() or "every 2 hours",
+        max_due_users=max_due_users,
+        timeout_seconds=timeout_seconds,
+        metrics_enabled=_env_bool("BILLING_REFRESH_METRICS_ENABLED", True),
     )
 
 

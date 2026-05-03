@@ -107,9 +107,9 @@ export function BillingPaywallModal({
           <h2 id="billing-modal-title">{copy.title}</h2>
           <p>{copy.subtitle}</p>
           {detail ? <p className="billing-modal-detail">{detail}</p> : null}
-          {billing.stripeSubscriptionStatus === "past_due" ? (
+          {hasBillingPaymentIssue(billing) ? (
             <div className="billing-status-warning" role="alert">
-              Payment issue. Update your payment method to keep paid access.
+              Payment issue. Manage Billing to avoid service interruption.
             </div>
           ) : null}
           {billing.cancelAtPeriodEnd ? (
@@ -352,6 +352,16 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
         subtitle: "Get more monthly credits for demos and full commercial rights.",
       };
   }
+}
+
+function hasBillingPaymentIssue(billing: BillingState): boolean {
+  if (["past_due", "unpaid", "paused"].includes(billing.stripeSubscriptionStatus || "")) {
+    return true;
+  }
+  if (billing.latestPaymentFailureCode || billing.latestPaymentFailureMessage) {
+    return true;
+  }
+  return billing.latestInvoiceStatus === "open" && billing.latestPaymentIntentStatus === "requires_payment_method";
 }
 
 function isHardBlockTrigger(trigger: PaywallTrigger): boolean {

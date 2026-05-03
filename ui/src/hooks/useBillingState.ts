@@ -14,6 +14,11 @@ export type BillingState = {
   family: PlanFamily;
   billingInterval: "none" | "month" | "year";
   stripeSubscriptionStatus: string | null;
+  latestInvoiceId: string | null;
+  latestInvoiceStatus: string | null;
+  latestPaymentIntentStatus: string | null;
+  latestPaymentFailureCode: string | null;
+  latestPaymentFailureMessage: string | null;
   stripeCustomerId: string | null;
   cancelAtPeriodEnd: boolean;
   currentPeriodEnd: Date | null;
@@ -32,6 +37,11 @@ const DEFAULT_STATE: Omit<BillingState, "loading" | "error"> = {
   family: "free",
   billingInterval: "none",
   stripeSubscriptionStatus: null,
+  latestInvoiceId: null,
+  latestInvoiceStatus: null,
+  latestPaymentIntentStatus: null,
+  latestPaymentFailureCode: null,
+  latestPaymentFailureMessage: null,
   stripeCustomerId: null,
   cancelAtPeriodEnd: false,
   currentPeriodEnd: null,
@@ -81,6 +91,11 @@ export function useBillingState(): BillingState {
           family: normalizeFamily(billing.family),
           billingInterval: normalizeInterval(billing.billingInterval),
           stripeSubscriptionStatus: billing.stripeSubscriptionStatus || null,
+          latestInvoiceId: billing.latestInvoiceId || null,
+          latestInvoiceStatus: billing.latestInvoiceStatus || null,
+          latestPaymentIntentStatus: billing.latestPaymentIntentStatus || null,
+          latestPaymentFailureCode: billing.latestPaymentFailureCode || null,
+          latestPaymentFailureMessage: billing.latestPaymentFailureMessage || null,
           stripeCustomerId: billing.stripeCustomerId || null,
           cancelAtPeriodEnd: Boolean(billing.cancelAtPeriodEnd),
           currentPeriodEnd: toDate(billing.currentPeriodEnd),
