@@ -22,6 +22,15 @@ export type ChatSelection = {
   part_id?: string;
 };
 
+export type VoicebankOption = {
+  id: string;
+  name: string;
+  gender?: string | null;
+  voice_type?: string | null;
+  default_voice_color?: string | null;
+  profile_image?: string | null;
+};
+
 export type UploadResponse = {
   session_id: string;
   parsed: boolean;
@@ -104,6 +113,10 @@ export type BillingSubscriptionSyncResponse = {
   synced: boolean;
   status: string;
   activePlanKey?: string | null;
+};
+
+export type VoicebankListResponse = {
+  voicebanks: VoicebankOption[];
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
@@ -224,17 +237,32 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
   return response.text();
 }
 
+export async function fetchVoicebanks(): Promise<VoicebankOption[]> {
+  const response = await request<VoicebankListResponse>("/api/voicebanks", { method: "GET" });
+  return Array.isArray(response.voicebanks) ? response.voicebanks : [];
+}
+
 export async function chat(
   sessionId: string,
   message: string,
-  selection?: ChatSelection
+  selection?: ChatSelection,
+  selectedVoicebankId?: string | null
 ): Promise<ChatResponse> {
+  const body: {
+    message: string;
+    selection?: ChatSelection;
+    selected_voicebank_id?: string;
+  } = { message };
+  if (selection) {
+    body.selection = selection;
+  }
+  if (selectedVoicebankId) {
+    body.selected_voicebank_id = selectedVoicebankId;
+  }
   const response = await request<ChatResponse>(`/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
-      selection ? { message, selection } : { message }
-    ),
+    body: JSON.stringify(body),
   });
   if (response.type === "chat_audio") {
     return {

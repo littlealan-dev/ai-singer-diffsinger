@@ -64,6 +64,15 @@
       ]
     },
     {
+      "source": "/privacy",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
       "source": "/learn",
       "headers": [
         {
@@ -145,6 +154,13 @@
     },
     {
       "source": "/credits",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/api/voicebanks",
       "run": {
         "serviceId": "sightsinger-api",
         "region": "us-east4"

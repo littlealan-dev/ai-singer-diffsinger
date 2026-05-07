@@ -1164,10 +1164,14 @@ div[id^="fire_app_check_"] {
 .voice-picker {
   position: relative;
   flex: 0 0 184px;
+  width: 184px;
+  min-width: 184px;
+  max-width: 184px;
 }
 
 .voice-picker-trigger {
   width: 100%;
+  max-width: 184px;
   height: 100%;
   min-height: 48px;
   border-radius: 14px;
@@ -1192,14 +1196,28 @@ div[id^="fire_app_check_"] {
   width: 28px;
   height: 28px;
   border-radius: 999px;
-  object-fit: cover;
   flex-shrink: 0;
   border: 1px solid rgba(255, 255, 255, 0.16);
+  background: linear-gradient(140deg, rgba(155, 134, 255, 0.3), rgba(110, 211, 255, 0.18));
+  color: var(--text-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+img.voice-picker-trigger-avatar {
+  display: block;
+  object-fit: cover;
+  background: transparent;
 }
 
 .voice-picker-trigger-copy {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1225,7 +1243,9 @@ div[id^="fire_app_check_"] {
 .voice-picker-menu {
   position: absolute;
   left: 0;
-  width: 240px;
+  width: 280px;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
   bottom: calc(100% + 10px);
   display: grid;
   gap: 6px;
@@ -1264,17 +1284,54 @@ div[id^="fire_app_check_"] {
   width: 30px;
   height: 30px;
   border-radius: 999px;
-  object-fit: cover;
   flex-shrink: 0;
   border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(140deg, rgba(155, 134, 255, 0.3), rgba(110, 211, 255, 0.18));
+  color: var(--text-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+img.voice-picker-option-avatar {
+  display: block;
+  object-fit: cover;
+  background: transparent;
+}
+
+.voice-picker-trigger-avatar.recommended,
+.voice-picker-option-avatar.recommended {
+  background: rgba(255, 255, 255, 0.06);
+  color: #b7a5ff;
+}
+
+.voice-picker-option-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
 }
 
 .voice-picker-option-name {
-  flex: 1;
   font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.input-row input {
+.voice-picker-option-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.input-row input,
+.input-row textarea {
   flex: 1;
   border-radius: 14px;
   border: 1px solid var(--glass-border);
@@ -1286,7 +1343,16 @@ div[id^="fire_app_check_"] {
   transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
-.input-row input:focus {
+.input-row textarea {
+  min-height: 56px;
+  max-height: 160px;
+  resize: vertical;
+  line-height: 1.45;
+  font-family: inherit;
+}
+
+.input-row input:focus,
+.input-row textarea:focus {
   border-color: rgba(155, 134, 255, 0.6);
   box-shadow: 0 0 0 3px rgba(155, 134, 255, 0.2);
 }
@@ -1466,6 +1532,13 @@ div[id^="fire_app_check_"] {
 
   .voice-picker {
     flex-basis: auto;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .voice-picker-trigger {
+    max-width: none;
   }
 
   .send-button {

@@ -66,6 +66,7 @@ def build_prompt_bundle(
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
+    selected_voicebank_id: Optional[str] = None,
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
@@ -105,6 +106,11 @@ def build_prompt_bundle(
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
+    selected_voicebank_text = (
+        f"{selected_voicebank_id} (user-selected; synthesize must use this voicebank)"
+        if selected_voicebank_id
+        else "none"
+    )
     static_prompt = _load_system_prompt().replace("{tool_json}", tool_json)
     static_prompt = (
         static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
@@ -132,6 +138,7 @@ def build_prompt_bundle(
         f"Available voicebanks (IDs): {voicebanks_text}\n"
         "Voicebank metadata (if available):\n"
         f"{voicebank_details_text}\n"
+        f"User-selected voicebank override: {selected_voicebank_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -150,6 +157,7 @@ def build_system_prompt(
     preprocess_mapping_context: Optional[Dict[str, Any]] = None,
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
+    selected_voicebank_id: Optional[str] = None,
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
     bundle = build_prompt_bundle(
@@ -162,6 +170,7 @@ def build_system_prompt(
         preprocess_mapping_context=preprocess_mapping_context,
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
+        selected_voicebank_id=selected_voicebank_id,
     )
     return bundle.full_prompt_text
 

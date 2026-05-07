@@ -60,6 +60,7 @@ class ChatRequest(BaseModel):
     # Optional structured selector payload from UI widgets (for example verse dropdown).
     # Values are treated as authoritative user selections and avoid fragile text parsing.
     selection: dict[str, Any] | None = None
+    selected_voicebank_id: str | None = None
 
 
 class WaitlistSubscribeRequest(BaseModel):
@@ -316,12 +317,37 @@ def create_app() -> FastAPI:
                 user_id=user_id,
                 user_email=user_email,
                 selection=payload.selection,
+                selected_voicebank_id=payload.selected_voicebank_id,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/voicebanks")
+    async def list_available_voicebanks(request: Request) -> Dict[str, Any]:
+        """Return enabled voicebanks from the active manifest for UI selectors."""
+        await _get_user_context_or_401(request)
+        from src.api.voicebank_cache import get_enabled_manifest_voicebanks
+
+        entries = get_enabled_manifest_voicebanks()
+        voicebanks = []
+        for entry in entries:
+            voicebank_id = entry.get("id")
+            if not isinstance(voicebank_id, str) or not voicebank_id:
+                continue
+            voicebanks.append(
+                {
+                    "id": voicebank_id,
+                    "name": entry.get("name") or voicebank_id,
+                    "gender": entry.get("gender"),
+                    "voice_type": entry.get("voice_type"),
+                    "default_voice_color": entry.get("default_voice_color"),
+                    "profile_image": entry.get("profile_image"),
+                }
+            )
+        return {"voicebanks": voicebanks}
 
     @app.get("/sessions/{session_id}/audio")
     async def get_audio(

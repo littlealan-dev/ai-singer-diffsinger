@@ -2408,6 +2408,93 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert audio_response.content.startswith(b"RIFF")
 
 
+def test_chat_selected_voicebank_overrides_llm_voicebank(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    synth_calls = []
+
+    def call_tool(name, arguments):
+        if name == "list_voicebanks":
+            return [
+                {"id": "VoiceA", "name": "Voice A", "path": "assets/voicebanks/VoiceA"},
+                {"id": "VoiceB", "name": "Voice B", "path": "assets/voicebanks/VoiceB"},
+            ]
+        if name == "get_voicebank_info":
+            return {
+                "name": arguments.get("voicebank"),
+                "languages": [],
+                "has_duration_model": False,
+                "has_pitch_model": False,
+                "has_variance_model": False,
+                "speakers": [],
+                "sample_rate": 44100,
+                "hop_size": 512,
+                "use_lang_id": False,
+            }
+        if name == "synthesize":
+            synth_calls.append(dict(arguments))
+            return {"waveform": [0.0, 0.1, 0.0], "sample_rate": 44100}
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"VoiceA","voice_color":"wrong"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "render audio", "selected_voicebank_id": "VoiceB"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    _wait_for_progress(test_client, payload["progress_url"])
+    assert synth_calls
+    assert synth_calls[-1]["voicebank"] == "VoiceB"
+    assert "voice_color" not in synth_calls[-1]
+
+
+def test_chat_recommended_voicebank_keeps_llm_choice(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    synth_calls = []
+
+    def call_tool(name, arguments):
+        if name == "synthesize":
+            synth_calls.append(dict(arguments))
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{"voicebank":"Dummy"}}],'
+            '"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    _wait_for_progress(test_client, payload["progress_url"])
+    assert synth_calls
+    assert synth_calls[-1]["voicebank"] == "Dummy"
+
+
 def test_app_check_rejects_query_param_only(monkeypatch):
     calls = {"count": 0}
     app, data_dir = _prepare_app(

@@ -85,6 +85,7 @@ class Orchestrator:
         user_id: str,
         user_email: str,
         selection: Optional[Dict[str, Any]] = None,
+        selected_voicebank_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
@@ -119,6 +120,12 @@ class Orchestrator:
                     "type": "chat_text",
                     "message": "That request is not allowed.",
                 }
+            forced_voicebank_id = await self._normalize_selected_voicebank_id(selected_voicebank_id)
+            if selected_voicebank_id and not forced_voicebank_id:
+                return {
+                    "type": "chat_error",
+                    "message": "Selected AI voice is not available. Please choose another voice.",
+                }
             self._logger.debug("chat_user session=%s message=%s", session_id, message)
             await self._sessions.append_history(session_id, "user", message)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -148,7 +155,11 @@ class Orchestrator:
                 await self._sessions.append_history(session_id, "assistant", response_message)
                 return {"type": "chat_text", "message": response_message}
 
-            llm_response, llm_error = await self._decide_with_llm(snapshot, score_available=True)
+            llm_response, llm_error = await self._decide_with_llm(
+                snapshot,
+                score_available=True,
+                selected_voicebank_id=forced_voicebank_id,
+            )
             if llm_error:
                 response_message = llm_error
                 await self._sessions.append_history(session_id, "assistant", response_message)
@@ -227,6 +238,7 @@ class Orchestrator:
                     initial_thought_summary=llm_response.thought_summary,
                     user_id=user_id,
                     user_email=user_email,
+                    forced_voicebank_id=forced_voicebank_id,
                 )
                 await self._sessions.append_history(
                     session_id, "assistant", str(response.get("message", ""))
@@ -271,7 +283,8 @@ class Orchestrator:
         synth_args["score"] = score
         if "voicebank" not in synth_args:
             synth_args["voicebank"] = await self._resolve_voicebank()
-        if "voice_id" not in synth_args and self._settings.default_voice_id:
+        skip_default_voice_id = bool(synth_args.pop("_skip_default_voice_id", False))
+        if "voice_id" not in synth_args and self._settings.default_voice_id and not skip_default_voice_id:
             synth_args["voice_id"] = self._settings.default_voice_id
         if job_id is not None:
             synth_args["progress_job_id"] = job_id
@@ -915,6 +928,7 @@ class Orchestrator:
         initial_thought_summary: Optional[str],
         user_id: str,
         user_email: str,
+        forced_voicebank_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns."""
@@ -963,6 +977,7 @@ class Orchestrator:
                 score_summary=score_summary,
                 user_email=user_email,
                 explicit_verse_number=explicit_verse_number,
+                forced_voicebank_id=forced_voicebank_id,
             )
             working_score = tool_result.score
             review_required_pending = review_required_pending or tool_result.review_required
@@ -1174,6 +1189,7 @@ class Orchestrator:
                         fixed_other_issue_keys=fixed_other_issue_keys,
                     ),
                     working_score,
+                    selected_voicebank_id=forced_voicebank_id,
                 )
                 if repair_error:
                     best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -1270,7 +1286,10 @@ class Orchestrator:
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             followup_response, followup_error = await self._decide_followup_with_llm(
-                latest_snapshot, followup_prompt, working_score
+                latest_snapshot,
+                followup_prompt,
+                working_score,
+                selected_voicebank_id=forced_voicebank_id,
             )
             if followup_error:
                 best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -2918,7 +2937,11 @@ class Orchestrator:
         return False
 
     async def _decide_with_llm(
-        self, snapshot: Dict[str, Any], score_available: bool
+        self,
+        snapshot: Dict[str, Any],
+        score_available: bool,
+        *,
+        selected_voicebank_id: Optional[str] = None,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Query the LLM to determine tool calls and response text."""
         if self._llm_client is None:
@@ -2963,6 +2986,7 @@ class Orchestrator:
                     else None
                 ),
                 voicebank_details=voicebank_details,
+                selected_voicebank_id=selected_voicebank_id,
             )
             text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
@@ -2999,6 +3023,8 @@ class Orchestrator:
         snapshot: Dict[str, Any],
         tool_summary: str,
         current_score: Optional[Dict[str, Any]] = None,
+        *,
+        selected_voicebank_id: Optional[str] = None,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
         if self._llm_client is None:
@@ -3050,6 +3076,7 @@ class Orchestrator:
                     else None
                 ),
                 voicebank_details=voicebank_details,
+                selected_voicebank_id=selected_voicebank_id,
             )
             text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
         except ValueError as exc:
@@ -3180,6 +3207,31 @@ class Orchestrator:
         self._cached_voicebank_ids = ids
         return ids
 
+    async def _normalize_selected_voicebank_id(self, voicebank_id: Optional[str]) -> Optional[str]:
+        """Return a selected voicebank ID only if it is currently available."""
+        selected = (voicebank_id or "").strip()
+        if not selected:
+            return None
+        available_ids = await self._get_voicebank_ids()
+        return selected if selected in set(available_ids) else None
+
+    def _apply_forced_voicebank(
+        self,
+        synth_args: Dict[str, Any],
+        forced_voicebank_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Force synthesis to use the user's selected voicebank when provided."""
+        if not forced_voicebank_id:
+            return synth_args
+        updated = dict(synth_args)
+        previous_voicebank = updated.get("voicebank")
+        updated["voicebank"] = forced_voicebank_id
+        updated["_skip_default_voice_id"] = True
+        if previous_voicebank != forced_voicebank_id:
+            updated.pop("voice_color", None)
+            updated.pop("voice_id", None)
+        return updated
+
     async def _get_voicebank_details(self) -> List[Dict[str, Any]]:
         """Return cached voicebank metadata for LLM prompts."""
         if self._cached_voicebank_details is not None:
@@ -3256,6 +3308,7 @@ class Orchestrator:
         score_summary: Optional[Dict[str, Any]],
         user_email: str,
         explicit_verse_number: Optional[str],
+        forced_voicebank_id: Optional[str] = None,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -3511,6 +3564,7 @@ class Orchestrator:
 
                 # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
+                synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
                 synth_args.pop("score", None)
                 requested_verse_number = self._normalize_verse_number(
                     synth_args.get("verse_number")

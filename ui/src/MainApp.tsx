@@ -10,10 +10,12 @@ import {
   createSession,
   fetchScoreXml,
   fetchProgress,
+  fetchVoicebanks,
   uploadScore,
   type ChatSelection,
   type ProgressResponse,
   type ScoreSummary,
+  type VoicebankOption,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
@@ -115,18 +117,26 @@ const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
   return (parts.length > 1 || verses.length > 1) && parts.length > 0 && verses.length > 0;
 };
 
-const MOCK_VOICE_OPTIONS = [
-  { name: "Hitsune Kumi", image: "/voicebanks/hitsune_kumi.png" },
-  { name: "Katyusha", image: "/voicebanks/katyusha.webp" },
-  { name: "Keiro Revenant", image: "/voicebanks/keiro_revenant.webp" },
-  { name: "Liam Thorne", image: "/voicebanks/liam_thorne.webp" },
-  { name: "Printto Magicbeat Indigo", image: "/voicebanks/printto_magicbeat_indigo.png" },
-  { name: "Qixuan (绮萱)", image: "/voicebanks/qixuan.png" },
-  { name: "SAiFA", image: "/voicebanks/saifa.webp" },
-] as const;
-
 const isInsufficientCreditError = (message: string): boolean =>
   /insufficient credits|requires ~?\d+ credits|out of credits/i.test(message);
+
+const voiceInitials = (name: string): string => {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "AI";
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return `${words[0][0] ?? ""}${words[1][0] ?? ""}`.toUpperCase();
+};
+
+const voiceDescriptor = (voice: VoicebankOption): string => {
+  const parts = [voice.voice_type, voice.gender].filter(Boolean);
+  return parts.length ? parts.join(" / ") : "AI voice";
+};
+
+const voiceImageUrl = (voice: VoicebankOption): string | null => {
+  const filename = voice.profile_image?.trim();
+  if (!filename || filename.includes("/") || filename.includes("\\")) return null;
+  return `/voicebanks/${encodeURIComponent(filename)}`;
+};
 
 export default function MainApp() {
   const navigate = useNavigate();
@@ -148,7 +158,10 @@ export default function MainApp() {
   const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState(false);
   const [selectorShown, setSelectorShown] = useState(false);
-  const [selectedVoiceName, setSelectedVoiceName] = useState<string>(MOCK_VOICE_OPTIONS[0].name);
+  const [voicebanks, setVoicebanks] = useState<VoicebankOption[]>([]);
+  const [voicebanksLoading, setVoicebanksLoading] = useState(false);
+  const [selectedVoicebankId, setSelectedVoicebankId] = useState<string | null>(null);
+  const [failedVoiceImages, setFailedVoiceImages] = useState<Record<string, boolean>>({});
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [showWaitlistModal, setShowWaitlistModal] = useState(false);
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
@@ -167,6 +180,7 @@ export default function MainApp() {
   const shouldAutoScrollRef = useRef(true);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
+  const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
   const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
@@ -210,8 +224,27 @@ export default function MainApp() {
       ? Math.ceil(estimatedDuration / 30)
       : null;
   const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
-  const selectedVoice =
-    MOCK_VOICE_OPTIONS.find((voice) => voice.name === selectedVoiceName) ?? MOCK_VOICE_OPTIONS[0];
+  const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
+  const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
+  const renderVoiceAvatar = (voice: VoicebankOption, className: string) => {
+    const imageUrl = failedVoiceImages[voice.id] ? null : voiceImageUrl(voice);
+    if (imageUrl) {
+      return (
+        <img
+          src={imageUrl}
+          alt=""
+          className={className}
+          aria-hidden="true"
+          onError={() => setFailedVoiceImages((current) => ({ ...current, [voice.id]: true }))}
+        />
+      );
+    }
+    return (
+      <span className={clsx(className, "initials")} aria-hidden="true">
+        {voiceInitials(voice.name)}
+      </span>
+    );
+  };
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
@@ -224,6 +257,67 @@ export default function MainApp() {
   useEffect(() => {
     activeUserIdRef.current = user?.uid ?? null;
   }, [user?.uid]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !user) {
+      setVoicebanks([]);
+      setSelectedVoicebankId(null);
+      return;
+    }
+    let cancelled = false;
+    setVoicebanksLoading(true);
+    void fetchVoicebanks()
+      .then((availableVoicebanks) => {
+        if (cancelled) return;
+        const sortedVoicebanks = [...availableVoicebanks].sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
+        );
+        setVoicebanks(sortedVoicebanks);
+        setFailedVoiceImages({});
+        setSelectedVoicebankId((current) =>
+          current && sortedVoicebanks.some((voice) => voice.id === current)
+            ? current
+            : null
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setVoicebanks([]);
+          setSelectedVoicebankId(null);
+          setError(err?.message || "Failed to load AI voices.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setVoicebanksLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, user]);
+
+  useEffect(() => {
+    if (!voiceMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && voicePickerRef.current?.contains(target)) {
+        return;
+      }
+      setVoiceMenuOpen(false);
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setVoiceMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [voiceMenuOpen]);
 
   const ensureSession = async (): Promise<string> => {
     if (sessionId) {
@@ -683,7 +777,11 @@ export default function MainApp() {
     }
   };
 
-  const sendMessage = async (content: string, selection?: ChatSelection) => {
+  const sendMessage = async (
+    content: string,
+    selection?: ChatSelection,
+    voicebankId: string | null = selectedVoicebankId
+  ) => {
     if (!content.trim()) return;
     if (creditsLocked) {
       openPaywall(selection ? "selection_blocked" : "chat_blocked");
@@ -699,7 +797,7 @@ export default function MainApp() {
 
     try {
       const activeSessionId = sessionId ?? await ensureSession();
-      const response = await chat(activeSessionId, content, selection);
+      const response = await chat(activeSessionId, content, selection, voicebankId);
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
         return;
@@ -764,8 +862,9 @@ export default function MainApp() {
       return;
     }
     const content = input.trim();
+    const voicebankId = selectedVoicebankId;
     setInput("");
-    await sendMessage(content);
+    await sendMessage(content, undefined, voicebankId);
   };
 
   const handleSelectionSend = async () => {
@@ -787,7 +886,7 @@ export default function MainApp() {
       part_index: selected.part_index,
       part_id: selected.part_id,
       verse_number: selectedVerse,
-    });
+    }, selectedVoicebankId);
   };
 
   const canShowSelector =
@@ -1226,28 +1325,43 @@ export default function MainApp() {
               />
             </label>
             <div className="input-row composer-row">
-              <div className="voice-picker">
+              <div className="voice-picker" ref={voicePickerRef}>
                 {voiceMenuOpen ? (
                   <div className="voice-picker-menu" role="listbox" aria-label="Select AI voice">
-                    {MOCK_VOICE_OPTIONS.map((voice) => {
-                      const isSelected = voice.name === selectedVoice.name;
+                    <button
+                      type="button"
+                      className={clsx("voice-picker-option", { selected: selectedVoicebankId === null })}
+                      onClick={() => {
+                        setSelectedVoicebankId(null);
+                        setVoiceMenuOpen(false);
+                      }}
+                    >
+                      <span className="voice-picker-option-avatar recommended" aria-hidden="true">
+                        <Sparkles size={15} />
+                      </span>
+                      <span className="voice-picker-option-copy">
+                        <span className="voice-picker-option-name">Use Recommended</span>
+                        <span className="voice-picker-option-meta">Let the model choose</span>
+                      </span>
+                      {selectedVoicebankId === null ? <Check size={14} aria-hidden="true" /> : null}
+                    </button>
+                    {voicebanks.map((voice) => {
+                      const isSelected = voice.id === selectedVoicebankId;
                       return (
                         <button
-                          key={voice.name}
+                          key={voice.id}
                           type="button"
                           className={clsx("voice-picker-option", { selected: isSelected })}
                           onClick={() => {
-                            setSelectedVoiceName(voice.name);
+                            setSelectedVoicebankId(voice.id);
                             setVoiceMenuOpen(false);
                           }}
                         >
-                          <img
-                            src={voice.image}
-                            alt=""
-                            className="voice-picker-option-avatar"
-                            aria-hidden="true"
-                          />
-                          <span className="voice-picker-option-name">{voice.name}</span>
+                          {renderVoiceAvatar(voice, "voice-picker-option-avatar")}
+                          <span className="voice-picker-option-copy">
+                            <span className="voice-picker-option-name">{voice.name}</span>
+                            <span className="voice-picker-option-meta">{voiceDescriptor(voice)}</span>
+                          </span>
                           {isSelected ? <Check size={14} aria-hidden="true" /> : null}
                         </button>
                       );
@@ -1261,27 +1375,37 @@ export default function MainApp() {
                   aria-expanded={voiceMenuOpen}
                   onClick={() => setVoiceMenuOpen((open) => !open)}
                 >
-                  <img
-                    src={selectedVoice.image}
-                    alt=""
-                    className="voice-picker-trigger-avatar"
-                    aria-hidden="true"
-                  />
+                  {selectedVoice ? (
+                    renderVoiceAvatar(selectedVoice, "voice-picker-trigger-avatar")
+                  ) : (
+                    <span
+                      className="voice-picker-trigger-avatar recommended"
+                      aria-hidden="true"
+                    >
+                      <Sparkles size={15} />
+                    </span>
+                  )}
                   <span className="voice-picker-trigger-copy">
                     <span className="voice-picker-trigger-label">Voice</span>
-                    <span className="voice-picker-trigger-name">{selectedVoice.name}</span>
+                    <span className="voice-picker-trigger-name">
+                      {voicebanksLoading ? "Loading voices..." : selectedVoiceLabel}
+                    </span>
                   </span>
                   <ChevronsUpDown size={16} aria-hidden="true" />
                 </button>
               </div>
-              <input
+              <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="Ask the singer to interpret or render..."
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") handleSend();
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    handleSend();
+                  }
                 }}
                 disabled={creditsLocked}
+                rows={2}
               />
               <button
                 onClick={handleSend}
@@ -1461,7 +1585,7 @@ function extractAttemptMessages(details: unknown): AttemptMessage[] | undefined 
   const raw = (details as { attempt_messages?: unknown }).attempt_messages;
   if (!Array.isArray(raw)) return undefined;
   const entries = raw
-    .map((entry) => {
+    .map<AttemptMessage | null>((entry) => {
       if (!entry || typeof entry !== "object") return null;
       const attemptNumber = Number((entry as { attempt_number?: unknown }).attempt_number);
       if (!Number.isFinite(attemptNumber)) return null;
@@ -1471,7 +1595,7 @@ function extractAttemptMessages(details: unknown): AttemptMessage[] | undefined 
         attempt_number: attemptNumber,
         message: typeof message === "string" ? message : undefined,
         thought_summary: typeof thought === "string" ? thought : undefined,
-      } satisfies AttemptMessage;
+      };
     })
     .filter((entry): entry is AttemptMessage => entry !== null);
   return entries.length > 0 ? entries : undefined;
