@@ -160,6 +160,13 @@
       }
     },
     {
+      "source": "/maintenance/status",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
       "source": "/api/voicebanks",
       "run": {
         "serviceId": "sightsinger-api",

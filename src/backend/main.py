@@ -25,8 +25,8 @@ from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore, FirestoreSessionStore
 from src.backend.firebase_app import (
+    get_firestore_client,
     initialize_firebase_app,
-    verify_id_token,
     verify_id_token_claims,
 )
 from src.backend.storage_client import download_bytes, upload_file
@@ -79,6 +79,12 @@ class BillingCheckoutRequest(BaseModel):
 
 class BillingCheckoutSyncRequest(BaseModel):
     sessionId: str
+
+
+class MaintenanceStatusResponse(BaseModel):
+    enabled: bool
+    allowed: bool
+    message: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -457,6 +463,17 @@ def create_app() -> FastAPI:
             ),
         }
 
+    @app.get("/maintenance/status")
+    async def get_maintenance_status(request: Request) -> MaintenanceStatusResponse:
+        """Return maintenance status for the authenticated user without exposing allowlists."""
+        user_id, user_email = await _get_user_context_without_maintenance_or_401(
+            request,
+            prefer_token_when_auth_disabled=True,
+        )
+        config = await asyncio.to_thread(_get_maintenance_config)
+        enabled, allowed, message = _evaluate_maintenance_access(config, user_id, user_email)
+        return MaintenanceStatusResponse(enabled=enabled, allowed=allowed, message=message)
+
     @app.post("/billing/checkout-session")
     async def create_billing_checkout_session(
         body: BillingCheckoutRequest,
@@ -644,7 +661,10 @@ async def _get_user_id_or_401(request: Request) -> str:
         return user_id
     token = _extract_bearer_token(request)
     try:
-        user_id = await asyncio.to_thread(verify_id_token, token)
+        claims = await asyncio.to_thread(verify_id_token_claims, token)
+        user_id = str(claims["uid"])
+        user_email = str(claims.get("email") or "")
+        await _require_not_under_maintenance(request, user_id, user_email)
         set_log_context(user_id=user_id)
         return user_id
     except HTTPException:
@@ -655,22 +675,91 @@ async def _get_user_id_or_401(request: Request) -> str:
 
 async def _get_user_context_or_401(request: Request) -> tuple[str, str]:
     """Return the authenticated user ID and email, or raise HTTP 401."""
+    user_id, user_email = await _get_user_context_without_maintenance_or_401(request)
+    await _require_not_under_maintenance(request, user_id, user_email)
+    return user_id, user_email
+
+
+async def _get_user_context_without_maintenance_or_401(
+    request: Request,
+    *,
+    prefer_token_when_auth_disabled: bool = False,
+) -> tuple[str, str]:
+    """Return authenticated user context without applying the maintenance access gate."""
     settings: Settings = request.app.state.settings
     if settings.backend_auth_disabled and settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        if prefer_token_when_auth_disabled and request.headers.get("authorization"):
+            return await _get_verified_user_context_or_401(request)
         user_id = settings.dev_user_id
         set_log_context(user_id=user_id)
         return user_id, settings.dev_user_email
+
+    return await _get_verified_user_context_or_401(request)
+
+
+async def _get_verified_user_context_or_401(request: Request) -> tuple[str, str]:
+    """Return user context from a verified Firebase bearer token."""
     token = _extract_bearer_token(request)
     try:
         claims = await asyncio.to_thread(verify_id_token_claims, token)
-        user_id = claims["uid"]
-        user_email = claims.get("email") or ""
+        user_id = str(claims["uid"])
+        user_email = str(claims.get("email") or "")
         set_log_context(user_id=user_id)
         return user_id, user_email
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
+
+
+async def _require_not_under_maintenance(request: Request, user_id: str, user_email: str) -> None:
+    """Block app-owned user bootstrap paths during production maintenance."""
+    settings: Settings = request.app.state.settings
+    if settings.app_env.lower() in {"dev", "development", "local", "test"}:
+        return
+    try:
+        config = await asyncio.to_thread(_get_maintenance_config)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Service availability could not be verified.",
+        ) from exc
+    enabled, allowed, message = _evaluate_maintenance_access(config, user_id, user_email)
+    if not enabled or allowed:
+        return
+    raise HTTPException(
+        status_code=503,
+        detail=message or "SightSinger is temporarily under maintenance.",
+    )
+
+
+def _evaluate_maintenance_access(
+    config: dict[str, Any],
+    user_id: str,
+    user_email: str,
+) -> tuple[bool, bool, str | None]:
+    enabled = bool(config.get("enabled"))
+    if not enabled:
+        return False, True, None
+    allowed_uids = _normalize_string_set(config.get("allowedUids"))
+    allowed_emails = {email.lower() for email in _normalize_string_set(config.get("allowedEmails"))}
+    message = str(config.get("message") or "").strip()
+    allowed = user_id in allowed_uids or user_email.strip().lower() in allowed_emails
+    return True, allowed, message or "SightSinger is temporarily under maintenance."
+
+
+def _get_maintenance_config() -> dict[str, Any]:
+    snapshot = get_firestore_client().collection("app_config").document("maintenance").get()
+    if not snapshot.exists:
+        return {"enabled": False}
+    data = snapshot.to_dict() or {}
+    return data if isinstance(data, dict) else {"enabled": False}
+
+
+def _normalize_string_set(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {item.strip() for item in value if isinstance(item, str) and item.strip()}
 
 
 async def _require_active_credits(user_id: str, user_email: str) -> None:

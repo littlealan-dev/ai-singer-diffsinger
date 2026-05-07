@@ -69,6 +69,19 @@ export default function LandingPage() {
         );
     }
 
+    if (!isAuthenticated) {
+        return (
+            <div className="landing-page landing-pricing-page">
+                <AuthModal
+                    isOpen={true}
+                    onClose={() => { }}
+                    onSuccess={() => navigate("/app")}
+                    redirectPath="/app"
+                />
+            </div>
+        );
+    }
+
     return (
         <div className="landing-page landing-pricing-page">
             <header className="landing-pricing-header">

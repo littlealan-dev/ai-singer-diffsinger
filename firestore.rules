@@ -12,6 +12,11 @@ service cloud.firestore {
       allow create, delete: if false; 
     }
 
+    match /app_config/maintenance {
+      allow read: if false;
+      allow write: if false;
+    }
+
     match /credit_reservations/{jobId} {
       allow read: if request.auth != null && resource.data.userId == request.auth.uid;
       allow write: if false; 

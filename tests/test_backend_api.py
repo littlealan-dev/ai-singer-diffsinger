@@ -194,11 +194,11 @@ def _prepare_app(monkeypatch, overrides=None):
     backend_main._PLAYBACK_SECRET_CACHE.clear()
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
     monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
-    monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "test-user")
     monkeypatch.setattr(
         "src.backend.main.verify_id_token_claims",
         lambda token: {"uid": "test-user", "email": "test@example.com"},
     )
+    monkeypatch.setattr("src.backend.main._get_maintenance_config", lambda: {"enabled": False})
     monkeypatch.setattr(
         "src.backend.credits.get_or_create_credits",
         lambda user_id, user_email: UserCredits(
@@ -459,6 +459,113 @@ def test_query_token_auth_is_rejected(monkeypatch):
         response = test_client.post("/sessions?id_token=test-token")
         assert response.status_code == 401
         assert response.json()["detail"] == "Missing Authorization header."
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_maintenance_blocks_credits_without_bootstrap(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch, overrides={"APP_ENV": "prod"})
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    calls = {"credits": 0}
+
+    monkeypatch.setattr(
+        "src.backend.main._get_maintenance_config",
+        lambda: {
+            "enabled": True,
+            "message": "Production testing is in progress.",
+            "allowedEmails": [],
+            "allowedUids": [],
+        },
+    )
+
+    def _unexpected_credit_bootstrap(user_id, user_email):
+        calls["credits"] += 1
+        return UserCredits(balance=1, reserved=0, expires_at=None, overdrafted=False)
+
+    monkeypatch.setattr("src.backend.credits.get_or_create_credits", _unexpected_credit_bootstrap)
+
+    with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
+        response = test_client.get("/credits")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Production testing is in progress."
+        assert calls["credits"] == 0
+
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_maintenance_status_does_not_expose_allowlist(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch, overrides={"APP_ENV": "prod"})
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+
+    monkeypatch.setattr(
+        "src.backend.main._get_maintenance_config",
+        lambda: {
+            "enabled": True,
+            "message": "Production testing is in progress.",
+            "allowedEmails": ["someone@example.com"],
+            "allowedUids": ["other-user"],
+        },
+    )
+
+    with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
+        response = test_client.get("/maintenance/status")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload == {
+            "enabled": True,
+            "allowed": False,
+            "message": "Production testing is in progress.",
+        }
+        assert "allowedEmails" not in payload
+        assert "allowedUids" not in payload
+
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_maintenance_status_requires_auth(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch, overrides={"APP_ENV": "prod"})
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/maintenance/status")
+        assert response.status_code == 401
+
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_maintenance_allows_allowlisted_email_to_bootstrap(monkeypatch):
+    app, data_dir = _prepare_app(monkeypatch, overrides={"APP_ENV": "prod"})
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    calls = {"credits": 0}
+
+    monkeypatch.setattr(
+        "src.backend.main._get_maintenance_config",
+        lambda: {
+            "enabled": True,
+            "message": "Production testing is in progress.",
+            "allowedEmails": ["test@example.com"],
+            "allowedUids": [],
+        },
+    )
+
+    def _credit_bootstrap(user_id, user_email):
+        calls["credits"] += 1
+        return UserCredits(balance=8, reserved=0, expires_at=None, overdrafted=False)
+
+    monkeypatch.setattr("src.backend.credits.get_or_create_credits", _credit_bootstrap)
+
+    with TestClient(app) as test_client:
+        test_client.headers.update(_auth_headers())
+        response = test_client.get("/credits")
+        assert response.status_code == 200
+        assert response.json()["balance"] == 8
+        assert calls["credits"] == 1
+
     if not keep_outputs:
         shutil.rmtree(data_dir, ignore_errors=True)
 

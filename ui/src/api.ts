@@ -119,6 +119,12 @@ export type VoicebankListResponse = {
   voicebanks: VoicebankOption[];
 };
 
+export type MaintenanceStatusResponse = {
+  enabled: boolean;
+  allowed: boolean;
+  message?: string | null;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 function withApiBase(url: string): string {
@@ -173,6 +179,10 @@ export async function createSession(): Promise<{ session_id: string }> {
 
 export async function ensureCredits(): Promise<unknown> {
   return request("/credits", { method: "GET" });
+}
+
+export async function fetchMaintenanceStatus(): Promise<MaintenanceStatusResponse> {
+  return request("/maintenance/status", { method: "GET" });
 }
 
 export async function createCheckoutSession(planKey: string): Promise<BillingCheckoutResponse> {
