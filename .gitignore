@@ -18,6 +18,9 @@ firestore-debug.log
 
 # Local artifacts
 pricing_model.csv
+ai_studio_profile/
+ai_studio_ready.txt
+downloaded_logs/
 
 # Media & Models
 *.wav

@@ -21,7 +21,7 @@ class FakeBlob:
 class TestVoicebankCache(unittest.TestCase):
     def setUp(self) -> None:
         self.root_dir = Path(__file__).parent.parent
-        self.voicebank_id = "Raine_Rena_2.01"
+        self.voicebank_id = "PM-31_Commercial_Indigo"
 
     def test_dev_env_uses_local_voicebank(self) -> None:
         with mock.patch.dict(os.environ, {"APP_ENV": "dev"}, clear=False):

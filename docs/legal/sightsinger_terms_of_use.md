@@ -102,7 +102,7 @@ An AI Voice or voicebank may include singing voice model files, model weights, c
 
 SightSinger may provide access to different AI Voices created by independent creators, communities, or rights holders.
 
-Each AI Voice may have its own creator permissions, licence terms, attribution requirements, commercial-use rules, or usage restrictions. These may be shown in the app, on the Credits page, or through linked original voicebank terms.
+Each AI Voice may have its own creator permissions, licence terms, attribution requirements, commercial-use rules, or usage restrictions. These may be shown in the app, on the [Credits and AI Voice Permissions page](/credits-and-ai-voices), or through linked original voicebank terms.
 
 By using an AI Voice in SightSinger, you agree to follow these Terms and any AI Voice-specific rules shown for that AI Voice.
 
@@ -120,7 +120,7 @@ Some AI Voices require attribution. Where required, you must credit the AI Voice
 
 Some AI Voices may also require you to disclose that the vocal was generated using AI or singing synthesis technology.
 
-You are responsible for checking the attribution and disclosure requirements shown in the app, on the Credits page, or in the linked original AI Voice / voicebank terms before publishing or commercially using generated Output.
+You are responsible for checking the attribution and disclosure requirements shown in the app, on the [Credits and AI Voice Permissions page](/credits-and-ai-voices), or in the linked original AI Voice / voicebank terms before publishing or commercially using generated Output.
 
 Even where not strictly required, we recommend that public releases using AI-generated or synthesized vocals are labelled transparently where appropriate.
 
@@ -148,6 +148,8 @@ For clarity, SightSinger may be used for lawful religious, church, worship, choi
 ## 10. Music rights and copyright
 
 SightSinger helps generate singing audio from materials you provide. We do not give you copyright licences for songs, lyrics, arrangements, scores, backing tracks, recordings, or third-party materials that you do not already own or have permission to use.
+
+You are responsible for making sure your uploaded score, lyrics, arrangement, and final use of generated audio are lawful.
 
 For example, if you upload a copyrighted song, arrangement, or lyric, you are responsible for having the necessary rights before using the generated Output publicly or commercially.
 
@@ -214,7 +216,7 @@ Unless required by law, payments are generally non-refundable once credits, subs
 
 If there is a technical issue that prevents reasonable use of a paid feature, contact us at:
 
-**hello@sightsinger.app**
+**billing@sightsinger.app**
 
 We will review it fairly.
 
@@ -250,9 +252,9 @@ Your use of third-party services may also be subject to their own terms and poli
 
 ## 18. Privacy
 
-Our handling of personal data is explained in our Privacy Policy.
+Our handling of personal data is explained in our [Privacy Policy](/privacy).
 
-By using SightSinger, you agree that we may process your data as described in the Privacy Policy.
+By using SightSinger, you agree that we may process your data as described in the [Privacy Policy](/privacy).
 
 ## 19. Feedback
 
@@ -312,40 +314,3 @@ The courts of **England and Wales** will have jurisdiction, unless applicable la
 For questions, support, copyright concerns, licensing issues, AI Voice permissions, voicebank permissions, or complaints, contact:
 
 **hello@sightsinger.app**
-
----
-
-# Credits and AI Voice Permissions
-
-SightSinger uses AI Voices, also known as voicebanks, created by independent creators and communities. We respect their work and only make AI Voices available where the licence or creator permission allows our use case.
-
-An AI Voice or voicebank may include singing voice models, model files, configuration files, dictionaries, phoneme lists, character names, character designs, images, documentation, licence terms, and other related materials.
-
-SightSinger users do not receive direct access to the underlying AI Voice, voicebank, or model files. Users interact with the AI Voice through SightSinger and receive generated audio.
-
-You may use generated audio according to the relevant AI Voice rules, but you must not attempt to access, copy, extract, reverse engineer, bypass, or redistribute the underlying AI Voice, voicebank, model, character asset, configuration, or service components used by SightSinger.
-
-You must not use SightSinger outputs or AI Voice-related materials to train, fine-tune, clone, sample, or improve another AI voice, singing synthesis, voice conversion, or machine learning model unless the relevant AI Voice terms clearly allow it.
-
-You are responsible for making sure your uploaded score, lyrics, arrangement, and final use of generated audio are lawful.
-
-SightSinger may be used for lawful religious, church, worship, choir, devotional, educational, and community music. Restrictions are intended to prevent misleading, exploitative, abusive, hateful, fraudulent, or harmful religious or spiritual content, not ordinary church choir, worship, hymn, rehearsal, or devotional music.
-
-This page explains which AI Voices are currently available, what attribution may be required, and where to find the original AI Voice or voicebank terms.
-
-## AI Voices currently available
-
-| AI Voice / voicebank | Commercial use of generated vocals | Available on free plan | Available on paid plan | Attribution / notes | Original terms |
-|---|---:|---:|---:|---|---|
-| Qixuan / 绮萱 | Yes, subject to terms | Yes | Yes | Public releases should credit “绮萱” and “DiffSinger” and disclose AI/singing synthesis use where required. | [Link to original ToU] |
-| Printto Magicbeat V5 Pure | Yes, subject to terms | Yes | Yes | Generated vocals must remain associated with Printto Magicbeat. Do not rename, rebrand, or claim ownership. | [Link to original ToU] |
-
-## Permission records
-
-Some AI Voices are available under public licence terms. Others are available through direct written permission from the creator or rights holder.
-
-If you are an AI Voice creator, voicebank creator, rights holder, platform reviewer, or user who needs to verify a permission record, please contact:
-
-**hello@sightsinger.app**
-
-We can provide relevant permission evidence on request where appropriate.

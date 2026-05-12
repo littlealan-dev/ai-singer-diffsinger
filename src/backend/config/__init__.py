@@ -125,7 +125,7 @@ class Settings:
         max_mxl_uncompressed_bytes = max_mxl_uncompressed_mb * 1024 * 1024
         session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 5 * 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
-        default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "Raine_Rena_2.01")
+        default_voicebank = os.getenv("BACKEND_DEFAULT_VOICEBANK", "PM-31_Commercial_Indigo")
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
         audio_format = os.getenv("BACKEND_AUDIO_FORMAT", "mp3").strip().lower()
         audio_mp3_bitrate = os.getenv("BACKEND_AUDIO_MP3_BITRATE", "256k").strip()
