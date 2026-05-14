@@ -194,7 +194,7 @@
     {
       "source": "/billing/**",
       "run": {
-        "serviceId": "sightsinger-api",
+        "serviceId": "sightsinger-billing-api",
         "region": "us-east4"
       }
     },

@@ -140,6 +140,38 @@ def test_create_checkout_session_creates_customer_and_session():
     assert billing["stripeCheckoutSessionId"] == "cs_test_123"
 
 
+def test_prod_billing_config_reads_stripe_secrets_from_secret_manager(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("PROJECT_ID", "demo-project")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_direct_should_not_be_used")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_direct_should_not_be_used")
+    monkeypatch.setenv("STRIPE_SECRET_KEY_SECRET", "STRIPE_SECRET_KEY_LIVE")
+    monkeypatch.setenv("STRIPE_SECRET_KEY_SECRET_VERSION", "3")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_SECRET", "STRIPE_WEBHOOK_SECRET_LIVE")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_SECRET_VERSION", "4")
+
+    requested: list[tuple[str, str]] = []
+
+    def fake_read_secret(settings, secret_name, version="latest"):
+        requested.append((secret_name, version))
+        return {
+            ("STRIPE_SECRET_KEY_LIVE", "3"): "sk_live_from_secret_manager",
+            ("STRIPE_WEBHOOK_SECRET_LIVE", "4"): "whsec_live_from_secret_manager",
+        }[(secret_name, version)]
+
+    monkeypatch.setattr("src.backend.billing_config.read_secret", fake_read_secret)
+    get_billing_config.cache_clear()
+
+    config = get_billing_config()
+
+    assert config.stripe_secret_key == "sk_live_from_secret_manager"
+    assert config.stripe_webhook_secret == "whsec_live_from_secret_manager"
+    assert requested == [
+        ("STRIPE_SECRET_KEY_LIVE", "3"),
+        ("STRIPE_WEBHOOK_SECRET_LIVE", "4"),
+    ]
+
+
 def test_sync_checkout_session_updates_paid_state_and_grants_credits():
     uid = "user-checkout-sync"
     get_or_create_credits(uid, "sync@example.com")

@@ -56,6 +56,11 @@ export function useMaintenanceMode(user: User | null): MaintenanceState {
       .catch((statusError) => {
         if (cancelled) return;
         console.error("Error loading maintenance settings:", statusError);
+        if (import.meta.env.VITE_APP_ENV === "dev") {
+          setConfig(DEFAULT_CONFIG);
+          setError(null);
+          return;
+        }
         setConfig({ ...DEFAULT_CONFIG, enabled: true, allowed: false });
         setError("Could not verify service availability.");
       })

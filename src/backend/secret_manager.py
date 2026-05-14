@@ -2,9 +2,12 @@ from __future__ import annotations
 
 """Google Secret Manager helpers."""
 
-from typing import Optional
+from typing import TYPE_CHECKING, Any
 
-from src.backend.config import Settings
+if TYPE_CHECKING:
+    from src.backend.config import Settings
+else:
+    Settings = Any
 
 
 def _build_secret_resource(

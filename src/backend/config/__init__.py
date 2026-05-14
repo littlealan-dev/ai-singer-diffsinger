@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 
-from src.mcp.resolve import PROJECT_ROOT
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _env_int(name: str, default: int) -> int:

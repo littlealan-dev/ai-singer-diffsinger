@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 import os
 
+from src.backend.secret_manager import read_secret
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -49,6 +51,24 @@ class BillingRefreshConfig:
     metrics_enabled: bool
 
 
+@dataclass(frozen=True)
+class _BillingSecretSettings:
+    app_env: str
+    project_id: str | None
+
+
+def _app_env() -> str:
+    return os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
+
+
+def _project_id() -> str | None:
+    for key in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "PROJECT_ID"):
+        value = os.getenv(key)
+        if value:
+            return value
+    return None
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -58,11 +78,46 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _load_secret_value(
+    *,
+    settings: _BillingSecretSettings,
+    direct_env_name: str,
+    secret_env_name: str,
+    secret_version_env_name: str,
+    default_secret_name: str,
+) -> str:
+    app_env = settings.app_env.lower()
+    direct_value = os.getenv(direct_env_name, "").strip()
+    if app_env in {"dev", "development", "local", "test"}:
+        if direct_value:
+            return direct_value
+        raise ValueError(f"Missing required local billing env var: {direct_env_name}")
+
+    secret_name = os.getenv(secret_env_name, default_secret_name).strip()
+    secret_version = os.getenv(secret_version_env_name, "latest").strip() or "latest"
+    if not secret_name:
+        raise ValueError(f"Missing required billing secret name env var: {secret_env_name}")
+    return read_secret(settings, secret_name, secret_version).strip()
+
+
 @lru_cache(maxsize=1)
 def get_billing_config() -> BillingConfig:
+    settings = _BillingSecretSettings(app_env=_app_env(), project_id=_project_id())
     return BillingConfig(
-        stripe_secret_key=_required_env("STRIPE_SECRET_KEY"),
-        stripe_webhook_secret=_required_env("STRIPE_WEBHOOK_SECRET"),
+        stripe_secret_key=_load_secret_value(
+            settings=settings,
+            direct_env_name="STRIPE_SECRET_KEY",
+            secret_env_name="STRIPE_SECRET_KEY_SECRET",
+            secret_version_env_name="STRIPE_SECRET_KEY_SECRET_VERSION",
+            default_secret_name="STRIPE_SECRET_KEY",
+        ),
+        stripe_webhook_secret=_load_secret_value(
+            settings=settings,
+            direct_env_name="STRIPE_WEBHOOK_SECRET",
+            secret_env_name="STRIPE_WEBHOOK_SECRET_SECRET",
+            secret_version_env_name="STRIPE_WEBHOOK_SECRET_SECRET_VERSION",
+            default_secret_name="STRIPE_WEBHOOK_SECRET",
+        ),
         stripe_product_solo=_required_env("STRIPE_PRODUCT_SOLO"),
         stripe_product_choir=_required_env("STRIPE_PRODUCT_CHOIR"),
         stripe_price_solo_monthly=_required_env("STRIPE_PRICE_SOLO_MONTHLY"),

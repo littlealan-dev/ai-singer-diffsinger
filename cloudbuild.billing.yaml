@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.billing
+      - -t
+      - ${_BILLING_BACKEND_IMAGE}
+      - .
+
+images:
+  - ${_BILLING_BACKEND_IMAGE}
