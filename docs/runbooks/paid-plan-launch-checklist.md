@@ -10,46 +10,62 @@ This launch uses three backend surfaces:
 
 ## 1. Pre-Launch Freeze
 
-- [ ] Confirm root repo changes are committed.
-- [ ] Confirm marketing repo changes are committed.
-- [ ] Confirm production Stripe products and prices match `env/prod.env`.
-- [ ] Confirm `STRIPE_API_VERSION` in `env/prod.env` matches the production webhook endpoint API version.
-- [ ] Confirm Terms of Use page is live.
-- [ ] Confirm Privacy Policy page is live.
-- [ ] Confirm Credits / AI Voice Permissions page is live.
-- [ ] Confirm pricing page is live and uses live plan links.
-- [ ] Confirm FAQ includes subscription, commercial-use, and royalty-free answers.
-- [ ] Confirm `env/voicebank_manifest.prod.json` enables only commercial-use voicebanks:
+- [x] Confirm root repo changes are committed.
+- [x] Confirm marketing repo changes are committed.
+- [x] Confirm production Stripe products and prices match `env/prod.env`.
+- [x] Confirm `STRIPE_API_VERSION` in `env/prod.env` matches the tested API version.
+- [x] Confirm Terms of Use page is ready locally and committed.
+- [x] Confirm Privacy Policy page is ready locally and committed.
+- [x] Confirm Credits / AI Voice Permissions page is ready locally and committed.
+- [x] Confirm pricing page is ready locally, committed, and uses live plan links.
+- [x] Confirm FAQ is ready locally, committed, and includes subscription, commercial-use, and royalty-free answers.
+- [x] Confirm `env/voicebank_manifest.prod.json` enables only commercial-use voicebanks:
   - `PM-31_Commercial_Indigo`
   - `PM-31_Commercial_Scarlet`
   - `Qixuan_v2.7.0_DiffSinger_OpenUtau`
-- [ ] Confirm `Qixuan_v2.7.0_DiffSinger_OpenUtau.tar.gz` is uploaded to the production voicebank bucket path expected by the manifest.
+- [x] Confirm `Qixuan_v2.7.0_DiffSinger_OpenUtau.tar.gz` is uploaded to the production voicebank bucket path expected by the manifest.
 
 ## 2. Stripe Secrets
 
-- [ ] Create or update Secret Manager secret `STRIPE_SECRET_KEY`.
-- [ ] Create or update Secret Manager secret `STRIPE_WEBHOOK_SECRET`.
-- [ ] Grant secret access to the Cloud Run runtime service account:
+- [x] Create or update Secret Manager secret `STRIPE_SECRET_KEY`.
+- [x] Create or update Secret Manager secret `STRIPE_WEBHOOK_SECRET`.
+- [x] Create billing Cloud Run runtime service account `sightsinger-billing-api-as@sightsinger-app.iam.gserviceaccount.com`.
+- [x] Grant Firestore access to the billing runtime service account.
+- [x] Grant Stripe secret access to the billing runtime service account:
 
 ```bash
+gcloud iam service-accounts create sightsinger-billing-api-as \
+  --project=sightsinger-app \
+  --display-name="SightSinger billing backend runtime"
+
+gcloud projects add-iam-policy-binding sightsinger-app \
+  --member="serviceAccount:sightsinger-billing-api-as@sightsinger-app.iam.gserviceaccount.com" \
+  --role="roles/datastore.user"
+
 gcloud secrets add-iam-policy-binding STRIPE_SECRET_KEY \
   --project=sightsinger-app \
-  --member="serviceAccount:sightsinger-cloud-run-sa@sightsinger-app.iam.gserviceaccount.com" \
+  --member="serviceAccount:sightsinger-billing-api-as@sightsinger-app.iam.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 
 gcloud secrets add-iam-policy-binding STRIPE_WEBHOOK_SECRET \
   --project=sightsinger-app \
-  --member="serviceAccount:sightsinger-cloud-run-sa@sightsinger-app.iam.gserviceaccount.com" \
+  --member="serviceAccount:sightsinger-billing-api-as@sightsinger-app.iam.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-- [ ] Confirm `env/prod.env` references secret names, not raw secret values:
+- [x] Confirm `env/prod.env` references secret names, not raw secret values:
   - `STRIPE_SECRET_KEY_SECRET=STRIPE_SECRET_KEY`
   - `STRIPE_WEBHOOK_SECRET_SECRET=STRIPE_WEBHOOK_SECRET`
 
 ## 3. Stripe Webhook Endpoint
 
-Deploy the billing backend before setting the final Stripe webhook URL, because the generated Cloud Run URL is only known after the first deployment.
+The billing backend Cloud Run service is `sightsinger-billing-api`.
+
+Production billing backend URL:
+
+```text
+https://sightsinger-billing-api-373752827978.us-east4.run.app/
+```
 
 - [ ] Deploy `sightsinger-billing-api`.
 - [ ] Get the billing backend URL:
@@ -61,13 +77,13 @@ gcloud run services describe sightsinger-billing-api \
   --format='value(status.url)'
 ```
 
-- [ ] Configure Stripe live webhook endpoint:
+- [x] Configure Stripe live webhook endpoint:
 
 ```text
-<billing-backend-url>/billing/webhook
+https://sightsinger-billing-api-373752827978.us-east4.run.app/billing/webhook
 ```
 
-- [ ] Subscribe only required events:
+- [x] Subscribe only required events:
   - `checkout.session.completed`
   - `invoice.paid`
   - `invoice.payment_failed`
@@ -87,7 +103,7 @@ Extra events are acknowledged and ignored, but avoid subscribing to all events i
 
 The maintenance mode logic must be deployed before it can protect users. For first launch:
 
-- [ ] Set production maintenance config before deployment:
+- [x] Set production maintenance config before deployment:
   - `enabled: true`
   - `allowedEmails` includes:
     - `littlealan@gmail.com`

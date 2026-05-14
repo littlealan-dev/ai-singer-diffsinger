@@ -29,6 +29,8 @@ tests/
 
 logs/
 reports/
+downloaded_logs/
+ai_studio_profile/
 tests/output/
 outputs/
 runs/
