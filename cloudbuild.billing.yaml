@@ -1,5 +1,15 @@
 steps:
+  - name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        mkdir -p /workspace/billing-context
+        cp Dockerfile.billing /workspace/billing-context/Dockerfile.billing
+        cp requirements-billing.txt /workspace/billing-context/requirements-billing.txt
+        cp -R src /workspace/billing-context/src
   - name: gcr.io/cloud-builders/docker
+    dir: /workspace/billing-context
     args:
       - build
       - -f

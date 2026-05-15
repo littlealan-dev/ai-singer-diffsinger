@@ -10,6 +10,7 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from firebase_admin import app_check
@@ -68,6 +69,7 @@ def create_billing_app() -> FastAPI:
     async def log_and_guard_requests(request: Request, call_next):
         start = time.monotonic()
         set_log_context()
+        response = None
         logger.debug(
             "billing_http_request_start method=%s path=%s",
             request.method,
@@ -77,6 +79,8 @@ def create_billing_app() -> FastAPI:
             if request.method != "OPTIONS" and _should_require_app_check(request):
                 await _require_app_check(request)
             response = await call_next(request)
+        except HTTPException as exc:
+            response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         finally:
             clear_log_context()
         elapsed_ms = (time.monotonic() - start) * 1000.0
@@ -91,6 +95,10 @@ def create_billing_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> Dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/billing/healthz")
+    async def billing_healthz() -> Dict[str, str]:
         return {"status": "ok"}
 
     @app.post("/billing/checkout-session")
@@ -267,7 +275,7 @@ async def _require_app_check(request: Request) -> None:
 
 
 def _should_require_app_check(request: Request) -> bool:
-    return request.url.path not in {"/billing/webhook", "/healthz"}
+    return request.url.path not in {"/billing/webhook", "/healthz", "/billing/healthz"}
 
 
 app = create_billing_app()

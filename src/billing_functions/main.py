@@ -13,8 +13,9 @@ from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import run_credit_refresh
 from src.backend.billing_refresh_metrics import emit_credit_refresh_metrics
 from src.backend.billing_webhooks import handle_event
-from src.mcp.logging_utils import get_logger
+from src.mcp.logging_utils import configure_logging, get_logger
 
+configure_logging()
 logger = get_logger(__name__)
 
 _refresh_config = get_billing_refresh_config()
