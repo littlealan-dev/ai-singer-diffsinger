@@ -323,7 +323,7 @@ export default function DemoApp() {
                       handleStartTrial();
                     }}
                   >
-                    Start Free Trial
+                    Start Free
                   </button>
                   <button
                     className="user-menu-item"

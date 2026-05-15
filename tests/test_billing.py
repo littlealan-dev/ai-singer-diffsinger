@@ -222,7 +222,10 @@ def test_sync_checkout_session_updates_paid_state_and_grants_credits():
     assert user["billing"]["latestCheckoutPaymentStatus"] == "paid"
     assert user["billing"]["latestInvoiceStatus"] == "paid"
     assert user["billing"]["creditRefreshAnchor"] == datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
-    assert user["billing"]["nextCreditRefreshAt"] == datetime(2027, 4, 25, 12, 0, tzinfo=timezone.utc)
+    assert user["billing"]["nextCreditRefreshAt"] == compute_next_monthly_refresh(
+        datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
+        datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
+    )
     assert user["credits"]["balance"] == 30
     assert user["credits"]["lastGrantInvoiceId"] == "in_checkout_sync_123"
     assert db.collection("credit_ledger").document("grant_invoice_in_checkout_sync_123").get().exists
@@ -456,6 +459,58 @@ def test_subscription_sync_reverts_to_free_after_immediate_portal_cancel():
     assert user["billing"]["activePlanKey"] == "free"
     assert user["billing"]["stripeSubscriptionId"] is None
     assert user["billing"]["creditRefreshAnchor"] == anchor
+
+
+@pytest.mark.parametrize("terminal_status", ["canceled", "incomplete_expired"])
+def test_subscription_updated_terminal_status_reverts_to_free(terminal_status):
+    uid = f"user-webhook-terminal-{terminal_status}"
+    get_or_create_credits(uid, f"{terminal_status}@example.com")
+    db = get_firestore_client()
+    anchor = datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": "cus_terminal",
+                "stripeSubscriptionId": "sub_terminal",
+                "stripeCheckoutSessionId": "cs_terminal",
+                "activePlanKey": "solo_monthly",
+                "stripeSubscriptionStatus": "active",
+                "family": "solo",
+                "billingInterval": "month",
+                "creditRefreshAnchor": anchor,
+                "nextCreditRefreshAt": datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            }
+        },
+        merge=True,
+    )
+
+    handle_event(
+        {
+            "id": f"evt_subscription_updated_{terminal_status}",
+            "type": "customer.subscription.updated",
+            "data": {
+                "object": {
+                    "id": "sub_terminal",
+                    "object": "subscription",
+                    "customer": "cus_terminal",
+                    "status": terminal_status,
+                    "metadata": {"firebaseUserId": uid},
+                    "items": {"data": [{"price": {"id": "price_solo_monthly"}}]},
+                }
+            },
+        }
+    )
+
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    billing = user["billing"]
+    assert billing["activePlanKey"] == "free"
+    assert billing["billingInterval"] == "none"
+    assert billing["stripeSubscriptionStatus"] is None
+    assert billing["stripeSubscriptionId"] is None
+    assert billing["stripeCustomerId"] == "cus_terminal"
+    assert billing["stripeCheckoutSessionId"] == "cs_terminal"
+    assert billing["creditRefreshAnchor"] == anchor
+    assert billing["nextCreditRefreshAt"] > anchor
 
 
 def test_invoice_paid_immediately_grants_monthly_plan_and_reanchors():
@@ -1005,6 +1060,44 @@ def test_scheduler_paid_terminal_status_marks_inconsistent_without_free_refresh(
     assert user["credits"]["balance"] == 3
     assert user["billing"]["activePlanKey"] == "solo_monthly"
     assert user["billing"]["refreshScheduler"]["lastStatus"] == "billing_state_inconsistent"
+
+
+def test_scheduler_paid_cancel_scheduled_does_not_refresh_or_repair_state():
+    uid = "user-paid-cancel-scheduled"
+    get_or_create_credits(uid, "cancel-scheduled@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    due_at = now - timedelta(minutes=1)
+    current_period_end = datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "solo_monthly",
+                "family": "solo",
+                "billingInterval": "month",
+                "stripeSubscriptionStatus": "active",
+                "cancelAtPeriodEnd": True,
+                "currentPeriodEnd": current_period_end,
+                "nextCreditRefreshAt": due_at,
+            },
+            "credits": {
+                "balance": 3,
+                "reserved": 0,
+                "monthlyAllowance": 30,
+            },
+        },
+        merge=True,
+    )
+
+    result = run_credit_refresh(now=now, max_users=10, run_id="refresh_test_cancel_scheduled")
+
+    assert result["processed"] == 0
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 3
+    assert user["billing"]["activePlanKey"] == "solo_monthly"
+    assert user["billing"]["cancelAtPeriodEnd"] is True
+    assert user["billing"]["nextCreditRefreshAt"] == due_at
+    assert user["billing"]["refreshScheduler"]["lastStatus"] == "cancel_scheduled"
 
 
 def test_annual_invoice_paid_sets_paid_anchor_and_next_refresh():

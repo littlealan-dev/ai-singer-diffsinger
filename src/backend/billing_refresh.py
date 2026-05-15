@@ -252,6 +252,8 @@ def _refresh_decision(active_plan_key: str, billing: BillingState | dict[str, An
     subscription_status = str(billing.get("stripeSubscriptionStatus") or "")
     if subscription_status in _TERMINAL_SUBSCRIPTION_STATUSES:
         return _RefreshDecision(status="billing_state_inconsistent", status_only=True)
+    if bool(billing.get("cancelAtPeriodEnd")):
+        return _RefreshDecision(status="cancel_scheduled", status_only=True)
 
     if interval == "year":
         return _RefreshDecision(

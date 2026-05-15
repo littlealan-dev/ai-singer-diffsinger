@@ -24,6 +24,8 @@ from src.mcp.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+_TERMINAL_SUBSCRIPTION_STATUSES = {"canceled", "incomplete_expired"}
+
 
 def construct_stripe_event(
     payload: bytes,
@@ -170,6 +172,9 @@ def _handle_subscription_updated(payload: dict[str, Any], *, config: BillingConf
         uid = find_user_id_by_customer_id(customer_id) if customer_id else None
     if not uid:
         raise BillingHttpError(409, "Unable to resolve Firebase user for subscription.")
+    if _get_string(payload, "status") in _TERMINAL_SUBSCRIPTION_STATUSES:
+        _transition_subscription_to_free(uid, payload)
+        return
     plan_key = _plan_key_from_subscription(payload, billing_config)
     if plan_key is None:
         return
@@ -194,6 +199,10 @@ def _handle_subscription_deleted(payload: dict[str, Any]) -> None:
         uid = find_user_id_by_customer_id(customer_id) if customer_id else None
     if not uid:
         raise BillingHttpError(409, "Unable to resolve Firebase user for deleted subscription.")
+    _transition_subscription_to_free(uid, payload)
+
+
+def _transition_subscription_to_free(uid: str, payload: dict[str, Any]) -> None:
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
     snapshot = user_ref.get()
@@ -203,7 +212,7 @@ def _handle_subscription_deleted(payload: dict[str, Any]) -> None:
     free_payload = free_billing_payload(now=datetime.now(timezone.utc), anchor=_to_utc(anchor))
     free_payload.update(
         {
-            "stripeCustomerId": billing.get("stripeCustomerId"),
+            "stripeCustomerId": billing.get("stripeCustomerId") or _get_string(payload, "customer"),
             "stripeSubscriptionId": None,
             "stripeCheckoutSessionId": billing.get("stripeCheckoutSessionId"),
         }

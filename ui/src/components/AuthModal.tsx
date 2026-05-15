@@ -5,7 +5,6 @@ import {
     sendMagicLink,
 } from "../firebase";
 import "./AuthModal.css";
-import { TRIAL_EXPIRY_DAYS } from "../constants";
 
 export interface AuthModalProps {
     isOpen: boolean;
@@ -148,11 +147,11 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                 </button>
 
                 <div className="auth-modal-content">
-                    <h2 className="auth-modal-title">✨ Start Your Free Trial</h2>
+                    <h2 className="auth-modal-title">✨ Start Free</h2>
                     <p className="auth-modal-subtitle">
-                        Get 20 credits (10 minutes of audio)
+                        Get 8 free credits every month
                         <br />
-                        Valid for {TRIAL_EXPIRY_DAYS} days
+                        About 4 minutes of audio, no time limit
                     </p>
                     <p className="auth-modal-subtitle auth-modal-note">
                         No password required. No marketing spam.
