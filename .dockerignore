@@ -45,5 +45,4 @@ reviews/
 scripts/
 spec/
 
-# Exclude assets from image build
 assets/

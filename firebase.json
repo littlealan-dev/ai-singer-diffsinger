@@ -12,15 +12,36 @@
       "runtime": "python311",
       "ignore": [
         ".git",
+        ".gitmodules",
         ".firebase",
         ".pytest_cache",
+        ".venv",
+        ".venv310",
+        "venv",
+        "__pycache__",
         "**/__pycache__/**",
+        "*.pyc",
         "**/.next/**",
         "**/node_modules/**",
+        "ai_studio_profile",
+        "assets",
+        "checkpoints",
+        "config",
         "data",
+        "docs",
+        "downloaded_logs",
         "logs",
+        "marketing",
+        "outputs",
         "reports",
         "reviews",
+        "runs",
+        "scripts",
+        "spec",
+        "tests",
+        "third_party",
+        "tmp",
+        "ui",
         "ui/dist",
         "firebase-debug.log",
         "firebase-debug.*.log",
@@ -162,6 +183,13 @@
     {
       "source": "/__/firebase/**",
       "destination": "/__/firebase/init.json"
+    },
+    {
+      "source": "/sessions",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
     },
     {
       "source": "/sessions/**",

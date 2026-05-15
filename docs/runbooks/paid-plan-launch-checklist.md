@@ -114,31 +114,31 @@ The maintenance mode logic must be deployed before it can protect users. For fir
 
 Build and deploy in this order.
 
-- [ ] Build GPU-enabled main backend image.
+- [x] Build GPU-enabled main backend image.
 
 ```bash
 scripts/build_backend_prod.sh
 ```
 
-- [ ] Build lightweight CPU-only billing backend image.
+- [x] Build lightweight CPU-only billing backend image.
 
 ```bash
 scripts/build_billing_backend_prod.sh
 ```
 
-- [ ] Deploy GPU-enabled main app backend.
+- [x] Deploy GPU-enabled main app backend.
 
 ```bash
 scripts/deploy_backend_prod.sh
 ```
 
-- [ ] Deploy CPU-only billing backend.
+- [x] Deploy CPU-only billing backend.
 
 ```bash
 scripts/deploy_billing_backend_prod.sh
 ```
 
-- [ ] Deploy Firebase Functions billing scheduler.
+- [x] Deploy Firebase Functions billing scheduler.
 
 ```bash
 npx -y firebase-tools@latest deploy \
@@ -146,19 +146,19 @@ npx -y firebase-tools@latest deploy \
   --only functions:billing
 ```
 
-- [ ] Deploy app frontend / Firebase Hosting.
+- [x] Deploy app frontend / Firebase Hosting.
 
 ```bash
 scripts/deploy_frontend_prod.sh
 ```
 
-- [ ] Confirm Firebase Hosting rewrite for `/billing/**` points to `sightsinger-billing-api`.
+- [x] Confirm Firebase Hosting rewrite for `/billing/**` points to `sightsinger-billing-api`.
 
 ## 6. Smoke Tests In Maintenance Mode
 
 Run these before opening access to all users.
 
-- [ ] Visit `https://sightsinger.app/` and confirm marketing pages load.
+- [x] Visit `https://sightsinger.app/` and confirm marketing pages load.
 - [ ] Visit `https://app.sightsinger.app/app` as a non-allowed email and confirm maintenance page blocks app access.
 - [ ] Sign in with an allowed email and confirm app access works.
 - [ ] Confirm `/maintenance/status` returns allowed for allowed email.
