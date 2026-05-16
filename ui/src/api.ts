@@ -29,6 +29,7 @@ export type VoicebankOption = {
   voice_type?: string | null;
   default_voice_color?: string | null;
   profile_image?: string | null;
+  selector_image?: string | null;
 };
 
 export type UploadResponse = {

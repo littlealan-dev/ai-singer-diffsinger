@@ -127,13 +127,8 @@ const voiceInitials = (name: string): string => {
   return `${words[0][0] ?? ""}${words[1][0] ?? ""}`.toUpperCase();
 };
 
-const voiceDescriptor = (voice: VoicebankOption): string => {
-  const parts = [voice.voice_type, voice.gender].filter(Boolean);
-  return parts.length ? parts.join(" / ") : "AI voice";
-};
-
 const voiceImageUrl = (voice: VoicebankOption): string | null => {
-  const filename = voice.profile_image?.trim();
+  const filename = (voice.selector_image || voice.profile_image)?.trim();
   if (!filename || filename.includes("/") || filename.includes("\\")) return null;
   return `/voicebanks/${encodeURIComponent(filename)}`;
 };
@@ -1360,7 +1355,6 @@ export default function MainApp() {
                           {renderVoiceAvatar(voice, "voice-picker-option-avatar")}
                           <span className="voice-picker-option-copy">
                             <span className="voice-picker-option-name">{voice.name}</span>
-                            <span className="voice-picker-option-meta">{voiceDescriptor(voice)}</span>
                           </span>
                           {isSelected ? <Check size={14} aria-hidden="true" /> : null}
                         </button>

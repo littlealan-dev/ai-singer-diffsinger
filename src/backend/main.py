@@ -351,6 +351,7 @@ def create_app() -> FastAPI:
                     "voice_type": entry.get("voice_type"),
                     "default_voice_color": entry.get("default_voice_color"),
                     "profile_image": entry.get("profile_image"),
+                    "selector_image": entry.get("selector_image"),
                 }
             )
         return {"voicebanks": voicebanks}
