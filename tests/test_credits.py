@@ -14,6 +14,12 @@ from src.backend.credits import (
     settle_credits,
     settle_credits_and_complete_job,
 )
+from src.backend.feedback import (
+    FeedbackError,
+    mark_feedback_prompted,
+    normalize_feedback_comment,
+    submit_audio_feedback,
+)
 from src.backend.firebase_app import get_firestore_client
 
 os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:8080"
@@ -23,7 +29,14 @@ os.environ["GCLOUD_PROJECT"] = "demo-project"
 @pytest.fixture(autouse=True)
 def cleanup_firestore():
     db = get_firestore_client()
-    for collection in ["users", "credit_reservations", "credit_ledger", "jobs", "stripe_events"]:
+    for collection in [
+        "users",
+        "credit_reservations",
+        "credit_ledger",
+        "jobs",
+        "stripe_events",
+        "audio_feedback",
+    ]:
         for doc in db.collection(collection).list_documents():
             doc.delete()
     yield
@@ -264,3 +277,154 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     )
 
     assert retry_result.status == "already_completed_and_settled"
+
+
+def test_first_completed_job_marks_feedback_candidate(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_PROMPT_MIN_SUCCESSFUL_GENERATIONS", "5")
+    monkeypatch.setenv("FEEDBACK_PROMPT_COOLDOWN_DAYS", "5")
+    uid = "feedback-first-user"
+    email = "feedback-first@example.com"
+    session_id = "session-feedback-first"
+    job_id = "feedback-first-job"
+    db = get_firestore_client()
+
+    get_or_create_credits(uid, email)
+    reserve_credits(uid, job_id, 1, session_id=session_id)
+    db.collection("jobs").document(job_id).set(
+        {
+            "userId": uid,
+            "sessionId": session_id,
+            "status": "queued",
+        }
+    )
+    result = settle_credits_and_complete_job(
+        uid,
+        job_id,
+        session_id,
+        1.0,
+        output_path="sessions/test/first.mp3",
+        audio_url=f"/sessions/{session_id}/audio?file=first.mp3",
+    )
+
+    assert result.status == "completed_and_settled"
+    job = db.collection("jobs").document(job_id).get().to_dict() or {}
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert job["feedback"]["promptCandidate"] is True
+    assert job["feedback"]["prompted"] is False
+    assert user["feedback"]["successfulGenerationsSinceLastPrompt"] == 1
+    assert "lastPromptAt" not in user["feedback"]
+
+
+def test_completed_job_marks_feedback_candidate_after_configured_generation_count(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_PROMPT_MIN_SUCCESSFUL_GENERATIONS", "2")
+    monkeypatch.setenv("FEEDBACK_PROMPT_COOLDOWN_DAYS", "5")
+    uid = "feedback-candidate-user"
+    email = "feedback-candidate@example.com"
+    session_id = "session-feedback"
+    db = get_firestore_client()
+
+    get_or_create_credits(uid, email)
+    db.collection("users").document(uid).set(
+        {
+            "feedback": {
+                "lastPromptAt": datetime.now(timezone.utc) - timedelta(days=6),
+                "successfulGenerationsSinceLastPrompt": 0,
+            }
+        },
+        merge=True,
+    )
+    for index in range(2):
+        job_id = f"feedback-job-{index}"
+        reserve_credits(uid, job_id, 1, session_id=session_id)
+        db.collection("jobs").document(job_id).set(
+            {
+                "userId": uid,
+                "sessionId": session_id,
+                "status": "queued",
+            }
+        )
+        result = settle_credits_and_complete_job(
+            uid,
+            job_id,
+            session_id,
+            1.0,
+            output_path=f"sessions/test/{job_id}.mp3",
+            audio_url=f"/sessions/{session_id}/audio?file={job_id}.mp3",
+        )
+        assert result.status == "completed_and_settled"
+
+    first_job = db.collection("jobs").document("feedback-job-0").get().to_dict() or {}
+    second_job = db.collection("jobs").document("feedback-job-1").get().to_dict() or {}
+    user = db.collection("users").document(uid).get().to_dict() or {}
+
+    assert "feedback" not in first_job
+    assert second_job["feedback"]["promptCandidate"] is True
+    assert second_job["feedback"]["prompted"] is False
+    assert user["feedback"]["successfulGenerationsSinceLastPrompt"] == 2
+
+
+def test_mark_feedback_prompted_consumes_prompt_and_submit_is_idempotent(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_PROMPT_MIN_SUCCESSFUL_GENERATIONS", "1")
+    uid = "feedback-submit-user"
+    email = "feedback-submit@example.com"
+    session_id = "session-submit"
+    job_id = "feedback-submit-job"
+    db = get_firestore_client()
+
+    get_or_create_credits(uid, email)
+    reserve_credits(uid, job_id, 1, session_id=session_id)
+    db.collection("jobs").document(job_id).set(
+        {
+            "userId": uid,
+            "sessionId": session_id,
+            "status": "queued",
+        }
+    )
+    settle_credits_and_complete_job(
+        uid,
+        job_id,
+        session_id,
+        1.0,
+        output_path="sessions/test/submit.mp3",
+        audio_url=f"/sessions/{session_id}/audio?file=submit.mp3",
+    )
+
+    prompted = mark_feedback_prompted(uid=uid, job_id=job_id, trigger="audio_played")
+    assert prompted["status"] == "prompted"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["feedback"]["successfulGenerationsSinceLastPrompt"] == 0
+    assert user["feedback"]["lastPromptJobId"] == job_id
+
+    ratings = {
+        "voiceQuality": 4,
+        "pronunciation": 3,
+        "timingRhythm": 5,
+        "lyricsAlignment": 4,
+        "partSplittingAccuracy": 2,
+    }
+    submitted = submit_audio_feedback(
+        uid=uid,
+        job_id=job_id,
+        ratings=ratings,
+        comment="Good timing.",
+    )
+    retry = submit_audio_feedback(
+        uid=uid,
+        job_id=job_id,
+        ratings=ratings,
+        comment="Different text ignored by idempotency.",
+    )
+
+    assert submitted == {"status": "submitted", "feedbackId": job_id}
+    assert retry == submitted
+    feedback = db.collection("audio_feedback").document(job_id).get().to_dict() or {}
+    job = db.collection("jobs").document(job_id).get().to_dict() or {}
+    assert feedback["ratings"] == ratings
+    assert feedback["comment"] == "Good timing."
+    assert job["feedback"]["submitted"] is True
+    assert job["feedback"]["feedbackId"] == job_id
+
+
+def test_feedback_comment_validation_rejects_control_characters():
+    with pytest.raises(FeedbackError):
+        normalize_feedback_comment("safe\x00unsafe")

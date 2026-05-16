@@ -110,6 +110,8 @@ class Settings:
     gemini_prompt_cache_enabled: bool
     gemini_prompt_cache_ttl_days: int
     gemini_prompt_cache_delete_stale: bool
+    feedback_prompt_cooldown_days: int
+    feedback_prompt_min_successful_generations: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -226,6 +228,14 @@ class Settings:
             "GEMINI_PROMPT_CACHE_DELETE_STALE",
             True,
         )
+        feedback_prompt_cooldown_days = max(
+            0,
+            _env_int("FEEDBACK_PROMPT_COOLDOWN_DAYS", 5),
+        )
+        feedback_prompt_min_successful_generations = max(
+            1,
+            _env_int("FEEDBACK_PROMPT_MIN_SUCCESSFUL_GENERATIONS", 5),
+        )
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -287,4 +297,6 @@ class Settings:
             gemini_prompt_cache_enabled=gemini_prompt_cache_enabled,
             gemini_prompt_cache_ttl_days=gemini_prompt_cache_ttl_days,
             gemini_prompt_cache_delete_stale=gemini_prompt_cache_delete_stale,
+            feedback_prompt_cooldown_days=feedback_prompt_cooldown_days,
+            feedback_prompt_min_successful_generations=feedback_prompt_min_successful_generations,
         )

@@ -10,6 +10,7 @@ import math
 
 from google.cloud import firestore
 from src.backend.firebase_app import get_firestore_client
+from src.backend.config import Settings
 from src.backend.billing_migration import FREE_TIER_MONTHLY_ALLOWANCE, ensure_billing_state_for_login
 from src.backend.message_catalog import backend_message
 from src.mcp.logging_utils import get_logger
@@ -23,6 +24,42 @@ FREE_TIER_CREDIT_AMOUNT = FREE_TIER_MONTHLY_ALLOWANCE
 TRIAL_CREDIT_AMOUNT = FREE_TIER_CREDIT_AMOUNT
 TRIAL_EXPIRY_DAYS = 30
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60
+
+
+def _days_since(now: datetime, previous: Any) -> int:
+    """Return whole days since a stored datetime-like value, or a large number if absent."""
+    if not isinstance(previous, datetime):
+        return 999999
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    return (now - previous).days
+
+
+def _feedback_candidate_update(
+    *,
+    now: datetime,
+    user_data: Dict[str, Any],
+    cooldown_days: int,
+    min_successful_generations: int,
+) -> tuple[dict[str, Any], bool]:
+    """Return user feedback counter updates and whether the completed job is a prompt candidate."""
+    feedback = user_data.get("feedback") if isinstance(user_data.get("feedback"), dict) else {}
+    successful_generations = int(feedback.get("successfulGenerationsSinceLastPrompt", 0) or 0) + 1
+    last_prompt_at = feedback.get("lastPromptAt")
+    last_submitted_at = feedback.get("lastSubmittedAt")
+    has_prior_prompt_cycle = isinstance(last_prompt_at, datetime) or isinstance(
+        last_submitted_at,
+        datetime,
+    )
+    required_generations = min_successful_generations if has_prior_prompt_cycle else 1
+    is_candidate = False
+    if successful_generations >= required_generations:
+        days_since_prompt = _days_since(now, last_prompt_at)
+        days_since_submit = _days_since(now, last_submitted_at)
+        is_candidate = days_since_prompt >= cooldown_days and days_since_submit >= cooldown_days
+    return {
+        "feedback.successfulGenerationsSinceLastPrompt": successful_generations,
+    }, is_candidate
 
 @dataclass(frozen=True)
 class UserCredits:
@@ -439,6 +476,7 @@ def settle_credits_and_complete_job(
     res_ref = db.collection("credit_reservations").document(job_id)
     job_ref = db.collection("jobs").document(job_id)
     actual_credits = estimate_credits(actual_duration_seconds)
+    settings = Settings.from_env()
 
     @firestore.transactional
     def _transactional_complete_and_settle(transaction):
@@ -518,6 +556,12 @@ def settle_credits_and_complete_job(
         new_reserved = max(0, reserved - estimated_credits)
         overdrafted = new_balance < 0
         now = datetime.now(timezone.utc)
+        feedback_user_update, feedback_prompt_candidate = _feedback_candidate_update(
+            now=now,
+            user_data=user_data,
+            cooldown_days=settings.feedback_prompt_cooldown_days,
+            min_successful_generations=settings.feedback_prompt_min_successful_generations,
+        )
 
         transaction.update(
             user_ref,
@@ -525,6 +569,7 @@ def settle_credits_and_complete_job(
                 "credits.balance": new_balance,
                 "credits.reserved": new_reserved,
                 "credits.overdrafted": overdrafted,
+                **feedback_user_update,
             },
         )
         transaction.update(
@@ -561,6 +606,12 @@ def settle_credits_and_complete_job(
             job_payload["outputPath"] = output_path
         if audio_url:
             job_payload["audioUrl"] = audio_url
+        if feedback_prompt_candidate:
+            job_payload["feedback"] = {
+                "promptCandidate": True,
+                "prompted": False,
+                "submitted": False,
+            }
         transaction.set(job_ref, job_payload, merge=True)
 
         return CompleteJobAndSettleCreditsResult(

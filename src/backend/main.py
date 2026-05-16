@@ -87,6 +87,18 @@ class MaintenanceStatusResponse(BaseModel):
     message: str | None = None
 
 
+class FeedbackPromptedRequest(BaseModel):
+    jobId: str
+    trigger: str = "unknown"
+
+
+class FeedbackSubmitRequest(BaseModel):
+    jobId: str
+    ratings: dict[str, Any]
+    comment: Any = ""
+    client: dict[str, Any] | None = None
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     configure_logging()
@@ -443,6 +455,46 @@ def create_app() -> FastAPI:
             user_id=user_id,
             resource_path=data.get("outputPath") if isinstance(data.get("outputPath"), str) else None,
         )
+
+    @app.post("/feedback/prompted")
+    async def mark_audio_feedback_prompted(
+        request: Request,
+        payload: FeedbackPromptedRequest,
+    ) -> Dict[str, str]:
+        """Record that a feedback prompt was displayed for a completed audio job."""
+        user_id = await _get_user_id_or_401(request)
+        from src.backend.feedback import FeedbackError, mark_feedback_prompted
+
+        try:
+            return await asyncio.to_thread(
+                mark_feedback_prompted,
+                uid=user_id,
+                job_id=payload.jobId,
+                trigger=payload.trigger,
+            )
+        except FeedbackError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.post("/feedback")
+    async def submit_audio_feedback(
+        request: Request,
+        payload: FeedbackSubmitRequest,
+    ) -> Dict[str, str]:
+        """Submit one idempotent feedback form for a completed audio job."""
+        user_id = await _get_user_id_or_401(request)
+        from src.backend.feedback import FeedbackError, submit_audio_feedback as persist_audio_feedback
+
+        try:
+            return await asyncio.to_thread(
+                persist_audio_feedback,
+                uid=user_id,
+                job_id=payload.jobId,
+                ratings=payload.ratings,
+                comment=payload.comment,
+                client=payload.client,
+            )
+        except FeedbackError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.get("/credits")
     async def get_credits(request: Request) -> Dict[str, Any]:

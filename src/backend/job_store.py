@@ -105,6 +105,7 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "review_required": data.get("reviewRequired"),
         "action_required": data.get("actionRequired"),
         "details": data.get("details"),
+        "feedback": data.get("feedback"),
         "updated_at": data.get("updatedAt"),
     }
     if raw_status == "credit_reconciliation_required":

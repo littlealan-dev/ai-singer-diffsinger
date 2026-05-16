@@ -79,6 +79,27 @@ export type ProgressResponse = {
   error?: string;
   details?: unknown;
   warning?: string;
+  feedback?: FeedbackPromptState;
+};
+
+export type FeedbackPromptState = {
+  promptCandidate?: boolean;
+  prompted?: boolean;
+  submitted?: boolean;
+  feedbackId?: string;
+};
+
+export type FeedbackRatingsRequest = {
+  voiceQuality: number;
+  pronunciation: number;
+  timingRhythm: number;
+  lyricsAlignment: number;
+  partSplittingAccuracy: number;
+};
+
+export type FeedbackSubmitResponse = {
+  status: string;
+  feedbackId: string;
 };
 
 export type WaitlistSubscribeRequest = {
@@ -303,4 +324,32 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
     payload.audio_url = withApiBase(payload.audio_url);
   }
   return payload;
+}
+
+export async function markFeedbackPrompted(
+  jobId: string,
+  trigger: "audio_played" | "audio_downloaded"
+): Promise<{ status: string }> {
+  return request("/feedback/prompted", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobId, trigger }),
+  });
+}
+
+export async function submitAudioFeedback(payload: {
+  jobId: string;
+  ratings: FeedbackRatingsRequest;
+  comment: string;
+}): Promise<FeedbackSubmitResponse> {
+  return request("/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...payload,
+      client: {
+        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      },
+    }),
+  });
 }

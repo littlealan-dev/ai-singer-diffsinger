@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
@@ -11,8 +11,12 @@ import {
   fetchScoreXml,
   fetchProgress,
   fetchVoicebanks,
+  markFeedbackPrompted,
+  submitAudioFeedback,
   uploadScore,
   type ChatSelection,
+  type FeedbackPromptState,
+  type FeedbackRatingsRequest,
   type ProgressResponse,
   type ScoreSummary,
   type VoicebankOption,
@@ -58,6 +62,8 @@ type Message = {
   progressUrl?: string;
   isProgress?: boolean;
   progressValue?: number;
+  jobId?: string;
+  feedback?: FeedbackPromptState;
 };
 
 type AttemptMessage = {
@@ -78,6 +84,25 @@ type PartOption = {
   part_name?: string;
   part_index: number;
   has_lyrics?: boolean;
+};
+
+const FEEDBACK_ASPECTS = [
+  "Pronunciation",
+  "Timing/rhythm",
+  "Part splitting accuracy",
+  "Lyrics alignment",
+  "Voice quality",
+] as const;
+
+type FeedbackAspect = (typeof FEEDBACK_ASPECTS)[number];
+type FeedbackRatings = Record<FeedbackAspect, number>;
+
+const DEFAULT_FEEDBACK_RATINGS: FeedbackRatings = {
+  "Voice quality": 3,
+  Pronunciation: 3,
+  "Timing/rhythm": 3,
+  "Lyrics alignment": 3,
+  "Part splitting accuracy": 3,
 };
 
 const buildPartOptions = (summary: ScoreSummary | null): PartOption[] => {
@@ -133,6 +158,214 @@ const voiceImageUrl = (voice: VoicebankOption): string | null => {
   return `/voicebanks/${encodeURIComponent(filename)}`;
 };
 
+function FeedbackPrototypeBubble({
+  minimized,
+  onClose,
+  onReopen,
+  onSubmit,
+}: {
+  minimized: boolean;
+  onClose: () => void;
+  onReopen: () => void;
+  onSubmit: (payload: { ratings: FeedbackRatings; feedback: string }) => void;
+}) {
+  const [ratings, setRatings] = useState<FeedbackRatings>(DEFAULT_FEEDBACK_RATINGS);
+  const [feedback, setFeedback] = useState("");
+
+  const chartCenter = { x: 180, y: 145 };
+  const chartRadius = 88;
+  const chartWidth = 360;
+  const chartHeight = 285;
+  const chartAspectCount = FEEDBACK_ASPECTS.length;
+  const labelLines: Record<FeedbackAspect, string[]> = {
+    "Voice quality": ["Voice", "quality"],
+    Pronunciation: ["Pronunciation"],
+    "Timing/rhythm": ["Timing", "/ rhythm"],
+    "Lyrics alignment": ["Lyrics", "alignment"],
+    "Part splitting accuracy": ["Part splitting", "accuracy"],
+  };
+
+  const aspectPoint = (index: number, radius: number) => {
+    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / chartAspectCount;
+    return {
+      angle,
+      x: chartCenter.x + Math.cos(angle) * radius,
+      y: chartCenter.y + Math.sin(angle) * radius,
+    };
+  };
+
+  const chartPoints = (values: number[]) =>
+    values
+      .map((value, index) => {
+        const { x, y } = aspectPoint(index, chartRadius * (value / 5));
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+
+  const guidePoints = (level: number) => chartPoints(FEEDBACK_ASPECTS.map(() => level));
+  const ratingValues = FEEDBACK_ASPECTS.map((aspect) => ratings[aspect]);
+
+  const handleChartClick = (event: MouseEvent<SVGSVGElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / bounds.width) * chartWidth;
+    const y = ((event.clientY - bounds.top) / bounds.height) * chartHeight;
+    const dx = x - chartCenter.x;
+    const dy = y - chartCenter.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const rawAngle = Math.atan2(dy, dx);
+    let closestIndex = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
+
+    FEEDBACK_ASPECTS.forEach((_, index) => {
+      const { angle } = aspectPoint(index, chartRadius);
+      const delta = Math.abs(Math.atan2(Math.sin(rawAngle - angle), Math.cos(rawAngle - angle)));
+      if (delta < closestDistance) {
+        closestDistance = delta;
+        closestIndex = index;
+      }
+    });
+
+    const value = Math.max(1, Math.min(5, Math.ceil((distance / chartRadius) * 5)));
+    const aspect = FEEDBACK_ASPECTS[closestIndex];
+    setRatings((prev) => ({ ...prev, [aspect]: value }));
+  };
+
+  if (minimized) {
+    return (
+      <div className="chat-bubble assistant feedback-minimized-bubble reveal">
+        <span>Feedback form minimized</span>
+        <button type="button" className="feedback-reopen-button" onClick={onReopen}>
+          Rate this take
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chat-bubble assistant feedback-prototype-bubble reveal">
+      <form
+        className="feedback-prototype-form"
+        aria-labelledby="feedback-prototype-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit({ ratings, feedback });
+        }}
+      >
+        <button
+          type="button"
+          className="feedback-prototype-close"
+          aria-label="Close feedback"
+          onClick={onClose}
+        >
+          <X size={18} aria-hidden="true" />
+        </button>
+        <header className="feedback-prototype-header">
+          <h3 id="feedback-prototype-title">How was the singing?</h3>
+          <p>Quick feedback helps improve future audio generation.</p>
+        </header>
+
+        <div className="feedback-prototype-body">
+          <div className="feedback-radar">
+            <svg
+              viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+              role="img"
+              aria-label="Click the pentagon chart to rate each aspect from 1 to 5."
+              onClick={handleChartClick}
+            >
+              {[1, 2, 3, 4, 5].map((level) => (
+                <polygon
+                  key={level}
+                  points={guidePoints(level)}
+                  className="feedback-radar-guide"
+                />
+              ))}
+              {FEEDBACK_ASPECTS.map((aspect, index) => {
+                const labelPoint = aspectPoint(index, 125);
+                const axisPoint = aspectPoint(index, chartRadius);
+                const lines = labelLines[aspect];
+                return (
+                  <g key={aspect}>
+                    <line
+                      x1={chartCenter.x}
+                      y1={chartCenter.y}
+                      x2={axisPoint.x.toFixed(1)}
+                      y2={axisPoint.y.toFixed(1)}
+                      className="feedback-radar-axis"
+                    />
+                    <text
+                      x={labelPoint.x.toFixed(1)}
+                      y={labelPoint.y.toFixed(1)}
+                      textAnchor={
+                        labelPoint.x < chartCenter.x - 8
+                          ? "end"
+                          : labelPoint.x > chartCenter.x + 8
+                            ? "start"
+                            : "middle"
+                      }
+                      dominantBaseline="middle"
+                      className="feedback-radar-label"
+                    >
+                      {lines.map((line, lineIndex) => (
+                        <tspan
+                          key={line}
+                          x={labelPoint.x.toFixed(1)}
+                          dy={lineIndex === 0 ? `${-(lines.length - 1) * 0.55}em` : "1.1em"}
+                        >
+                          {line}
+                        </tspan>
+                      ))}
+                      <tspan
+                        x={labelPoint.x.toFixed(1)}
+                        dy="1.25em"
+                        className="feedback-radar-label-value"
+                      >
+                        {ratings[aspect]}
+                      </tspan>
+                    </text>
+                  </g>
+                );
+              })}
+              <polygon points={chartPoints(ratingValues)} className="feedback-radar-score" />
+              {ratingValues.map((value, index) => {
+                const { x, y } = aspectPoint(index, chartRadius * (value / 5));
+                return (
+                  <circle
+                    key={`${FEEDBACK_ASPECTS[index]}:${value}`}
+                    cx={x.toFixed(1)}
+                    cy={y.toFixed(1)}
+                    r="5"
+                    className="feedback-radar-point"
+                  />
+                );
+              })}
+            </svg>
+            <p className="feedback-radar-hint">Click closer to the center for 1, outer edge for 5.</p>
+          </div>
+        </div>
+
+        <label className="feedback-text-field">
+          <span>Any other suggestions?</span>
+          <textarea
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+            rows={4}
+            maxLength={4000}
+          />
+        </label>
+
+        <div className="feedback-prototype-actions">
+          <button type="button" className="feedback-secondary-action" onClick={onClose}>
+            Close
+          </button>
+          <button type="submit" className="feedback-primary-action">
+            Submit
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function MainApp() {
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth();
@@ -167,6 +400,7 @@ export default function MainApp() {
   const [dismissedBillingWarningStatus, setDismissedBillingWarningStatus] = useState<string | null>(null);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
+  const [feedbackPrompts, setFeedbackPrompts] = useState<Record<string, "open" | "minimized">>({});
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -179,6 +413,8 @@ export default function MainApp() {
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
   const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
+  const feedbackPromptedMessagesRef = useRef<Set<string>>(new Set());
+  const feedbackPromptConsumedThisSessionRef = useRef(false);
   const pendingCheckoutStartedRef = useRef(false);
   const billingSyncInFlightRef = useRef(false);
   const lastBillingSyncAtRef = useRef(0);
@@ -561,6 +797,8 @@ export default function MainApp() {
             attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
             audioUrl: nextAudioUrl || msg.audioUrl,
+            jobId: payload.job_id ?? msg.jobId,
+            feedback: payload.feedback ?? msg.feedback,
             isProgress: payload.status !== "done" && payload.status !== "error",
           };
         })
@@ -672,7 +910,15 @@ export default function MainApp() {
       if (!nextAudioUrl) return null;
       setMessages((prev) =>
         prev.map((msg) =>
-          msg.id === messageId ? { ...msg, audioUrl: nextAudioUrl, progressUrl } : msg
+          msg.id === messageId
+            ? {
+                ...msg,
+                audioUrl: nextAudioUrl,
+                progressUrl,
+                jobId: payload.job_id ?? msg.jobId,
+                feedback: payload.feedback ?? msg.feedback,
+              }
+            : msg
         )
       );
       setAudioUrl((current) => (current ? nextAudioUrl : current));
@@ -716,6 +962,79 @@ export default function MainApp() {
     }
   };
 
+  const shouldOpenFeedbackPrompt = (message: Message): boolean =>
+    Boolean(
+      message.jobId &&
+      message.feedback?.promptCandidate &&
+      !message.feedback.prompted &&
+        !message.feedback.submitted &&
+        !feedbackPromptConsumedThisSessionRef.current
+    );
+
+  const openFeedbackPrompt = (message: Message, trigger: "audio_played" | "audio_downloaded") => {
+    if (!shouldOpenFeedbackPrompt(message)) return;
+    if (feedbackPromptedMessagesRef.current.has(message.id)) return;
+    const jobId = message.jobId;
+    if (!jobId) return;
+    feedbackPromptConsumedThisSessionRef.current = true;
+    feedbackPromptedMessagesRef.current.add(message.id);
+    setFeedbackPrompts((prev) => ({ ...prev, [message.id]: "open" }));
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === message.id
+          ? { ...msg, feedback: { ...(msg.feedback ?? {}), prompted: true } }
+          : msg
+      )
+    );
+    void markFeedbackPrompted(jobId, trigger).catch((err) => {
+      setError(err instanceof Error ? err.message : "Could not record feedback prompt.");
+    });
+  };
+
+  const toFeedbackRatingsRequest = (ratings: FeedbackRatings): FeedbackRatingsRequest => ({
+    voiceQuality: ratings["Voice quality"],
+    pronunciation: ratings.Pronunciation,
+    timingRhythm: ratings["Timing/rhythm"],
+    lyricsAlignment: ratings["Lyrics alignment"],
+    partSplittingAccuracy: ratings["Part splitting accuracy"],
+  });
+
+  const handleFeedbackSubmit = async (
+    messageId: string,
+    payload: { ratings: FeedbackRatings; feedback: string }
+  ) => {
+    const message = messages.find((item) => item.id === messageId);
+    if (!message?.jobId) {
+      setFeedbackPrompts((prev) => {
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      });
+      return;
+    }
+    try {
+      await submitAudioFeedback({
+        jobId: message.jobId,
+        ratings: toFeedbackRatingsRequest(payload.ratings),
+        comment: payload.feedback,
+      });
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? { ...msg, feedback: { ...(msg.feedback ?? {}), submitted: true } }
+            : msg
+        )
+      );
+      setFeedbackPrompts((prev) => {
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not submit feedback.");
+    }
+  };
+
   const handleAudioDownload = async (
     messageId: string,
     audioUrl?: string,
@@ -736,6 +1055,10 @@ export default function MainApp() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      const message = messages.find((item) => item.id === messageId);
+      if (message) {
+        openFeedbackPrompt(message, "audio_downloaded");
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to refresh audio download.");
     }
@@ -1060,8 +1383,8 @@ export default function MainApp() {
               </div>
             )}
             {messages.map((msg, index) => (
+              <div className="chat-message-group" key={msg.id}>
               <div
-                key={msg.id}
                 className={clsx(
                   "chat-bubble",
                   msg.role,
@@ -1263,6 +1586,9 @@ export default function MainApp() {
                       className="audio-player"
                       controls
                       src={msg.audioUrl}
+                      onPlay={() => {
+                        openFeedbackPrompt(msg, "audio_played");
+                      }}
                       onError={() => {
                         void handleAudioPlaybackError(msg.id, msg.progressUrl);
                       }}
@@ -1280,6 +1606,25 @@ export default function MainApp() {
                     </button>
                   </div>
                 )}
+              </div>
+              {feedbackPrompts[msg.id] && (
+                <FeedbackPrototypeBubble
+                  minimized={feedbackPrompts[msg.id] === "minimized"}
+                  onClose={() =>
+                    setFeedbackPrompts((prev) => {
+                      const next = { ...prev };
+                      delete next[msg.id];
+                      return next;
+                    })
+                  }
+                  onReopen={() =>
+                    setFeedbackPrompts((prev) => ({ ...prev, [msg.id]: "open" }))
+                  }
+                  onSubmit={(payload) => {
+                    void handleFeedbackSubmit(msg.id, payload);
+                  }}
+                />
+              )}
               </div>
             ))}
             {status && (
