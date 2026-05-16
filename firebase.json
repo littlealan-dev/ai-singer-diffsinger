@@ -220,6 +220,20 @@
       }
     },
     {
+      "source": "/feedback",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/feedback/**",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
       "source": "/billing/**",
       "run": {
         "serviceId": "sightsinger-billing-api",
