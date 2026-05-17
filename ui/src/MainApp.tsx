@@ -862,12 +862,6 @@ export default function MainApp() {
     shouldAutoScrollRef.current = distanceFromBottom < 48;
   };
 
-  const headerSubtitle = useMemo(
-    () =>
-      "Zero-shot sight-singing from MusicXML. Tell the singer how to perform.",
-    []
-  );
-
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
 
@@ -1291,11 +1285,13 @@ export default function MainApp() {
     <div className="app-shell">
       <header className="app-header">
         <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
-          <Sparkles className="brand-icon" />
-          <div>
-            <h1>SightSinger.app</h1>
-            <p>{headerSubtitle}</p>
-          </div>
+          <span className="brand-banner-crop" aria-label="SightSinger">
+            <img
+              className="brand-banner"
+              src="/content/images/logo-hackaton-white.png"
+              alt=""
+            />
+          </span>
         </div>
         <div className="header-actions">
           <CreditsHeader
