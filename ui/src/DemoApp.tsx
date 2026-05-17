@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Sparkles, UploadCloud, Minus, Plus, Info, User, ChevronDown } from "lucide-react";
+import { UploadCloud, Minus, Plus, Info, User, ChevronDown } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { useAuth } from "./hooks/useAuth.tsx";
@@ -280,11 +280,13 @@ export default function DemoApp() {
     <div className="app-shell demo-app">
       <header className="app-header">
         <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
-          <Sparkles className="brand-icon" />
-          <div>
-            <h1>SightSinger.app</h1>
-            <p>Interactive Demo</p>
-          </div>
+          <span className="brand-banner-crop" aria-label="SightSinger">
+            <img
+              className="brand-banner"
+              src="/content/images/logo-hackaton-white.png"
+              alt=""
+            />
+          </span>
         </div>
         <div className="header-actions">
           <div className="status-pill">{status}</div>
