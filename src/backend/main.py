@@ -73,6 +73,13 @@ class WaitlistSubscribeRequest(BaseModel):
     source: str
 
 
+class MarketingOptInRequest(BaseModel):
+    """Request payload for authenticated marketing email opt-in."""
+    consent_text: str
+    source: str
+    pending_intent_created_at: str | None = None
+
+
 class BillingCheckoutRequest(BaseModel):
     planKey: str
 
@@ -629,8 +636,54 @@ def create_app() -> FastAPI:
         )
         if not result.success:
             raise HTTPException(status_code=result.status_code, detail=result.message)
+        authenticated_context = await _get_optional_verified_user_context(request)
+        if authenticated_context is not None:
+            user_id, user_email = authenticated_context
+            if user_email.strip().lower() == str(request_body.email).strip().lower():
+                from src.backend.marketing_opt_in import mark_marketing_opt_in_requested
+
+                await asyncio.to_thread(
+                    mark_marketing_opt_in_requested,
+                    uid=user_id,
+                    email=user_email,
+                    source=f"{request_body.source}_authenticated",
+                    consent_text=request_body.consent_text,
+                    brevo_status="doi_requested",
+                )
         return {
             "success": result.success,
+            "message": result.message,
+            "requires_confirmation": result.requires_confirmation,
+        }
+
+    @app.post("/marketing/opt-in")
+    async def marketing_opt_in(
+        request_body: MarketingOptInRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Request marketing email opt-in for an authenticated user."""
+        if not request_body.consent_text.strip():
+            raise HTTPException(status_code=400, detail="Consent text is required.")
+        if not request_body.source.strip():
+            raise HTTPException(status_code=400, detail="Source is required.")
+
+        user_id, user_email = await _get_user_context_or_401(request)
+        if not user_email:
+            raise HTTPException(status_code=400, detail="Authenticated email is required.")
+        from src.backend.marketing_opt_in import request_authenticated_marketing_opt_in
+
+        result = await request_authenticated_marketing_opt_in(
+            request.app.state.settings,
+            uid=user_id,
+            email=user_email,
+            source=request_body.source,
+            consent_text=request_body.consent_text,
+        )
+        if not result.success:
+            raise HTTPException(status_code=result.status_code, detail=result.message)
+        return {
+            "success": result.success,
+            "status": result.status,
             "message": result.message,
             "requires_confirmation": result.requires_confirmation,
         }
@@ -763,6 +816,24 @@ async def _get_verified_user_context_or_401(request: Request) -> tuple[str, str]
         raise
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid Firebase token.") from exc
+
+
+async def _get_optional_verified_user_context(request: Request) -> tuple[str, str] | None:
+    """Return verified user context when an Authorization header is present."""
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        return None
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    try:
+        claims = await asyncio.to_thread(verify_id_token_claims, parts[1])
+        user_id = str(claims["uid"])
+        user_email = str(claims.get("email") or "")
+        return user_id, user_email
+    except Exception:
+        logger.warning("optional_auth_token_invalid")
+        return None
 
 
 async def _require_not_under_maintenance(request: Request, user_id: str, user_email: str) -> None:

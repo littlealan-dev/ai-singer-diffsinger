@@ -14,8 +14,8 @@ export function WaitlistModal({
   isOpen,
   onClose,
   source,
-  title = "Join the Waiting List",
-  subtitle = "Be the first to know when paid plans launch.",
+  title = "Get SightSinger Updates",
+  subtitle = "Receive product updates, feature news, and occasional announcements.",
 }: WaitlistModalProps) {
   if (!isOpen) return null;
   return (

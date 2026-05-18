@@ -9,11 +9,13 @@ import LegalTerms from "./LegalTerms";
 import LegalPrivacy from "./LegalPrivacy";
 import CookieBanner from "./components/CookieBanner";
 import MaintenancePage from "./MaintenancePage";
+import { MarketingOptInProcessor } from "./components/MarketingOptInProcessor";
 
 export default function App() {
   return (
     <BrowserRouter>
       <CookieBanner />
+      <MarketingOptInProcessor />
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route

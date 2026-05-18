@@ -117,6 +117,19 @@ export type WaitlistSubscribeResponse = {
   requires_confirmation: boolean;
 };
 
+export type MarketingOptInRequest = {
+  source: string;
+  consent_text: string;
+  pending_intent_created_at?: string;
+};
+
+export type MarketingOptInResponse = {
+  success: boolean;
+  status: string;
+  message: string;
+  requires_confirmation: boolean;
+};
+
 export type BillingCheckoutResponse = {
   url: string;
 };
@@ -235,6 +248,16 @@ export async function subscribeToWaitlist(
   payload: WaitlistSubscribeRequest
 ): Promise<WaitlistSubscribeResponse> {
   return request("/waitlist/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function requestMarketingOptIn(
+  payload: MarketingOptInRequest
+): Promise<MarketingOptInResponse> {
+  return request("/marketing/opt-in", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

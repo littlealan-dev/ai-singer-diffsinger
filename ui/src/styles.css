@@ -468,6 +468,7 @@ body.legal-active #root {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 8px 10px;
   border: none;
   border-radius: 10px;
@@ -477,12 +478,57 @@ body.legal-active #root {
   transition: background 0.2s ease;
 }
 
-.user-menu-item-mobile-only {
-  display: none;
-}
-
 .user-menu-item:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.user-menu-item-highlighted {
+  border: 1px solid rgba(196, 181, 253, 0.72);
+  background:
+    linear-gradient(135deg, rgba(168, 85, 247, 0.34), rgba(59, 130, 246, 0.18)),
+    rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.18);
+}
+
+.user-menu-item-highlighted:hover {
+  background:
+    linear-gradient(135deg, rgba(168, 85, 247, 0.42), rgba(59, 130, 246, 0.24)),
+    rgba(255, 255, 255, 0.1);
+}
+
+.user-menu-guided-item {
+  position: relative;
+}
+
+.user-menu-update-bubble {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 14px);
+  width: 220px;
+  transform: translateY(-50%);
+  padding: 12px 14px;
+  border: 1px solid rgba(196, 181, 253, 0.45);
+  border-radius: 12px;
+  background: rgba(33, 24, 55, 0.98);
+  box-shadow: var(--shadow-strong);
+  color: #f8f5ff;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.user-menu-update-bubble::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -7px;
+  width: 12px;
+  height: 12px;
+  transform: translateY(-50%) rotate(45deg);
+  border-top: 1px solid rgba(196, 181, 253, 0.45);
+  border-right: 1px solid rgba(196, 181, 253, 0.45);
+  background: rgba(33, 24, 55, 0.98);
 }
 
 .icon-button {
@@ -1927,6 +1973,22 @@ img.voice-picker-option-avatar {
     font-size: 0.7rem;
   }
 
+  .user-menu-update-bubble {
+    top: calc(100% + 8px);
+    right: 0;
+    width: min(260px, calc(100vw - 32px));
+    transform: none;
+  }
+
+  .user-menu-update-bubble::after {
+    top: -7px;
+    right: 18px;
+    transform: rotate(45deg);
+    border-top: 1px solid rgba(196, 181, 253, 0.45);
+    border-left: 1px solid rgba(196, 181, 253, 0.45);
+    border-right: 0;
+  }
+
   .demo-app .header-actions .demo-join-button {
     display: none;
   }
@@ -1937,10 +1999,6 @@ img.voice-picker-option-avatar {
 
   .demo-app .header-actions .demo-action-label {
     display: none;
-  }
-
-  .user-menu-item-mobile-only {
-    display: inline-flex;
   }
 
   .demo-app .header-actions .btn-primary-inline {

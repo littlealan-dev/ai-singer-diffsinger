@@ -47,6 +47,10 @@ export default defineConfig({
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
+      "/marketing/opt-in": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
       "/billing": {
         target: "http://127.0.0.1:8001",
         changeOrigin: true,

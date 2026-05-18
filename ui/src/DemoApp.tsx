@@ -296,7 +296,7 @@ export default function DemoApp() {
                 className="btn-primary-inline demo-join-button"
                 onClick={() => handleJoinWaitlist("demo_menu")}
               >
-                Join Waiting List
+                Get Updates
               </button>
               <UserMenu onJoinWaitlist={() => handleJoinWaitlist("demo_menu")} />
             </>
@@ -335,7 +335,7 @@ export default function DemoApp() {
                       handleJoinWaitlist("demo_menu");
                     }}
                   >
-                    Join Waiting List
+                    Get Updates
                   </button>
                 </div>
               )}

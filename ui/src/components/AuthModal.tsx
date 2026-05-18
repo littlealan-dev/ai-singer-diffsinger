@@ -4,6 +4,11 @@ import {
     signInWithGoogleRedirect,
     sendMagicLink,
 } from "../firebase";
+import {
+    MARKETING_AUTH_CONSENT_TEXT,
+    clearPendingMarketingOptIn,
+    storePendingMarketingOptIn,
+} from "../marketingOptIn";
 import "./AuthModal.css";
 
 export interface AuthModalProps {
@@ -28,6 +33,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
     const [email, setEmail] = useState("");
     const [error, setError] = useState<string | null>(null);
     const [sentEmail, setSentEmail] = useState<string | null>(null);
+    const [marketingOptIn, setMarketingOptIn] = useState(false);
     const autoGoogleStarted = useRef(false);
 
     useEffect(() => {
@@ -49,8 +55,18 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         autoGoogleStarted.current = true;
         setState("signingInGoogle");
         setError(null);
+        const localBridgeMarketingOptIn =
+            import.meta.env.VITE_APP_ENV === "dev" && params.get("marketingOptIn") === "1";
+        if (marketingOptIn || localBridgeMarketingOptIn) {
+            storePendingMarketingOptIn({
+                marketingOptIn: true,
+                source: "auth_modal_google",
+                createdAt: Date.now(),
+            });
+        }
         signInWithGoogleRedirect(returnUrl).catch((err) => {
             autoGoogleStarted.current = false;
+            clearPendingMarketingOptIn();
             setState("error");
             setError(err instanceof Error ? err.message : "Google sign-in failed");
         });
@@ -62,9 +78,19 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setState("signingInGoogle");
         setError(null);
         try {
+            if (marketingOptIn) {
+                storePendingMarketingOptIn({
+                    marketingOptIn: true,
+                    source: "auth_modal_google",
+                    createdAt: Date.now(),
+                });
+            } else {
+                clearPendingMarketingOptIn();
+            }
             await signInWithGoogleRedirect(redirectPath);
             // Page will redirect to Google, so we don't need to do anything else
         } catch (err) {
+            clearPendingMarketingOptIn();
             setState("error");
             setError(err instanceof Error ? err.message : "Google sign-in failed");
         }
@@ -77,10 +103,21 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setState("sendingEmail");
         setError(null);
         try {
+            if (marketingOptIn) {
+                storePendingMarketingOptIn({
+                    marketingOptIn: true,
+                    source: "auth_modal_magic_link",
+                    email: email.trim(),
+                    createdAt: Date.now(),
+                });
+            } else {
+                clearPendingMarketingOptIn();
+            }
             await sendMagicLink(email.trim(), redirectPath);
             setSentEmail(email.trim());
             setState("emailSent");
         } catch (err) {
+            clearPendingMarketingOptIn();
             setState("error");
             setError(err instanceof Error ? err.message : "Failed to send magic link");
         }
@@ -103,6 +140,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setEmail("");
         setError(null);
         setSentEmail(null);
+        setMarketingOptIn(false);
         onClose();
     };
 
@@ -154,7 +192,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                         About 4 minutes of audio, no time limit
                     </p>
                     <p className="auth-modal-subtitle auth-modal-note">
-                        No password required. No marketing spam.
+                        No password required.
                     </p>
                     {error && (
                         <div className="auth-modal-error" role="alert">
@@ -217,6 +255,16 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                             )}
                         </button>
                     </form>
+
+                    <label className="auth-marketing-consent">
+                        <input
+                            type="checkbox"
+                            checked={marketingOptIn}
+                            onChange={(event) => setMarketingOptIn(event.target.checked)}
+                            disabled={state === "signingInGoogle" || state === "sendingEmail"}
+                        />
+                        <span>{MARKETING_AUTH_CONSENT_TEXT}</span>
+                    </label>
 
                     <p className="auth-modal-terms">
                         By continuing, you agree to our{" "}

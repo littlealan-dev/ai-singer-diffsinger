@@ -13,7 +13,7 @@ export type WaitlistSource =
   | "trial_expired";
 
 const CONSENT_TEXT =
-  "I agree to receive product updates, marketing emails, and announcements about SightSinger.app paid plans. I can unsubscribe at any time.";
+  "I agree to receive product updates, marketing emails, and announcements about SightSinger. I can unsubscribe at any time.";
 
 interface WaitingListFormProps {
   source: WaitlistSource;
@@ -132,7 +132,7 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
       </p>
       {message && <div className={`waitlist-message ${status}`}>{message}</div>}
       <button type="submit" disabled={status === "loading"}>
-        {status === "loading" ? "Joining..." : "Join Waiting List"}
+        {status === "loading" ? "Submitting..." : "Get Updates"}
       </button>
     </form>
   );

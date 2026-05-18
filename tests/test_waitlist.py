@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.backend.config import Settings
 from src.backend.main import create_app
+from src.backend.marketing_opt_in import MarketingOptInResult
 from src.backend.waitlist import WaitlistResult, subscribe_to_waitlist
 
 
@@ -149,6 +150,55 @@ def test_waitlist_dependency_failure_maps_to_503(monkeypatch):
         )
         assert response.status_code == 503
         assert "temporarily unavailable" in response.json()["detail"]
+
+
+def test_marketing_opt_in_requires_auth(monkeypatch):
+    app = _prepare_app(monkeypatch, {"BACKEND_REQUIRE_APP_CHECK": "false"})
+    with TestClient(app) as client:
+        response = client.post(
+            "/marketing/opt-in",
+            json={
+                "consent_text": "Send me updates.",
+                "source": "auth_modal_google",
+            },
+        )
+        assert response.status_code == 401
+
+
+def test_marketing_opt_in_success(monkeypatch):
+    app = _prepare_app(monkeypatch, {"BACKEND_REQUIRE_APP_CHECK": "false"})
+    monkeypatch.setattr(
+        "src.backend.main.verify_id_token_claims",
+        lambda token: {"uid": "user-1", "email": "user@example.com"},
+    )
+
+    async def _fake_opt_in(settings, *, uid, email, source, consent_text):
+        assert uid == "user-1"
+        assert email == "user@example.com"
+        assert source == "auth_modal_google"
+        assert consent_text == "Send me updates."
+        return MarketingOptInResult(
+            success=True,
+            status="doi_requested",
+            message="Check your inbox.",
+            requires_confirmation=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.marketing_opt_in.request_authenticated_marketing_opt_in",
+        _fake_opt_in,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/marketing/opt-in",
+            headers={"Authorization": "Bearer token"},
+            json={
+                "consent_text": "Send me updates.",
+                "source": "auth_modal_google",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "doi_requested"
 
 
 def test_subscribe_to_waitlist_retries_timeout_then_succeeds(monkeypatch):

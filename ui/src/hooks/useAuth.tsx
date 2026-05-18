@@ -7,6 +7,7 @@ import {
     isMagicLinkSignIn,
     getStoredEmailForSignIn,
 } from "../firebase";
+import { storePendingMarketingOptIn } from "../marketingOptIn";
 
 export interface AuthState {
     user: User | null;
@@ -60,6 +61,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     const magicLinkUser = await completeMagicLinkSignIn();
                     if (magicLinkUser && mounted) {
                         console.log("[useAuth] Magic Link sign-in complete:", magicLinkUser.email);
+                        if (
+                            import.meta.env.VITE_APP_ENV === "dev" &&
+                            hasMarketingOptInQueryParam() &&
+                            magicLinkUser.email
+                        ) {
+                            storePendingMarketingOptIn({
+                                marketingOptIn: true,
+                                source: "auth_modal_magic_link",
+                                email: magicLinkUser.email,
+                                createdAt: Date.now(),
+                            });
+                            removeMarketingOptInQueryParam();
+                        }
                         setUser(magicLinkUser);
                         // Check if this is a new user (metadata.creationTime === metadata.lastSignInTime)
                         const creationTime = magicLinkUser.metadata.creationTime;
@@ -132,6 +146,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     return <AuthContext.Provider value={ value }> { children } </AuthContext.Provider>;
+}
+
+function hasMarketingOptInQueryParam(): boolean {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("marketingOptIn") === "1";
+}
+
+function removeMarketingOptInQueryParam(): void {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("marketingOptIn");
+    window.history.replaceState({}, "", url.toString());
 }
 
 /**
