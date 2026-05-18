@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bell, ChevronDown, CreditCard, LogOut } from "lucide-react";
+import { doc, onSnapshot } from "firebase/firestore";
 import { useAuth } from "../hooks/useAuth.tsx";
-import { logOut } from "../firebase";
+import { db, logOut } from "../firebase";
 import { formatPlanBadge, type BillingPlanKey } from "../billing/plans";
 
 const getInitials = (name: string) => {
@@ -67,6 +68,8 @@ export function UserMenu({
   const { user, isAuthenticated } = useAuth();
   const [open, setOpen] = useState(false);
   const [showGetUpdatesPrompt, setShowGetUpdatesPrompt] = useState(false);
+  const [marketingOptInRequested, setMarketingOptInRequested] = useState<boolean | null>(null);
+  const [marketingStateLoading, setMarketingStateLoading] = useState(true);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const promptedUserRef = useRef<string | null>(null);
 
@@ -106,7 +109,43 @@ export function UserMenu({
   }, [open]);
 
   useEffect(() => {
+    if (!isAuthenticated || !userUid) {
+      setMarketingOptInRequested(null);
+      setMarketingStateLoading(false);
+      promptedUserRef.current = null;
+      setShowGetUpdatesPrompt(false);
+      return;
+    }
+
+    setMarketingStateLoading(true);
+    const unsubscribe = onSnapshot(
+      doc(db, "users", userUid),
+      (snapshot) => {
+        const data = snapshot.exists() ? snapshot.data() : {};
+        const marketing = data.marketing && typeof data.marketing === "object" ? data.marketing : {};
+        setMarketingOptInRequested(
+          typeof marketing.emailOptInRequested === "boolean"
+            ? marketing.emailOptInRequested
+            : null
+        );
+        setMarketingStateLoading(false);
+      },
+      (error) => {
+        console.error("Error listening to marketing opt-in state for user menu:", error);
+        setMarketingOptInRequested(null);
+        setMarketingStateLoading(false);
+      }
+    );
+    return () => unsubscribe();
+  }, [isAuthenticated, userUid]);
+
+  useEffect(() => {
     if (!isAuthenticated || !userUid || !hasJoinWaitlist) return;
+    if (marketingStateLoading) return;
+    if (marketingOptInRequested === true) {
+      setShowGetUpdatesPrompt(false);
+      return;
+    }
     if (promptedUserRef.current === userUid) return;
     promptedUserRef.current = userUid;
     if (!shouldShowGetUpdatesPrompt(userUid)) return;
@@ -117,7 +156,13 @@ export function UserMenu({
       recordGetUpdatesPromptShown(userUid);
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [hasJoinWaitlist, isAuthenticated, userUid]);
+  }, [
+    hasJoinWaitlist,
+    isAuthenticated,
+    marketingOptInRequested,
+    marketingStateLoading,
+    userUid,
+  ]);
 
   if (!isAuthenticated || !user) return null;
 
