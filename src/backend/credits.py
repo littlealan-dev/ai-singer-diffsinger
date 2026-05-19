@@ -600,6 +600,8 @@ def settle_credits_and_complete_job(
             "step": "done",
             "message": message,
             "progress": 1.0,
+            "actualDurationSeconds": float(actual_duration_seconds),
+            "consumedCredits": actual_credits,
             "updatedAt": now,
         }
         if output_path:

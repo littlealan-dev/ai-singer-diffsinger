@@ -243,6 +243,7 @@ def _prepare_app(monkeypatch, overrides=None):
         status: str,
         input_path: str | None = None,
         render_type: str | None = None,
+        voicebank_metadata: dict | None = None,
     ) -> None:
         payload = {
             "userId": user_id,
@@ -254,6 +255,8 @@ def _prepare_app(monkeypatch, overrides=None):
             payload["inputPath"] = input_path
         if render_type:
             payload["renderType"] = render_type
+        if voicebank_metadata:
+            payload.update(voicebank_metadata)
         fake_jobs[job_id] = payload
 
     def _fake_update_job(self, job_id: str, **fields) -> None:
@@ -311,6 +314,8 @@ def _prepare_app(monkeypatch, overrides=None):
                 "progress": 1.0,
                 "audioUrl": audio_url,
                 "outputPath": output_path,
+                "actualDurationSeconds": float(duration_seconds),
+                "consumedCredits": 1,
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -2528,13 +2533,16 @@ def test_chat_selected_voicebank_overrides_llm_voicebank(client):
                 {"id": "VoiceB", "name": "Voice B", "path": "assets/voicebanks/VoiceB"},
             ]
         if name == "get_voicebank_info":
+            voicebank = arguments.get("voicebank")
             return {
-                "name": arguments.get("voicebank"),
+                "name": f"{voicebank} Display",
                 "languages": [],
                 "has_duration_model": False,
                 "has_pitch_model": False,
                 "has_variance_model": False,
                 "speakers": [],
+                "voice_colors": [{"name": "01: Default", "suffix": "default"}],
+                "default_voice_color": "01: Default",
                 "sample_rate": 44100,
                 "hop_size": 512,
                 "use_lang_id": False,
@@ -2566,6 +2574,17 @@ def test_chat_selected_voicebank_overrides_llm_voicebank(client):
     assert synth_calls
     assert synth_calls[-1]["voicebank"] == "VoiceB"
     assert "voice_color" not in synth_calls[-1]
+    latest_job = app.state.job_store.get_latest_job_by_session(
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest_job is not None
+    _, job_data = latest_job
+    assert job_data["voicebankId"] == "VoiceB"
+    assert job_data["voicebankName"] == "VoiceB Display"
+    assert job_data["voicebankStyle"] == "01: Default"
+    assert job_data["actualDurationSeconds"] == 0.01
+    assert job_data["consumedCredits"] == 1
 
 
 def test_chat_recommended_voicebank_keeps_llm_choice(client):

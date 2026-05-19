@@ -400,6 +400,7 @@ class Orchestrator:
             output_storage_path = _job_storage_output_path(
                 user_id, session_id, job_id, self._settings.audio_format
             )
+        voicebank_metadata = await self._build_synthesis_voicebank_metadata(arguments)
         await asyncio.to_thread(
             self._job_store.create_job,
             job_id=job_id,
@@ -408,6 +409,7 @@ class Orchestrator:
             status="queued",
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
+            voicebank_metadata=voicebank_metadata,
         )
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -3231,6 +3233,45 @@ class Orchestrator:
             updated.pop("voice_color", None)
             updated.pop("voice_id", None)
         return updated
+
+    async def _build_synthesis_voicebank_metadata(
+        self,
+        synth_args: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Return job metadata for the voicebank/style used by synthesis."""
+        raw_voicebank = synth_args.get("voicebank")
+        voicebank_id = str(raw_voicebank).strip() if raw_voicebank is not None else ""
+        if not voicebank_id:
+            voicebank_id = await self._resolve_voicebank()
+        if not voicebank_id:
+            return {}
+
+        details_by_id = {
+            str(entry.get("id")): entry
+            for entry in await self._get_voicebank_details()
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        details = details_by_id.get(voicebank_id, {})
+        metadata: Dict[str, str] = {
+            "voicebankId": voicebank_id,
+            "voicebankName": str(details.get("name") or voicebank_id),
+        }
+
+        raw_style = synth_args.get("voice_color")
+        requested_style = str(raw_style).strip() if raw_style is not None else ""
+        voice_colors = details.get("voice_colors")
+        valid_styles = {
+            str(entry.get("name")).strip()
+            for entry in voice_colors
+            if isinstance(entry, dict) and entry.get("name")
+        } if isinstance(voice_colors, list) else set()
+        if requested_style and (not valid_styles or requested_style in valid_styles):
+            metadata["voicebankStyle"] = requested_style
+        else:
+            default_style = str(details.get("default_voice_color") or "").strip()
+            if default_style:
+                metadata["voicebankStyle"] = default_style
+        return metadata
 
     async def _get_voicebank_details(self) -> List[Dict[str, Any]]:
         """Return cached voicebank metadata for LLM prompts."""

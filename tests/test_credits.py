@@ -258,6 +258,8 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     job = db.collection("jobs").document(job_id).get().to_dict()
     assert job["status"] == "completed"
     assert job["audioUrl"] == "/sessions/session-11/audio?file=audio.mp3"
+    assert job["actualDurationSeconds"] == 61.0
+    assert job["consumedCredits"] == 3
 
     ledger = list(
         db.collection("credit_ledger")

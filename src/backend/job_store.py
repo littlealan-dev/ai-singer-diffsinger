@@ -30,6 +30,7 @@ class JobStore:
         status: str,
         input_path: Optional[str] = None,
         render_type: Optional[str] = None,
+        voicebank_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Create a new job record with initial metadata."""
         payload: Dict[str, Any] = {
@@ -43,6 +44,8 @@ class JobStore:
             payload["inputPath"] = input_path
         if render_type:
             payload["renderType"] = render_type
+        if voicebank_metadata:
+            payload.update(voicebank_metadata)
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload)
 
