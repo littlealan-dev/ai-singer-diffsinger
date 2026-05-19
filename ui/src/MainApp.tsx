@@ -1732,7 +1732,7 @@ export default function MainApp() {
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder="Ask the singer to interpret or render..."
+                placeholder="Ask me to sing a specific part or verse..."
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
