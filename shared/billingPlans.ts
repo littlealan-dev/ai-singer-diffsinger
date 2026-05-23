@@ -137,7 +137,11 @@ export function getDisplayPlans(
           ? Math.round(price.originalAnnualCents / 12)
           : price.originalMonthlyCents
         : undefined;
-    const savings = Math.round(
+    const discountPercent = calculateDiscountPercent(
+      isAnnual ? price.originalAnnualCents : price.originalMonthlyCents,
+      isAnnual ? price.annualCents : price.monthlyCents
+    );
+    const annualSavings = Math.round(
       ((price.monthlyCents * 12 - price.annualCents) / (price.monthlyCents * 12)) * 100
     );
 
@@ -153,7 +157,11 @@ export function getDisplayPlans(
       originalSecondaryPrice:
         isAnnual && price.originalAnnualCents ? formatPrice(price.originalAnnualCents) : undefined,
       secondaryPrice: isAnnual ? `${formatPrice(price.annualCents)} billed yearly` : undefined,
-      savingsLabel: isAnnual ? `Save ${savings}%` : undefined,
+      savingsLabel: discountPercent
+        ? `${discountPercent}% off`
+        : isAnnual
+          ? `Save ${annualSavings}%`
+          : undefined,
       creditsAmountLabel: `${plan.monthlyCredits} credits`,
       creditsLabel: `${plan.monthlyCredits} credits reset every month`,
       audioLabel: `About ${plan.audioMinutes} minutes of audio monthly`,
@@ -230,6 +238,13 @@ function getChoirPrice(earlySupporterEnabled: boolean): PaidPrice {
     monthlyPlanKey: "choir_monthly",
     annualPlanKey: "choir_annual",
   };
+}
+
+function calculateDiscountPercent(originalCents: number | undefined, currentCents: number): number | undefined {
+  if (!originalCents || originalCents <= currentCents) {
+    return undefined;
+  }
+  return Math.round(((originalCents - currentCents) / originalCents) * 100);
 }
 
 function formatPrice(cents: number, options: { wholeDollars?: boolean } = {}): string {
