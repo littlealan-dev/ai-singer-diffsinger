@@ -672,6 +672,47 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertIn("measure_number", first_measure)
         self.assertIn("max_simultaneous_notes", first_measure)
 
+    def test_same_voice_chords_mark_part_complex_for_preprocess(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <lyric><text>la</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xml_path = Path(tmpdir) / "same-voice-chord.xml"
+            xml_path.write_text(xml, encoding="utf-8")
+            score = parse_score(xml_path, verse_number=1)
+        part_signal = score["voice_part_signals"]["parts"][0]
+        self.assertTrue(part_signal["multi_voice_part"])
+        self.assertTrue(part_signal["has_same_voice_simultaneous_notes"])
+        self.assertEqual(part_signal["part_region_indices"]["chord_regions"], [{"start": 1, "end": 1}])
+
     def test_parse_score_ignores_grace_and_zero_duration_in_voice_part_region_checks(self) -> None:
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">

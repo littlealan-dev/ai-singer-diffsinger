@@ -772,6 +772,45 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             {1: 1},
         )
 
+    def test_single_voice_chord_ranked_plan_does_not_require_sibling_targets(self) -> None:
+        score = {
+            "parts": [
+                _part(
+                    "P1",
+                    "Soprano",
+                    [
+                        _note(measure=1, offset=0.0, pitch=72.0, voice="1", lyric="hi"),
+                        _note(measure=1, offset=0.0, pitch=67.0, voice="1"),
+                    ],
+                )
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "ranked",
+                            "rank_index": 0,
+                            "rank_fallback": "greedy",
+                            "melody_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                        }
+                    ],
+                },
+            ]
+        }
+        result = _run_preflight_plan_lint(score, plan)
+        self.assertTrue(
+            result.get("ok"),
+            msg=f"single-voice ranked chord extraction should not require sibling targets: {result.get('findings')}",
+        )
+
     def test_same_part_target_completeness(self) -> None:
         score = {
             "parts": [

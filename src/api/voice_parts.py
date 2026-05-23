@@ -157,6 +157,7 @@ def analyze_score_voice_parts(
                 "part_id": full["part_id"],
                 "part_name": full["part_name"],
                 "multi_voice_part": full["multi_voice_part"],
+                "has_same_voice_simultaneous_notes": full["has_same_voice_simultaneous_notes"],
                 "missing_lyric_voice_parts": full["missing_lyric_voice_parts"],
                 "has_missing_lyric_voice_parts": len(full["missing_lyric_voice_parts"]) > 0,
                 "is_potentially_complex_for_preprocess": bool(full["multi_voice_part"])
@@ -1026,11 +1027,19 @@ def _prepare_score_for_voice_part_legacy(
 def _analyze_part_voice_parts(part: Dict[str, Any], part_index: int) -> Dict[str, Any]:
     notes = part.get("notes") or []
     buckets: Dict[str, List[Dict[str, Any]]] = {}
+    simultaneous_counts: Dict[Tuple[str, int, float], int] = {}
     for note in notes:
         if not _is_countable_sung_note(note):
             continue
         key = _voice_key(note.get("voice"))
         buckets.setdefault(key, []).append(note)
+        measure = int(note.get("measure_number") or 0)
+        if measure > 0:
+            offset = round(float(note.get("offset_beats") or 0.0), 6)
+            chord_key = (key, measure, offset)
+            simultaneous_counts[chord_key] = simultaneous_counts.get(chord_key, 0) + 1
+
+    has_same_voice_simultaneous_notes = any(count > 1 for count in simultaneous_counts.values())
 
     voice_parts: List[Dict[str, Any]] = []
     part_name = str(part.get("part_name") or "").upper()
@@ -1058,7 +1067,8 @@ def _analyze_part_voice_parts(part: Dict[str, Any], part_index: int) -> Dict[str
         "part_index": part_index,
         "part_id": part.get("part_id"),
         "part_name": part.get("part_name"),
-        "multi_voice_part": len(voice_parts) > 1,
+        "multi_voice_part": len(voice_parts) > 1 or has_same_voice_simultaneous_notes,
+        "has_same_voice_simultaneous_notes": has_same_voice_simultaneous_notes,
         "voice_part_count": len(voice_parts),
         "missing_lyric_voice_parts": missing,
         "missing_lyric_voice_part_count": len(missing),
@@ -1790,6 +1800,11 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         if part_index < 0 or part_index >= len(parts):
             continue
         analysis = _analyze_part_voice_parts(parts[part_index], part_index)
+        # This guard is for sibling-lane plans where each simultaneous note
+        # should be represented by a visible derived lane. A single native
+        # voice can still be made monophonic by ranked chord selection.
+        if int(analysis.get("voice_part_count") or 0) <= 1:
+            continue
         for source_meta in analysis.get("voice_parts") or []:
             source_voice_part_id = str(source_meta.get("voice_part_id") or "")
             if not source_voice_part_id:
