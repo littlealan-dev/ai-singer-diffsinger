@@ -1748,6 +1748,31 @@ def test_format_llm_error_returns_plain_non_json_message(client):
     )
 
 
+def test_repair_planning_prompt_includes_target_voice_part_constraints(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    prompt = orchestrator._build_repair_planning_prompt(
+        best_candidate=None,
+        bootstrap_plan_baseline=None,
+        latest_candidate=None,
+        action_required_payload={
+            "status": "action_required",
+            "action": "target_voice_part_not_found",
+            "message": "Requested voice part was not found in the selected part.",
+            "part_index": 3,
+            "voice_part_options": ["voice part 1"],
+        },
+        attempt_number=1,
+        max_attempts=3,
+    )
+
+    payload = json.loads(prompt)
+    constraints = payload.get("repair_constraints") or []
+    assert any("voice_part_options" in constraint for constraint in constraints)
+    assert any("Do not create new voice_part_id values" in constraint for constraint in constraints)
+
+
 def test_workflow_keeps_better_later_valid_candidate_when_followup_fails(client):
     _, app = client
     orchestrator = app.state.orchestrator

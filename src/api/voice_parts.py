@@ -1302,6 +1302,7 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
 def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
     findings: List[Dict[str, Any]] = []
     targets = plan.get("targets") or []
+    findings.extend(_lint_existing_target_voice_parts(score, targets))
     findings.extend(_lint_same_part_target_completeness(score, targets))
     by_part_claims: Dict[int, set[int]] = {}
     by_part_has_timeline_targets: Dict[int, bool] = {}
@@ -1848,6 +1849,43 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 )
 
     return {"ok": len(findings) == 0, "findings": findings}
+
+
+def _lint_existing_target_voice_parts(
+    score: Dict[str, Any], targets: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    parts = score.get("parts") or []
+    for target_idx, target_entry in enumerate(targets):
+        target = target_entry.get("target") or {}
+        try:
+            part_index = int(target.get("part_index", -1))
+        except (TypeError, ValueError):
+            continue
+        target_voice_part_id = str(target.get("voice_part_id") or "").strip()
+        if not target_voice_part_id or part_index < 0 or part_index >= len(parts):
+            continue
+        analysis = _analyze_part_voice_parts(parts[part_index], part_index)
+        available_voice_part_ids = [
+            str(vp.get("voice_part_id") or "")
+            for vp in (analysis.get("voice_parts") or [])
+            if str(vp.get("voice_part_id") or "")
+        ]
+        if target_voice_part_id not in available_voice_part_ids:
+            findings.append(
+                _lint_finding(
+                    "invented_target_voice_part",
+                    target_index=target_idx,
+                    part_index=part_index,
+                    target_voice_part_id=target_voice_part_id,
+                    available_voice_part_ids=available_voice_part_ids,
+                    failing_attributes={
+                        "target_voice_part_id": target_voice_part_id,
+                        "available_voice_part_ids": available_voice_part_ids,
+                    },
+                )
+            )
+    return findings
 
 
 def _lint_same_part_target_completeness(
@@ -4200,13 +4238,10 @@ def _finalize_transform_result(
         part_index=part_index,
         target_voice_part_id=target_voice_part_id,
     )
-    hidden_default_lane = (
-        str(target_source_voice_id or "").strip() == "_default"
-        or _is_hidden_default_lane(
-            score=score,
-            part_index=part_index,
-            target_voice_part_id=target_voice_part_id,
-        )
+    hidden_default_lane = _is_hidden_default_lane(
+        score=score,
+        part_index=part_index,
+        target_voice_part_id=target_voice_part_id,
     )
 
     artifact_key = f"{score_fingerprint}:{transform_hash}"
@@ -4348,7 +4383,14 @@ def _is_hidden_default_lane(
     target_meta = _find_voice_part_by_id(analysis.get("voice_parts") or [], target_voice_part_id)
     if target_meta is None:
         return False
-    return str(target_meta.get("source_voice_id") or "") == "_default"
+    if str(target_meta.get("source_voice_id") or "") != "_default":
+        return False
+    sibling_voice_parts = [
+        vp
+        for vp in (analysis.get("voice_parts") or [])
+        if str(vp.get("source_voice_id") or "") != "_default"
+    ]
+    return bool(sibling_voice_parts)
 
 
 def _resolve_source_musicxml_path(score: Dict[str, Any]) -> Optional[str]:

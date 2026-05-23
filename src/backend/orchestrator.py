@@ -1419,6 +1419,7 @@ class Orchestrator:
             "tool": "preprocess_voice_parts",
             "phase": "preprocess_repair_planning",
             "tool_result": payload,
+            "repair_constraints": self._build_repair_constraints(payload),
             "baseline_plan_source": baseline_source,
             "baseline_plan": copy.deepcopy(baseline_plan) if isinstance(baseline_plan, dict) else None,
             "latest_attempted_plan_summary": (
@@ -1429,6 +1430,40 @@ class Orchestrator:
             "repair_context": repair_context,
         }
         return json.dumps(envelope, sort_keys=True)
+
+    def _build_repair_constraints(self, payload: Dict[str, Any]) -> List[str]:
+        """Return hard planning constraints implied by the latest tool failure."""
+        if not isinstance(payload, dict):
+            return []
+        constraints: List[str] = []
+        action = str(payload.get("action") or "").strip()
+        if action == "target_voice_part_not_found":
+            options = payload.get("voice_part_options")
+            constraints.append(
+                "The attempted target voice_part_id does not exist. Retry using only "
+                f"one of voice_part_options for that part: {options!r}. Do not create "
+                "new voice_part_id values."
+            )
+        lint_findings = payload.get("lint_findings")
+        if isinstance(lint_findings, list):
+            for finding in lint_findings:
+                if not isinstance(finding, dict):
+                    continue
+                if str(finding.get("rule") or "") != "invented_target_voice_part":
+                    continue
+                attrs = finding.get("failing_attributes")
+                available = (
+                    attrs.get("available_voice_part_ids")
+                    if isinstance(attrs, dict)
+                    else finding.get("available_voice_part_ids")
+                )
+                constraints.append(
+                    "The plan used an invented target voice_part_id. Retry using only "
+                    f"the listed available_voice_part_ids for that same part: {available!r}. "
+                    "Same-voice chord notes must be handled by ranked extraction into an "
+                    "existing target, not by creating a synthetic target lane."
+                )
+        return constraints
 
     def _select_repair_baseline(
         self,

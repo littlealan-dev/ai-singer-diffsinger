@@ -12,6 +12,7 @@ Scope
 Hard Rules
 1. Voice identity must be explicit as `(part_index, voice_part_id)`.
 1a. Follow the preprocess tool schema exactly (sections-based plan contract).
+1b. Target `voice_part_id` values must be existing parser facts for the same `part_index`; never invent a target lane such as `voice part 2`, `Soprano 2`, or `Alto 2` unless that exact ID appears in `voice_part_signals.parts[].voice_parts`.
 2. Use parser facts only. Do not invent score structure:
    - `voice_part_measure_spans`
    - `voice_part_id_to_source_voice_id`
@@ -50,6 +51,7 @@ Hard Rules
      - `rank_fallback=greedy` means when the requested rank does not exist, use the nearest available lower rank.
      - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
    - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
+   - Same-voice chords are not evidence that a second target voice part exists. If the part has `has_same_voice_simultaneous_notes=true` but only one listed `voice_part_id`, extract the requested rank into that existing target only.
 20a. Visible claim coverage:
 - For visible claim coverage, a sung measure must be carried by at least one visible exported derived target.
 - If all visible sibling targets leave a sung measure as `rest`, that measure is still unclaimed.

@@ -49,6 +49,16 @@ LINT_RULE_SPECS: Dict[str, LintRuleSpec] = {
         suggestion="Rewrite the section boundaries so they are contiguous from start to end with no gaps or overlaps.",
         message_template="Target sections must be contiguous with no gaps or overlaps.",
     ),
+    "invented_target_voice_part": LintRuleSpec(
+        code="invented_target_voice_part",
+        name="Invented Target Voice Part",
+        severity="P0",
+        domain="STRUCTURAL",
+        definition="Preprocess targets must refer to voice_part_id values that already exist in the selected part's parser facts.",
+        fail_condition="A plan target uses a voice_part_id that is not listed for the target part.",
+        suggestion="Use one of the available voice_part_id values for that part. Do not create synthetic target lanes for chord notes unless the tool explicitly supports them.",
+        message_template="Plan target uses a voice_part_id that does not exist for the selected part.",
+    ),
     "trivial_method_requires_equal_chord_voice_part_count": LintRuleSpec(
         code="trivial_method_requires_equal_chord_voice_part_count",
         name="Trivial Split Requires Matching Chord Density",

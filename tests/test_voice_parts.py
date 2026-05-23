@@ -1114,6 +1114,64 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             any(f.get("rule") == "no_rest_when_target_has_native_notes" for f in findings)
         )
 
+    def test_preflight_lint_flags_invented_target_voice_part(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Solo",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "la",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 2"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = preprocess_voice_parts(score, plan=plan)
+
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        finding = next(f for f in findings if f.get("rule") == "invented_target_voice_part")
+        self.assertEqual(finding.get("target_voice_part_id"), "voice part 2")
+        self.assertEqual(
+            finding.get("failing_attributes", {}).get("available_voice_part_ids"),
+            ["voice part 1"],
+        )
+
     def test_preflight_lint_flags_same_part_claim_coverage(self) -> None:
         score = {
             "parts": [
@@ -1251,6 +1309,122 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertEqual(result.get("action"), "plan_lint_failed")
         findings = result.get("lint_findings") or []
         self.assertTrue(any(f.get("rule") == "same_clef_claim_coverage" for f in findings))
+
+    def test_single_default_lane_satisfies_claim_coverage(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Solo",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 65.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 2,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = preprocess_voice_parts(score, plan=plan)
+
+        self.assertNotEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertFalse(any(f.get("rule") == "same_clef_claim_coverage" for f in findings))
+
+    def test_single_default_lane_preprocess_appends_visible_derived_part(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Solo",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = preprocess_voice_parts(score, plan=plan)
+
+        self.assertEqual(result.get("status"), "ready")
+        self.assertFalse(result.get("hidden_default_lane"))
+        self.assertEqual(len(result["score"]["parts"]), 2)
+        self.assertEqual(result["appended_part_ref"].get("part_index"), 1)
 
     def test_preflight_lint_flags_underclaimed_same_part_chord_source(self) -> None:
         score = {
