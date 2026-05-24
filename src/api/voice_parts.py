@@ -4238,10 +4238,16 @@ def _finalize_transform_result(
         part_index=part_index,
         target_voice_part_id=target_voice_part_id,
     )
-    hidden_default_lane = _is_hidden_default_lane(
-        score=score,
-        part_index=part_index,
-        target_voice_part_id=target_voice_part_id,
+    hidden_default_lane = (
+        _is_hidden_default_lane(
+            score=score,
+            part_index=part_index,
+            target_voice_part_id=target_voice_part_id,
+        )
+        or (
+            str(target_source_voice_id or "") == "_default"
+            and _has_non_default_sibling_voice_parts(score, part_index)
+        )
     )
 
     artifact_key = f"{score_fingerprint}:{transform_hash}"
@@ -4391,6 +4397,17 @@ def _is_hidden_default_lane(
         if str(vp.get("source_voice_id") or "") != "_default"
     ]
     return bool(sibling_voice_parts)
+
+
+def _has_non_default_sibling_voice_parts(score: Dict[str, Any], part_index: int) -> bool:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return False
+    analysis = _analyze_part_voice_parts(parts[part_index], part_index)
+    return any(
+        str(vp.get("source_voice_id") or "") != "_default"
+        for vp in (analysis.get("voice_parts") or [])
+    )
 
 
 def _resolve_source_musicxml_path(score: Dict[str, Any]) -> Optional[str]:

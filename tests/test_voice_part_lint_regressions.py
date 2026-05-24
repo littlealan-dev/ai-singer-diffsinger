@@ -82,6 +82,7 @@ class VoicePartLintRegressionTests(unittest.TestCase):
             "same_clef_claim_coverage",
             "same_part_chord_source_underclaimed_by_visible_targets",
             "same_part_target_completeness",
+            "invented_target_voice_part",
         }
         self.assertEqual(set(LINT_RULE_SPECS), expected)
 

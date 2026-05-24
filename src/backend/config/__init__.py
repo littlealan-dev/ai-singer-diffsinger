@@ -48,6 +48,15 @@ def _app_env() -> str:
 
 
 @dataclass(frozen=True)
+class GeminiModelRoleConfig:
+    """Gemini model settings for one logical LLM role."""
+
+    model: str
+    thinking_level: str
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class Settings:
     """Configuration values parsed from the environment."""
     project_root: Path
@@ -70,6 +79,8 @@ class Settings:
     gemini_model: str
     gemini_timeout_seconds: float
     gemini_thinking_level: str
+    gemini_default: GeminiModelRoleConfig
+    gemini_preprocess: GeminiModelRoleConfig
     gemini_include_thought_summary: bool
     inject_full_parsed_score_json: bool
     llm_max_message_chars: int
@@ -143,6 +154,28 @@ class Settings:
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         gemini_timeout_seconds = _env_float("GEMINI_TIMEOUT_SECONDS", 30.0)
         gemini_thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "").strip()
+        gemini_default = GeminiModelRoleConfig(
+            model=os.getenv("GEMINI_DEFAULT_MODEL", gemini_model).strip() or gemini_model,
+            thinking_level=os.getenv(
+                "GEMINI_DEFAULT_THINKING_LEVEL",
+                gemini_thinking_level,
+            ).strip(),
+            timeout_seconds=_env_float(
+                "GEMINI_DEFAULT_TIMEOUT_SECONDS",
+                gemini_timeout_seconds,
+            ),
+        )
+        gemini_preprocess = GeminiModelRoleConfig(
+            model=os.getenv("GEMINI_PREPROCESS_MODEL", gemini_model).strip() or gemini_model,
+            thinking_level=os.getenv(
+                "GEMINI_PREPROCESS_THINKING_LEVEL",
+                gemini_thinking_level,
+            ).strip(),
+            timeout_seconds=_env_float(
+                "GEMINI_PREPROCESS_TIMEOUT_SECONDS",
+                gemini_timeout_seconds,
+            ),
+        )
         gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
         inject_full_parsed_score_json = _env_bool(
             "INJECT_FULL_PARSED_SCORE_JSON",
@@ -257,6 +290,8 @@ class Settings:
             gemini_model=gemini_model,
             gemini_timeout_seconds=gemini_timeout_seconds,
             gemini_thinking_level=gemini_thinking_level,
+            gemini_default=gemini_default,
+            gemini_preprocess=gemini_preprocess,
             gemini_include_thought_summary=gemini_include_thought_summary,
             inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
 from src.backend.main import _require_app_check, create_app
-from src.backend.llm_client import StaticLlmClient
+from src.backend.llm_client import LlmRole, StaticLlmClient
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
     MISSING_ORIGINAL_SCORE_MESSAGE,
@@ -105,6 +105,109 @@ ZIPPED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
   </part>
 </score-partwise>
 """
+
+
+def _preprocess_workflow_response(
+    *,
+    part_index: int = 0,
+    part_id: str | None = None,
+    voice_part_id: str | None = None,
+    verse_number: str | int | None = None,
+    final_message: str = "I'm splitting the requested part now.",
+) -> str:
+    request = {
+        "reason": "This request needs voice-part preprocessing before synthesis.",
+    }
+    if part_id is not None:
+        request["part_id"] = part_id
+    else:
+        request["part_index"] = part_index
+    if voice_part_id is not None:
+        request["voice_part_id"] = voice_part_id
+    if verse_number is not None:
+        request["verse_number"] = verse_number
+    return json.dumps(
+        {
+            "tool_calls": [
+                {
+                    "name": "start_preprocess_voice_part_workflow",
+                    "arguments": {"request": request},
+                }
+            ],
+            "final_message": final_message,
+            "include_score": False,
+        }
+    )
+
+
+def _preprocess_plan_response(
+    *,
+    part_index: int = 0,
+    voice_part_id: str = "soprano",
+    final_message: str = "Planning split.",
+    include_score: bool = False,
+) -> str:
+    return json.dumps(
+        {
+            "tool_calls": [
+                {
+                    "name": "preprocess_voice_parts",
+                    "arguments": {
+                        "request": {
+                            "plan": {
+                                "targets": [
+                                    {
+                                        "target": {
+                                            "part_index": part_index,
+                                            "voice_part_id": voice_part_id,
+                                        },
+                                        "sections": [
+                                            {
+                                                "start_measure": 1,
+                                                "end_measure": 1,
+                                                "mode": "derive",
+                                                "melody_source": {
+                                                    "part_index": part_index,
+                                                    "voice_part_id": voice_part_id,
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                }
+            ],
+            "final_message": final_message,
+            "include_score": include_score,
+        }
+    )
+
+
+class WorkflowThenPreprocessClient:
+    def __init__(
+        self,
+        *,
+        workflow_response: str | None = None,
+        preprocess_response: str | None = None,
+    ):
+        self.workflow_response = workflow_response or _preprocess_workflow_response()
+        self.preprocess_response = preprocess_response or _preprocess_plan_response()
+
+    def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+        if role == LlmRole.PREPROCESS:
+            return self.preprocess_response
+        last = history[-1].get("content", "") if history else ""
+        if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": "Please review the derived score.",
+                    "include_score": True,
+                }
+            )
+        return self.workflow_response
 
 
 def _make_router_call_tool():
@@ -732,11 +835,16 @@ def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
         return _make_router_call_tool()(name, arguments)
 
     app.state.router.call_tool = call_tool
-    llm_client = StaticLlmClient(
-        response_text=(
-            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
-            '"final_message":"Please review the derived score.","include_score":true}'
-        )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="Please review the derived score.",
+        ),
+        preprocess_response=_preprocess_plan_response(
+            voice_part_id="soprano",
+            final_message="Please review the derived score.",
+            include_score=True,
+        ),
     )
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
@@ -812,11 +920,15 @@ def test_get_score_returns_derived_musicxml_after_reviewable_validation_candidat
         }
 
     orchestrator_module.finalize_review_materialization = fake_finalize_review_materialization
-    llm_client = StaticLlmClient(
-        response_text=(
-            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"tenor"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"tenor"}}]}]}}}}],'
-            '"final_message":"I\\u0027ll prepare the tenor line and stop for review if coverage is incomplete.","include_score":false}'
-        )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="tenor",
+            final_message="I'll prepare the tenor line and stop for review if coverage is incomplete.",
+        ),
+        preprocess_response=_preprocess_plan_response(
+            voice_part_id="tenor",
+            final_message="I'll prepare the tenor line and stop for review if coverage is incomplete.",
+        ),
     )
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
@@ -913,11 +1025,12 @@ def test_chat_returns_progress_immediately_for_preprocess(client):
     upload_response = _upload_score(test_client, session_id)
     assert upload_response.status_code == 200
 
-    llm_client = StaticLlmClient(
-        response_text=(
-            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
-            '"final_message":"I\\u0027m splitting the requested part now and will let you know when the derived score is ready to review.","include_score":false}'
-        )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="I'm splitting the requested part now and will let you know when the derived score is ready to review.",
+        ),
+        preprocess_response=_preprocess_plan_response(voice_part_id="soprano"),
     )
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
@@ -930,6 +1043,153 @@ def test_chat_returns_progress_immediately_for_preprocess(client):
     assert chat_payload["type"] == "chat_progress"
     assert "splitting the requested part" in chat_payload["message"].lower()
     assert chat_payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
+
+
+def test_deterministic_complex_selection_uses_default_message_and_preprocess_plan_roles(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    complex_score = {
+        "title": "Complex",
+        "tempos": [],
+        "parts": [{"part_id": "P1", "part_name": "Soprano", "notes": []}],
+        "structure": {},
+        "voice_part_signals": {
+            "has_multi_voice_parts": True,
+            "has_missing_lyric_voice_parts": False,
+            "parts": [
+                {
+                    "part_index": 0,
+                    "part_id": "P1",
+                    "part_name": "Soprano",
+                    "multi_voice_part": True,
+                    "missing_lyric_voice_parts": [],
+                    "voice_parts": [{"voice_part_id": "soprano"}],
+                }
+            ],
+        },
+        "score_summary": {
+            "title": "Complex",
+            "composer": None,
+            "lyricist": None,
+            "parts": [{"part_id": "P1", "part_index": 0, "part_name": "Soprano"}],
+            "available_verses": [],
+        },
+    }
+    asyncio.run(app.state.sessions.set_original_score(session_id, complex_score))
+    asyncio.run(app.state.sessions.set_score(session_id, complex_score))
+    asyncio.run(app.state.sessions.set_score_summary(session_id, complex_score["score_summary"]))
+
+    preprocess_calls: list[dict] = []
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_calls.append(dict(arguments))
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    class RoleAwareClient:
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            last = history[-1].get("content", "") if history else ""
+            role_value = role.value if isinstance(role, LlmRole) else str(role)
+            self.calls.append((role_value, last))
+            if role == LlmRole.DEFAULT:
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "start_preprocess_voice_part_workflow",
+                                "arguments": {
+                                    "request": {
+                                        "part_index": 0,
+                                        "voice_part_id": "soprano",
+                                        "reason": "This part has multiple voice lanes.",
+                                    }
+                                },
+                            }
+                        ],
+                        "final_message": "This part needs splitting first. I'll start preprocessing now.",
+                        "include_score": False,
+                    }
+                )
+            if role == LlmRole.PREPROCESS and "initial_preprocess_planning" in last:
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "preprocess_voice_parts",
+                                "arguments": {
+                                    "request": {
+                                        "plan": {
+                                            "targets": [
+                                                {
+                                                    "target": {
+                                                        "part_index": 0,
+                                                        "voice_part_id": "soprano",
+                                                    },
+                                                    "sections": [
+                                                        {
+                                                            "start_measure": 1,
+                                                            "end_measure": 1,
+                                                            "mode": "derive",
+                                                            "melody_source": {
+                                                                "part_index": 0,
+                                                                "voice_part_id": "soprano",
+                                                            },
+                                                        }
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    }
+                                },
+                            }
+                        ],
+                        "final_message": "Planning split.",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": "Please review the derived score.",
+                    "include_score": True,
+                }
+            )
+
+    llm_client = RoleAwareClient()
+    app.state.router.call_tool = call_tool
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing this part", "selection": {"part_index": 0}},
+    )
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.json()
+    assert chat_payload["type"] == "chat_progress"
+    assert chat_payload["message"] == "This part needs splitting first. I'll start preprocessing now."
+
+    progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert preprocess_calls
+    assert llm_client.calls[0][0] == LlmRole.DEFAULT.value
+    assert "sing this part" in llm_client.calls[0][1]
+    assert any(call[0] == LlmRole.PREPROCESS.value for call in llm_client.calls)
+    assert not any(
+        call[0] == LlmRole.DEFAULT.value and "initial_preprocess_planning" in call[1]
+        for call in llm_client.calls
+    )
 
 
 def test_repreprocess_uses_original_uploaded_score_context(client):
@@ -985,11 +1245,15 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
         return _make_router_call_tool()(name, arguments)
 
     app.state.router.call_tool = call_tool
-    llm_client = StaticLlmClient(
-        response_text=(
-            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
-            '"final_message":"Please review the derived score.","include_score":false}'
-        )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="Please review the derived score.",
+        ),
+        preprocess_response=_preprocess_plan_response(
+            voice_part_id="soprano",
+            final_message="Please review the derived score.",
+        ),
     )
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
@@ -1139,6 +1403,47 @@ def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     assert prompt is not None
     assert "Latest attempted preprocess plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
+
+
+def test_orchestrator_excludes_hidden_default_lane_from_derived_mapping(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    score = {
+        "selected_verse_number": "1",
+        "voice_part_transforms": {
+            "visible": {
+                "target_voice_part_id": "voice part 1",
+                "source_part_index": 0,
+                "source_voice_part_id": "voice part 2",
+                "appended_part_ref": {
+                    "part_index": 2,
+                    "part_id": "P_DERIVED_VISIBLE",
+                    "part_name": "Women - voice part 1 (Derived)",
+                },
+            },
+            "hidden": {
+                "target_voice_part_id": "voice part 2",
+                "source_part_index": 0,
+                "source_voice_part_id": "voice part 2",
+                "appended_part_ref": {
+                    "part_index": 0,
+                    "part_id": "P_DERIVED_HIDDEN",
+                    "part_name": "Women - voice part 2 (Derived)",
+                    "hidden_default_lane": True,
+                },
+            },
+        },
+    }
+
+    context = orchestrator._build_preprocess_mapping_context(
+        score,
+        score_summary={
+            "parts": [{"part_index": 0, "part_id": "Women", "part_name": "Women"}]
+        },
+    )
+
+    targets = ((context or {}).get("derived_mapping") or {}).get("targets") or []
+    assert [target.get("target_voice_part_id") for target in targets] == ["voice part 1"]
 
 
 def test_upload_rejects_invalid_extension(client):
@@ -2646,6 +2951,76 @@ def test_chat_recommended_voicebank_keeps_llm_choice(client):
     assert synth_calls[-1]["voicebank"] == "Dummy"
 
 
+def test_chat_drops_voice_color_when_voicebank_has_no_colors(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    synth_calls = []
+
+    def call_tool(name, arguments):
+        if name == "list_voicebanks":
+            return [
+                {
+                    "id": "NoColorVoice",
+                    "name": "No Color Voice",
+                    "path": "assets/voicebanks/NoColorVoice",
+                }
+            ]
+        if name == "get_voicebank_info":
+            return {
+                "name": "No Color Voice",
+                "languages": [],
+                "has_duration_model": False,
+                "has_pitch_model": False,
+                "has_variance_model": False,
+                "speakers": [],
+                "voice_colors": [],
+                "default_voice_color": None,
+                "sample_rate": 44100,
+                "hop_size": 512,
+                "use_lang_id": False,
+                "gender": "female",
+                "voice_type": "soprano",
+            }
+        if name == "synthesize":
+            synth_calls.append(dict(arguments))
+            return {"waveform": [0.0, 0.1, 0.0], "sample_rate": 44100}
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"synthesize","arguments":{'
+            '"voicebank":"NoColorVoice",'
+            '"voice_color":"NoColorVoice"'
+            '}}],"final_message":"Rendered.","include_score":true}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+    _wait_for_progress(test_client, payload["progress_url"])
+    assert synth_calls
+    assert synth_calls[-1]["voicebank"] == "NoColorVoice"
+    assert "voice_color" not in synth_calls[-1]
+    latest_job = app.state.job_store.get_latest_job_by_session(
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest_job is not None
+    _, job_data = latest_job
+    assert job_data["voicebankId"] == "NoColorVoice"
+    assert "voicebankStyle" not in job_data
+
+
 def test_app_check_rejects_query_param_only(monkeypatch):
     calls = {"count": 0}
     app, data_dir = _prepare_app(
@@ -2990,7 +3365,7 @@ def test_chat_executes_followup_tool_calls_same_turn(client):
         return _make_router_call_tool()(name, arguments)
 
     class RepairThenSynthesizeClient:
-        def generate(self, system_prompt, history):
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
                 return json.dumps(
@@ -3024,12 +3399,8 @@ def test_chat_executes_followup_tool_calls_same_turn(client):
                                     }
                                 },
                             },
-                            {
-                                "name": "synthesize",
-                                "arguments": {"voicebank": "Dummy"},
-                            },
                         ],
-                        "final_message": "Plan repaired; rendering now.",
+                        "final_message": "Plan repaired.",
                         "include_score": True,
                     }
                 )
@@ -3046,41 +3417,15 @@ def test_chat_executes_followup_tool_calls_same_turn(client):
                         "include_score": True,
                     }
                 )
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "soprano",
-                                                },
-                                                "sections": [
-                                                    {
-                                                        "start_measure": 1,
-                                                        "end_measure": 1,
-                                                        "mode": "derive",
-                                                        "melody_source": {
-                                                            "part_index": 0,
-                                                            "voice_part_id": "soprano",
-                                                        },
-                                                    }
-                                                ],
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Preparing render.",
-                    "include_score": True,
-                }
+            if role == LlmRole.PREPROCESS:
+                return _preprocess_plan_response(
+                    voice_part_id="soprano",
+                    final_message="Preparing render.",
+                    include_score=True,
+                )
+            return _preprocess_workflow_response(
+                voice_part_id="soprano",
+                final_message="Preparing render.",
             )
 
     app.state.router.call_tool = call_tool
@@ -3235,7 +3580,7 @@ def test_chat_blocks_preprocess_without_explicit_verse_for_multiverse_score(clie
         return _make_router_call_tool()(name, arguments)
 
     class PreprocessNeedsVerseClient:
-        def generate(self, system_prompt, history):
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(
                 "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
@@ -3247,28 +3592,9 @@ def test_chat_blocks_preprocess_without_explicit_verse_for_multiverse_score(clie
                         "include_score": False,
                     }
                 )
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {"part_index": 0, "voice_part_id": "soprano"},
-                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Preparing your requested part.",
-                    "include_score": False,
-                }
+            return _preprocess_workflow_response(
+                voice_part_id="soprano",
+                final_message="Preparing your requested part.",
             )
 
     app.state.router.call_tool = call_tool
@@ -3553,29 +3879,25 @@ def test_chat_selection_verse_number_allows_preprocess_for_multiverse_score(clie
         return _make_router_call_tool()(name, arguments)
 
     class SelectionAwareClient:
-        def generate(self, system_prompt, history):
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {"part_index": 0, "voice_part_id": "alto"},
-                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Setting up Alto verse 1.",
-                    "include_score": False,
-                }
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
+            if role == LlmRole.PREPROCESS:
+                return _preprocess_plan_response(
+                    voice_part_id="alto",
+                    final_message="Setting up Alto verse 1.",
+                )
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "Please review the derived score.",
+                        "include_score": True,
+                    }
+                )
+            return _preprocess_workflow_response(
+                voice_part_id="alto",
+                verse_number=1,
+                final_message="Setting up Alto verse 1.",
             )
 
     app.state.router.call_tool = call_tool
@@ -3630,7 +3952,7 @@ def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(cl
         return _make_router_call_tool()(name, arguments)
 
     class TextOnlyClient:
-        def generate(self, system_prompt, history):
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(
                 "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
@@ -3642,28 +3964,9 @@ def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(cl
                         "include_score": False,
                     }
                 )
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {"part_index": 0, "voice_part_id": "alto"},
-                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Setting up Alto verse 1.",
-                    "include_score": False,
-                }
+            return _preprocess_workflow_response(
+                voice_part_id="alto",
+                final_message="Setting up Alto verse 1.",
             )
 
     app.state.router.call_tool = call_tool
@@ -3720,30 +4023,25 @@ def test_preprocess_with_explicit_verse_argument_bypasses_selection_blocker(clie
         return _make_router_call_tool()(name, arguments)
 
     class PreprocessWithVerseClient:
-        def generate(self, system_prompt, history):
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "verse_number": 1,
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {"part_index": 0, "voice_part_id": "alto"},
-                                                "sections": [{"start_measure": 1, "end_measure": 1, "mode": "derive"}],
-                                            }
-                                        ]
-                                    },
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Setting up Alto verse 1.",
-                    "include_score": False,
-                }
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
+            if role == LlmRole.PREPROCESS:
+                return _preprocess_plan_response(
+                    voice_part_id="alto",
+                    final_message="Setting up Alto verse 1.",
+                )
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "Please review the derived score.",
+                        "include_score": True,
+                    }
+                )
+            return _preprocess_workflow_response(
+                voice_part_id="alto",
+                verse_number=1,
+                final_message="Setting up Alto verse 1.",
             )
 
     app.state.router.call_tool = call_tool
@@ -3887,43 +4185,16 @@ def test_preprocess_returns_last_validation_review_after_repair_cap(client):
         def __init__(self):
             self.calls = 0
 
-        def generate(self, system_prompt, history):
+        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
             self.calls += 1
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "preprocess_voice_parts",
-                            "arguments": {
-                                "request": {
-                                    "plan": {
-                                        "targets": [
-                                            {
-                                                "target": {
-                                                    "part_index": 0,
-                                                    "voice_part_id": "soprano",
-                                                },
-                                                "sections": [
-                                                    {
-                                                        "start_measure": 1,
-                                                        "end_measure": 1,
-                                                        "mode": "derive",
-                                                        "melody_source": {
-                                                            "part_index": 0,
-                                                            "voice_part_id": "soprano",
-                                                        },
-                                                    }
-                                                ],
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        }
-                    ],
-                    "final_message": "Trying preprocess again.",
-                    "include_score": False,
-                }
+            if role == LlmRole.PREPROCESS:
+                return _preprocess_plan_response(
+                    voice_part_id="soprano",
+                    final_message="Trying preprocess again.",
+                )
+            return _preprocess_workflow_response(
+                voice_part_id="soprano",
+                final_message="Trying preprocess again.",
             )
 
     llm_client = RepairLoopClient()

@@ -16,7 +16,7 @@ import uuid
 from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
-from src.backend.llm_client import LlmClient
+from src.backend.llm_client import LlmClient, LlmRole
 from src.backend.llm_prompt import (
     LlmResponse,
     ToolCall,
@@ -47,6 +47,20 @@ MISSING_ORIGINAL_SCORE_MESSAGE = (
 MAX_OUT_OF_SCOPE_SECTIONS = 10
 MAX_SECTION_CHANGE_RATIO = 0.7
 MAX_MEASURE_CHANGE_RATIO = 0.8
+TOOL_REPARSE = "reparse"
+TOOL_SYNTHESIZE = "synthesize"
+TOOL_PREPROCESS_VOICE_PARTS = "preprocess_voice_parts"
+TOOL_START_PREPROCESS_WORKFLOW = "start_preprocess_voice_part_workflow"
+DEFAULT_LLM_TOOL_ALLOWLIST = {
+    TOOL_REPARSE,
+    TOOL_SYNTHESIZE,
+    TOOL_START_PREPROCESS_WORKFLOW,
+}
+PREPROCESS_LLM_TOOL_ALLOWLIST = {TOOL_PREPROCESS_VOICE_PARTS}
+LLM_TOOL_ALLOWLIST_BY_ROLE = {
+    LlmRole.DEFAULT: DEFAULT_LLM_TOOL_ALLOWLIST,
+    LlmRole.PREPROCESS: PREPROCESS_LLM_TOOL_ALLOWLIST,
+}
 
 
 class Orchestrator:
@@ -68,8 +82,12 @@ class Orchestrator:
         self._cached_voicebank: Optional[str] = None
         self._cached_voicebank_ids: Optional[List[str]] = None
         self._cached_voicebank_details: Optional[List[Dict[str, Any]]] = None
-        self._llm_tool_allowlist = {"reparse", "preprocess_voice_parts", "synthesize"}
-        self._llm_tools = list_tools(self._llm_tool_allowlist)
+        self._llm_tool_allowlist = DEFAULT_LLM_TOOL_ALLOWLIST | PREPROCESS_LLM_TOOL_ALLOWLIST
+        self._llm_tools_by_role = {
+            role: list_tools(tool_names)
+            for role, tool_names in LLM_TOOL_ALLOWLIST_BY_ROLE.items()
+        }
+        self._llm_tools = self._llm_tools_by_role[LlmRole.DEFAULT]
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
         self._chat_locks_guard = asyncio.Lock()
@@ -187,7 +205,7 @@ class Orchestrator:
                     },
                 )
                 if llm_response.thought_summary and any(
-                    call.name == "preprocess_voice_parts" for call in llm_response.tool_calls
+                    call.name == TOOL_PREPROCESS_VOICE_PARTS for call in llm_response.tool_calls
                 ):
                     self._logger.debug(
                         "chat_llm_preprocess_thought_summary session=%s thought_summary=%s",
@@ -200,6 +218,52 @@ class Orchestrator:
                     llm_response.thought_summary,
                     llm_response.tool_calls,
                 )
+                if self._should_start_preprocess_workflow(llm_response.tool_calls):
+                    explicit_verse_number = self._normalize_verse_number(
+                        (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
+                        if isinstance(snapshot.get("files"), dict)
+                        else None
+                    )
+                    requires_verse_selection = self._tool_calls_require_verse_selection(
+                        llm_response.tool_calls,
+                        score=current_score["score"],
+                        score_summary=snapshot.get("score_summary"),
+                        explicit_verse_number=explicit_verse_number,
+                    )
+                    if requires_verse_selection:
+                        action_required = self._build_verse_selection_required_action(
+                            score=current_score["score"],
+                            score_summary=snapshot.get("score_summary"),
+                            tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
+                            explicit_verse_number=explicit_verse_number,
+                        )
+                        response_message = str(
+                            action_required.get("message") or response_message
+                        )
+                        await self._sessions.append_history(
+                            session_id, "assistant", response_message
+                        )
+                        return {
+                            "type": "chat_text",
+                            "message": response_message,
+                            "action_required": action_required,
+                        }
+                    if not requires_verse_selection:
+                        planning_context = self._build_preprocess_workflow_planning_context(
+                            llm_response.tool_calls,
+                            user_message=message,
+                        )
+                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        return await self._start_preprocess_job(
+                            session_id,
+                            current_score["score"],
+                            [],
+                            initial_message=response_message,
+                            initial_thought_summary=llm_response.thought_summary,
+                            user_id=user_id,
+                            user_email=user_email,
+                            planning_context=planning_context,
+                        )
                 if self._should_start_preprocess_job(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -455,6 +519,7 @@ class Orchestrator:
         initial_thought_summary: str,
         user_id: str,
         user_email: str,
+        planning_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
         existing = self._preprocess_tasks.get(session_id)
@@ -494,6 +559,9 @@ class Orchestrator:
                 user_email,
                 initial_message=initial_message,
                 initial_thought_summary=initial_thought_summary,
+                planning_context=copy.deepcopy(planning_context)
+                if isinstance(planning_context, dict)
+                else None,
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -831,6 +899,7 @@ class Orchestrator:
         *,
         initial_message: str,
         initial_thought_summary: str,
+        planning_context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message."""
         async def publish_attempt_messages(
@@ -859,6 +928,24 @@ class Orchestrator:
                 jobKind="preprocess",
             )
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            if not tool_calls and isinstance(planning_context, dict):
+                plan_response, plan_error = await self._plan_preprocess_with_llm(
+                    snapshot,
+                    score,
+                    planning_context,
+                )
+                if plan_error:
+                    raise RuntimeError(plan_error)
+                if plan_response is None or not plan_response.tool_calls:
+                    raise RuntimeError("LLM did not return an initial preprocess plan.")
+                tool_calls = list(plan_response.tool_calls)
+                tool_calls = self._apply_preprocess_planning_context_defaults(
+                    tool_calls,
+                    planning_context,
+                )
+                initial_thought_summary = (
+                    plan_response.thought_summary or initial_thought_summary
+                )
             response = await self._run_llm_tool_workflow(
                 session_id,
                 snapshot,
@@ -916,6 +1003,37 @@ class Orchestrator:
             )
         finally:
             clear_log_context()
+
+    def _apply_preprocess_planning_context_defaults(
+        self,
+        tool_calls: List[ToolCall],
+        planning_context: Dict[str, Any],
+    ) -> List[ToolCall]:
+        """Carry handoff-level selectors into executable preprocess calls."""
+        target = planning_context.get("target")
+        request = planning_context.get("request")
+        verse_number = None
+        if isinstance(target, dict):
+            verse_number = target.get("verse_number")
+        if verse_number is None and isinstance(request, dict):
+            verse_number = request.get("verse_number")
+        if verse_number is None:
+            return tool_calls
+
+        updated_calls: List[ToolCall] = []
+        for call in tool_calls:
+            if call.name != TOOL_PREPROCESS_VOICE_PARTS:
+                updated_calls.append(call)
+                continue
+            arguments = copy.deepcopy(call.arguments)
+            call_request = arguments.get("request")
+            if not isinstance(call_request, dict):
+                call_request = {}
+            if call_request.get("verse_number") is None:
+                call_request["verse_number"] = verse_number
+                arguments["request"] = call_request
+            updated_calls.append(ToolCall(name=call.name, arguments=arguments))
+        return updated_calls
 
     async def _run_llm_tool_workflow(
         self,
@@ -1192,6 +1310,7 @@ class Orchestrator:
                     ),
                     working_score,
                     selected_voicebank_id=forced_voicebank_id,
+                    role=LlmRole.PREPROCESS,
                 )
                 if repair_error:
                     best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -2623,7 +2742,61 @@ class Orchestrator:
         if not tool_calls:
             return False
         tool_names = {call.name for call in tool_calls}
-        return "preprocess_voice_parts" in tool_names and "synthesize" not in tool_names
+        return TOOL_PREPROCESS_VOICE_PARTS in tool_names and TOOL_SYNTHESIZE not in tool_names
+
+    def _should_start_preprocess_workflow(self, tool_calls: List[ToolCall]) -> bool:
+        """Return True when default role requested a preprocess-model handoff."""
+        return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
+
+    def _build_preprocess_workflow_planning_context(
+        self,
+        tool_calls: List[ToolCall],
+        *,
+        user_message: str,
+    ) -> Dict[str, Any]:
+        """Convert default-role handoff arguments into preprocess planning context."""
+        request: Dict[str, Any] = {}
+        for call in tool_calls:
+            if call.name != TOOL_START_PREPROCESS_WORKFLOW:
+                continue
+            raw_request = call.arguments.get("request")
+            if isinstance(raw_request, dict):
+                request = copy.deepcopy(raw_request)
+            else:
+                request = copy.deepcopy(call.arguments)
+            break
+
+        target_keys = ("part_id", "part_index", "voice_id", "voice_part_id", "verse_number")
+        synthesis_keys = (
+            "voicebank",
+            "voice_color",
+            "articulation",
+            "airiness",
+            "intensity",
+            "clarity",
+            "allow_lyric_propagation",
+        )
+        target = {key: request.get(key) for key in target_keys if request.get(key) is not None}
+        future_synthesis = {
+            key: request.get(key) for key in synthesis_keys if request.get(key) is not None
+        }
+        return {
+            "phase": "initial_preprocess_planning",
+            "handoff_tool": TOOL_START_PREPROCESS_WORKFLOW,
+            "reason": request.get("reason"),
+            "target": target,
+            "future_synthesis_request": future_synthesis,
+            "other_instruction": request.get("other_instruction"),
+            "user_request": user_message,
+            "request": request,
+            "instructions": [
+                "The default LLM already selected the preprocess workflow for this render request.",
+                "The request object states target and synthesis intent only; it is not an executable preprocess plan.",
+                "Generate exactly one preprocess_voice_parts tool call.",
+                "Do not call synthesize in this planning turn.",
+                "Preserve target selection and any other_instruction when choosing sections and melody sources.",
+            ],
+        }
 
     def _selection_requested(
         self,
@@ -2652,11 +2825,11 @@ class Orchestrator:
 
     def _extract_call_requested_verse(self, call: ToolCall) -> Optional[str]:
         """Extract explicit requested verse from a tool call when provided."""
-        if call.name == "synthesize":
+        if call.name == TOOL_SYNTHESIZE:
             return self._normalize_verse_number(call.arguments.get("verse_number"))
-        if call.name == "reparse":
+        if call.name == TOOL_REPARSE:
             return self._normalize_verse_number(call.arguments.get("verse_number"))
-        if call.name == "preprocess_voice_parts":
+        if call.name in {TOOL_PREPROCESS_VOICE_PARTS, TOOL_START_PREPROCESS_WORKFLOW}:
             direct = self._normalize_verse_number(call.arguments.get("verse_number"))
             if direct:
                 return direct
@@ -2694,7 +2867,12 @@ class Orchestrator:
             return False
         selected_verse_number = self._score_selected_verse_number(score)
         for call in tool_calls:
-            if call.name not in {"reparse", "preprocess_voice_parts", "synthesize"}:
+            if call.name not in {
+                TOOL_REPARSE,
+                TOOL_PREPROCESS_VOICE_PARTS,
+                TOOL_START_PREPROCESS_WORKFLOW,
+                TOOL_SYNTHESIZE,
+            }:
                 continue
             requested_verse_number = self._extract_call_requested_verse(call)
             if requested_verse_number:
@@ -2844,7 +3022,7 @@ class Orchestrator:
             message=(
                 "The requested verse differs from the currently loaded score verse. "
                 "Call reparse with the requested verse first. If the target requires derived "
-                "voice-part preprocessing, run preprocess_voice_parts before synthesis."
+                "voice-part preprocessing, start the preprocess workflow before synthesis."
             ),
         )
 
@@ -2934,6 +3112,156 @@ class Orchestrator:
         lowered = message.lower()
         return any(keyword in lowered for keyword in ("score", "json", "notes"))
 
+    def _message_requests_render(self, message: str) -> bool:
+        """Return True when a chat message appears to request sung/audio output."""
+        lowered = message.lower()
+        return any(
+            keyword in lowered
+            for keyword in (
+                "sing",
+                "synthesize",
+                "synthesise",
+                "render",
+                "generate audio",
+                "make audio",
+                "create audio",
+                "record",
+                "perform",
+                "voice this",
+            )
+        )
+
+    def _resolve_selection_part_index(
+        self,
+        score: Dict[str, Any],
+        selection: Optional[Dict[str, Any]],
+    ) -> Optional[int]:
+        """Resolve a structured UI part selection to a score part index."""
+        if not isinstance(selection, dict):
+            return None
+        parts = score.get("parts")
+        if not isinstance(parts, list):
+            return None
+        raw_part_index = selection.get("part_index")
+        if isinstance(raw_part_index, int) and 0 <= raw_part_index < len(parts):
+            return raw_part_index
+        raw_part_id = selection.get("part_id")
+        if raw_part_id is None:
+            return None
+        part_id = str(raw_part_id).strip()
+        if not part_id:
+            return None
+        for idx, part in enumerate(parts):
+            if isinstance(part, dict) and str(part.get("part_id") or "") == part_id:
+                return idx
+        return None
+
+    def _build_deterministic_preprocess_context(
+        self,
+        score: Dict[str, Any],
+        *,
+        message: str,
+        selection: Optional[Dict[str, Any]],
+        score_summary: Optional[Dict[str, Any]],
+        explicit_verse_number: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Return planning context when static analysis can force preprocessing."""
+        if not self._message_requests_render(message):
+            return None
+        if len(self._available_verses(score_summary)) > 1 and not explicit_verse_number:
+            return None
+        part_index = self._resolve_selection_part_index(score, selection)
+        if part_index is None:
+            return None
+        precheck = synthesize_preflight_action_required(score, part_index=part_index)
+        if not isinstance(precheck, dict):
+            return None
+        diagnostics = precheck.get("diagnostics")
+        if not isinstance(diagnostics, dict) or not diagnostics.get("preprocess_required"):
+            return None
+        parts = score.get("parts") if isinstance(score.get("parts"), list) else []
+        part = parts[part_index] if part_index < len(parts) and isinstance(parts[part_index], dict) else {}
+        return {
+            "phase": "initial_preprocess_planning",
+            "message_intent": "PREPROCESS_REQUIRED_STARTING",
+            "reason": precheck.get("reason"),
+            "failed_validation_rules": precheck.get("failed_validation_rules"),
+            "target": {
+                "part_index": part_index,
+                "part_id": part.get("part_id"),
+                "part_name": part.get("part_name"),
+            },
+            "diagnostics": diagnostics,
+            "user_request": message,
+            "instructions": [
+                "Backend static analysis already determined preprocessing is required.",
+                "Generate exactly one preprocess_voice_parts tool call.",
+                "Do not call synthesize in this planning turn.",
+                "Do not reconsider whether direct synthesis is possible.",
+            ],
+        }
+
+    async def _render_preprocess_start_message(
+        self,
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        planning_context: Dict[str, Any],
+        *,
+        selected_voicebank_id: Optional[str],
+    ) -> tuple[str, Optional[str]]:
+        """Ask the default LLM role for natural copy before preprocess starts."""
+        payload = {
+            "message_intent": "PREPROCESS_REQUIRED_STARTING",
+            "reason": planning_context.get("reason"),
+            "target": planning_context.get("target"),
+            "diagnostics": planning_context.get("diagnostics"),
+            "instructions": [
+                "Tell the user that this selected part needs splitting before synthesis.",
+                "Say that preprocessing/splitting is starting now.",
+                "Do not ask for confirmation yet.",
+                "Do not claim the derived score or audio is ready.",
+                "Return no tool calls.",
+            ],
+        }
+        response, error = await self._decide_followup_with_llm(
+            snapshot,
+            json.dumps(payload, sort_keys=True),
+            score,
+            selected_voicebank_id=selected_voicebank_id,
+            role=LlmRole.DEFAULT,
+        )
+        if error:
+            return "", error
+        if response is None:
+            return "", None
+        return self._format_followup_message_text(response.final_message), None
+
+    async def _plan_preprocess_with_llm(
+        self,
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        planning_context: Dict[str, Any],
+    ) -> tuple[Optional[LlmResponse], Optional[str]]:
+        """Ask the preprocess LLM role to author the initial preprocess plan."""
+        response, error = await self._decide_followup_with_llm(
+            snapshot,
+            json.dumps(planning_context, sort_keys=True),
+            score,
+            role=LlmRole.PREPROCESS,
+        )
+        if error:
+            return None, error
+        if response is None:
+            return None, "LLM did not return an initial preprocess plan."
+        preprocess_calls = [
+            call for call in response.tool_calls if call.name == TOOL_PREPROCESS_VOICE_PARTS
+        ]
+        if not preprocess_calls:
+            return None, "LLM did not return an initial preprocess plan."
+        if len(preprocess_calls) != len(response.tool_calls):
+            response = replace(response, tool_calls=preprocess_calls)
+        return response, None
+
     def _format_llm_error(self, exc: RuntimeError) -> str:
         """Return a user-facing LLM error message."""
         message = str(exc).strip()
@@ -2963,6 +3291,22 @@ class Orchestrator:
         cleaned = message.strip()
         return cleaned == LLM_ERROR_FALLBACK or cleaned.startswith("LLM error ")
 
+    def _call_llm_client_generate(
+        self,
+        prompt_bundle: Any,
+        history: List[Dict[str, str]],
+        role: LlmRole,
+    ) -> str:
+        """Call the LLM client with role fallback for legacy test clients."""
+        if self._llm_client is None:
+            raise RuntimeError("LLM is not configured.")
+        try:
+            return self._llm_client.generate(prompt_bundle, history, role=role)
+        except TypeError as exc:
+            if "role" not in str(exc):
+                raise
+            return self._llm_client.generate(prompt_bundle, history)
+
     def _tool_payload_has_error(self, payload: str) -> bool:
         """Return True if the tool payload JSON includes an error object."""
         try:
@@ -2979,6 +3323,7 @@ class Orchestrator:
         score_available: bool,
         *,
         selected_voicebank_id: Optional[str] = None,
+        role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Query the LLM to determine tool calls and response text."""
         if self._llm_client is None:
@@ -2987,7 +3332,10 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
-            llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            llm_tools = self._with_voicebank_enum(
+                self._llm_tools_for_role(role),
+                voicebank_ids,
+            )
             current_score = snapshot.get("current_score")
             planning_score = None
             voice_part_signals = None
@@ -3024,8 +3372,14 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                role=role,
             )
-            text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
+            text = await asyncio.to_thread(
+                self._call_llm_client_generate,
+                prompt_bundle,
+                history,
+                role,
+            )
         except ValueError as exc:
             self._logger.warning("llm_planning_context_failed error=%s", exc)
             return None, str(exc)
@@ -3042,6 +3396,14 @@ class Orchestrator:
                 summarize_payload(text),
             )
             return None, "LLM returned an invalid response. Please try again."
+        invalid_tool = self._first_invalid_tool_for_role(response.tool_calls, role)
+        if invalid_tool:
+            self._logger.warning(
+                "llm_tool_not_allowed_for_role role=%s tool=%s",
+                role.value,
+                invalid_tool,
+            )
+            return None, "LLM returned a tool that is not available in this workflow. Please try again."
         return response, None
 
     async def _render_tool_followup(
@@ -3062,6 +3424,7 @@ class Orchestrator:
         current_score: Optional[Dict[str, Any]] = None,
         *,
         selected_voicebank_id: Optional[str] = None,
+        role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
         if self._llm_client is None:
@@ -3076,7 +3439,10 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
-            llm_tools = self._with_voicebank_enum(self._llm_tools, voicebank_ids)
+            llm_tools = self._with_voicebank_enum(
+                self._llm_tools_for_role(role),
+                voicebank_ids,
+            )
             planning_score = self._resolve_llm_planning_score(snapshot, current_score)
             voice_part_signals = (
                 planning_score.get("voice_part_signals")
@@ -3114,8 +3480,14 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                role=role,
             )
-            text = await asyncio.to_thread(self._llm_client.generate, prompt_bundle, history)
+            text = await asyncio.to_thread(
+                self._call_llm_client_generate,
+                prompt_bundle,
+                history,
+                role,
+            )
         except ValueError as exc:
             self._logger.warning("llm_followup_context_failed error=%s", exc)
             return None, str(exc)
@@ -3142,6 +3514,14 @@ class Orchestrator:
                     None,
                 )
             return None, tool_summary
+        invalid_tool = self._first_invalid_tool_for_role(response.tool_calls, role)
+        if invalid_tool:
+            self._logger.warning(
+                "llm_followup_tool_not_allowed_for_role role=%s tool=%s",
+                role.value,
+                invalid_tool,
+            )
+            return None, "LLM returned a tool that is not available in this workflow. Please try again."
         return response, None
 
     def _extract_followup_prose_fallback(self, text: str) -> str:
@@ -3224,6 +3604,22 @@ class Orchestrator:
             return ""
         return f"Thought summary:\n{cleaned_summary}"
 
+    def _llm_tools_for_role(self, role: LlmRole) -> List[Dict[str, Any]]:
+        """Return the tool schemas exposed to a specific LLM role."""
+        return self._llm_tools_by_role.get(role, self._llm_tools_by_role[LlmRole.DEFAULT])
+
+    def _first_invalid_tool_for_role(
+        self,
+        tool_calls: List[ToolCall],
+        role: LlmRole,
+    ) -> Optional[str]:
+        """Return the first tool name that is not available to the role."""
+        allowed = LLM_TOOL_ALLOWLIST_BY_ROLE.get(role, DEFAULT_LLM_TOOL_ALLOWLIST)
+        for call in tool_calls:
+            if call.name not in allowed:
+                return call.name
+        return None
+
     async def _get_voicebank_ids(self) -> List[str]:
         """Return cached voicebank IDs or fetch them from the MCP server."""
         if self._cached_voicebank_ids is not None:
@@ -3300,13 +3696,56 @@ class Orchestrator:
             for entry in voice_colors
             if isinstance(entry, dict) and entry.get("name")
         } if isinstance(voice_colors, list) else set()
-        if requested_style and (not valid_styles or requested_style in valid_styles):
+        if requested_style and requested_style in valid_styles:
             metadata["voicebankStyle"] = requested_style
         else:
             default_style = str(details.get("default_voice_color") or "").strip()
-            if default_style:
+            if default_style and default_style in valid_styles:
                 metadata["voicebankStyle"] = default_style
         return metadata
+
+    async def _normalize_synthesize_voice_color(
+        self,
+        synth_args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Drop voice_color when it is not valid for the selected voicebank."""
+        if "voice_color" not in synth_args:
+            return synth_args
+
+        raw_voicebank = synth_args.get("voicebank")
+        voicebank_id = str(raw_voicebank).strip() if raw_voicebank is not None else ""
+        if not voicebank_id:
+            voicebank_id = await self._resolve_voicebank()
+        if not voicebank_id:
+            updated = dict(synth_args)
+            updated.pop("voice_color", None)
+            return updated
+
+        details_by_id = {
+            str(entry.get("id")): entry
+            for entry in await self._get_voicebank_details()
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        voice_colors = details_by_id.get(voicebank_id, {}).get("voice_colors")
+        valid_styles = {
+            str(entry.get("name")).strip()
+            for entry in voice_colors
+            if isinstance(entry, dict) and entry.get("name")
+        } if isinstance(voice_colors, list) else set()
+
+        requested_style = str(synth_args.get("voice_color") or "").strip()
+        if requested_style and requested_style in valid_styles:
+            return synth_args
+
+        updated = dict(synth_args)
+        updated.pop("voice_color", None)
+        self._logger.warning(
+            "synthesize_voice_color_dropped voicebank=%s requested=%s reason=%s",
+            voicebank_id,
+            requested_style,
+            "no_voice_colors" if not valid_styles else "invalid_voice_color",
+        )
+        return updated
 
     async def _get_voicebank_details(self) -> List[Dict[str, Any]]:
         """Return cached voicebank metadata for LLM prompts."""
@@ -3351,14 +3790,11 @@ class Orchestrator:
     def _with_voicebank_enum(
         self, tools: List[Dict[str, Any]], voicebank_ids: List[str]
     ) -> List[Dict[str, Any]]:
-        """Inject a voicebank enum into the synthesize tool schema."""
+        """Inject a voicebank enum into tool schemas that accept voicebank."""
         if not voicebank_ids:
             return tools
         updated: List[Dict[str, Any]] = []
         for tool in tools:
-            if tool.get("name") != "synthesize":
-                updated.append(tool)
-                continue
             tool_copy = copy.deepcopy(tool)
             schema = tool_copy.get("inputSchema")
             if isinstance(schema, dict):
@@ -3371,6 +3807,22 @@ class Orchestrator:
                     schema = dict(schema)
                     schema["properties"] = props
                     tool_copy["inputSchema"] = schema
+                if isinstance(props, dict) and isinstance(props.get("request"), dict):
+                    request_schema = dict(props["request"])
+                    request_props = request_schema.get("properties")
+                    if isinstance(request_props, dict) and isinstance(
+                        request_props.get("voicebank"), dict
+                    ):
+                        voicebank_schema = dict(request_props["voicebank"])
+                        voicebank_schema["enum"] = voicebank_ids
+                        request_props = dict(request_props)
+                        request_props["voicebank"] = voicebank_schema
+                        request_schema["properties"] = request_props
+                        props = dict(props)
+                        props["request"] = request_schema
+                        schema = dict(schema)
+                        schema["properties"] = props
+                        tool_copy["inputSchema"] = schema
             updated.append(tool_copy)
         return updated
 
@@ -3400,7 +3852,10 @@ class Orchestrator:
                 call.name,
                 summarize_payload(call.arguments),
             )
-            if call.name not in self._llm_tool_allowlist:
+            if call.name == TOOL_START_PREPROCESS_WORKFLOW:
+                self._logger.warning("handoff_tool_reached_executor tool=%s", call.name)
+                continue
+            if call.name not in {TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_SYNTHESIZE}:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
             if call.name == "reparse":
@@ -3641,6 +4096,7 @@ class Orchestrator:
                 # Launch an async synthesis job.
                 synth_args = dict(call.arguments)
                 synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
+                synth_args = await self._normalize_synthesize_voice_color(synth_args)
                 synth_args.pop("score", None)
                 requested_verse_number = self._normalize_verse_number(
                     synth_args.get("verse_number")
@@ -3985,6 +4441,8 @@ class Orchestrator:
                     continue
                 appended_ref = value.get("appended_part_ref")
                 if not isinstance(appended_ref, dict):
+                    continue
+                if bool(appended_ref.get("hidden_default_lane")):
                     continue
                 derived_part_index = appended_ref.get("part_index")
                 if not isinstance(derived_part_index, int):

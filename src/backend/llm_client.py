@@ -3,6 +3,7 @@ from __future__ import annotations
 """LLM client protocol and test stub implementation."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Protocol
 import json
 
@@ -11,10 +12,21 @@ from src.backend.llm_prompt import PromptBundle
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 
 
+class LlmRole(str, Enum):
+    """Logical model role for a single LLM request."""
+
+    DEFAULT = "default"
+    PREPROCESS = "preprocess"
+
+
 class LlmClient(Protocol):
     """Protocol for LLM clients used by the orchestrator."""
     def generate(
-        self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]
+        self,
+        prompt_bundle: PromptBundle | str,
+        history: List[Dict[str, str]],
+        *,
+        role: LlmRole = LlmRole.DEFAULT,
     ) -> str:
         """Return a model response given prompt and chat history."""
         raise NotImplementedError
@@ -29,7 +41,11 @@ class StaticLlmClient:
     _index: int = 0
 
     def generate(
-        self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]
+        self,
+        prompt_bundle: PromptBundle | str,
+        history: List[Dict[str, str]],
+        *,
+        role: LlmRole = LlmRole.DEFAULT,
     ) -> str:
         """Return the configured static response."""
         if history:

@@ -101,6 +101,7 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
         preprocess_mapping_context=None,
         last_preprocess_plan=None,
         voicebank_details=None,
+        role="preprocess",
     )
     assert "SVS Voice-Part Lint Rules (Canonical Runtime Validation)" in prompt
     assert "- Rule code: same_part_target_completeness" in prompt
@@ -122,7 +123,7 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
         voicebank_details=None,
     )
     assert (
-        "When you call preprocess_voice_parts, set final_message to a short preprocess-in-progress confirmation"
+        "call `start_preprocess_voice_part_workflow` and set final_message to a short preprocess-in-progress confirmation"
         in prompt
     )
 
@@ -138,6 +139,7 @@ def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() ->
         preprocess_mapping_context=None,
         last_preprocess_plan=None,
         voicebank_details=None,
+        role="preprocess",
     )
     assert '"phase": "preprocess_repair_planning"' in prompt
     assert "must return exactly one `preprocess_voice_parts` tool call" in prompt
@@ -154,6 +156,7 @@ def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None
         preprocess_mapping_context=None,
         last_preprocess_plan=None,
         voicebank_details=None,
+        role="preprocess",
     )
     assert "Study the full parsed score JSON, score summary, and voice-part planning signals together" in prompt
     assert "Prefer the full parsed score JSON as the ground truth for note-level planning details" in prompt
@@ -235,3 +238,32 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
     assert "Voicebank metadata (if available):" in bundle.dynamic_prompt_text
     assert '"gender": "female"' in bundle.dynamic_prompt_text
     assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text
+
+
+def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["VoiceA", "VoiceB"],
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        selected_voicebank_id="VoiceB",
+        voicebank_details=[
+            {
+                "id": "VoiceB",
+                "name": "Voice B Display",
+                "gender": "female",
+                "voice_type": "soprano",
+                "voice_colors": [],
+                "default_voice_color": None,
+            }
+        ],
+    )
+    assert "User-selected voicebank override:" in bundle.dynamic_prompt_text
+    assert '"id": "VoiceB"' in bundle.dynamic_prompt_text
+    assert '"name": "Voice B Display"' in bundle.dynamic_prompt_text
+    assert "Mandatory user-selected voicebank" in bundle.dynamic_prompt_text
+    assert "Do not choose or mention another voicebank" in bundle.dynamic_prompt_text

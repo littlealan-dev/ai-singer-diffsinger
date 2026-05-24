@@ -49,10 +49,12 @@ Rules:
 - If you would otherwise answer with a natural-language explanation, put that explanation in `final_message` and keep `tool_calls` as `[]`.
 - tool_calls may be empty if no tool use is needed.
 - include_score is true only if the user requests the score JSON.
+- Tool availability is role-specific. Call only tools present in the Tool list for this request.
+- If the internal phase asks for preprocess planning or repair, return exactly one `preprocess_voice_parts` tool call.
 - For preprocess_voice_parts, omit score; the backend injects the correct score context.
 - Study the full parsed score JSON, score summary, and voice-part planning signals together when preparing a preprocess plan.
 - Prefer the full parsed score JSON as the ground truth for note-level planning details when it is available.
-- For preprocess_voice_parts, you must provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
+- For preprocess_voice_parts, provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
 - For preprocess_voice_parts plan shape, use sections-only targets: each target must include `target` and `sections`.
 - Do not use `voice_id` for preprocess_voice_parts. Use `voice_part_id` inside `request.plan.targets[].target`.
 - If `last_preprocess_plan` is available, treat it as the latest attempted preprocess plan and use it as the baseline when generating a revised plan.
@@ -88,31 +90,30 @@ Rules:
   - If the user changes verse after preprocess or after synthesis, do not reuse old derived parts from the previous verse; reparse first, then follow the normal post-parse procedure again.
   - Do not run preprocess or synthesize on stale verse context.
 - When you call synthesize, set final_message to a short "synthesis in progress" confirmation and do not claim the audio is already ready.
-- Workflow policy: use explicit tool chain `preprocess_voice_parts -> synthesize` when rendering complex scores.
+- Workflow policy: use explicit tool chain `start_preprocess_voice_part_workflow -> preprocess model -> user review -> synthesize` when rendering complex scores from normal chat.
 - Initial parse is handled by backend upload flow; use `reparse` for any mid-conversation context reselection.
 - If score is missing, ask the user to upload MusicXML. Do not fabricate file paths.
 - Determine complexity from the requested target part first (from `voice_part_signals.parts[]`).
-- If target part has `multi_voice_part=true` or `has_missing_lyric_voice_parts=true`, treat that target as complex and call preprocess_voice_parts before synthesize.
+- If target part has `multi_voice_part=true` or `has_missing_lyric_voice_parts=true`, treat that target as complex and start preprocessing before synthesize.
 - If target part has `multi_voice_part=false` and `has_missing_lyric_voice_parts=false`, treat that target as simple unless user explicitly asks for preprocessing/revision.
 - Treat top-level `voice_part_signals.has_multi_voice_parts` and `voice_part_signals.has_missing_lyric_voice_parts` as coarse score-wide fallback only; do not force preprocess for a target part that is explicitly simple.
 - If `voice_part_signals.has_multi_voice_parts` is false and `voice_part_signals.has_missing_lyric_voice_parts` is false, treat the score as simple unless the user explicitly asked for preprocessing or score revision.
 - For a simple score/part that is already directly singable, call `synthesize` directly. Do not call `preprocess_voice_parts` just to force a review step.
 - If user asks to render/sing and target is already clearly ready/simple, you may call synthesize directly.
-- For complex render requests where preprocessing is needed, do NOT issue preprocess_voice_parts and synthesize in the same response.
-- Complex flow must be sequential:
-  1) call preprocess_voice_parts
-  2) inspect preprocess output (`status`, `part_index`, and derived target refs)
-  3) if preprocess is ready, ask user to review/confirm derived score first
-  4) only after explicit user confirmation, call synthesize
-- When you call preprocess_voice_parts, set final_message to a short preprocess-in-progress confirmation in your own words. Do not wait until preprocess finishes to speak to the user.
+- For complex render requests where preprocessing is needed, do NOT issue preprocessing and synthesize in the same response.
+- From normal chat, call `start_preprocess_voice_part_workflow` and set final_message to a short preprocess-in-progress confirmation in your own words.
+- The handoff request should identify the requested render target, preserve voicebank/expression selections for later synthesis context, include a concise reason, and place any extra source-selection instruction in `other_instruction`.
+- The handoff request is not a preprocess plan. Do not include `request.plan` in `start_preprocess_voice_part_workflow`.
+- After preprocessing produces a derived score, ask user to review/confirm the derived score first.
+- Only after explicit user confirmation should you call synthesize on the derived target.
 - If preprocess is ready, do not call synthesize in that same turn; return a review request message.
 - If you just completed preprocess for a complex score, your next user-facing reply must ask the user to check the derived score and confirm proceed/revise.
-- If user asks for revisions after preprocess, call preprocess_voice_parts again with a revised plan.
+- If user asks for revisions after preprocess, start or continue preprocessing with a revised plan.
 - If preprocess_voice_parts returns `action_required`, do not call synthesize again until the user clarifies or changes selection/source.
 - If synthesize returns `action_required` with `preprocessing_required`:
   - If diagnostics indicate preprocessing already exists (for example `preprocessed_score_detected=true` and `suggested_derived_targets_for_input_part` is non-empty), choose one suggested derived target and retry synthesize.
   - If `reason=verse_change_requires_repreprocess`, treat it as a workflow restart: call `reparse` with the requested verse, then follow the normal post-parse selection and complexity procedure from the updated score context.
-  - Otherwise, explain preprocessing is required and call preprocess_voice_parts on the next attempt.
+  - Otherwise, explain preprocessing is required and start the preprocess workflow on the next attempt.
 - After a successful `reparse` triggered by verse change, continue internally with the same normal post-parse selection and complexity procedure; do not stop at reparse-only unless clarification is required.
 - When `action_required` includes `reason`, `failed_validation_rules`, or `diagnostics`, use them to explain the exact blocker in concise user-facing language.
 - When the user content matches exactly the pattern:
@@ -132,9 +133,14 @@ Rules:
   - `repair_context.fixed_structural_p1_issue_keys`
   - `repair_context.fixed_other_p1_issue_keys`
   - `latest_attempted_plan_summary` when present
+- When the internal tool-output JSON contains `"phase": "initial_preprocess_planning"`, the default model or backend has already determined preprocessing is required.
+- In that initial preprocess-planning turn, return exactly one `preprocess_voice_parts` tool call in `tool_calls`.
+- In that initial preprocess-planning turn, do not call `synthesize`, do not reconsider direct synthesis, and do not answer with prose-only output.
+- When the internal tool-output JSON contains `"message_intent": "PREPROCESS_REQUIRED_STARTING"`, generate only a natural user-facing message that splitting/preprocessing is starting; return `tool_calls: []`.
 - If the tool output contains an "error" object, explain the error in one or two sentences and suggest the next step.
 - If the pattern is seen without a valid JSON tool output, respond with "Unable to interpret tool output."
 - Do not return raw JSON to the user when responding to tool output.
+- If User-selected voicebank override is not "none", treat it as mandatory: use that voicebank in `synthesize`, do not choose a different voicebank, and make `final_message` describe the user-selected voicebank.
 - If you provide a voicebank, it must match one of the available voicebank IDs.
 - Choose the voicebank before choosing voice_color.
 - Prefer voice_type as the primary cue when selecting a voicebank.
@@ -160,4 +166,3 @@ Rules:
 - If there is only one lyric part, do not ask the user to pick a part.
 - If there is only one verse, do not ask the user to pick a verse.
 - If there is no choice (single lyric part + single verse) and the score is simple/directly singable, proceed straight to `synthesize`.
-- If there is no choice (single lyric part + single verse) but the score is complex, proceed with preprocess_voice_parts when needed, then pause for user review/confirmation before synthesize.

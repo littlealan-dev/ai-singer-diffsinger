@@ -67,6 +67,7 @@ def build_prompt_bundle(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    role: Any = "default",
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
@@ -106,12 +107,29 @@ def build_prompt_bundle(
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
-    selected_voicebank_text = (
-        f"{selected_voicebank_id} (user-selected; synthesize must use this voicebank)"
-        if selected_voicebank_id
-        else "none"
-    )
-    static_prompt = _load_system_prompt().replace("{tool_json}", tool_json)
+    selected_voicebank_text = "none"
+    if selected_voicebank_id:
+        selected_voicebank_payload: Dict[str, Any] = {
+            "id": selected_voicebank_id,
+            "instruction": (
+                "Mandatory user-selected voicebank. Use this voicebank in synthesize "
+                "and describe this voicebank in final_message. Do not choose or mention "
+                "another voicebank as the selected singer."
+            ),
+        }
+        if voicebank_details:
+            for entry in voicebank_details:
+                if isinstance(entry, dict) and str(entry.get("id") or "") == selected_voicebank_id:
+                    selected_voicebank_payload["metadata"] = entry
+                    break
+        selected_voicebank_text = json.dumps(
+            selected_voicebank_payload,
+            indent=2,
+            sort_keys=True,
+        )
+    static_prompt = _load_system_prompt(
+        include_preprocess_guidance=_is_preprocess_role(role)
+    ).replace("{tool_json}", tool_json)
     static_prompt = (
         static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
         .replace("{voicebanks}", "<provided in Dynamic Context>")
@@ -158,6 +176,7 @@ def build_system_prompt(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    role: Any = "default",
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
     bundle = build_prompt_bundle(
@@ -171,21 +190,29 @@ def build_system_prompt(
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
         selected_voicebank_id=selected_voicebank_id,
+        role=role,
     )
     return bundle.full_prompt_text
 
 
-def _load_system_prompt() -> str:
+def _is_preprocess_role(role: Any) -> bool:
+    """Return True when prompt construction is for the preprocess LLM role."""
+    role_value = getattr(role, "value", role)
+    return str(role_value).strip().lower() == "preprocess"
+
+
+def _load_system_prompt(*, include_preprocess_guidance: bool = False) -> str:
     """Load and combine system prompt templates from disk."""
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
     base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
     prompt_sections = [base_prompt]
-    if _SYSTEM_PROMPT_LESSONS_PATH.exists():
+    if include_preprocess_guidance and _SYSTEM_PROMPT_LESSONS_PATH.exists():
         lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
         prompt_sections.append(lessons_prompt)
-    prompt_sections.append(render_lint_rules_for_prompt())
-    prompt_sections.append(render_postflight_validation_rules_for_prompt())
+    if include_preprocess_guidance:
+        prompt_sections.append(render_lint_rules_for_prompt())
+        prompt_sections.append(render_postflight_validation_rules_for_prompt())
     return "\n\n---\n\n".join(prompt_sections)
 
 

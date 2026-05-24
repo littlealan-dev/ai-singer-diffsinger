@@ -1352,6 +1352,123 @@ TOOLS: List[Tool] = [
         },
     ),
     Tool(
+        name="start_preprocess_voice_part_workflow",
+        description=(
+            "Default-chat handoff tool for render requests that need voice-part "
+            "preprocessing before synthesis. This states the user's target and "
+            "intent; a separate preprocess model will author the executable "
+            "preprocess_voice_parts plan."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "object",
+                    "description": (
+                        "Preprocess workflow intent. Use the same target/render "
+                        "selection fields as synthesize, excluding derived-source "
+                        "reuse hints. This is not a preprocess plan."
+                    ),
+                    "properties": {
+                        "part_id": {
+                            "type": ["string", "null"],
+                            "description": "Exact MusicXML part id requested by the user.",
+                        },
+                        "part_index": {
+                            "type": ["integer", "null"],
+                            "description": "0-based score.parts index requested by the user.",
+                        },
+                        "voice_id": {
+                            "type": ["string", "null"],
+                            "description": "Optional original MusicXML voice id target.",
+                        },
+                        "voice_part_id": {
+                            "type": ["string", "null"],
+                            "description": "Optional normalized voice-part id target.",
+                        },
+                        "allow_lyric_propagation": {
+                            "type": "boolean",
+                            "description": "Whether later synthesis may use lyric propagation.",
+                        },
+                        "verse_number": {
+                            "type": ["integer", "string", "null"],
+                            "description": (
+                                "Optional explicit verse selector. Required before "
+                                "preprocessing multi-verse scores."
+                            ),
+                        },
+                        "voicebank": {
+                            "type": ["string", "null"],
+                            "description": "Voicebank id requested for later synthesis.",
+                        },
+                        "voice_color": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Optional voice color/style for later synthesis. Omit when "
+                                "the selected voicebank has no voice colors."
+                            ),
+                        },
+                        "articulation": {
+                            "type": ["number", "null"],
+                            "minimum": -1.0,
+                            "maximum": 1.0,
+                            "description": "Articulation value to preserve for later synthesis.",
+                        },
+                        "airiness": {
+                            "type": ["number", "null"],
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Airiness value to preserve for later synthesis.",
+                        },
+                        "intensity": {
+                            "type": ["number", "null"],
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Intensity value to preserve for later synthesis.",
+                        },
+                        "clarity": {
+                            "type": ["number", "null"],
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Clarity value to preserve for later synthesis.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Short user-facing reason this request needs "
+                                "preprocessing before synthesis."
+                            ),
+                        },
+                        "other_instruction": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Free-text instruction for the preprocess model, "
+                                "for example 'take the lower note in a chord'."
+                            ),
+                        },
+                    },
+                    "required": ["reason"],
+                    "oneOf": [
+                        {"required": ["part_id"]},
+                        {"required": ["part_index"]},
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["request"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "message": {"type": "string"},
+            },
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="save_audio",
         description="Save audio to a file and return base64 bytes.",
         input_schema={
@@ -1439,7 +1556,10 @@ TOOLS: List[Tool] = [
                 },
                 "voice_color": {
                     "type": ["string", "null"],
-                    "description": "Optional voice color/style name supported by the selected voicebank.",
+                    "description": (
+                        "Optional voice color/style name supported by the selected "
+                        "voicebank. Omit when the selected voicebank has no voice colors."
+                    ),
                 },
                 "articulation": {
                     "type": "number",

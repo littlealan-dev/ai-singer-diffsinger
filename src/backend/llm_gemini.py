@@ -10,6 +10,7 @@ import urllib.request
 
 from src.backend.config import Settings
 from src.backend.gemini_cache import GeminiPromptCacheManager
+from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.mcp.logging_utils import summarize_payload
 
@@ -27,21 +28,31 @@ class GeminiRestClient:
         self._settings = settings
         self._api_key = api_key or settings.gemini_api_key
         self._base_url = settings.gemini_base_url
-        self._model = settings.gemini_model
-        self._timeout = settings.gemini_timeout_seconds
-        self._thinking_level = settings.gemini_thinking_level.strip()
         self._include_thought_summary = bool(settings.gemini_include_thought_summary)
         self._logger = logging.getLogger(__name__)
         self._cache_manager = cache_manager or GeminiPromptCacheManager(settings, api_key=self._api_key)
 
-    def generate(self, prompt_bundle: PromptBundle | str, history: List[Dict[str, str]]) -> str:
+    def generate(
+        self,
+        prompt_bundle: PromptBundle | str,
+        history: List[Dict[str, str]],
+        *,
+        role: LlmRole = LlmRole.DEFAULT,
+    ) -> str:
         """Generate a response from Gemini using the REST API."""
         if isinstance(prompt_bundle, str):
             prompt_bundle = PromptBundle(
                 static_prompt_text=prompt_bundle,
                 dynamic_prompt_text="Dynamic Context:\nnone\nEnd Dynamic Context.",
             )
-        url = f"{self._base_url}/models/{self._model}:generateContent"
+        role_config = (
+            self._settings.gemini_preprocess
+            if role == LlmRole.PREPROCESS
+            else self._settings.gemini_default
+        )
+        model = role_config.model
+        timeout = role_config.timeout_seconds
+        thinking_level = role_config.thinking_level.strip()
         payload = {
             "contents": self._history_to_contents(
                 history,
@@ -49,7 +60,7 @@ class GeminiRestClient:
             ),
         }
         cached_content_name = self._cache_manager.ensure_prompt_cache(
-            model=self._model,
+            model=model,
             build_id=self._settings.backend_build_id,
             static_prompt_text=prompt_bundle.static_prompt_text,
         )
@@ -58,17 +69,56 @@ class GeminiRestClient:
         else:
             payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
         thinking_config: Dict[str, Any] = {}
-        if self._thinking_level:
-            thinking_config["thinkingLevel"] = self._thinking_level
+        if thinking_level:
+            thinking_config["thinkingLevel"] = thinking_level
         if self._include_thought_summary:
             thinking_config["includeThoughts"] = True
         if thinking_config:
             payload["generationConfig"] = {"thinkingConfig": thinking_config}
         self._logger.debug(
-            "gemini_request_payload model=%s payload=%s",
-            self._model,
+            "gemini_request_payload role=%s model=%s thinking_level=%s payload=%s",
+            role.value,
+            model,
+            thinking_level,
             payload,
         )
+        try:
+            return self._generate_with_payload(payload, model=model, timeout=timeout, thinking_level=thinking_level)
+        except RuntimeError as exc:
+            if not cached_content_name or not _is_missing_cached_content_error(str(exc)):
+                raise
+            self._logger.warning(
+                "gemini_cached_content_retry_uncached role=%s model=%s cache_name=%s error=%s",
+                role.value,
+                model,
+                cached_content_name,
+                exc,
+            )
+            self._cache_manager.invalidate_prompt_cache(
+                model=model,
+                build_id=self._settings.backend_build_id,
+                static_prompt_text=prompt_bundle.static_prompt_text,
+                cache_name=cached_content_name,
+            )
+            retry_payload = dict(payload)
+            retry_payload.pop("cachedContent", None)
+            retry_payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
+            return self._generate_with_payload(
+                retry_payload,
+                model=model,
+                timeout=timeout,
+                thinking_level=thinking_level,
+            )
+
+    def _generate_with_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        model: str,
+        timeout: float,
+        thinking_level: str,
+    ) -> str:
+        url = f"{self._base_url}/models/{model}:generateContent"
         # Encode payload as JSON for the HTTP request body.
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -80,7 +130,7 @@ class GeminiRestClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read()
         except TimeoutError as exc:
             raise RuntimeError("Gemini request timed out.") from exc
@@ -116,8 +166,8 @@ class GeminiRestClient:
         if thinking_parts:
             self._logger.debug(
                 "gemini_thinking model=%s level=%s parts=%s thought=%s",
-                self._model,
-                self._thinking_level,
+                model,
+                thinking_level,
                 len(thinking_parts),
                 summarize_payload("\n".join(thinking_parts)),
             )
@@ -163,3 +213,11 @@ class GeminiRestClient:
             content_role = "model" if role == "assistant" else "user"
             contents.append({"role": content_role, "parts": [{"text": entry.get("content", "")}]})
         return contents
+
+
+def _is_missing_cached_content_error(message: str) -> bool:
+    return (
+        "CachedContent not found" in message
+        or "cachedContent not found" in message
+        or "Cached content not found" in message
+    )

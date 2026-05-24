@@ -14,6 +14,7 @@ from src.api.voice_parts import (
     _analyze_part_voice_parts,
     _choose_notes_ranked,
     _choose_notes_trivial_ranked,
+    _finalize_transform_result,
     _lint_finding,
     _normalize_materialized_musicxml_stem,
     _reviewable_action_required_from_finalized,
@@ -1425,6 +1426,64 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertFalse(result.get("hidden_default_lane"))
         self.assertEqual(len(result["score"]["parts"]), 2)
         self.assertEqual(result["appended_part_ref"].get("part_index"), 1)
+
+    def test_default_lane_with_siblings_is_not_materialized_as_visible_part(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Women",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        transformed_part = {
+            **score["parts"][0],
+            "part_name": "voice part 2",
+            "notes": [score["parts"][0]["notes"][1]],
+        }
+
+        result = _finalize_transform_result(
+            score,
+            part_index=0,
+            target_voice_part_id="voice part 2",
+            source_voice_part_id="voice part 2",
+            source_part_index=0,
+            transformed_part=transformed_part,
+            propagated=False,
+            status="ready",
+            validation={},
+            target_source_voice_id="_default",
+        )
+
+        self.assertTrue(result.get("hidden_default_lane"))
+        appended_ref = result.get("appended_part_ref") or {}
+        self.assertTrue(appended_ref.get("hidden_default_lane"))
+        self.assertEqual(appended_ref.get("part_index"), 0)
+        self.assertEqual(len(result.get("score", {}).get("parts", [])), 1)
 
     def test_preflight_lint_flags_underclaimed_same_part_chord_source(self) -> None:
         score = {

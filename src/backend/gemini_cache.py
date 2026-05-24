@@ -105,6 +105,28 @@ class GeminiPromptCacheManager:
             )
             return None
 
+    def invalidate_prompt_cache(
+        self,
+        *,
+        model: str,
+        build_id: str,
+        static_prompt_text: str,
+        cache_name: str | None = None,
+    ) -> None:
+        """Forget a cachedContent name after Gemini reports it is unusable."""
+        fingerprint = prompt_fingerprint(static_prompt_text)
+        cache_key = (model, build_id, fingerprint)
+        cached_name = self._cache_names_by_key.get(cache_key)
+        if cached_name and (cache_name is None or cached_name == cache_name):
+            self._cache_names_by_key.pop(cache_key, None)
+            self._logger.warning(
+                "gemini_prompt_cache_invalidated model=%s build_id=%s fingerprint_prefix=%s cache_name=%s",
+                model,
+                build_id,
+                fingerprint[:12],
+                cached_name,
+            )
+
     def _list_caches(self) -> list[GeminiPromptCache]:
         caches: list[GeminiPromptCache] = []
         page_token: str | None = None
