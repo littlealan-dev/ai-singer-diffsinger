@@ -34,6 +34,7 @@ class NoteEvent:
     lyric_is_extended: bool
     is_rest: bool
     tie_type: Optional[str]
+    dot_count: int
     voice: Optional[str]
     staff: Optional[str]
     chord_group_id: Optional[str]
@@ -588,6 +589,7 @@ def _make_note_event(
         lyric_is_extended=lyric_extended,
         is_rest=False,
         tie_type=tie_type,
+        dot_count=int(getattr(element.duration, "dots", 0) or 0),
         voice=voice,
         staff=staff,
         chord_group_id=chord_group_id,
@@ -627,6 +629,7 @@ def _make_rest_event(
         lyric_is_extended=False,
         is_rest=True,
         tie_type=None,
+        dot_count=int(getattr(element.duration, "dots", 0) or 0),
         voice=voice,
         staff=staff,
         chord_group_id=None,

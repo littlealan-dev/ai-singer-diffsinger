@@ -2741,6 +2741,91 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertTrue(part_nodes)
         self.assertGreaterEqual(int(result["part_index"]), 1)
 
+    def test_materialize_preserves_dotted_note_notation(self) -> None:
+        source_path = self._output_dir / "dotted-source.xml"
+        source_path.write_text(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Solo</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>3</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <dot/>
+        <lyric><text>Dot</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>eighth</type>
+      </note>
+    </measure>
+    <measure number="2">
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch>
+        <duration>6</duration>
+        <voice>1</voice>
+        <type>half</type>
+        <dot/>
+        <lyric><text>Long</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+""",
+            encoding="utf-8",
+        )
+        score = parse_score(source_path, part_index=0, verse_number=1)
+        transformed_part = {
+            **score["parts"][0],
+            "notes": [
+                note
+                for note in score["parts"][0]["notes"]
+                if not note.get("is_rest") and note.get("lyric")
+            ],
+        }
+
+        result = _finalize_transform_result(
+            score,
+            part_index=0,
+            target_voice_part_id="voice part 1",
+            source_voice_part_id="voice part 1",
+            source_part_index=0,
+            transformed_part=transformed_part,
+            propagated=False,
+            status="ready",
+            validation={},
+            source_musicxml_path=str(source_path),
+            target_source_voice_id="1",
+            allow_reuse=False,
+        )
+
+        modified_path = result.get("modified_musicxml_path")
+        self.assertIsInstance(modified_path, str)
+        root = ET.parse(str(modified_path)).getroot()
+        part_id = result["appended_part_ref"]["part_id"]
+        derived_part = root.find(f"./part[@id='{part_id}']")
+        self.assertIsNotNone(derived_part)
+        measure_1_note = derived_part.find("./measure[@number='1']/note")
+        measure_2_note = derived_part.find("./measure[@number='2']/note")
+        self.assertIsNotNone(measure_1_note)
+        self.assertIsNotNone(measure_2_note)
+        self.assertEqual(measure_1_note.findtext("type"), "quarter")
+        self.assertIsNotNone(measure_1_note.find("dot"))
+        self.assertEqual(measure_2_note.findtext("type"), "half")
+        self.assertIsNotNone(measure_2_note.find("dot"))
+
     def test_golden_musicxml_deterministic_appended_id(self) -> None:
         first = self._run_alto_preprocess()
         second = self._run_alto_preprocess()

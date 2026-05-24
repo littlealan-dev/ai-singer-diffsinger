@@ -79,6 +79,38 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertTrue(tie_types)
         self.assertIn("start", tie_types)
 
+    def test_dot_count_extraction(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>3</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <dot/>
+        <lyric><text>Dot</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "dotted.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(score.parts[0].notes[0].dot_count, 1)
+
     def test_keep_rests_includes_rest_events(self) -> None:
         score = parse_musicxml(TEST_XML, keep_rests=True)
         part = score.parts[0]

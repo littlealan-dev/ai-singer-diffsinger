@@ -4640,11 +4640,15 @@ def _append_transformed_measures(
             ET.SubElement(rest_node, q("rest"))
             ET.SubElement(rest_node, q("duration")).text = str(duration_div)
             ET.SubElement(rest_node, q("voice")).text = "1"
-            ET.SubElement(rest_node, q("type")).text = _duration_to_type(duration_beats)
+            rest_type = _duration_to_type(duration_beats)
+            ET.SubElement(rest_node, q("type")).text = rest_type
+            for _ in range(_coerce_dot_count(None)):
+                ET.SubElement(rest_node, q("dot"))
             continue
 
         for note in notes:
             note_node = ET.SubElement(measure_node, q("note"))
+            duration_beats = float(note.get("duration_beats") or 1.0)
             if note.get("is_rest"):
                 ET.SubElement(note_node, q("rest"))
             else:
@@ -4664,13 +4668,14 @@ def _append_transformed_measures(
                     ET.SubElement(pitch_node, q("alter")).text = str(alter)
                 ET.SubElement(pitch_node, q("octave")).text = str(octave)
             duration_div = max(
-                1, int(round(float(note.get("duration_beats") or 1.0) * float(divisions)))
+                1, int(round(duration_beats * float(divisions)))
             )
             ET.SubElement(note_node, q("duration")).text = str(duration_div)
             ET.SubElement(note_node, q("voice")).text = str(note.get("voice") or "1")
-            ET.SubElement(note_node, q("type")).text = _duration_to_type(
-                float(note.get("duration_beats") or 1.0)
-            )
+            note_type = _duration_to_type(duration_beats)
+            ET.SubElement(note_node, q("type")).text = note_type
+            for _ in range(_coerce_dot_count(note.get("dot_count"))):
+                ET.SubElement(note_node, q("dot"))
             lyric = note.get("lyric")
             if isinstance(lyric, str) and lyric.strip():
                 lyric_node = ET.SubElement(note_node, q("lyric"))
@@ -4728,6 +4733,13 @@ def _duration_to_type(duration_beats: float) -> str:
     if duration_beats >= 0.5:
         return "eighth"
     return "16th"
+
+
+def _coerce_dot_count(value: Any) -> int:
+    try:
+        return max(0, min(3, int(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _collect_global_lyric_source_options(
