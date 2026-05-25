@@ -139,6 +139,16 @@ LINT_RULE_SPECS: Dict[str, LintRuleSpec] = {
         suggestion="Add melody_source for the section, choose a different target lane, or make the section rest if it should be silent.",
         message_template="Section uses lyric_source without melody_source, but target lane has no native sung notes in this range.",
     ),
+    "melody_source_requires_lyric_source": LintRuleSpec(
+        code="melody_source_requires_lyric_source",
+        name="Melody Source Requires Lyric Source",
+        severity="P0",
+        domain="LYRIC",
+        definition="A derive section that copies or splits melody notes must also provide a lyric source because melody executors clear copied lyrics before lyric propagation.",
+        fail_condition="A derive section specifies melody_source but omits lyric_source.",
+        suggestion="Add lyric_source, lyric_strategy, and lyric_policy for the same section, choosing the strongest lyric donor from parser facts.",
+        message_template="Section copies or splits melody notes but does not specify lyric_source, so copied notes would be lyric-empty.",
+    ),
     "no_rest_when_target_has_native_notes": LintRuleSpec(
         code="no_rest_when_target_has_native_notes",
         name="Rest Not Allowed Over Native Notes",

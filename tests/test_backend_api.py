@@ -116,7 +116,7 @@ def _preprocess_workflow_response(
     final_message: str = "I'm splitting the requested part now.",
 ) -> str:
     request = {
-        "reason": "This request needs voice-part preprocessing before synthesis.",
+        "reason": "This request needs the selected part split before singing.",
     }
     if part_id is not None:
         request["part_id"] = part_id
@@ -1117,7 +1117,7 @@ def test_deterministic_complex_selection_uses_default_message_and_preprocess_pla
                                 },
                             }
                         ],
-                        "final_message": "This part needs splitting first. I'll start preprocessing now.",
+                        "final_message": "This part needs splitting first. I'm preparing that singing line now.",
                         "include_score": False,
                     }
                 )
@@ -1178,7 +1178,7 @@ def test_deterministic_complex_selection_uses_default_message_and_preprocess_pla
     assert chat_response.status_code == 200
     chat_payload = chat_response.json()
     assert chat_payload["type"] == "chat_progress"
-    assert chat_payload["message"] == "This part needs splitting first. I'll start preprocessing now."
+    assert chat_payload["message"] == "This part needs splitting first. I'm preparing that singing line now."
 
     progress_payload = _wait_for_progress(test_client, chat_payload["progress_url"])
     assert progress_payload["status"] == "done"
@@ -1401,7 +1401,7 @@ def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     assert error is None
     assert response is not None
     assert prompt is not None
-    assert "Latest attempted preprocess plan (if available):" in prompt
+    assert "Latest attempted line-preparation plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
 
 
@@ -1827,7 +1827,7 @@ def test_workflow_returns_best_invalid_error_when_no_structurally_valid_candidat
     )
 
     assert response["type"] == "chat_error"
-    assert response["message"] == "Unable to produce synthesis-safe monophonic output after 3 attempts."
+    assert response["message"] == "Unable to produce a clean single singing line after 3 attempts."
     assert response["details"]["best_invalid_candidate"]["attempt_number"] == 1
     assert response["details"]["best_invalid_candidate"]["failing_ranges"] == [{"start": 12, "end": 12}]
     assert response["details"]["failed_validation_rules"][0]["rule"] == "structural_validation_failed"

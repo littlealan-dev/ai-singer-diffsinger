@@ -990,7 +990,7 @@ class Orchestrator:
                 )
         except Exception as exc:
             self._logger.exception("preprocess_job_failed session=%s error=%s", session_id, exc)
-            safe_message = "Couldn't finish preprocessing."
+            safe_message = "Couldn't finish preparing the selected singing line."
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
@@ -1281,7 +1281,7 @@ class Orchestrator:
                         response = self._build_invalid_candidate_error(best_invalid_candidate) or {
                             "type": "chat_error",
                             "message": (
-                                f"Unable to produce synthesis-safe monophonic output after "
+                                f"Unable to produce a clean single singing line after "
                                 f"{max_attempts} attempts."
                             ),
                         }
@@ -1289,8 +1289,8 @@ class Orchestrator:
                         response = {
                             "type": "chat_text",
                             "message": (
-                                f"I couldn't complete preprocessing after {max_attempts} attempts. "
-                                "Please revise the request or plan details."
+                                f"I couldn't finish preparing a clean singing line after {max_attempts} attempts. "
+                                "Please revise the request or part details."
                             ),
                         }
                     break
@@ -2582,9 +2582,9 @@ class Orchestrator:
         serialized = json.dumps(payload, sort_keys=True)
         return (
             f"{serialized}\n\n"
-            "Explain this selected preprocess candidate to the user. "
+            "Explain this selected prepared-score candidate to the user. "
             "Do not call any tools. "
-            "Summarize what remains unresolved, why the workflow is stopping here, "
+            "Summarize what remains unresolved in singer-friendly language, why the workflow is stopping here, "
             "and ask the user to review the score or request revisions."
         )
 
@@ -2612,7 +2612,7 @@ class Orchestrator:
         return {
             "type": "chat_error",
             "message": (
-                f"Unable to produce synthesis-safe monophonic output after "
+                f"Unable to produce a clean single singing line after "
                 f"{self._settings.preprocess_max_attempts} attempts."
             ),
             "details": {
@@ -2790,8 +2790,8 @@ class Orchestrator:
             "user_request": user_message,
             "request": request,
             "instructions": [
-                "The default LLM already selected the preprocess workflow for this render request.",
-                "The request object states target and synthesis intent only; it is not an executable preprocess plan.",
+                "The default LLM already selected the line-preparation workflow for this render request.",
+                "The request object states target and synthesis intent only; it is not an executable line-preparation plan.",
                 "Generate exactly one preprocess_voice_parts tool call.",
                 "Do not call synthesize in this planning turn.",
                 "Preserve target selection and any other_instruction when choosing sections and melody sources.",
@@ -2902,7 +2902,7 @@ class Orchestrator:
             "action": "verse_selection_required",
             "code": "verse_selection_required",
             "reason": "multi_verse_selection_required_before_render",
-            "message": "Select a verse before reparsing, preprocessing, or synthesis.",
+            "message": "Select a verse before reparsing, preparing the part, or synthesis.",
             "available_verses": available_verses,
             "selected_verse_number": selected_verse_number,
             "failed_validation_rules": [
@@ -3022,7 +3022,7 @@ class Orchestrator:
             message=(
                 "The requested verse differs from the currently loaded score verse. "
                 "Call reparse with the requested verse first. If the target requires derived "
-                "voice-part preprocessing, start the preprocess workflow before synthesis."
+                "voice-part preparation, split/prepare the selected line before synthesis."
             ),
         )
 
@@ -3194,7 +3194,7 @@ class Orchestrator:
             "diagnostics": diagnostics,
             "user_request": message,
             "instructions": [
-                "Backend static analysis already determined preprocessing is required.",
+                "Backend static analysis already determined line preparation is required.",
                 "Generate exactly one preprocess_voice_parts tool call.",
                 "Do not call synthesize in this planning turn.",
                 "Do not reconsider whether direct synthesis is possible.",
@@ -3209,15 +3209,16 @@ class Orchestrator:
         *,
         selected_voicebank_id: Optional[str],
     ) -> tuple[str, Optional[str]]:
-        """Ask the default LLM role for natural copy before preprocess starts."""
+        """Ask the default LLM role for natural copy before line preparation starts."""
         payload = {
             "message_intent": "PREPROCESS_REQUIRED_STARTING",
             "reason": planning_context.get("reason"),
             "target": planning_context.get("target"),
             "diagnostics": planning_context.get("diagnostics"),
             "instructions": [
-                "Tell the user that this selected part needs splitting before synthesis.",
-                "Say that preprocessing/splitting is starting now.",
+                "Tell the user that this selected part needs splitting before singing.",
+                "Say that you are splitting/preparing the selected part now.",
+                "Do not use the words preprocess or preprocessing in the user-facing message.",
                 "Do not ask for confirmation yet.",
                 "Do not claim the derived score or audio is ready.",
                 "Return no tool calls.",

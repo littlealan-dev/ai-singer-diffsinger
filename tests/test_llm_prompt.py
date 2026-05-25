@@ -85,7 +85,7 @@ def test_build_system_prompt_includes_latest_attempted_preprocess_plan() -> None
         },
         voicebank_details=None,
     )
-    assert "Latest attempted preprocess plan (if available):" in prompt
+    assert "Latest attempted line-preparation plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
     assert '"start_measure": 7' in prompt
 
@@ -123,7 +123,7 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
         voicebank_details=None,
     )
     assert (
-        "call `start_preprocess_voice_part_workflow` and set final_message to a short preprocess-in-progress confirmation"
+        "call `start_preprocess_voice_part_workflow` and set final_message to a short singer-friendly confirmation"
         in prompt
     )
 
@@ -210,7 +210,7 @@ def test_build_prompt_bundle_supports_legacy_string_containment() -> None:
         last_preprocess_plan={"targets": []},
         voicebank_details=None,
     )
-    assert "Latest attempted preprocess plan (if available):" in bundle
+    assert "Latest attempted line-preparation plan (if available):" in bundle
     assert '"title": "My Tribute"' in str(bundle)
 
 

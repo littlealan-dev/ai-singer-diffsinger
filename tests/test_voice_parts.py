@@ -9,13 +9,17 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
+import src.api.voice_parts as voice_parts_module
 from src.api import parse_score, synthesize
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
     _choose_notes_ranked,
     _choose_notes_trivial_ranked,
+    _collect_derived_target_candidates,
+    _copy_section_melody_into_target,
     _finalize_transform_result,
     _lint_finding,
+    _merge_source_timeline_events_into_native_target,
     _normalize_materialized_musicxml_stem,
     _reviewable_action_required_from_finalized,
     _run_preflight_plan_lint,
@@ -146,6 +150,48 @@ class VoicePartFlowTests(unittest.TestCase):
 
 
 class VoicePartAnalysisAndPlanTests(unittest.TestCase):
+    def test_derived_target_candidates_exclude_hidden_default_lane(self) -> None:
+        score = {
+            "parts": [
+                {"part_id": "P1", "part_name": "Women", "notes": []},
+                {
+                    "part_id": "P_VISIBLE",
+                    "part_name": "Women - voice part 1 (Derived)",
+                    "notes": [],
+                },
+            ],
+            "voice_part_transforms": {
+                "visible": {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 1",
+                    "source_voice_part_id": "voice part 1",
+                    "source_part_index": 0,
+                    "appended_part_ref": {
+                        "part_id": "P_VISIBLE",
+                        "part_name": "Women - voice part 1 (Derived)",
+                        "part_index": 1,
+                    },
+                },
+                "hidden": {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 2",
+                    "source_voice_part_id": "voice part 2",
+                    "source_part_index": 0,
+                    "appended_part_ref": {
+                        "part_id": "P_HIDDEN",
+                        "part_name": "voice part 2 (Derived)",
+                        "part_index": 2,
+                        "hidden_default_lane": True,
+                    },
+                },
+            },
+        }
+
+        candidates = _collect_derived_target_candidates(score)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].get("target_voice_part_id"), "voice part 1")
+
     def test_normalize_materialized_musicxml_stem_strips_trailing_derived_suffixes(self) -> None:
         self.assertEqual(_normalize_materialized_musicxml_stem("score"), "score")
         self.assertEqual(
@@ -579,6 +625,569 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             "trivial_method_requires_equal_chord_voice_part_count",
             failing_rules,
         )
+
+    def test_same_part_cross_voice_chord_split_preserves_native_target_notes(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "SOPRANO ALTO",
+                    "notes": [
+                        {
+                            "offset_beats": 5.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 66.0,
+                            "lyric": "one",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 6.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "two",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 7.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 66.0,
+                            "lyric": "three",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 7.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": "three",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 8.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 66.0,
+                            "lyric": "four",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 8.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": "four",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 5.0,
+                            "duration_beats": 2.0,
+                            "pitch_midi": 62.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 7.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 8.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "soprano"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 3,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "ranked",
+                            "rank_index": 0,
+                            "rank_fallback": "greedy",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                },
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 3,
+                            "mode": "derive",
+                            "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                            "method": "ranked",
+                            "rank_index": 1,
+                            "rank_fallback": "greedy",
+                            "melody_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "soprano"},
+                            "lyric_policy": "replace_all",
+                        }
+                    ],
+                },
+            ]
+        }
+
+        result = preprocess_voice_parts(score, plan=plan)
+
+        self.assertIn(result.get("status"), {"ready", "ready_with_warnings"})
+        alto_part = next(
+            part
+            for part in result["score"]["parts"]
+            if str(part.get("part_name") or "").endswith(" - alto (Derived)")
+        )
+        alto_notes = [
+            note
+            for note in sorted(
+                alto_part["notes"],
+                key=lambda row: (
+                    float(row.get("offset_beats") or 0.0),
+                    float(row.get("duration_beats") or 0.0),
+                    float(row.get("pitch_midi") or 0.0),
+                ),
+            )
+            if int(note.get("measure_number") or 0) == 3 and not note.get("is_rest")
+        ]
+        self.assertEqual(
+            [
+                (
+                    float(note["offset_beats"]),
+                    float(note["duration_beats"]),
+                    float(note["pitch_midi"]),
+                )
+                for note in alto_notes
+            ],
+            [
+                (5.0, 2.0, 62.0),
+                (7.0, 1.0, 62.0),
+                (8.0, 1.0, 62.0),
+            ],
+        )
+
+    def test_same_part_cross_voice_merge_copies_source_rest_into_target_silence(self) -> None:
+        source_notes = [
+            {
+                "offset_beats": 37.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 62.0,
+                "pitch_step": "D",
+                "pitch_octave": 4,
+                "lyric": "Him,",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+            {
+                "offset_beats": 39.0,
+                "duration_beats": 1.0,
+                "pitch_midi": None,
+                "lyric": None,
+                "syllabic": None,
+                "lyric_is_extended": False,
+                "is_rest": True,
+                "voice": "1",
+                "measure_number": 1,
+            },
+            {
+                "offset_beats": 40.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 62.0,
+                "pitch_step": "D",
+                "pitch_octave": 4,
+                "lyric": "Keep",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+            {
+                "offset_beats": 40.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 57.0,
+                "pitch_step": "A",
+                "pitch_octave": 3,
+                "lyric": "Keep",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+        ]
+        working_notes = [
+            {
+                "offset_beats": 37.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 62.0,
+                "pitch_step": "D",
+                "pitch_octave": 4,
+                "lyric": None,
+                "syllabic": None,
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "2",
+                "measure_number": 1,
+            },
+        ]
+        copied_count = _merge_source_timeline_events_into_native_target(
+            working_notes=working_notes,
+            source_notes=source_notes,
+            target_voice="2",
+            start_measure=1,
+            end_measure=1,
+            method="ranked",
+            split_selector="lower",
+            rank_index=1,
+            rank_fallback="greedy",
+        )
+
+        self.assertEqual(copied_count, 1)
+        measure_events = [
+            note
+            for note in sorted(
+                working_notes,
+                key=lambda row: (
+                    float(row.get("offset_beats") or 0.0),
+                    float(row.get("pitch_midi") or -1.0),
+                ),
+            )
+            if int(note.get("measure_number") or 0) == 1
+        ]
+        self.assertEqual(
+            [
+                (
+                    float(note["offset_beats"]),
+                    float(note["duration_beats"]),
+                    "REST" if note.get("is_rest") else float(note["pitch_midi"]),
+                )
+                for note in measure_events
+            ],
+            [
+                (37.0, 2.0, 62.0),
+                (39.0, 1.0, "REST"),
+                (40.0, 1.0, 57.0),
+            ],
+        )
+
+    def test_same_part_cross_voice_merge_can_preserve_same_source_lyrics(self) -> None:
+        source_notes = [
+            {
+                "offset_beats": 40.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 62.0,
+                "pitch_step": "D",
+                "pitch_octave": 4,
+                "lyric": "Keep",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+            {
+                "offset_beats": 40.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 57.0,
+                "pitch_step": "A",
+                "pitch_octave": 3,
+                "lyric": "Keep",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+        ]
+        working_notes = []
+
+        copied_count = _merge_source_timeline_events_into_native_target(
+            working_notes=working_notes,
+            source_notes=source_notes,
+            target_voice="2",
+            start_measure=1,
+            end_measure=1,
+            method="ranked",
+            split_selector="lower",
+            rank_index=1,
+            rank_fallback="greedy",
+            preserve_source_lyrics=True,
+        )
+
+        self.assertEqual(copied_count, 1)
+        self.assertEqual(working_notes[0].get("lyric"), "Keep")
+        self.assertEqual(working_notes[0].get("syllabic"), "single")
+
+    def test_same_part_cross_voice_merge_keeps_native_rest_protected(self) -> None:
+        source_notes = [
+            {
+                "offset_beats": 39.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 57.0,
+                "lyric": "Fill",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "1",
+                "measure_number": 1,
+            },
+        ]
+        working_notes = [
+            {
+                "offset_beats": 39.0,
+                "duration_beats": 1.0,
+                "pitch_midi": None,
+                "lyric": None,
+                "syllabic": None,
+                "lyric_is_extended": False,
+                "is_rest": True,
+                "voice": "2",
+                "measure_number": 1,
+            },
+        ]
+        copied_count = _merge_source_timeline_events_into_native_target(
+            working_notes=working_notes,
+            source_notes=source_notes,
+            target_voice="2",
+            start_measure=1,
+            end_measure=1,
+            method="ranked",
+            split_selector="lower",
+            rank_index=0,
+            rank_fallback="greedy",
+        )
+        self.assertEqual(copied_count, 0)
+        measure_events = [
+            note
+            for note in working_notes
+            if int(note.get("measure_number") or 0) == 1
+            and float(note.get("offset_beats") or 0.0) == 39.0
+        ]
+        self.assertEqual(len(measure_events), 1)
+        self.assertTrue(measure_events[0].get("is_rest"))
+
+    def test_same_part_copy_unison_preserves_native_two_beat_target_note(self) -> None:
+        source_score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "MEN",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "top",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "up",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "per",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 2.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "fill",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 2.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "own",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "3",
+                            "measure_number": 3,
+                        },
+                    ],
+                }
+            ]
+        }
+        working_notes = [
+            {
+                "offset_beats": 0.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 60.0,
+                "lyric": "own",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": "3",
+                "measure_number": 3,
+            }
+        ]
+
+        copied_count = _copy_section_melody_into_target(
+            working_notes=working_notes,
+            source_score=source_score,
+            target_voice="3",
+            target_part_index=0,
+            source_part_index=0,
+            source_voice_part_id="voice part 2",
+            start_measure=3,
+            end_measure=3,
+        )
+
+        self.assertEqual(copied_count, 1)
+        self.assertEqual(
+            [
+                (
+                    float(note["offset_beats"]),
+                    float(note["duration_beats"]),
+                    float(note["pitch_midi"]),
+                    note.get("lyric"),
+                )
+                for note in sorted(
+                    working_notes,
+                    key=lambda row: float(row.get("offset_beats") or 0.0),
+                )
+                if not note.get("is_rest")
+            ],
+            [
+                (0.0, 2.0, 60.0, "own"),
+                (2.0, 1.0, 67.0, None),
+            ],
+        )
+
+    def test_same_part_copy_unison_keeps_copied_lyric_as_propagation_fallback(self) -> None:
+        source_score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "MEN",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "top",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 67.0,
+                            "lyric": "fallback",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "2",
+                            "measure_number": 3,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": None,
+                            "syllabic": None,
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "3",
+                            "measure_number": 3,
+                        },
+                    ],
+                }
+            ]
+        }
+        working_notes = []
+
+        copied_count = _copy_section_melody_into_target(
+            working_notes=working_notes,
+            source_score=source_score,
+            target_voice="3",
+            target_part_index=0,
+            source_part_index=0,
+            source_voice_part_id="voice part 2",
+            start_measure=3,
+            end_measure=3,
+            preserve_source_lyrics=True,
+        )
+
+        self.assertEqual(copied_count, 1)
+        self.assertEqual(working_notes[0].get("lyric"), "fallback")
+        self.assertEqual(working_notes[0].get("syllabic"), "single")
 
     def test_parse_score_note_events_include_extended_fact_fields(self) -> None:
         score = parse_score(TEST_XML, verse_number=1)
@@ -1481,9 +2090,155 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
 
         self.assertTrue(result.get("hidden_default_lane"))
         appended_ref = result.get("appended_part_ref") or {}
-        self.assertTrue(appended_ref.get("hidden_default_lane"))
-        self.assertEqual(appended_ref.get("part_index"), 0)
+        self.assertFalse(appended_ref)
         self.assertEqual(len(result.get("score", {}).get("parts", [])), 1)
+
+    def test_hidden_default_lane_ignores_stale_cached_musicxml_artifact(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Women",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        transformed_part = {
+            **score["parts"][0],
+            "part_name": "voice part 2",
+            "notes": [score["parts"][0]["notes"][1]],
+        }
+        transform_payload = {
+            "part_index": 0,
+            "target_voice_part_id": "voice part 2",
+            "source_voice_part_id": "voice part 2",
+            "source_part_index": 0,
+            "propagated": False,
+            "notes": transformed_part["notes"],
+        }
+        transform_hash = voice_parts_module.hashlib.sha256(
+            voice_parts_module.json.dumps(
+                transform_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        artifact_key = f"{voice_parts_module._compute_score_fingerprint(score)}:{transform_hash}"
+        stale_path = Path(tempfile.gettempdir()) / "stale-hidden-derived.xml"
+        stale_path.write_text("<score-partwise/>", encoding="utf-8")
+        voice_parts_module._TRANSFORM_ARTIFACT_INDEX[artifact_key] = {
+            "transform_id": "stale",
+            "transform_hash": transform_hash,
+            "score_fingerprint": voice_parts_module._compute_score_fingerprint(score),
+            "appended_part_ref": {"part_id": "STALE", "part_index": 99},
+            "modified_musicxml_path": str(stale_path),
+        }
+        try:
+            result = _finalize_transform_result(
+                score,
+                part_index=0,
+                target_voice_part_id="voice part 2",
+                source_voice_part_id="voice part 2",
+                source_part_index=0,
+                transformed_part=transformed_part,
+                propagated=False,
+                status="ready",
+                validation={},
+                target_source_voice_id="_default",
+            )
+        finally:
+            voice_parts_module._TRANSFORM_ARTIFACT_INDEX.pop(artifact_key, None)
+
+        self.assertTrue(result.get("hidden_default_lane"))
+        self.assertIsNone(result.get("modified_musicxml_path"))
+        self.assertFalse(result.get("reused_transform"))
+        self.assertEqual(len(result.get("score", {}).get("parts", [])), 1)
+
+    def test_finalize_result_scrubs_hidden_derived_part_from_returned_score(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Women",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 72.0,
+                            "lyric": "A",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "",
+                            "measure_number": 1,
+                        },
+                    ],
+                },
+                {
+                    "part_id": "P_HIDDEN",
+                    "part_name": "voice part 2 (Derived)",
+                    "notes": [],
+                },
+            ]
+        }
+        transformed_part = {
+            **score["parts"][0],
+            "part_name": "voice part 1",
+            "notes": [score["parts"][0]["notes"][0]],
+        }
+
+        result = _finalize_transform_result(
+            score,
+            part_index=0,
+            target_voice_part_id="voice part 1",
+            source_voice_part_id="voice part 1",
+            source_part_index=0,
+            transformed_part=transformed_part,
+            propagated=False,
+            status="ready",
+            validation={},
+            target_source_voice_id="1",
+        )
+
+        part_names = [
+            str(part.get("part_name") or "")
+            for part in result.get("score", {}).get("parts", [])
+        ]
+        self.assertNotIn("voice part 2 (Derived)", part_names)
 
     def test_preflight_lint_flags_underclaimed_same_part_chord_source(self) -> None:
         score = {
@@ -2164,6 +2919,59 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             any(f.get("rule") == "lyric_source_without_target_notes" for f in findings)
         )
 
+    def test_preflight_lint_flags_melody_source_without_lyric_source(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Solo",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 60.0,
+                            "lyric": "src",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ]
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "voice part 1"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 1,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": 0,
+                                "voice_part_id": "voice part 1",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = preprocess_voice_parts(score, plan=plan)
+
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("action"), "plan_lint_failed")
+        findings = result.get("lint_findings") or []
+        self.assertTrue(
+            any(
+                f.get("rule") == "melody_source_requires_lyric_source"
+                for f in findings
+            )
+        )
+
     def test_preflight_allows_lyric_only_when_target_notes_exist(self) -> None:
         score = {
             "parts": [
@@ -2220,6 +3028,7 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
                             "end_measure": 1,
                             "mode": "derive",
                             "melody_source": {"part_index": 0, "voice_part_id": "alto"},
+                            "lyric_source": {"part_index": 0, "voice_part_id": "alto"},
                         }
                     ],
                 },
@@ -2935,6 +3744,91 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         score_part_names = [sp.findtext("part-name") or "" for sp in score_parts]
         self.assertTrue(any(name.endswith("voice part 1 (Derived)") for name in score_part_names))
         self.assertTrue(any(name.endswith("voice part 2 (Derived)") for name in score_part_names))
+
+    def test_finalize_review_materialization_bundle_scrubs_hidden_default_lane(self) -> None:
+        score = {
+            "source_musicxml_path": None,
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Women",
+                    "notes": [
+                        {
+                            "offset_beats": 0.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 64.0,
+                            "lyric": "Sing",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1,
+                        },
+                        {
+                            "offset_beats": 1.0,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 62.0,
+                            "lyric": "All",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "_default",
+                            "measure_number": 1,
+                        },
+                    ],
+                }
+            ],
+        }
+        source_part = score["parts"][0]
+        visible_note = dict(source_part["notes"][0])
+        hidden_note = dict(source_part["notes"][1])
+        bundle = {
+            "base_score": score,
+            "steps": [
+                {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 1",
+                    "source_voice_part_id": "voice part 1",
+                    "source_part_index": 0,
+                    "transformed_part": {
+                        **dict(source_part),
+                        "part_name": "voice part 1",
+                        "notes": [visible_note],
+                    },
+                    "propagated": True,
+                    "status": "ready",
+                    "validation": {},
+                    "source_musicxml_path": None,
+                    "target_source_voice_id": "1",
+                },
+                {
+                    "part_index": 0,
+                    "target_voice_part_id": "voice part 2",
+                    "source_voice_part_id": "voice part 2",
+                    "source_part_index": 0,
+                    "transformed_part": {
+                        **dict(source_part),
+                        "part_name": "voice part 2",
+                        "notes": [hidden_note],
+                    },
+                    "propagated": True,
+                    "status": "ready",
+                    "validation": {},
+                    "source_musicxml_path": None,
+                    "target_source_voice_id": "_default",
+                },
+            ],
+        }
+
+        result = finalize_review_materialization(bundle)
+
+        score_after = result.get("score") or {}
+        derived_names = [str(part.get("part_name") or "") for part in score_after.get("parts") or []]
+        self.assertTrue(any(name.endswith("voice part 1 (Derived)") for name in derived_names))
+        self.assertFalse(any(name.endswith("voice part 2 (Derived)") for name in derived_names))
+        appended_refs = result.get("appended_part_refs") or []
+        self.assertEqual(len(appended_refs), 1)
+        self.assertFalse(any(bool(ref.get("hidden_default_lane")) for ref in appended_refs))
 
 
 if __name__ == "__main__":

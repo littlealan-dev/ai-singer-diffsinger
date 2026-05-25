@@ -276,7 +276,10 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "description": (
         "Contiguous inclusive measure range with explicit derive/rest behavior. "
-        "All sections for a target must be contiguous and cover the full target span."
+        "All sections for a target must be contiguous and cover the full target span. "
+        "For mode=derive, melody_source creates or replaces note events and must "
+        "be paired with lyric_source because melody executors clear copied lyrics "
+        "before applying explicit lyric propagation."
     ),
     "properties": {
         "start_measure": {
@@ -345,14 +348,17 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
             **_PREPROCESS_PLAN_VOICE_REF_SCHEMA,
             "description": (
                 "Source lane for note events. Required for derive sections when target "
-                "section has no usable notes or explicit melody replacement is needed."
+                "section has no usable notes or explicit melody replacement is needed. "
+                "If present, lyric_source is also required for the same section; "
+                "copied/split note events do not retain source lyrics automatically."
             ),
         },
         "lyric_source": {
             **_PREPROCESS_PLAN_VOICE_REF_SCHEMA,
             "description": (
-                "Source lane for lyric tokens. For lyric-only propagation, ensure target "
-                "already has singable notes in this section."
+                "Source lane for lyric tokens. Required for every derive section that "
+                "has melody_source. For lyric-only propagation, ensure target already "
+                "has singable notes in this section."
             ),
         },
         "lyric_strategy": {
@@ -506,7 +512,7 @@ _PARSE_SCORE_OUTPUT_SCHEMA: Dict[str, Any] = {
                         "parts": {"type": "array", "items": _FULL_SCORE_ANALYSIS_PART_SCHEMA},
                         "status_taxonomy": {
                             "type": "array",
-                            "description": "Allowed status values used by preprocessing workflow.",
+                            "description": "Allowed status values used by the line-preparation workflow.",
                             "items": {"type": "string"},
                         },
                     },
@@ -950,11 +956,11 @@ _PREPROCESS_OUTPUT_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["ready", "ready_with_warnings", "action_required", "error"],
             "description": (
-                "Preprocess status. "
+                "Line-preparation status. "
                 "ready=transformed score is valid for synthesis; "
                 "ready_with_warnings=usable but has non-blocking warnings; "
                 "action_required=planner/user must review or change selection; "
-                "error=preprocess execution failed."
+                "error=line preparation failed."
             ),
         },
         "score": {
@@ -1009,7 +1015,7 @@ _PREPROCESS_OUTPUT_SCHEMA: Dict[str, Any] = {
         },
         "message": {
             "type": "string",
-            "description": "Human-readable summary of the preprocess outcome.",
+            "description": "Human-readable summary of the line-preparation outcome.",
         },
         "reason": {
             "type": ["string", "null"],
@@ -1075,7 +1081,7 @@ _SYNTH_FAILED_RULE_SCHEMA: Dict[str, Any] = {
 
 _SYNTH_ACTION_REQUIRED_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "description": "Action-required synth response emitted when the score must be preprocessed or timing constraints fail.",
+    "description": "Action-required synth response emitted when the selected singing line must be prepared or timing constraints fail.",
     "properties": {
         "status": {
             "type": "string",
@@ -1087,7 +1093,7 @@ _SYNTH_ACTION_REQUIRED_SCHEMA: Dict[str, Any] = {
             "enum": ["preprocessing_required", "infeasible_anchor_budget"],
             "description": (
                 "Action key for deterministic handling. "
-                "preprocessing_required means preprocess_voice_parts must run first. "
+                "preprocessing_required means the selected singing line must be prepared with preprocess_voice_parts first. "
                 "infeasible_anchor_budget means timing constraints cannot be satisfied."
             ),
         },
@@ -1271,7 +1277,7 @@ TOOLS: List[Tool] = [
                     "description": (
                         "Optional verse selector for lyric extraction. "
                         "For multi-verse rendering workflows, provide an explicit verse "
-                        "via reparse before preprocess/synthesize."
+                        "via reparse before line preparation/synthesis."
                     ),
                 },
                 "expand_repeats": {
@@ -1321,7 +1327,7 @@ TOOLS: List[Tool] = [
     Tool(
         name="preprocess_voice_parts",
         description=(
-            "Run deterministic voice-part preprocessing using a required plan payload "
+            "Prepare clean derived singing lines from voice parts using a required plan payload "
             "and return a transformed score or action_required."
         ),
         input_schema={
@@ -1331,13 +1337,13 @@ TOOLS: List[Tool] = [
                 "request": {
                     "type": "object",
                     "description": (
-                        "Preprocess request payload. "
+                        "Score-preparation request payload. "
                         "request.plan is mandatory; exposed contract accepts sections-only plans."
                     ),
                     "properties": {
                         "plan": {
                             **_PREPROCESS_PLAN_REQUEST_SCHEMA,
-                            "description": "Normalized sections-only preprocess plan.",
+                            "description": "Normalized sections-only plan for preparing derived singing lines.",
                         }
                     },
                     "required": ["plan"],
@@ -1355,8 +1361,8 @@ TOOLS: List[Tool] = [
         name="start_preprocess_voice_part_workflow",
         description=(
             "Default-chat handoff tool for render requests that need voice-part "
-            "preprocessing before synthesis. This states the user's target and "
-            "intent; a separate preprocess model will author the executable "
+            "splitting/preparation before synthesis. This states the user's target and "
+            "intent; a separate line-preparation model will author the executable "
             "preprocess_voice_parts plan."
         ),
         input_schema={
@@ -1365,7 +1371,7 @@ TOOLS: List[Tool] = [
                 "request": {
                     "type": "object",
                     "description": (
-                        "Preprocess workflow intent. Use the same target/render "
+                        "Line-preparation workflow intent. Use the same target/render "
                         "selection fields as synthesize, excluding derived-source "
                         "reuse hints. This is not a preprocess plan."
                     ),
@@ -1394,7 +1400,7 @@ TOOLS: List[Tool] = [
                             "type": ["integer", "string", "null"],
                             "description": (
                                 "Optional explicit verse selector. Required before "
-                                "preprocessing multi-verse scores."
+                                "preparing multi-verse scores."
                             ),
                         },
                         "voicebank": {
@@ -1436,13 +1442,13 @@ TOOLS: List[Tool] = [
                             "type": "string",
                             "description": (
                                 "Short user-facing reason this request needs "
-                                "preprocessing before synthesis."
+                                "the selected part split/prepared before singing."
                             ),
                         },
                         "other_instruction": {
                             "type": ["string", "null"],
                             "description": (
-                                "Free-text instruction for the preprocess model, "
+                                "Free-text instruction for the line-preparation model, "
                                 "for example 'take the lower note in a chord'."
                             ),
                         },
@@ -1533,7 +1539,7 @@ TOOLS: List[Tool] = [
                 },
                 "voice_part_id": {
                     "type": ["string", "null"],
-                    "description": "Optional normalized voice-part id hint for preprocess-aware flows.",
+                    "description": "Optional normalized voice-part id hint for line-preparation-aware flows.",
                 },
                 "allow_lyric_propagation": {
                     "type": "boolean",
@@ -1551,7 +1557,7 @@ TOOLS: List[Tool] = [
                     "type": ["integer", "string", "null"],
                     "description": (
                         "Optional explicit verse selector used by orchestration guards. "
-                        "Required for multi-verse scores before preprocess/synthesize can proceed."
+                        "Required for multi-verse scores before line preparation/synthesis can proceed."
                     ),
                 },
                 "voice_color": {

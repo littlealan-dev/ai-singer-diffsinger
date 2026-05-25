@@ -52,6 +52,7 @@ Hard Rules
      - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
    - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
    - Same-voice chords are not evidence that a second target voice part exists. If the part has `has_same_voice_simultaneous_notes=true` but only one listed `voice_part_id`, extract the requested rank into that existing target only.
+   - When a same-part sibling target already has native notes in a section, use same-part cross-voice chord extraction only to merge missing chord noteheads from true chord onsets; do not replace the target's native line with singleton notes from another sibling voice.
 20a. Visible claim coverage:
 - For visible claim coverage, a sung measure must be carried by at least one visible exported derived target.
 - If all visible sibling targets leave a sung measure as `rest`, that measure is still unclaimed.

@@ -1283,7 +1283,10 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             action_required_result["warnings"] = merged_warnings
         if isinstance(last_result, dict) and isinstance(last_result.get("repair_loop"), dict):
             action_required_result["repair_loop"] = dict(last_result["repair_loop"])
-        return action_required_result
+        return _cleanup_hidden_derived_outputs(
+            action_required_result,
+            source_score=original_score,
+        )
 
     final_result = dict(last_result)
     final_result["targets"] = target_outputs
@@ -1296,7 +1299,10 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     merged_failed_rules = _merge_target_output_issues(target_outputs)
     if merged_failed_rules:
         final_result["failed_validation_rules"] = merged_failed_rules
-    return final_result
+    return _cleanup_hidden_derived_outputs(
+        final_result,
+        source_score=original_score,
+    )
 
 
 def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1733,6 +1739,35 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                 has_lyric_source = isinstance(lyric_source_part, int)
                 has_melody_source = isinstance(melody_source_part, int)
+                if has_melody_source and not has_lyric_source:
+                    findings.append(
+                        _lint_finding(
+                            "melody_source_requires_lyric_source",
+                            target_index=target_idx,
+                            part_index=part_index,
+                            target_voice_part_id=target_voice_part_id,
+                            section={"start_measure": start, "end_measure": end},
+                            details={
+                                "reason": "melody_source_requires_lyric_source",
+                                "decision_type": decision_type,
+                                "method": method,
+                                "melody_source": {
+                                    "part_index": melody_source_part,
+                                    "voice_part_id": melody_source_voice_part_id,
+                                },
+                                "has_melody_source": has_melody_source,
+                                "has_lyric_source": has_lyric_source,
+                            },
+                            failing_attributes={
+                                "decision_type": decision_type,
+                                "method": method,
+                                "melody_source_part_index": melody_source_part,
+                                "melody_source_voice_part_id": melody_source_voice_part_id,
+                                "has_melody_source": has_melody_source,
+                                "has_lyric_source": has_lyric_source,
+                            },
+                        )
+                    )
                 if has_lyric_source and not has_melody_source:
                     target_measures = set(range(start, end + 1))
                     if not (target_measures & native_sung_measures):
@@ -2502,6 +2537,7 @@ def _execute_timeline_sections(
                         target_voice=target_voice,
                         target_voice_rank=int(voice_priority.get(target_voice, 0)),
                         target_voice_part_count=len(voice_parts),
+                        target_part_index=part_index,
                         source_part_index=int(melody_source["part_index"]),
                         source_voice_part_id=str(melody_source["voice_part_id"]),
                         start_measure=start_measure,
@@ -2510,16 +2546,23 @@ def _execute_timeline_sections(
                         split_selector=str(section.get("split_selector") or "upper"),
                         rank_index=int(section.get("rank_index") or 0),
                         rank_fallback=str(section.get("rank_fallback") or "greedy"),
+                        preserve_source_lyrics=_should_preserve_copied_melody_lyrics(
+                            melody_source, section.get("lyric_source")
+                        ),
                     )
                 else:
                     copied_note_count = _copy_section_melody_into_target(
                         working_notes=working_notes,
                         source_score=source_score,
                         target_voice=target_voice,
+                        target_part_index=part_index,
                         source_part_index=int(melody_source["part_index"]),
                         source_voice_part_id=str(melody_source["voice_part_id"]),
                         start_measure=start_measure,
                         end_measure=end_measure,
+                        preserve_source_lyrics=_should_preserve_copied_melody_lyrics(
+                            melody_source, section.get("lyric_source")
+                        ),
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
@@ -2916,6 +2959,7 @@ def _split_chords_select_notes_into_target(
     target_voice: str,
     target_voice_rank: int,
     target_voice_part_count: int,
+    target_part_index: int,
     source_part_index: int,
     source_voice_part_id: str,
     start_measure: int,
@@ -2924,6 +2968,7 @@ def _split_chords_select_notes_into_target(
     split_selector: str,
     rank_index: int,
     rank_fallback: str,
+    preserve_source_lyrics: bool = False,
 ) -> int:
     source_notes = _resolve_source_notes_allow_lyricless(
         source_score,
@@ -2932,6 +2977,45 @@ def _split_chords_select_notes_into_target(
     )
     if source_notes is None:
         return 0
+    source_voice_id: Optional[str] = None
+    source_parts = source_score.get("parts") or []
+    if 0 <= source_part_index < len(source_parts):
+        source_analysis = _analyze_part_voice_parts(
+            source_parts[source_part_index], source_part_index
+        )
+        source_meta = _find_voice_part_by_id(
+            source_analysis.get("voice_parts") or [],
+            source_voice_part_id,
+        )
+        if source_meta is not None:
+            source_voice_id = str(source_meta.get("source_voice_id") or "")
+
+    native_target_events = [
+        note
+        for note in working_notes
+        if _note_in_measure_range(note, (start_measure, end_measure))
+        and _is_voice_timeline_event(note)
+    ]
+    merge_chord_notes_into_native_target = (
+        source_part_index == target_part_index
+        and bool(source_voice_id)
+        and source_voice_id != target_voice
+        and bool(native_target_events)
+    )
+    if merge_chord_notes_into_native_target:
+        return _merge_source_timeline_events_into_native_target(
+            working_notes=working_notes,
+            source_notes=source_notes,
+            target_voice=target_voice,
+            start_measure=start_measure,
+            end_measure=end_measure,
+            method=method,
+            split_selector=split_selector,
+            rank_index=rank_index,
+            rank_fallback=rank_fallback,
+            preserve_source_lyrics=preserve_source_lyrics,
+        )
+
     grouped: Dict[Tuple[int, float], List[Dict[str, Any]]] = {}
     copied_rests: List[Dict[str, Any]] = []
     for note in source_notes:
@@ -2952,26 +3036,27 @@ def _split_chords_select_notes_into_target(
         grouped.setdefault(key, []).append(note)
     chosen: List[Dict[str, Any]] = []
     previous_pitch: Optional[float] = None
+    selection_grouped = grouped
     if method == "B":
         # Deprecated internal-only method retained for compatibility with repair paths.
-        chosen = _choose_notes_dp(grouped, split_selector=split_selector)
+        chosen = _choose_notes_dp(selection_grouped, split_selector=split_selector)
     elif method == "ranked":
         chosen = _choose_notes_ranked(
-            grouped,
+            selection_grouped,
             rank_index=rank_index,
             rank_fallback=rank_fallback,
         )
     elif method == "trivial":
         chosen = _choose_notes_trivial_ranked(
-            grouped,
+            selection_grouped,
             target_voice_rank=target_voice_rank,
             target_voice_part_count=target_voice_part_count,
             split_selector=split_selector,
         )
     else:
         # Deprecated internal-only method retained for compatibility with repair paths.
-        for key in sorted(grouped):
-            candidates = grouped[key]
+        for key in sorted(selection_grouped):
+            candidates = selection_grouped[key]
             selected = _choose_note_rule_based(
                 candidates,
                 split_selector=split_selector,
@@ -2985,9 +3070,10 @@ def _split_chords_select_notes_into_target(
     for note in chosen:
         new_note = dict(note)
         new_note["voice"] = target_voice
-        new_note["lyric"] = None
-        new_note["syllabic"] = None
-        new_note["lyric_is_extended"] = False
+        if not preserve_source_lyrics:
+            new_note["lyric"] = None
+            new_note["syllabic"] = None
+            new_note["lyric_is_extended"] = False
         copied.append(new_note)
     copied = _enforce_non_overlapping_sequence(
         copied,
@@ -3001,6 +3087,196 @@ def _split_chords_select_notes_into_target(
     kept.extend(copied)
     working_notes[:] = kept
     return len([note for note in copied if not note.get("is_rest")])
+
+
+def _merge_source_timeline_events_into_native_target(
+    *,
+    working_notes: List[Dict[str, Any]],
+    source_notes: Sequence[Dict[str, Any]],
+    target_voice: str,
+    start_measure: int,
+    end_measure: int,
+    method: str,
+    split_selector: str,
+    rank_index: int,
+    rank_fallback: str,
+    preserve_source_lyrics: bool = False,
+) -> int:
+    protected = [
+        dict(note)
+        for note in working_notes
+        if _note_in_measure_range(note, (start_measure, end_measure))
+        and _is_voice_timeline_event(note)
+    ]
+    occupied = [dict(note) for note in protected]
+    source_by_onset: Dict[Tuple[int, float], List[Dict[str, Any]]] = {}
+    for source_note in source_notes:
+        if not _note_in_measure_range(source_note, (start_measure, end_measure)):
+            continue
+        if not _is_voice_timeline_event(source_note):
+            continue
+        key = (
+            int(source_note.get("measure_number") or 0),
+            round(float(source_note.get("offset_beats") or 0.0), 6),
+        )
+        source_by_onset.setdefault(key, []).append(source_note)
+
+    added: List[Dict[str, Any]] = []
+    previous_pitch: Optional[float] = None
+    for key in sorted(source_by_onset):
+        events = source_by_onset[key]
+        if any(
+            _notes_overlap_same_measure(event, existing)
+            for event in events
+            for existing in occupied
+        ):
+            continue
+        selected = _choose_voice_timeline_event(
+            events,
+            method=method,
+            split_selector=split_selector,
+            rank_index=rank_index,
+            rank_fallback=rank_fallback,
+            previous_pitch=previous_pitch,
+        )
+        if selected is None:
+            continue
+        copied = _copy_timeline_event_to_target_voice(
+            selected,
+            target_voice,
+            preserve_source_lyrics=preserve_source_lyrics,
+        )
+        if any(_notes_overlap_same_measure(copied, existing) for existing in occupied):
+            continue
+        added.append(copied)
+        occupied.append(copied)
+        if not copied.get("is_rest"):
+            previous_pitch = float(copied.get("pitch_midi") or 0.0)
+
+    working_notes.extend(added)
+    return len([note for note in added if not note.get("is_rest")])
+
+
+def _is_voice_timeline_event(note: Dict[str, Any]) -> bool:
+    try:
+        duration = float(note.get("duration_beats") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0.0:
+        return False
+    return bool(note.get("is_rest")) or _is_countable_sung_note(note)
+
+
+def _copy_timeline_event_to_target_voice(
+    event: Dict[str, Any],
+    target_voice: str,
+    *,
+    preserve_source_lyrics: bool = False,
+) -> Dict[str, Any]:
+    copied = dict(event)
+    copied["voice"] = target_voice
+    if not preserve_source_lyrics:
+        copied["lyric"] = None
+        copied["syllabic"] = None
+        copied["lyric_is_extended"] = False
+    return copied
+
+
+def _choose_voice_timeline_event(
+    events: Sequence[Dict[str, Any]],
+    *,
+    method: str,
+    split_selector: str,
+    rank_index: int,
+    rank_fallback: str,
+    previous_pitch: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    if not events:
+        return None
+    if len(events) == 1:
+        return dict(events[0])
+    unknown_position_rest = next(
+        (
+            event
+            for event in events
+            if event.get("is_rest") and _timeline_event_rank_position(event) is None
+        ),
+        None,
+    )
+    if unknown_position_rest is not None:
+        return dict(unknown_position_rest)
+    if str(method or "").strip().lower() == "ranked":
+        return _choose_ranked_timeline_event(
+            events,
+            rank_index=rank_index,
+            rank_fallback=rank_fallback,
+        )
+    selected = _choose_note_rule_based(
+        [event for event in events if not event.get("is_rest")],
+        split_selector=split_selector,
+        previous_pitch=previous_pitch,
+    )
+    if selected is not None:
+        return selected
+    return _choose_ranked_timeline_event(
+        events,
+        rank_index=rank_index,
+        rank_fallback=rank_fallback,
+    )
+
+
+def _choose_ranked_timeline_event(
+    events: Sequence[Dict[str, Any]], *, rank_index: int, rank_fallback: str
+) -> Optional[Dict[str, Any]]:
+    ranked = [
+        (float(rank_position), idx, event)
+        for idx, event in enumerate(events)
+        if (rank_position := _timeline_event_rank_position(event)) is not None
+    ]
+    if not ranked:
+        return dict(events[0]) if events else None
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    rank = max(0, int(rank_index))
+    if rank < len(ranked):
+        return dict(ranked[rank][2])
+    fallback = str(rank_fallback or "greedy").strip().lower()
+    if fallback == "skip":
+        return None
+    return dict(ranked[-1][2])
+
+
+def _timeline_event_rank_position(event: Dict[str, Any]) -> Optional[float]:
+    if event.get("is_rest"):
+        return _rest_visual_rank_position(event)
+    try:
+        return float(event.get("pitch_midi"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _rest_visual_rank_position(event: Dict[str, Any]) -> Optional[float]:
+    step = (
+        event.get("display_step")
+        or event.get("rest_display_step")
+        or event.get("pitch_step")
+    )
+    octave = (
+        event.get("display_octave")
+        or event.get("rest_display_octave")
+        or event.get("pitch_octave")
+    )
+    if step is None or octave is None:
+        return None
+    step_index = {"C": 0, "D": 1, "E": 2, "F": 3, "G": 4, "A": 5, "B": 6}.get(
+        str(step).strip().upper()
+    )
+    if step_index is None:
+        return None
+    try:
+        octave_index = int(octave)
+    except (TypeError, ValueError):
+        return None
+    return float((octave_index * 7) + step_index)
 
 
 def _choose_notes_ranked(
@@ -3190,10 +3466,12 @@ def _copy_section_melody_into_target(
     working_notes: List[Dict[str, Any]],
     source_score: Dict[str, Any],
     target_voice: str,
+    target_part_index: int,
     source_part_index: int,
     source_voice_part_id: str,
     start_measure: int,
     end_measure: int,
+    preserve_source_lyrics: bool = False,
 ) -> int:
     source_notes = _resolve_source_notes_allow_lyricless(
         source_score,
@@ -3202,15 +3480,54 @@ def _copy_section_melody_into_target(
     )
     if source_notes is None:
         return 0
+    source_voice_id: Optional[str] = None
+    source_parts = source_score.get("parts") or []
+    if 0 <= source_part_index < len(source_parts):
+        source_analysis = _analyze_part_voice_parts(
+            source_parts[source_part_index], source_part_index
+        )
+        source_meta = _find_voice_part_by_id(
+            source_analysis.get("voice_parts") or [],
+            source_voice_part_id,
+        )
+        if source_meta is not None:
+            source_voice_id = str(source_meta.get("source_voice_id") or "")
+
+    native_target_events = [
+        note
+        for note in working_notes
+        if _note_in_measure_range(note, (start_measure, end_measure))
+        and _is_voice_timeline_event(note)
+    ]
+    if (
+        source_part_index == target_part_index
+        and bool(source_voice_id)
+        and source_voice_id != target_voice
+        and bool(native_target_events)
+    ):
+        return _merge_source_timeline_events_into_native_target(
+            working_notes=working_notes,
+            source_notes=source_notes,
+            target_voice=target_voice,
+            start_measure=start_measure,
+            end_measure=end_measure,
+            method="trivial",
+            split_selector="lower",
+            rank_index=0,
+            rank_fallback="greedy",
+            preserve_source_lyrics=preserve_source_lyrics,
+        )
+
     copied: List[Dict[str, Any]] = []
     for source_note in source_notes:
         if not _note_in_measure_range(source_note, (start_measure, end_measure)):
             continue
         note = dict(source_note)
         note["voice"] = target_voice
-        note["lyric"] = None
-        note["syllabic"] = None
-        note["lyric_is_extended"] = False
+        if not preserve_source_lyrics:
+            note["lyric"] = None
+            note["syllabic"] = None
+            note["lyric_is_extended"] = False
         copied.append(note)
 
     kept = [
@@ -4087,6 +4404,25 @@ def _copy_lyric_fields(target_note: Dict[str, Any], source_note: Dict[str, Any])
     target_note["lyric_is_extended"] = bool(source_note.get("lyric_is_extended"))
 
 
+def _same_voice_ref(left: Any, right: Any) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    try:
+        left_part = int(left.get("part_index"))
+        right_part = int(right.get("part_index"))
+    except (TypeError, ValueError):
+        return False
+    return left_part == right_part and str(left.get("voice_part_id") or "").strip() == str(
+        right.get("voice_part_id") or ""
+    ).strip()
+
+
+def _should_preserve_copied_melody_lyrics(melody_source: Any, lyric_source: Any) -> bool:
+    if not isinstance(melody_source, dict):
+        return False
+    return isinstance(lyric_source, dict) or _same_voice_ref(melody_source, lyric_source)
+
+
 def _should_apply_policy(note: Dict[str, Any], policy: str) -> bool:
     if policy == "replace_all":
         return True
@@ -4103,6 +4439,20 @@ def _note_in_measure_range(
     start_measure, end_measure = measure_range
     measure = int(note.get("measure_number") or 0)
     return start_measure <= measure <= end_measure
+
+
+def _notes_overlap_same_measure(
+    left: Dict[str, Any], right: Dict[str, Any], *, epsilon: float = 1e-6
+) -> bool:
+    left_measure = int(left.get("measure_number") or 0)
+    right_measure = int(right.get("measure_number") or 0)
+    if left_measure != right_measure:
+        return False
+    left_start = float(left.get("offset_beats") or 0.0)
+    right_start = float(right.get("offset_beats") or 0.0)
+    left_end = left_start + max(0.0, float(left.get("duration_beats") or 0.0))
+    right_end = right_start + max(0.0, float(right.get("duration_beats") or 0.0))
+    return left_start < (right_end - epsilon) and right_start < (left_end - epsilon)
 
 
 def _note_signature(note: Dict[str, Any]) -> Tuple[float, float, float]:
@@ -4257,7 +4607,11 @@ def _finalize_transform_result(
     reused_transform = False
 
     with _get_artifact_lock(lock_key):
-        existing = _TRANSFORM_ARTIFACT_INDEX.get(artifact_key) if allow_reuse else None
+        existing = (
+            _TRANSFORM_ARTIFACT_INDEX.get(artifact_key)
+            if allow_reuse and not hidden_default_lane
+            else None
+        )
         if existing:
             existing_path = existing.get("modified_musicxml_path")
             if isinstance(existing_path, str) and existing_path and Path(existing_path).exists():
@@ -4278,6 +4632,8 @@ def _finalize_transform_result(
                 modified_musicxml_path = materialized.get("modified_musicxml_path")
 
         if hidden_default_lane:
+            modified_musicxml_path = None
+            reused_transform = False
             appended_part_ref = {
                 "part_id": derived_part_id,
                 "part_name": derived_part_name,
@@ -4336,7 +4692,7 @@ def _finalize_transform_result(
         result["warnings"] = warnings
     if validation:
         result["validation"] = validation
-    return result
+    return _cleanup_hidden_derived_outputs(result)
 
 
 def _get_artifact_lock(lock_key: str) -> threading.Lock:
@@ -4408,6 +4764,209 @@ def _has_non_default_sibling_voice_parts(score: Dict[str, Any], part_index: int)
         str(vp.get("source_voice_id") or "") != "_default"
         for vp in (analysis.get("voice_parts") or [])
     )
+
+
+def _hidden_derived_part_identifiers(score: Dict[str, Any]) -> Dict[str, set[str]]:
+    part_ids: set[str] = set()
+    part_names: set[str] = set()
+    voice_part_ids: set[str] = set()
+    transforms = score.get("voice_part_transforms")
+    if isinstance(transforms, dict):
+        for value in transforms.values():
+            if not isinstance(value, dict):
+                continue
+            appended_ref = value.get("appended_part_ref")
+            if not isinstance(appended_ref, dict) or not bool(
+                appended_ref.get("hidden_default_lane")
+            ):
+                continue
+            part_id = str(appended_ref.get("part_id") or "").strip()
+            part_name = str(appended_ref.get("part_name") or "").strip()
+            if part_id:
+                part_ids.add(part_id)
+            if part_name:
+                part_names.add(part_name)
+            target_voice_part_id = str(value.get("target_voice_part_id") or "").strip()
+            if target_voice_part_id:
+                voice_part_ids.add(target_voice_part_id)
+
+    for part_index, part in enumerate(score.get("parts") or []):
+        analysis = _analyze_part_voice_parts(part, part_index)
+        for voice_part in analysis.get("voice_parts") or []:
+            voice_part_id = str(voice_part.get("voice_part_id") or "").strip()
+            if not voice_part_id:
+                continue
+            if not _is_hidden_default_lane(
+                score=score,
+                part_index=part_index,
+                target_voice_part_id=voice_part_id,
+            ):
+                continue
+            voice_part_ids.add(voice_part_id)
+            part_names.add(
+                _build_derived_part_name(
+                    score=score,
+                    part_index=part_index,
+                    target_voice_part_id=voice_part_id,
+                )
+            )
+
+    return {
+        "part_ids": part_ids,
+        "part_names": part_names,
+        "voice_part_ids": voice_part_ids,
+    }
+
+
+def _cleanup_hidden_derived_outputs(
+    result: Dict[str, Any],
+    *,
+    source_score: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Final guardrail: remove hidden/helper derived lanes from returned outputs."""
+    cleaned = dict(result)
+    result_score = cleaned.get("score")
+    hidden = _merge_hidden_derived_identifiers(
+        _hidden_derived_part_identifiers(source_score or {}),
+        _hidden_derived_part_identifiers(result_score if isinstance(result_score, dict) else {}),
+    )
+    if not any(hidden.values()):
+        return cleaned
+
+    if isinstance(result_score, dict):
+        _remove_hidden_derived_parts_from_score(result_score, hidden)
+
+    modified_path = cleaned.get("modified_musicxml_path")
+    if isinstance(modified_path, str) and modified_path.strip():
+        _remove_hidden_derived_parts_from_musicxml_path(modified_path, hidden)
+    _remove_hidden_refs_from_result_payload(cleaned, hidden)
+    return cleaned
+
+
+def _merge_hidden_derived_identifiers(
+    *items: Dict[str, set[str]]
+) -> Dict[str, set[str]]:
+    merged: Dict[str, set[str]] = {
+        "part_ids": set(),
+        "part_names": set(),
+        "voice_part_ids": set(),
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in merged:
+            merged[key].update(
+                str(value).strip()
+                for value in item.get(key, set())
+                if str(value).strip()
+            )
+    return merged
+
+
+def _remove_hidden_derived_parts_from_score(
+    score: Dict[str, Any],
+    hidden_derived_parts: Dict[str, set[str]],
+) -> None:
+    parts = score.get("parts")
+    if not isinstance(parts, list):
+        return
+    hidden_ids = hidden_derived_parts.get("part_ids", set())
+    hidden_names = hidden_derived_parts.get("part_names", set())
+    hidden_voice_part_ids = hidden_derived_parts.get("voice_part_ids", set())
+    score["parts"] = [
+        part
+        for part in parts
+        if not (
+            isinstance(part, dict)
+            and (
+                str(part.get("part_id") or "").strip() in hidden_ids
+                or str(part.get("part_name") or "").strip() in hidden_names
+                or _part_name_matches_hidden_voice_part_id(
+                    str(part.get("part_name") or ""),
+                    hidden_voice_part_ids,
+                )
+            )
+        )
+    ]
+
+
+def _remove_hidden_refs_from_result_payload(
+    result: Dict[str, Any],
+    hidden_derived_parts: Dict[str, set[str]],
+) -> None:
+    appended_ref = result.get("appended_part_ref")
+    if isinstance(appended_ref, dict) and _appended_ref_matches_hidden(
+        appended_ref, hidden_derived_parts
+    ):
+        result.pop("appended_part_ref", None)
+
+    appended_refs = result.get("appended_part_refs")
+    if isinstance(appended_refs, list):
+        visible_refs = [
+            ref
+            for ref in appended_refs
+            if not (
+                isinstance(ref, dict)
+                and _appended_ref_matches_hidden(ref, hidden_derived_parts)
+            )
+        ]
+        if visible_refs:
+            result["appended_part_refs"] = visible_refs
+            if not isinstance(result.get("appended_part_ref"), dict):
+                result["appended_part_ref"] = visible_refs[-1]
+        else:
+            result.pop("appended_part_refs", None)
+
+    targets = result.get("targets")
+    if isinstance(targets, list):
+        result["targets"] = [
+            target
+            for target in targets
+            if not (
+                isinstance(target, dict)
+                and bool(target.get("hidden_default_lane"))
+            )
+        ]
+
+
+def _appended_ref_matches_hidden(
+    appended_ref: Dict[str, Any],
+    hidden_derived_parts: Dict[str, set[str]],
+) -> bool:
+    if bool(appended_ref.get("hidden_default_lane")):
+        return True
+    part_id = str(appended_ref.get("part_id") or "").strip()
+    part_name = str(appended_ref.get("part_name") or "").strip()
+    return (
+        part_id in hidden_derived_parts.get("part_ids", set())
+        or part_name in hidden_derived_parts.get("part_names", set())
+        or _part_name_matches_hidden_voice_part_id(
+            part_name,
+            hidden_derived_parts.get("voice_part_ids", set()),
+        )
+    )
+
+
+def _remove_hidden_derived_parts_from_musicxml_path(
+    path: str,
+    hidden_derived_parts: Dict[str, set[str]],
+) -> None:
+    try:
+        tree = ET.parse(path)
+    except Exception:
+        return
+    root = tree.getroot()
+    ns = _xml_namespace(root.tag)
+    q = lambda tag: f"{{{ns}}}{tag}" if ns else tag
+    _remove_hidden_derived_parts_from_musicxml(
+        root,
+        q=q,
+        hidden_derived_parts=hidden_derived_parts,
+    )
+    try:
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        return
 
 
 def _resolve_source_musicxml_path(score: Dict[str, Any]) -> Optional[str]:
@@ -4543,6 +5102,66 @@ def _normalize_materialized_musicxml_stem(stem: str) -> str:
         if updated == normalized:
             return normalized
         normalized = updated
+
+
+def _remove_hidden_derived_parts_from_musicxml(
+    root: ET.Element,
+    *,
+    q: Any,
+    hidden_derived_parts: Dict[str, set[str]],
+) -> None:
+    hidden_ids = {
+        str(value).strip()
+        for value in hidden_derived_parts.get("part_ids", set())
+        if str(value).strip()
+    }
+    hidden_names = {
+        str(value).strip()
+        for value in hidden_derived_parts.get("part_names", set())
+        if str(value).strip()
+    }
+    hidden_voice_part_ids = {
+        str(value).strip()
+        for value in hidden_derived_parts.get("voice_part_ids", set())
+        if str(value).strip()
+    }
+    if not hidden_ids and not hidden_names and not hidden_voice_part_ids:
+        return
+
+    part_list = root.find(q("part-list"))
+    if part_list is not None:
+        for score_part in list(part_list.findall(q("score-part"))):
+            part_id = str(score_part.get("id") or "").strip()
+            part_name = str(score_part.findtext(q("part-name")) or "").strip()
+            if (
+                part_id in hidden_ids
+                or part_name in hidden_names
+                or _part_name_matches_hidden_voice_part_id(
+                    part_name,
+                    hidden_voice_part_ids,
+                )
+            ):
+                if part_id:
+                    hidden_ids.add(part_id)
+                part_list.remove(score_part)
+
+    for part_node in list(root.findall(q("part"))):
+        part_id = str(part_node.get("id") or "").strip()
+        if part_id in hidden_ids:
+            root.remove(part_node)
+
+
+def _part_name_matches_hidden_voice_part_id(
+    part_name: str, hidden_voice_part_ids: set[str]
+) -> bool:
+    normalized_name = re.sub(r"\s+", " ", str(part_name or "")).strip().lower()
+    if not normalized_name.endswith("(derived)"):
+        return False
+    for voice_part_id in hidden_voice_part_ids:
+        normalized_voice = re.sub(r"\s+", " ", str(voice_part_id or "")).strip().lower()
+        if normalized_voice and normalized_name.endswith(f"{normalized_voice} (derived)"):
+            return True
+    return False
 
 
 def _resolve_reference_part_for_transformed(
@@ -5718,9 +6337,12 @@ def finalize_review_materialization(payload: Dict[str, Any]) -> Dict[str, Any]:
         if payload.get("metadata"):
             metadata = finalized.setdefault("metadata", {})
             metadata.update(dict(payload["metadata"]))
-        return finalized
+        return _cleanup_hidden_derived_outputs(
+            finalized,
+            source_score=payload.get("base_score") if isinstance(payload.get("base_score"), dict) else None,
+        )
 
-    return _finalize_transform_result(
+    finalized = _finalize_transform_result(
         payload["score"],
         part_index=int(payload["part_index"]),
         target_voice_part_id=str(payload["target_voice_part_id"]),
@@ -5733,6 +6355,10 @@ def finalize_review_materialization(payload: Dict[str, Any]) -> Dict[str, Any]:
         validation=dict(payload.get("validation") or {}),
         source_musicxml_path=payload.get("source_musicxml_path"),
         target_source_voice_id=payload.get("target_source_voice_id"),
+    )
+    return _cleanup_hidden_derived_outputs(
+        finalized,
+        source_score=payload.get("score") if isinstance(payload.get("score"), dict) else None,
     )
 
 
@@ -5775,13 +6401,13 @@ def build_preprocessing_required_action(
     diagnostics: Optional[Dict[str, Any]] = None,
     message: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build a user-facing action_required payload for preprocessing requirements."""
+    """Build a user-facing action_required payload for line-preparation requirements."""
     payload = _action_required(
         "preprocessing_required",
         message
         or (
-            "This part requires voice-part preprocessing before synthesis. "
-            "Run preprocess_voice_parts first, then synthesize the derived target."
+            "This part needs to be split into a clean singing line before synthesis. "
+            "Prepare the derived part first, then synthesize that derived part."
         ),
         code="preprocessing_required",
         part_index=int(part_index),
@@ -5807,6 +6433,8 @@ def _collect_derived_target_candidates(score: Dict[str, Any]) -> List[Dict[str, 
             continue
         appended_ref = value.get("appended_part_ref")
         if not isinstance(appended_ref, dict):
+            continue
+        if bool(appended_ref.get("hidden_default_lane")):
             continue
         part_index = appended_ref.get("part_index")
         if not isinstance(part_index, int):
@@ -5993,15 +6621,15 @@ def synthesize_preflight_action_required(
     else:
         reason = "complex_score_missing_lyrics_without_derived_target"
     message = (
-        "This part requires voice-part preprocessing before synthesis. "
-        "Run preprocess_voice_parts first, then synthesize the derived target."
+        "This part needs to be split into a clean singing line before synthesis. "
+        "Prepare the derived part first, then synthesize that derived part."
     )
     if preprocessed_score_detected and suggested_for_input_part:
         reason = "preprocessed_score_without_derived_target_selection"
         message = (
-            "Preprocessing already exists for this score, but synthesize targeted an original "
-            "complex part. Retry synthesize using a derived part selection. "
-            "Only rerun preprocess_voice_parts if the user asked for plan revisions."
+            "A prepared derived part already exists for this score, but synthesis targeted "
+            "the original complex part. Retry synthesis using the derived part selection. "
+            "Only rebuild the derived part if the user asked for revisions."
         )
 
     return build_preprocessing_required_action(
