@@ -899,17 +899,32 @@ export default function MainApp() {
     setScore({ name: score.name, data });
   };
 
+  const progressUrlForJob = (progressUrl: string, jobId?: string): string => {
+    if (!jobId) return progressUrl;
+    try {
+      const url = new URL(progressUrl, window.location.origin);
+      if (!url.searchParams.has("job_id")) {
+        url.searchParams.set("job_id", jobId);
+      }
+      return url.toString();
+    } catch {
+      return progressUrl;
+    }
+  };
+
   const refreshMessageAudioUrl = async (
     messageId: string,
-    progressUrl?: string
+    progressUrl?: string,
+    jobId?: string
   ): Promise<string | null> => {
     if (!progressUrl) return null;
+    const refreshUrl = progressUrlForJob(progressUrl, jobId);
     const pending = audioRefreshPromisesRef.current[messageId];
     if (pending) {
       return pending;
     }
     const refreshPromise = (async () => {
-      const payload = await fetchProgress(progressUrl);
+      const payload = await fetchProgress(refreshUrl);
       const nextAudioUrl = payload.audio_url;
       if (!nextAudioUrl) return null;
       setMessages((prev) =>
@@ -918,7 +933,7 @@ export default function MainApp() {
             ? {
                 ...msg,
                 audioUrl: nextAudioUrl,
-                progressUrl,
+                progressUrl: refreshUrl,
                 jobId: payload.job_id ?? msg.jobId,
                 feedback: payload.feedback ?? msg.feedback,
               }
@@ -936,9 +951,13 @@ export default function MainApp() {
     }
   };
 
-  const handleAudioPlaybackError = async (messageId: string, progressUrl?: string) => {
+  const handleAudioPlaybackError = async (
+    messageId: string,
+    progressUrl?: string,
+    jobId?: string
+  ) => {
     try {
-      const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl);
+      const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl, jobId);
       if (!nextAudioUrl) {
         setError("Audio link expired. Please try again.");
         return;
@@ -1042,10 +1061,12 @@ export default function MainApp() {
   const handleAudioDownload = async (
     messageId: string,
     audioUrl?: string,
-    progressUrl?: string
+    progressUrl?: string,
+    jobId?: string
   ) => {
     try {
-      const nextAudioUrl = (await refreshMessageAudioUrl(messageId, progressUrl)) || audioUrl;
+      const nextAudioUrl =
+        (await refreshMessageAudioUrl(messageId, progressUrl, jobId)) || audioUrl;
       if (!nextAudioUrl) {
         setError("No audio available to download.");
         return;
@@ -1606,7 +1627,7 @@ export default function MainApp() {
                         openFeedbackPrompt(msg, "audio_played");
                       }}
                       onError={() => {
-                        void handleAudioPlaybackError(msg.id, msg.progressUrl);
+                        void handleAudioPlaybackError(msg.id, msg.progressUrl, msg.jobId);
                       }}
                     />
                     <button
@@ -1615,7 +1636,12 @@ export default function MainApp() {
                       aria-label="Download audio"
                       title="Download audio"
                       onClick={() => {
-                        void handleAudioDownload(msg.id, msg.audioUrl, msg.progressUrl);
+                        void handleAudioDownload(
+                          msg.id,
+                          msg.audioUrl,
+                          msg.progressUrl,
+                          msg.jobId
+                        );
                       }}
                     >
                       <Download size={16} aria-hidden="true" />
