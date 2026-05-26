@@ -401,6 +401,7 @@ export default function MainApp() {
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [feedbackPrompts, setFeedbackPrompts] = useState<Record<string, "open" | "minimized">>({});
+  const [chatTurnInProgress, setChatTurnInProgress] = useState(false);
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -419,6 +420,12 @@ export default function MainApp() {
   const billingSyncInFlightRef = useRef(false);
   const lastBillingSyncAtRef = useRef(0);
   const checkoutReturnSyncStartedRef = useRef(false);
+  const chatTurnInProgressRef = useRef(false);
+
+  const setChatTurnBusy = (busy: boolean) => {
+    chatTurnInProgressRef.current = busy;
+    setChatTurnInProgress(busy);
+  };
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -821,9 +828,11 @@ export default function MainApp() {
         }
         if (payload.status === "done") {
           setActiveProgress(null);
+          setChatTurnBusy(false);
         }
         if (payload.status === "error") {
           setActiveProgress(null);
+          setChatTurnBusy(false);
           setError(
             payload.message ||
               (payload.job_kind === "preprocess"
@@ -835,6 +844,7 @@ export default function MainApp() {
         if (!cancelled) {
           setError(err?.message || "Failed to fetch synthesis progress.");
           setActiveProgress(null);
+          setChatTurnBusy(false);
         }
       }
     };
@@ -1095,10 +1105,13 @@ export default function MainApp() {
     voicebankId: string | null = selectedVoicebankId
   ) => {
     if (!content.trim()) return;
+    if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall(selection ? "selection_blocked" : "chat_blocked");
       return;
     }
+    let keepTurnBusy = false;
+    setChatTurnBusy(true);
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -1142,6 +1155,8 @@ export default function MainApp() {
       if (response.type === "chat_progress") {
         assistantMessage.progressUrl = response.progress_url;
         assistantMessage.isProgress = true;
+        assistantMessage.jobId = response.job_id;
+        keepTurnBusy = true;
         if (pendingSelection) {
           setPendingSelection(false);
         }
@@ -1164,11 +1179,15 @@ export default function MainApp() {
       setError(message);
     } finally {
       setStatus(null);
+      if (!keepTurnBusy) {
+        setChatTurnBusy(false);
+      }
     }
   };
 
   const handleSend = async () => {
     if (!input.trim()) return;
+    if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall("chat_blocked");
       return;
@@ -1181,6 +1200,7 @@ export default function MainApp() {
 
   const handleSelectionSend = async () => {
     if (!selectedPartKey || !selectedVerse) return;
+    if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall("selection_blocked");
       return;
@@ -1561,7 +1581,7 @@ export default function MainApp() {
                         type="button"
                         className="selection-send"
                         onClick={handleSelectionSend}
-                        disabled={!selectedPartKey || !selectedVerse}
+                        disabled={!selectedPartKey || !selectedVerse || chatTurnInProgress}
                       >
                         Use selection
                       </button>
@@ -1736,6 +1756,7 @@ export default function MainApp() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
+                    if (chatTurnInProgress) return;
                     handleSend();
                   }
                 }}
@@ -1745,8 +1766,8 @@ export default function MainApp() {
               <button
                 onClick={handleSend}
                 className="send-button"
-                disabled={!input.trim()}
-                aria-disabled={creditsLocked}
+                disabled={!input.trim() || creditsLocked || chatTurnInProgress}
+                aria-disabled={creditsLocked || chatTurnInProgress}
               >
                 <Send size={18} />
               </button>

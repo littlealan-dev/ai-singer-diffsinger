@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { doc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from './useAuth';
 import { LATEST_ANNOUNCEMENT_ID, ANNOUNCEMENTS, Announcement } from '../announcements';
@@ -46,11 +46,17 @@ export function useAnnouncements(): UseAnnouncementsResult {
         if (!user) return;
         const userDocRef = doc(db, 'users', user.uid);
         try {
-            await updateDoc(userDocRef, {
-                'metadata.lastSeenAnnouncementId': announcementId,
-                'metadata.lastSeenAnnouncementDate': serverTimestamp(),
-                'metadata.pendingAnnouncementId': null,
-            });
+            await setDoc(
+                userDocRef,
+                {
+                    metadata: {
+                        lastSeenAnnouncementId: announcementId,
+                        lastSeenAnnouncementDate: serverTimestamp(),
+                        pendingAnnouncementId: null,
+                    },
+                },
+                { merge: true },
+            );
         } catch (error) {
             console.error("Error marking announcement as seen:", error);
         }
@@ -80,13 +86,14 @@ export function useAnnouncements(): UseAnnouncementsResult {
     // Condition 1: Not loading
     // Condition 2: User is logged in
     // Condition 3: User hasn't seen this specific announcement yet
-    // Condition 4: Current date is within the effective range
+    // Condition 4: Announcement is global or explicitly pending for this user
+    // Condition 5: Current date is within the effective range
     const showAnnouncement = 
         !loading && 
         !!user && 
-        pendingAnnouncementId === LATEST_ANNOUNCEMENT_ID &&
         lastSeenId !== LATEST_ANNOUNCEMENT_ID && 
         !!currentAnnouncement && 
+        (!currentAnnouncement.requiresPending || pendingAnnouncementId === LATEST_ANNOUNCEMENT_ID) &&
         isWithinEffectiveRange(currentAnnouncement);
 
     return {

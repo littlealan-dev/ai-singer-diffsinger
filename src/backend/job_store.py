@@ -75,6 +75,19 @@ class JobStore:
         data = doc.to_dict() or {}
         return doc.id, data
 
+    def get_job_by_id(
+        self, *, job_id: str, user_id: str, session_id: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return one job when it belongs to the requested user/session."""
+        self._ensure_client()
+        doc = self._client.collection(self.collection).document(job_id).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        if data.get("userId") != user_id or data.get("sessionId") != session_id:
+            return None
+        return doc.id, data
+
     def clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
         """Delete all stored jobs for a user/session pair."""
         self._ensure_client()

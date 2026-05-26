@@ -505,7 +505,7 @@ class Orchestrator:
         return {
             "type": "chat_progress",
             "message": "Give me a moment to prepare the take...",
-            "progress_url": f"/sessions/{session_id}/progress",
+            "progress_url": _job_progress_url(session_id, job_id),
             "job_id": job_id,
         }
 
@@ -573,7 +573,7 @@ class Orchestrator:
         return {
             "type": "chat_progress",
             "message": initial_message,
-            "progress_url": f"/sessions/{session_id}/progress",
+            "progress_url": _job_progress_url(session_id, job_id),
             "job_id": job_id,
         }
 
@@ -4588,6 +4588,11 @@ def _job_storage_output_path(
     """Build the storage path for job output audio."""
     extension = "mp3" if audio_format.lower() == "mp3" else "wav"
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/output.{extension}"
+
+
+def _job_progress_url(session_id: str, job_id: str) -> str:
+    """Build a job-specific progress URL so older audio players refresh their own job."""
+    return f"/sessions/{session_id}/progress?job_id={job_id}"
 
 
 def _ensure_job_input_storage(

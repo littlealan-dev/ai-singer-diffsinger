@@ -214,6 +214,14 @@ def integration_client(monkeypatch):
             return None
         return max(matches, key=lambda item: item[1].get("updatedAt") or "")
 
+    def _fake_get_job_by_id(self, *, job_id: str, user_id: str, session_id: str):
+        payload = fake_jobs.get(job_id)
+        if not payload:
+            return None
+        if payload.get("userId") != user_id or payload.get("sessionId") != session_id:
+            return None
+        return job_id, payload
+
     def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str):
         to_delete = [
             job_id
@@ -229,6 +237,7 @@ def integration_client(monkeypatch):
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
     )
+    monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.clear_jobs_for_session",
         _fake_clear_jobs_for_session,

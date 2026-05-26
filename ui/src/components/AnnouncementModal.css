@@ -103,7 +103,7 @@
 .announcement-content h2 {
     font-size: 1.85rem;
     font-weight: 700;
-    margin-bottom: 1.25rem;
+    margin-bottom: 0.5rem;
     color: var(--text-strong);
     background: linear-gradient(135deg, #fff 0%, var(--accent-strong) 100%);
     -webkit-background-clip: text;
@@ -113,11 +113,19 @@
     letter-spacing: -0.02em;
 }
 
+.announcement-version {
+    margin: 0 0 1.25rem;
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    font-weight: 600;
+}
+
 .announcement-body {
     font-size: 1.05rem;
     line-height: 1.6;
     color: var(--text-muted);
     margin-bottom: 2.5rem;
+    text-align: left;
 }
 
 .announcement-body p {

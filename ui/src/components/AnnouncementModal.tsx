@@ -5,6 +5,7 @@ import { X, Bell, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import './AnnouncementModal.css';
 import { Announcement } from '../announcements';
+import { APP_VERSION_LABEL } from '../appVersion';
 
 interface AnnouncementModalProps {
     announcement: Announcement;
@@ -72,6 +73,7 @@ const AnnouncementModal: React.FC<AnnouncementModalProps> = ({ announcement, onC
 
                 <div className="announcement-content">
                     <h2>{announcement.title}</h2>
+                    <p className="announcement-version">{APP_VERSION_LABEL}</p>
                     <div className="announcement-body">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
                             {announcement.content}

@@ -377,6 +377,14 @@ def _prepare_app(monkeypatch, overrides=None):
             return None
         return max(matches, key=lambda item: item[1].get("updatedAt", ""))
 
+    def _fake_get_job_by_id(self, *, job_id: str, user_id: str, session_id: str):
+        payload = fake_jobs.get(job_id)
+        if not payload:
+            return None
+        if payload.get("userId") != user_id or payload.get("sessionId") != session_id:
+            return None
+        return job_id, payload
+
     def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
         to_delete = [
             job_id
@@ -392,6 +400,7 @@ def _prepare_app(monkeypatch, overrides=None):
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
     )
+    monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.clear_jobs_for_session",
         _fake_clear_jobs_for_session,
@@ -548,6 +557,49 @@ def test_create_session_returns_id(client):
     session_id = _create_session(test_client)
     assert isinstance(session_id, str)
     assert len(session_id) > 0
+
+
+def test_progress_can_refresh_an_older_job_after_newer_audio_exists(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    app.state.job_store.create_job(
+        job_id="first-job",
+        user_id="test-user",
+        session_id=session_id,
+        status="completed",
+    )
+    app.state.job_store.update_job(
+        "first-job",
+        status="completed",
+        audioUrl=f"/sessions/{session_id}/audio?file=first.wav",
+        outputPath=f"sessions/test-user/{session_id}/jobs/first-job/output.wav",
+    )
+    time.sleep(0.01)
+    app.state.job_store.create_job(
+        job_id="second-job",
+        user_id="test-user",
+        session_id=session_id,
+        status="completed",
+    )
+    app.state.job_store.update_job(
+        "second-job",
+        status="completed",
+        audioUrl=f"/sessions/{session_id}/audio?file=second.wav",
+        outputPath=f"sessions/test-user/{session_id}/jobs/second-job/output.wav",
+    )
+
+    latest_response = test_client.get(f"/sessions/{session_id}/progress")
+    assert latest_response.status_code == 200
+    latest_payload = latest_response.json()
+    assert latest_payload["job_id"] == "second-job"
+    assert "file=second.wav" in latest_payload["audio_url"]
+
+    first_response = test_client.get(f"/sessions/{session_id}/progress?job_id=first-job")
+    assert first_response.status_code == 200
+    first_payload = first_response.json()
+    assert first_payload["job_id"] == "first-job"
+    assert "file=first.wav" in first_payload["audio_url"]
 
 
 def test_missing_auth_header_returns_401(monkeypatch):
@@ -1043,6 +1095,7 @@ def test_chat_returns_progress_immediately_for_preprocess(client):
     assert chat_payload["type"] == "chat_progress"
     assert "splitting the requested part" in chat_payload["message"].lower()
     assert chat_payload["progress_url"].startswith(f"/sessions/{session_id}/progress")
+    assert "job_id=" in chat_payload["progress_url"]
 
 
 def test_deterministic_complex_selection_uses_default_message_and_preprocess_plan_roles(client):
