@@ -255,6 +255,20 @@
       }
     },
     {
+      "source": "/healthz",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
+      "source": "/readyz",
+      "run": {
+        "serviceId": "sightsinger-api",
+        "region": "us-east4"
+      }
+    },
+    {
       "source": "/app",
       "destination": "/app.html"
     },
