@@ -833,11 +833,13 @@ export default function MainApp() {
         if (payload.status === "error") {
           setActiveProgress(null);
           setChatTurnBusy(false);
+          const fallbackError =
+            payload.job_kind === "preprocess" ? "Preprocess failed." : "Synthesis failed.";
+          const baseMessage = payload.message || fallbackError;
           setError(
-            payload.message ||
-              (payload.job_kind === "preprocess"
-                ? "Preprocess failed."
-                : "Synthesis failed.")
+            payload.error && payload.error !== baseMessage
+              ? `${baseMessage} Reason: ${payload.error}`
+              : baseMessage
           );
         }
       } catch (err: any) {

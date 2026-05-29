@@ -172,6 +172,64 @@ body.legal-active #root {
   color: #17111f;
 }
 
+.backend-readiness-page {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(13, 11, 24, 0.84);
+  z-index: 1000;
+}
+
+.backend-readiness-modal {
+  width: min(100%, 420px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(18, 15, 30, 0.96);
+  box-shadow: var(--shadow-strong);
+  text-align: center;
+}
+
+.backend-readiness-spinner {
+  color: var(--accent-strong);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.backend-readiness-modal h2 {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+
+.backend-readiness-modal p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.backend-readiness-action {
+  min-height: 40px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 8px;
+  background: #f5f7fa;
+  color: #17111f;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .app-shell {
   width: 100%;
   display: flex;

@@ -21,6 +21,13 @@ class McpError(RuntimeError):
     pass
 
 
+class McpStartupInProgressError(McpError):
+    """Raised when MCP workers are still warming up."""
+
+    code = "backend_starting"
+    user_message = "SightSinger is still starting up. Please try again in a moment."
+
+
 @dataclass(frozen=True)
 class McpRequest:
     """JSON-RPC request payload for MCP tools."""
@@ -234,11 +241,44 @@ class McpRouter:
             "synthesize": "gpu",
             "save_audio": "gpu",
         }
+        self._startup_lock = threading.Lock()
+        self._startup_ready = threading.Event()
+        self._startup_thread: Optional[threading.Thread] = None
+        self._startup_error: Optional[str] = None
 
     def start(self) -> None:
         """Start both CPU and GPU MCP processes."""
-        self._cpu.start()
-        self._gpu.start()
+        with self._startup_lock:
+            self._startup_ready.clear()
+            self._startup_error = None
+            try:
+                self._cpu.start()
+                self._gpu.start()
+            except Exception as exc:
+                self._startup_error = str(exc)
+                self._cpu.stop()
+                self._gpu.stop()
+                raise
+            finally:
+                self._startup_ready.set()
+
+    def start_background(self) -> None:
+        """Start both MCP processes in a background thread."""
+        if self._startup_ready.is_set():
+            return
+        with self._startup_lock:
+            if self._startup_ready.is_set():
+                return
+            if self._startup_thread is not None and self._startup_thread.is_alive():
+                return
+            self._startup_thread = threading.Thread(
+                target=self._start_background_target,
+                name="mcp-router-startup",
+                daemon=True,
+            )
+        # Start the thread OUTSIDE the lock — start() also acquires
+        # _startup_lock, so holding it here would deadlock.
+        self._startup_thread.start()
 
     def stop(self) -> None:
         """Stop both CPU and GPU MCP processes."""
@@ -247,8 +287,48 @@ class McpRouter:
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
         """Route a tool call to the appropriate MCP process."""
+        self._ensure_started_for_call()
         worker = self._tool_to_worker.get(name, "cpu")
         return self._call_with_retry(worker, name, arguments)
+
+    def readiness(self) -> Dict[str, Any]:
+        """Return lightweight MCP startup state for diagnostics."""
+        ready = self._startup_ready.is_set() and self._startup_error is None
+        starting = (
+            not self._startup_ready.is_set()
+            and self._startup_thread is not None
+            and self._startup_thread.is_alive()
+        )
+        status = "ready" if ready else "starting" if starting else "error" if self._startup_error else "not_started"
+        payload: Dict[str, Any] = {
+            "status": status,
+            "ready": ready,
+            "starting": starting,
+        }
+        if self._startup_error:
+            payload["error"] = self._startup_error
+        return payload
+
+    def _start_background_target(self) -> None:
+        """Run startup from a daemon thread and keep any failure observable."""
+        try:
+            self.start()
+        except Exception:
+            logging.getLogger(__name__).exception("mcp_background_start_failed")
+
+    def _ensure_started_for_call(self) -> None:
+        """Wait for background startup before routing a real tool call."""
+        if not self._startup_ready.is_set():
+            if self._startup_thread is None:
+                self.start()
+            else:
+                timeout_seconds = self._settings.backend_ready_timeout_seconds
+                if not self._startup_ready.wait(timeout_seconds):
+                    raise McpStartupInProgressError(
+                        McpStartupInProgressError.user_message
+                    )
+        if self._startup_error:
+            raise McpError(f"MCP startup failed: {self._startup_error}")
 
     def _call_with_retry(self, worker: str, name: str, arguments: Dict[str, Any]) -> Any:
         """Retry a tool call once after restarting a failed process."""

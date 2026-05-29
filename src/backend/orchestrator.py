@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
+import ast
 import asyncio
 import logging
 import copy
@@ -857,6 +858,7 @@ class Orchestrator:
             )
             self._release_fault_injection_remaining.pop(job_id, None)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
+            error_message = _format_synthesis_error(exc)
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
                     self._job_store.update_job,
@@ -865,7 +867,7 @@ class Orchestrator:
                     step="error",
                     message=backend_message("job.finish_failed"),
                     progress=1.0,
-                    errorMessage=str(exc),
+                    errorMessage=error_message,
                 )
             else:
                 await self._mark_reservation_reconciliation_required(
@@ -873,7 +875,7 @@ class Orchestrator:
                     job_id=job_id,
                     reservation_error="release_failed_after_synthesis_error",
                     reservation_error_message=(
-                        f"{exc} | billing_rollback_status={release_result.status}"
+                        f"{error_message} | billing_rollback_status={release_result.status}"
                     ),
                 )
                 await self._mark_job_terminal_billing_state(
@@ -882,7 +884,7 @@ class Orchestrator:
                     step="error",
                     message=backend_message("job.audio_generation_and_billing_rollback_failed"),
                     error_message=(
-                        f"{exc} | billing_rollback_status={release_result.status}"
+                        f"{error_message} | billing_rollback_status={release_result.status}"
                     ),
                 )
         finally:
@@ -4593,6 +4595,31 @@ def _job_storage_output_path(
 def _job_progress_url(session_id: str, job_id: str) -> str:
     """Build a job-specific progress URL so older audio players refresh their own job."""
     return f"/sessions/{session_id}/progress?job_id={job_id}"
+
+
+def _format_synthesis_error(exc: Exception) -> str:
+    """Return a concise troubleshooting message for failed synthesis jobs."""
+    raw = str(exc).strip()
+    if raw:
+        try:
+            payload = ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            message = str(payload.get("message") or "").strip()
+            error_type = str(payload.get("type") or "").strip()
+            if (
+                len(message) >= 2
+                and message[0] == message[-1]
+                and message[0] in {"'", '"'}
+            ):
+                message = message[1:-1].strip()
+            if message and error_type:
+                return f"{message} ({error_type})"
+            if message:
+                return message
+        return raw
+    return exc.__class__.__name__
 
 
 def _ensure_job_input_storage(

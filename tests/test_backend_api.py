@@ -23,6 +23,7 @@ from src.backend.orchestrator import (
     MISSING_ORIGINAL_SCORE_MESSAGE,
     ToolExecutionResult,
     WorkflowCandidate,
+    _format_synthesis_error,
 )
 from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.session import SessionStore
@@ -33,6 +34,18 @@ from src.backend.credits import (
     ReleaseCreditsResult,
     ReserveCreditsResult,
 )
+
+
+def test_format_synthesis_error_extracts_tool_error_message():
+    exc = RuntimeError(
+        "{'message': '\"Token \\'à\\' has no usable letters for G2P lookup.\"', "
+        "'type': 'KeyError'}"
+    )
+
+    assert (
+        _format_synthesis_error(exc)
+        == "Token 'à' has no usable letters for G2P lookup. (KeyError)"
+    )
 
 
 VERSED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
@@ -480,6 +493,26 @@ def _create_session(test_client):
     payload = response.json()
     assert "session_id" in payload
     return payload["session_id"]
+
+
+def test_healthz_is_lightweight(client):
+    test_client, _ = client
+
+    response = test_client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_readyz_reports_mcp_readiness(client):
+    test_client, _ = client
+
+    response = test_client.get("/readyz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ready"] is False
+    assert payload["mcp"]["status"] == "not_started"
 
 
 def _upload_score(test_client, session_id, filename="score.xml"):

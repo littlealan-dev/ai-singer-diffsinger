@@ -160,7 +160,40 @@ export type MaintenanceStatusResponse = {
   message?: string | null;
 };
 
+export type BackendReadyzResponse = {
+  status: string;
+  ready: boolean;
+  build?: string;
+  mcp?: {
+    status?: string;
+    ready?: boolean;
+    starting?: boolean;
+    error?: string;
+  };
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+const APP_ENV = import.meta.env.VITE_APP_ENV ?? "";
+const IS_LOCAL_DEV = ["dev", "development", "local"].includes(APP_ENV.toLowerCase());
+export const BACKEND_STARTING_MESSAGE =
+  "SightSinger is still starting up. Please try again in a moment.";
+const BACKEND_READY_TIMEOUT_SECONDS = parsePositiveNumber(
+  import.meta.env.VITE_BACKEND_READY_TIMEOUT_SECONDS,
+  240
+);
+
+class BackendStartingError extends Error {
+  constructor(message = BACKEND_STARTING_MESSAGE) {
+    super(message);
+    this.name = "BackendStartingError";
+  }
+}
+
+function parsePositiveNumber(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function withApiBase(url: string): string {
   if (!url) return url;
@@ -197,13 +230,72 @@ async function withAuthHeaders(
   };
 }
 
+async function fetchWithBackendTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    BACKEND_READY_TIMEOUT_SECONDS * 1000
+  );
+  const signal = init.signal;
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new BackendStartingError();
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function backendStartingMessageFromBody(text: string): string | null {
+  if (!text) return null;
+  try {
+    const payload = JSON.parse(text);
+    const detail = payload?.detail;
+    if (detail?.code === "backend_starting") {
+      return detail.message || BACKEND_STARTING_MESSAGE;
+    }
+  } catch {
+    // Fall back to text matching below.
+  }
+  if (
+    text.includes("backend_starting") ||
+    text.includes("MCP startup is still in progress") ||
+    text.includes("SightSinger is still starting up")
+  ) {
+    return BACKEND_STARTING_MESSAGE;
+  }
+  return null;
+}
+
+async function errorFromResponse(response: Response, fallback: string): Promise<Error> {
+  const text = await response.text();
+  const startupMessage = backendStartingMessageFromBody(text);
+  const localProxyBackendDown = IS_LOCAL_DEV && response.status === 500 && !text.trim();
+  if (startupMessage || response.status === 503 || localProxyBackendDown) {
+    return new BackendStartingError(startupMessage || BACKEND_STARTING_MESSAGE);
+  }
+  return new Error(text || fallback);
+}
+
 async function request<T>(path: string, options: RequestInit): Promise<T> {
   let headers = await withAppCheckHeaders(options.headers);
   headers = await withAuthHeaders(headers);
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetchWithBackendTimeout(`${API_BASE}${path}`, { ...options, headers });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }
   return (await response.json()) as T;
 }
@@ -218,6 +310,10 @@ export async function ensureCredits(): Promise<unknown> {
 
 export async function fetchMaintenanceStatus(): Promise<MaintenanceStatusResponse> {
   return request("/maintenance/status", { method: "GET" });
+}
+
+export async function fetchBackendReadiness(): Promise<BackendReadyzResponse> {
+  return request("/readyz", { method: "GET" });
 }
 
 export async function createCheckoutSession(planKey: string): Promise<BillingCheckoutResponse> {
@@ -269,14 +365,13 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
   form.append("file", file);
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}/upload`, {
+  const response = await fetchWithBackendTimeout(`${API_BASE}/sessions/${sessionId}/upload`, {
     method: "POST",
     body: form,
     headers,
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || "Upload failed");
+    throw await errorFromResponse(response, "Upload failed");
   }
   return response.json();
 }
@@ -284,10 +379,11 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
 export async function fetchScoreXml(sessionId: string): Promise<string> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}/score`, { headers });
+  const response = await fetchWithBackendTimeout(`${API_BASE}/sessions/${sessionId}/score`, {
+    headers,
+  });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || "Failed to load score.");
+    throw await errorFromResponse(response, "Failed to load score.");
   }
   return response.text();
 }
@@ -337,10 +433,9 @@ export async function chat(
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetch(withApiBase(progressUrl), { headers });
+  const response = await fetchWithBackendTimeout(withApiBase(progressUrl), { headers });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }
   const payload = (await response.json()) as ProgressResponse;
   if (payload.audio_url) {

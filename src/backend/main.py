@@ -20,7 +20,7 @@ import logging
 
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
-from src.backend.mcp_client import McpRouter, McpError
+from src.backend.mcp_client import McpRouter, McpError, McpStartupInProgressError
 from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore, FirestoreSessionStore
@@ -139,15 +139,19 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Start/stop shared services and handle cleanup."""
         settings.sessions_dir.mkdir(parents=True, exist_ok=True)
-        router.start()
-        _log_onnx_providers()
+        if settings.mcp_startup_blocking:
+            router.start()
+            _log_onnx_providers()
+        else:
+            logger.info("mcp_start_deferred")
+            router.start_background()
+            asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
         try:
             yield
         finally:
             removed = await sessions.cleanup_expired_on_disk()
             if removed:
-                logger = get_logger("backend.api")
-                logger.info("session_cleanup_removed count=%s", removed)
+                get_logger("backend.api").info("session_cleanup_removed count=%s", removed)
             router.stop()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
@@ -179,6 +183,23 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/healthz")
+    async def healthz() -> Dict[str, str]:
+        """Return process liveness without depending on MCP worker readiness."""
+        return {"status": "ok", "build": settings.backend_build_id}
+
+    @app.get("/readyz")
+    async def readyz(request: Request) -> Dict[str, Any]:
+        """Return app readiness diagnostics without requiring MCP tool calls."""
+        router: McpRouter = request.app.state.router
+        mcp = router.readiness()
+        return {
+            "status": "ready" if mcp["ready"] else "starting",
+            "ready": bool(mcp["ready"]),
+            "build": settings.backend_build_id,
+            "mcp": mcp,
+        }
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -263,6 +284,8 @@ def create_app() -> FastAPI:
                     {"file_path": rel_path, "expand_repeats": False},
                 )
                 parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
+            except McpStartupInProgressError as exc:
+                raise _backend_starting_http_exception(exc) from exc
             except McpError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             logger.info(
@@ -345,6 +368,8 @@ def create_app() -> FastAPI:
                 selected_voicebank_id=payload.selected_voicebank_id,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
+        except McpStartupInProgressError as exc:
+            raise _backend_starting_http_exception(exc) from exc
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -934,9 +959,21 @@ async def _require_app_check(request: Request) -> None:
 def _should_require_app_check(request: Request) -> bool:
     """Skip App Check only for signed audio playback routes."""
     path = request.url.path
-    if path == "/billing/webhook":
+    if path in {"/billing/webhook", "/healthz", "/readyz"}:
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
+
+
+def _backend_starting_http_exception(exc: McpStartupInProgressError) -> HTTPException:
+    """Return the typed backend warmup response used by clients."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": exc.code,
+            "message": exc.user_message,
+        },
+        headers={"Retry-After": "10"},
+    )
 
 
 async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:

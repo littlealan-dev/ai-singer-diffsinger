@@ -92,6 +92,8 @@ class Settings:
     mcp_timeout_seconds: float
     mcp_gpu_timeout_seconds: float
     mcp_startup_timeout_seconds: float
+    mcp_startup_blocking: bool
+    backend_ready_timeout_seconds: float
     mcp_debug: bool
     backend_auth_disabled: bool
     dev_user_id: str
@@ -185,11 +187,18 @@ class Settings:
         llm_max_tool_code_chars = _env_int("LLM_MAX_TOOL_CODE_CHARS", 4000)
         llm_max_history_items = _env_int("LLM_MAX_HISTORY_ITEMS", 12)
         preprocess_max_attempts = _env_int("PREPROCESS_MAX_ATTEMPTS", 3)
+        app_env = _app_env()
+        app_env_lower = app_env.lower()
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
+        backend_ready_timeout_seconds = _env_float("BACKEND_READY_TIMEOUT_SECONDS", 240.0)
+        mcp_startup_blocking = _env_bool(
+            "MCP_STARTUP_BLOCKING",
+            app_env_lower in {"dev", "development", "local", "test"},
+        )
         mcp_debug = _env_bool("MCP_DEBUG", False)
         backend_auth_disabled = _env_bool("BACKEND_AUTH_DISABLED", False)
         dev_user_id = os.getenv("BACKEND_DEV_USER_ID", "dev-user").strip()
@@ -198,8 +207,6 @@ class Settings:
         project_id = _project_id()
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
         storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
-        app_env = _app_env()
-        app_env_lower = app_env.lower()
         backend_require_app_check = _env_bool(
             "BACKEND_REQUIRE_APP_CHECK",
             app_env_lower not in {"dev", "development", "local", "test"},
@@ -303,6 +310,8 @@ class Settings:
             mcp_timeout_seconds=mcp_timeout_seconds,
             mcp_gpu_timeout_seconds=mcp_gpu_timeout_seconds,
             mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
+            mcp_startup_blocking=mcp_startup_blocking,
+            backend_ready_timeout_seconds=backend_ready_timeout_seconds,
             mcp_debug=mcp_debug,
             backend_auth_disabled=backend_auth_disabled,
             dev_user_id=dev_user_id,

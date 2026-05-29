@@ -4,6 +4,7 @@ import DemoApp from "./DemoApp";
 import LandingPage from "./landing/LandingPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { MaintenanceGate } from "./components/MaintenanceGate";
+import { BackendReadinessGate } from "./components/BackendReadinessGate";
 import WaitlistConfirmed from "./WaitlistConfirmed";
 import LegalTerms from "./LegalTerms";
 import LegalPrivacy from "./LegalPrivacy";
@@ -22,9 +23,11 @@ export default function App() {
           path="/app"
           element={
             <ProtectedRoute>
-              <MaintenanceGate>
-                <MainApp />
-              </MaintenanceGate>
+              <BackendReadinessGate>
+                <MaintenanceGate>
+                  <MainApp />
+                </MaintenanceGate>
+              </BackendReadinessGate>
             </ProtectedRoute>
           }
         />
