@@ -671,6 +671,46 @@ body.legal-active #root {
   color: #ff9b9b;
 }
 
+.app-error-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: var(--bg-0);
+  color: var(--text-strong);
+}
+
+.app-error-fallback section {
+  width: min(520px, 100%);
+  padding: 24px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.app-error-fallback h1 {
+  margin: 0 0 10px;
+  font-size: 1.5rem;
+}
+
+.app-error-fallback p {
+  margin: 0 0 18px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.app-error-fallback button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: white;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
 .billing-warning-banner {
   display: flex;
   align-items: center;
@@ -1858,6 +1898,18 @@ img.voice-picker-option-avatar {
   text-align: center;
   color: var(--text-muted);
   padding: 0 24px;
+}
+
+.score-error-placeholder {
+  color: #ff9b9b;
+}
+
+.score-error-placeholder p {
+  max-width: 520px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: rgba(255, 98, 98, 0.12);
+  border: 1px solid rgba(255, 98, 98, 0.28);
 }
 
 @keyframes page-enter {

@@ -181,11 +181,22 @@ const BACKEND_READY_TIMEOUT_SECONDS = parsePositiveNumber(
   import.meta.env.VITE_BACKEND_READY_TIMEOUT_SECONDS,
   240
 );
+const API_REQUEST_TIMEOUT_SECONDS = parsePositiveNumber(
+  import.meta.env.VITE_API_REQUEST_TIMEOUT_SECONDS,
+  300
+);
 
 class BackendStartingError extends Error {
   constructor(message = BACKEND_STARTING_MESSAGE) {
     super(message);
     this.name = "BackendStartingError";
+  }
+}
+
+class ApiRequestTimeoutError extends Error {
+  constructor(message = "The request took too long. Please try again.") {
+    super(message);
+    this.name = "ApiRequestTimeoutError";
   }
 }
 
@@ -230,14 +241,16 @@ async function withAuthHeaders(
   };
 }
 
-async function fetchWithBackendTimeout(
+async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutSeconds = API_REQUEST_TIMEOUT_SECONDS,
+  createAbortError: () => Error = () => new ApiRequestTimeoutError()
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(
     () => controller.abort(),
-    BACKEND_READY_TIMEOUT_SECONDS * 1000
+    timeoutSeconds * 1000
   );
   const signal = init.signal;
   if (signal) {
@@ -251,12 +264,20 @@ async function fetchWithBackendTimeout(
     return await fetch(input, { ...init, signal: controller.signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new BackendStartingError();
+      throw createAbortError();
     }
     throw error;
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+function timeoutForPath(path: string): number {
+  return path === "/readyz" ? BACKEND_READY_TIMEOUT_SECONDS : API_REQUEST_TIMEOUT_SECONDS;
+}
+
+function abortErrorForPath(path: string): Error {
+  return path === "/readyz" ? new BackendStartingError() : new ApiRequestTimeoutError();
 }
 
 function backendStartingMessageFromBody(text: string): string | null {
@@ -293,7 +314,12 @@ async function errorFromResponse(response: Response, fallback: string): Promise<
 async function request<T>(path: string, options: RequestInit): Promise<T> {
   let headers = await withAppCheckHeaders(options.headers);
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithBackendTimeout(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetchWithTimeout(
+    `${API_BASE}${path}`,
+    { ...options, headers },
+    timeoutForPath(path),
+    () => abortErrorForPath(path)
+  );
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }
@@ -365,11 +391,16 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
   form.append("file", file);
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithBackendTimeout(`${API_BASE}/sessions/${sessionId}/upload`, {
-    method: "POST",
-    body: form,
-    headers,
-  });
+  const response = await fetchWithTimeout(
+    `${API_BASE}/sessions/${sessionId}/upload`,
+    {
+      method: "POST",
+      body: form,
+      headers,
+    },
+    API_REQUEST_TIMEOUT_SECONDS,
+    () => new ApiRequestTimeoutError("Upload took too long. Please try again.")
+  );
   if (!response.ok) {
     throw await errorFromResponse(response, "Upload failed");
   }
@@ -379,7 +410,7 @@ export async function uploadScore(sessionId: string, file: File): Promise<Upload
 export async function fetchScoreXml(sessionId: string): Promise<string> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithBackendTimeout(`${API_BASE}/sessions/${sessionId}/score`, {
+  const response = await fetchWithTimeout(`${API_BASE}/sessions/${sessionId}/score`, {
     headers,
   });
   if (!response.ok) {
@@ -433,7 +464,7 @@ export async function chat(
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithBackendTimeout(withApiBase(progressUrl), { headers });
+  const response = await fetchWithTimeout(withApiBase(progressUrl), { headers });
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }

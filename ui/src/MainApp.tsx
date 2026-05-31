@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
@@ -48,6 +48,9 @@ import {
   isPaidPlanKey,
   type BillingPlanKey,
 } from "./billing/plans";
+
+const SCORE_PREVIEW_RENDER_ERROR =
+  "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
 
 type Role = "user" | "assistant";
 
@@ -382,6 +385,7 @@ export default function MainApp() {
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scoreReady, setScoreReady] = useState(false);
+  const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
   const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
   const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState(false);
@@ -487,10 +491,51 @@ export default function MainApp() {
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const scorePreviewTrapActiveRef = useRef(false);
+  const scorePreviewTrapTimerRef = useRef<number | null>(null);
   const dragStateRef = useRef<{
     containerLeft: number;
     containerWidth: number;
   } | null>(null);
+
+  const endScorePreviewTrap = useCallback(() => {
+    if (scorePreviewTrapTimerRef.current !== null) {
+      window.clearTimeout(scorePreviewTrapTimerRef.current);
+      scorePreviewTrapTimerRef.current = null;
+    }
+    scorePreviewTrapActiveRef.current = false;
+  }, []);
+
+  const beginScorePreviewTrap = useCallback(() => {
+    if (scorePreviewTrapTimerRef.current !== null) {
+      window.clearTimeout(scorePreviewTrapTimerRef.current);
+    }
+    scorePreviewTrapActiveRef.current = true;
+    scorePreviewTrapTimerRef.current = window.setTimeout(() => {
+      scorePreviewTrapActiveRef.current = false;
+      scorePreviewTrapTimerRef.current = null;
+    }, 2000);
+  }, []);
+
+  const handleScorePreviewFailure = useCallback((message = SCORE_PREVIEW_RENDER_ERROR) => {
+    endScorePreviewTrap();
+    setScoreReady(false);
+    setScorePreviewError(message);
+    setError(message);
+    try {
+      osmdRef.current?.clear();
+    } catch {
+      // Ignore cleanup errors from a half-rendered OSMD instance.
+    }
+    osmdRef.current = null;
+    scoreRef.current?.replaceChildren();
+  }, [endScorePreviewTrap]);
+
+  useEffect(() => {
+    return () => {
+      endScorePreviewTrap();
+    };
+  }, [endScorePreviewTrap]);
 
   useEffect(() => {
     activeUserIdRef.current = user?.uid ?? null;
@@ -705,6 +750,36 @@ export default function MainApp() {
   }, [available, billing.loading, creditsLoading, isExpired, overdrafted, user?.uid]);
 
   useEffect(() => {
+    if (!score) return;
+
+    const handleWindowError = (event: ErrorEvent) => {
+      if (!scorePreviewTrapActiveRef.current) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      handleScorePreviewFailure();
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      if (!scorePreviewTrapActiveRef.current) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      handleScorePreviewFailure();
+    };
+
+    window.addEventListener("error", handleWindowError, true);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection, true);
+
+    return () => {
+      window.removeEventListener("error", handleWindowError, true);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection, true);
+    };
+  }, [handleScorePreviewFailure, score]);
+
+  useEffect(() => {
     if (billing.loading || !isAuthenticated || pendingCheckoutStartedRef.current) return;
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
@@ -737,31 +812,63 @@ export default function MainApp() {
 
   useEffect(() => {
     if (!scoreRef.current || !score) return;
+    let cancelled = false;
+    beginScorePreviewTrap();
     setScoreReady(false);
-    const osmd = new OpenSheetMusicDisplay(scoreRef.current, {
-      autoResize: true,
-      drawTitle: true,
-      followCursor: false,
-      renderSingleHorizontalStaffline: false,
-    });
-    osmdRef.current = osmd;
-    osmd
-      .load(score.data)
-      .then(() => {
+    setScorePreviewError(null);
+    scoreRef.current.replaceChildren();
+    let osmd: OpenSheetMusicDisplay | null = null;
+
+    void (async () => {
+      try {
+        if (cancelled || !scoreRef.current) return;
+
+        osmd = new OpenSheetMusicDisplay(scoreRef.current, {
+          autoResize: true,
+          drawTitle: true,
+          followCursor: false,
+          renderSingleHorizontalStaffline: false,
+        });
+        osmdRef.current = osmd;
+
+        await osmd.load(score.data);
+        if (cancelled) return;
+
+        beginScorePreviewTrap();
         osmd.zoom = zoomLevel;
         osmd.render();
+        setScorePreviewError(null);
         setScoreReady(true);
-      })
-      .catch((err) => {
-        setError(err?.message || "Failed to render the score.");
-      });
-  }, [score]);
+      } catch {
+        if (cancelled) return;
+        handleScorePreviewFailure();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      endScorePreviewTrap();
+      try {
+        osmd?.clear();
+      } catch {
+        // Ignore cleanup errors from a half-rendered OSMD instance.
+      }
+      if (osmd && osmdRef.current === osmd) {
+        osmdRef.current = null;
+      }
+    };
+  }, [beginScorePreviewTrap, endScorePreviewTrap, handleScorePreviewFailure, score]);
 
   useEffect(() => {
     if (!scoreReady || !osmdRef.current) return;
-    osmdRef.current.zoom = zoomLevel;
-    osmdRef.current.render();
-  }, [zoomLevel, scoreReady]);
+    try {
+      beginScorePreviewTrap();
+      osmdRef.current.zoom = zoomLevel;
+      osmdRef.current.render();
+    } catch {
+      handleScorePreviewFailure();
+    }
+  }, [beginScorePreviewTrap, handleScorePreviewFailure, zoomLevel, scoreReady]);
 
   useEffect(() => {
     if (!activeProgress) return;
@@ -1098,6 +1205,7 @@ export default function MainApp() {
     }
     setUploading(true);
     setError(null);
+    setScorePreviewError(null);
     try {
       const activeSessionId = sessionId ?? await ensureSession();
       const uploadResponse = await uploadScore(activeSessionId, file);
@@ -1832,7 +1940,7 @@ export default function MainApp() {
                   className="zoom-button"
                   onClick={() => handleZoom(-0.1)}
                   aria-label="Zoom out"
-                  disabled={!score}
+                  disabled={!score || Boolean(scorePreviewError)}
                 >
                   <Minus size={16} />
                 </button>
@@ -1842,7 +1950,7 @@ export default function MainApp() {
                   className="zoom-button"
                   onClick={() => handleZoom(0.1)}
                   aria-label="Zoom in"
-                  disabled={!score}
+                  disabled={!score || Boolean(scorePreviewError)}
                 >
                   <Plus size={16} />
                 </button>
@@ -1851,11 +1959,15 @@ export default function MainApp() {
           </div>
           <div className="score-canvas">
             <div ref={scoreRef} className="score-surface" />
-            {!score && (
+            {scorePreviewError ? (
+              <div className="score-placeholder score-error-placeholder">
+                <p>{scorePreviewError}</p>
+              </div>
+            ) : !score ? (
               <div className="score-placeholder">
                 <p>Upload a MusicXML file to render the score here.</p>
               </div>
-            )}
+            ) : null}
           </div>
         </section>
       </main>

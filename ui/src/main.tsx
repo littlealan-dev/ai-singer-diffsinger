@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 import "./firebase";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 
 import { AuthProvider } from "./hooks/useAuth.tsx";
 
@@ -16,7 +17,9 @@ if (typeof window !== "undefined") {
 
 const app = (
   <AuthProvider>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </AuthProvider>
 );
 
