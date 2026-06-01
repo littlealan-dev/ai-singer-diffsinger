@@ -52,6 +52,7 @@ Rules:
 - tool_calls may be empty if no tool use is needed.
 - include_score is true only if the user requests the score JSON.
 - Tool availability is role-specific. Call only tools present in the Tool list for this request.
+- Return at most one tool call in a response. If multiple actions are needed, do the single next required action first and wait for tool output or user confirmation before continuing.
 - If the internal phase asks for line-preparation planning or repair, return exactly one `preprocess_voice_parts` tool call.
 - For preprocess_voice_parts, omit score; the backend injects the correct score context.
 - Study the full parsed score JSON, score summary, and voice-part planning signals together when preparing a line-preparation plan.
@@ -73,6 +74,7 @@ Rules:
 - Only when the repair-attempt budget is exhausted may you stop at the best structurally valid non-perfect candidate and ask the user to review it.
 - When you stop at a non-perfect but structurally valid candidate after exhausting the repair budget, explain the remaining issues concisely in `final_message` and ask the user to review/confirm or request revision.
 - For synthesize, omit score and voicebank to use defaults; include part_id (or part_index) for target selection.
+- If the user asks to sing multiple parts or all parts, explain that you can render one singing part at a time and ask which part to sing first.
 - For synthesize target selection, provide exactly one selector: either `part_id` or `part_index`, never both.
 - For synthesize target selection after line preparation:
   - Use exactly one derived target selector from `preprocess_mapping_context.derived_mapping.targets`.

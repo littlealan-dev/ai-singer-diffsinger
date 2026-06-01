@@ -219,6 +219,27 @@ class Orchestrator:
                     llm_response.thought_summary,
                     llm_response.tool_calls,
                 )
+                if len(llm_response.tool_calls) > 1:
+                    self._logger.warning(
+                        "multiple_tool_calls_blocked session=%s count=%s tools=%s",
+                        session_id,
+                        len(llm_response.tool_calls),
+                        [call.name for call in llm_response.tool_calls],
+                    )
+                    followup_response, followup_error = await self._decide_followup_with_llm(
+                        snapshot,
+                        self._build_multiple_tool_calls_followup_prompt(llm_response.tool_calls),
+                        current_score["score"],
+                        selected_voicebank_id=forced_voicebank_id,
+                    )
+                    if followup_response is not None and followup_response.final_message:
+                        response_message = self._format_followup_message_text(
+                            followup_response.final_message
+                        )
+                    elif followup_error:
+                        response_message = followup_error
+                    await self._sessions.append_history(session_id, "assistant", response_message)
+                    return {"type": "chat_text", "message": response_message}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -2746,6 +2767,26 @@ class Orchestrator:
         tool_names = {call.name for call in tool_calls}
         return TOOL_PREPROCESS_VOICE_PARTS in tool_names and TOOL_SYNTHESIZE not in tool_names
 
+    def _build_multiple_tool_calls_followup_prompt(self, tool_calls: List[ToolCall]) -> str:
+        """Build internal tool-output payload for an invalid multi-tool response."""
+        tool_names = [call.name for call in tool_calls]
+        return json.dumps(
+            {
+                "error": {
+                    "type": "multiple_tool_calls_not_allowed",
+                    "message": (
+                        "Only one tool call can be executed per assistant turn. "
+                        "Respond to the user with no tool calls. Explain what needs "
+                        "to happen next and ask them to choose or confirm the single "
+                        "next action."
+                    ),
+                    "tool_count": len(tool_calls),
+                    "tool_names": tool_names,
+                }
+            },
+            sort_keys=True,
+        )
+
     def _should_start_preprocess_workflow(self, tool_calls: List[ToolCall]) -> bool:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
@@ -3848,6 +3889,22 @@ class Orchestrator:
         reparse_selected_verse: Optional[str] = None
         reparse_noop_this_batch = False
         selected_explicit_verse_number = explicit_verse_number
+        if len(tool_calls) > 1:
+            self._logger.warning(
+                "multiple_tool_calls_blocked session=%s count=%s tools=%s",
+                session_id,
+                len(tool_calls),
+                [call.name for call in tool_calls],
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={
+                    "type": "chat_text",
+                    "message": "",
+                },
+                followup_prompt=self._build_multiple_tool_calls_followup_prompt(tool_calls),
+                explicit_verse_number=selected_explicit_verse_number,
+            )
         for call in tool_calls:
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",

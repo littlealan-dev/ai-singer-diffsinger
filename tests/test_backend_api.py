@@ -21,6 +21,7 @@ from src.backend.llm_client import LlmRole, StaticLlmClient
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
     MISSING_ORIGINAL_SCORE_MESSAGE,
+    TOOL_RESULT_PREFIX,
     ToolExecutionResult,
     WorkflowCandidate,
     _format_synthesis_error,
@@ -4360,6 +4361,88 @@ def test_chat_releases_reserved_credits_when_synthesis_job_start_fails(client, m
     assert body["type"] == "chat_text"
     assert "Couldn't start the take" in body["message"]
     assert len(release_calls) == 1
+
+
+def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    reserve_calls = {"count": 0}
+    followup_payloads: list[dict] = []
+
+    def fake_reserve(*_args, **_kwargs):
+        reserve_calls["count"] += 1
+        return ReserveCreditsResult(status="reserved", estimated_credits=1)
+
+    monkeypatch.setattr("src.backend.credits.reserve_credits", fake_reserve)
+
+    class MultiToolClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                payload = json.loads(last[len(TOOL_RESULT_PREFIX):])
+                followup_payloads.append(payload)
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "I can only do one action at a time. Which part should I sing first?",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "reparse", "arguments": {"verse_number": 1}},
+                        {"name": "synthesize", "arguments": {"part_index": 1, "voicebank": "Dummy"}},
+                    ],
+                    "final_message": "Starting all parts.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.llm_client = MultiToolClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "please sing all parts"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert body["message"] == "I can only do one action at a time. Which part should I sing first?"
+    assert reserve_calls["count"] == 0
+    assert followup_payloads
+    assert followup_payloads[0]["error"]["type"] == "multiple_tool_calls_not_allowed"
+    assert followup_payloads[0]["error"]["tool_names"] == ["reparse", "synthesize"]
+
+
+def test_execute_tool_calls_blocks_multiple_tools_with_followup_prompt(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    result = asyncio.run(
+        orchestrator._execute_tool_calls(
+            "session-1",
+            {"parts": []},
+            [
+                ToolCall(name="reparse", arguments={"verse_number": 1}),
+                ToolCall(name="synthesize", arguments={"part_index": 0, "voicebank": "Dummy"}),
+            ],
+            user_id="test-user",
+            score_summary={},
+            user_email="test@example.com",
+            explicit_verse_number=None,
+        )
+    )
+
+    assert result.audio_response == {"type": "chat_text", "message": ""}
+    assert result.followup_prompt is not None
+    payload = json.loads(result.followup_prompt)
+    assert payload["error"]["type"] == "multiple_tool_calls_not_allowed"
+    assert payload["error"]["tool_names"] == ["reparse", "synthesize"]
 
 
 def test_settle_failure_releases_reservation_and_fails_job_without_audio(client, monkeypatch):

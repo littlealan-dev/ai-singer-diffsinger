@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { BACKEND_STARTING_MESSAGE, fetchBackendReadiness } from "../api";
+import { fetchBackendReadiness } from "../api";
 
 type BackendReadinessGateProps = {
   children: ReactNode;
@@ -9,6 +9,9 @@ type BackendReadinessGateProps = {
 type ReadinessState = "checking" | "ready" | "timeout";
 
 const POLL_INTERVAL_MS = 2000;
+const BACKEND_WAITING_MESSAGE = "Please wait...";
+const BACKEND_TIMEOUT_MESSAGE =
+  "SightSinger is taking longer than expected to start. Please try again later.";
 
 function backendReadyTimeoutMs(): number {
   const raw = import.meta.env.VITE_BACKEND_READY_TIMEOUT_SECONDS;
@@ -70,7 +73,7 @@ export function BackendReadinessGate({ children }: BackendReadinessGateProps) {
       <div className="backend-readiness-modal" role="alertdialog" aria-modal="true">
         <Loader2 className="backend-readiness-spinner" size={28} aria-hidden="true" />
         <h2>{state === "timeout" ? "Still starting up" : "Bootstrapping studio"}</h2>
-        <p>{BACKEND_STARTING_MESSAGE}</p>
+        <p>{state === "timeout" ? BACKEND_TIMEOUT_MESSAGE : BACKEND_WAITING_MESSAGE}</p>
         {state === "timeout" ? (
           <button
             type="button"
