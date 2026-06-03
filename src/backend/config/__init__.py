@@ -57,6 +57,15 @@ class GeminiModelRoleConfig:
 
 
 @dataclass(frozen=True)
+class OpenAIModelRoleConfig:
+    """OpenAI model settings for one logical LLM role."""
+
+    model: str
+    reasoning_effort: str
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class Settings:
     """Configuration values parsed from the environment."""
     project_root: Path
@@ -82,6 +91,18 @@ class Settings:
     gemini_default: GeminiModelRoleConfig
     gemini_preprocess: GeminiModelRoleConfig
     gemini_include_thought_summary: bool
+    openai_api_key: str
+    openai_api_key_secret: str
+    openai_api_key_secret_version: str
+    openai_base_url: str
+    openai_model: str
+    openai_timeout_seconds: float
+    openai_reasoning_effort: str
+    openai_default: OpenAIModelRoleConfig
+    openai_preprocess: OpenAIModelRoleConfig
+    openai_prompt_cache_enabled: bool
+    openai_prompt_cache_key_prefix: str
+    openai_prompt_cache_retention: str
     inject_full_parsed_score_json: bool
     llm_max_message_chars: int
     llm_max_tool_code_chars: int
@@ -179,6 +200,48 @@ class Settings:
             ),
         )
         gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
+        openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        openai_api_key_secret = os.getenv("OPENAI_API_KEY_SECRET", "OPENAI_API_KEY")
+        openai_api_key_secret_version = os.getenv(
+            "OPENAI_API_KEY_SECRET_VERSION",
+            "latest",
+        )
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
+        openai_timeout_seconds = _env_float("OPENAI_TIMEOUT_SECONDS", 180.0)
+        openai_reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "").strip().lower()
+        _validate_openai_reasoning_effort(openai_reasoning_effort)
+        openai_default = OpenAIModelRoleConfig(
+            model=os.getenv("OPENAI_DEFAULT_MODEL", openai_model).strip() or openai_model,
+            reasoning_effort=os.getenv(
+                "OPENAI_DEFAULT_REASONING_EFFORT",
+                openai_reasoning_effort,
+            ).strip().lower(),
+            timeout_seconds=_env_float(
+                "OPENAI_DEFAULT_TIMEOUT_SECONDS",
+                openai_timeout_seconds,
+            ),
+        )
+        _validate_openai_reasoning_effort(openai_default.reasoning_effort)
+        openai_preprocess = OpenAIModelRoleConfig(
+            model=os.getenv("OPENAI_PREPROCESS_MODEL", openai_model).strip() or openai_model,
+            reasoning_effort=os.getenv(
+                "OPENAI_PREPROCESS_REASONING_EFFORT",
+                openai_reasoning_effort,
+            ).strip().lower(),
+            timeout_seconds=_env_float(
+                "OPENAI_PREPROCESS_TIMEOUT_SECONDS",
+                openai_timeout_seconds,
+            ),
+        )
+        _validate_openai_reasoning_effort(openai_preprocess.reasoning_effort)
+        openai_prompt_cache_key_prefix = os.getenv(
+            "OPENAI_PROMPT_CACHE_KEY_PREFIX",
+            "sightsinger",
+        ).strip()
+        openai_prompt_cache_retention = _normalize_openai_prompt_cache_retention(
+            os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "").strip()
+        )
         inject_full_parsed_score_json = _env_bool(
             "INJECT_FULL_PARSED_SCORE_JSON",
             False,
@@ -268,6 +331,10 @@ class Settings:
             "GEMINI_PROMPT_CACHE_DELETE_STALE",
             True,
         )
+        openai_prompt_cache_enabled = _env_bool(
+            "OPENAI_PROMPT_CACHE_ENABLED",
+            app_env_lower not in {"dev", "development", "local", "test"},
+        )
         feedback_prompt_cooldown_days = max(
             0,
             _env_int("FEEDBACK_PROMPT_COOLDOWN_DAYS", 5),
@@ -300,6 +367,18 @@ class Settings:
             gemini_default=gemini_default,
             gemini_preprocess=gemini_preprocess,
             gemini_include_thought_summary=gemini_include_thought_summary,
+            openai_api_key=openai_api_key,
+            openai_api_key_secret=openai_api_key_secret,
+            openai_api_key_secret_version=openai_api_key_secret_version,
+            openai_base_url=openai_base_url,
+            openai_model=openai_model,
+            openai_timeout_seconds=openai_timeout_seconds,
+            openai_reasoning_effort=openai_reasoning_effort,
+            openai_default=openai_default,
+            openai_preprocess=openai_preprocess,
+            openai_prompt_cache_enabled=openai_prompt_cache_enabled,
+            openai_prompt_cache_key_prefix=openai_prompt_cache_key_prefix,
+            openai_prompt_cache_retention=openai_prompt_cache_retention,
             inject_full_parsed_score_json=inject_full_parsed_score_json,
             llm_max_message_chars=llm_max_message_chars,
             llm_max_tool_code_chars=llm_max_tool_code_chars,
@@ -344,3 +423,20 @@ class Settings:
             feedback_prompt_cooldown_days=feedback_prompt_cooldown_days,
             feedback_prompt_min_successful_generations=feedback_prompt_min_successful_generations,
         )
+
+
+def _validate_openai_reasoning_effort(value: str) -> None:
+    if value not in {"", "none", "minimal", "low", "medium", "high", "xhigh"}:
+        raise ValueError(
+            "OPENAI_REASONING_EFFORT must be one of: '', 'none', 'minimal', "
+            "'low', 'medium', 'high', 'xhigh'."
+        )
+
+
+def _normalize_openai_prompt_cache_retention(value: str) -> str:
+    normalized = "in-memory" if value == "in_memory" else value
+    if normalized not in {"", "in-memory", "24h"}:
+        raise ValueError(
+            "OPENAI_PROMPT_CACHE_RETENTION must be one of: '', 'in-memory', '24h'."
+        )
+    return normalized

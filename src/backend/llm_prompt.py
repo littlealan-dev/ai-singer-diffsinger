@@ -112,9 +112,11 @@ def build_prompt_bundle(
         selected_voicebank_payload: Dict[str, Any] = {
             "id": selected_voicebank_id,
             "instruction": (
-                "Mandatory user-selected voicebank. Use this voicebank in synthesize "
-                "and describe this voicebank in final_message. Do not choose or mention "
-                "another voicebank as the selected singer."
+                "VOICEBANK OVERRIDE ACTIVE. The user explicitly selected this voicebank "
+                "in the UI. Every synthesize tool call and every future synthesis request "
+                "inside start_preprocess_voice_part_workflow must set voicebank to this "
+                "exact id. Describe this voicebank in final_message. Do not choose, "
+                "recommend, or mention another voicebank as the selected singer."
             ),
         }
         if voicebank_details:
