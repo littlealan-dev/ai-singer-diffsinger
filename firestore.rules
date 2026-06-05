@@ -2,12 +2,16 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isNonAnonymousUser() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != "anonymous";
+    }
 
     match /users/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
+      allow read: if isNonAnonymousUser() && request.auth.uid == uid;
       // Allow users to update their own notification metadata, but nothing else. 
       // Credits are managed by the server.
-      allow update: if request.auth != null && request.auth.uid == uid 
+      allow update: if isNonAnonymousUser() && request.auth.uid == uid 
                     && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['metadata']);
       allow create, delete: if false; 
     }
@@ -18,14 +22,14 @@ service cloud.firestore {
     }
 
     match /credit_reservations/{jobId} {
-      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow read: if isNonAnonymousUser() && resource.data.userId == request.auth.uid;
       allow write: if false; 
     }
 
     match /jobs/{jobId} {
-      allow create: if request.auth != null
+      allow create: if isNonAnonymousUser()
                     && request.resource.data.userId == request.auth.uid;
-      allow read, update, delete: if request.auth != null
+      allow read, update, delete: if isNonAnonymousUser()
                     && resource.data.userId == request.auth.uid;
     }
   }

@@ -5,8 +5,13 @@ rules_version = '2';
 //    /databases/(default)/documents/users/$(request.auth.uid)).data.isAdmin;
 service firebase.storage {
   match /b/{bucket}/o {
+    function isNonAnonymousUser() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != "anonymous";
+    }
+
     match /sessions/{uid}/{allPaths=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if isNonAnonymousUser() && request.auth.uid == uid;
     }
   }
 }
