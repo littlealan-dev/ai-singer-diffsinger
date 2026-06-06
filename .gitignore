@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .venv310/
 .env
+/.env.*
 env/local.env
 
 # MacOS

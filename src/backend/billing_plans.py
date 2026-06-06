@@ -23,9 +23,16 @@ class PlanDefinition:
         return self.key != "free"
 
 
+FREE_PLAN = PlanDefinition("free", "free", "none", 8, None, None)
+
+
+def get_free_plan() -> PlanDefinition:
+    return FREE_PLAN
+
+
 def get_plan_catalog(config: BillingConfig) -> dict[PlanKey, PlanDefinition]:
     return {
-        "free": PlanDefinition("free", "free", "none", 8, None, None),
+        "free": FREE_PLAN,
         "solo_monthly": PlanDefinition(
             "solo_monthly",
             "solo",

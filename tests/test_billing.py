@@ -957,6 +957,49 @@ def test_scheduler_limits_due_users_and_records_reserved_status():
     assert len(applied) == 1
 
 
+def test_scheduler_refreshes_free_user_without_stripe_secret(monkeypatch):
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("STRIPE_SECRET_KEY_SECRET", raising=False)
+    get_billing_config.cache_clear()
+    get_stripe_client.cache_clear()
+
+    uid = "user-free-refresh-no-stripe"
+    get_or_create_credits(uid, "free-no-stripe@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    due_at = now - timedelta(minutes=1)
+    anchor = now - timedelta(days=31)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "free",
+                "billingInterval": "none",
+                "creditRefreshAnchor": anchor,
+                "lastCreditRefreshAt": anchor,
+                "nextCreditRefreshAt": due_at,
+            },
+            "credits": {
+                "balance": 0,
+                "expiresAt": due_at,
+                "reserved": 0,
+                "monthlyAllowance": 8,
+            },
+        },
+        merge=True,
+    )
+
+    result = run_credit_refresh(now=now, max_users=10, run_id="refresh_test_free_no_stripe")
+
+    assert result["processed"] == 1
+    assert result["failed"] == 0
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 8
+    assert user["credits"]["expiresAt"] is None
+    assert user["credits"]["lastGrantType"] == "grant_free_monthly"
+    assert user["billing"]["nextCreditRefreshAt"] > now
+    assert user["billing"]["refreshScheduler"]["lastStatus"] == "applied"
+
+
 def test_scheduler_records_reserved_status_without_advancing_refresh():
     uid = "user-refresh-reserved"
     get_or_create_credits(uid, "refresh-reserved@example.com")

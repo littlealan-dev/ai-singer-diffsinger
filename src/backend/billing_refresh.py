@@ -10,7 +10,7 @@ from uuid import uuid4
 from google.cloud import firestore
 
 from src.backend.billing_config import get_billing_config
-from src.backend.billing_plans import get_plan
+from src.backend.billing_plans import get_free_plan, get_plan
 from src.backend.billing_types import BillingState, PlanKey
 from src.backend.firebase_app import get_firestore_client
 from src.mcp.logging_utils import get_logger
@@ -94,8 +94,6 @@ def apply_due_refresh(uid: str, *, now: datetime | None = None, run_id: str | No
     user_ref = db.collection("users").document(uid)
     current_time = _ensure_utc(now or datetime.now(timezone.utc))
     refresh_run_id = run_id or f"refresh_{current_time.strftime('%Y%m%dT%H%M%S')}"
-    config = get_billing_config()
-
     @firestore.transactional
     def _apply(transaction):
         snapshot = user_ref.get(transaction=transaction)
@@ -132,7 +130,10 @@ def apply_due_refresh(uid: str, *, now: datetime | None = None, run_id: str | No
             )
             return decision.status
         plan_key = decision.plan_key
-        plan = get_plan(plan_key, config)
+        if plan_key == "free":
+            plan = get_free_plan()
+        else:
+            plan = get_plan(plan_key, get_billing_config())
         allowance = plan.monthly_allowance
         anchor = _ensure_utc(billing.get("creditRefreshAnchor") or current_time)
         next_refresh = compute_next_monthly_refresh(anchor, current_time)
@@ -144,6 +145,7 @@ def apply_due_refresh(uid: str, *, now: datetime | None = None, run_id: str | No
             transaction.update(
                 user_ref,
                 {
+                    "credits.expiresAt": None,
                     "billing.lastCreditRefreshAt": current_time,
                     "billing.nextCreditRefreshAt": next_refresh,
                     **_refresh_scheduler_audit_update(
@@ -165,6 +167,7 @@ def apply_due_refresh(uid: str, *, now: datetime | None = None, run_id: str | No
                 "credits.lastGrantInvoiceId": billing.get("latestInvoiceId")
                 if grant_type == "grant_paid_subscription_cycle"
                 else credits.get("lastGrantInvoiceId"),
+                "credits.expiresAt": None,
                 "billing.lastCreditRefreshAt": current_time,
                 "billing.nextCreditRefreshAt": next_refresh,
                 **_refresh_scheduler_audit_update(
