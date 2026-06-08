@@ -133,6 +133,13 @@
   text-align: center;
 }
 
+.auth-turnstile-wrapper {
+  width: 100%;
+  min-height: 65px;
+  display: flex;
+  justify-content: center;
+}
+
 .auth-btn-google {
   width: 100%;
   display: flex;

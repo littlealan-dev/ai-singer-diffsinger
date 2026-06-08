@@ -160,6 +160,10 @@ export type MaintenanceStatusResponse = {
   message?: string | null;
 };
 
+export type TurnstileVerifyResponse = {
+  success: boolean;
+};
+
 export type BackendReadyzResponse = {
   status: string;
   ready: boolean;
@@ -360,6 +364,14 @@ export async function fetchMaintenanceStatus(): Promise<MaintenanceStatusRespons
 
 export async function fetchBackendReadiness(): Promise<BackendReadyzResponse> {
   return request("/readyz", { method: "GET" });
+}
+
+export async function verifyTurnstileToken(token: string): Promise<TurnstileVerifyResponse> {
+  return request("/auth/turnstile/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
 }
 
 export async function createCheckoutSession(planKey: string): Promise<BillingCheckoutResponse> {

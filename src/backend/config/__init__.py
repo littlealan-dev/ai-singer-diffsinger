@@ -146,6 +146,9 @@ class Settings:
     gemini_prompt_cache_delete_stale: bool
     feedback_prompt_cooldown_days: int
     feedback_prompt_min_successful_generations: int
+    turnstile_secret_key_secret: str
+    turnstile_secret_key_secret_version: str
+    turnstile_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -343,6 +346,15 @@ class Settings:
             1,
             _env_int("FEEDBACK_PROMPT_MIN_SUCCESSFUL_GENERATIONS", 5),
         )
+        turnstile_secret_key_secret = os.getenv(
+            "TURNSTILE_SECRET_KEY_SECRET",
+            "TURNSTILE_SECRET_KEY",
+        ).strip()
+        turnstile_secret_key_secret_version = os.getenv(
+            "TURNSTILE_SECRET_KEY_SECRET_VERSION",
+            "latest",
+        ).strip()
+        turnstile_timeout_seconds = _env_float("TURNSTILE_TIMEOUT_SECONDS", 5.0)
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,
@@ -422,6 +434,9 @@ class Settings:
             gemini_prompt_cache_delete_stale=gemini_prompt_cache_delete_stale,
             feedback_prompt_cooldown_days=feedback_prompt_cooldown_days,
             feedback_prompt_min_successful_generations=feedback_prompt_min_successful_generations,
+            turnstile_secret_key_secret=turnstile_secret_key_secret,
+            turnstile_secret_key_secret_version=turnstile_secret_key_secret_version,
+            turnstile_timeout_seconds=turnstile_timeout_seconds,
         )
 
 

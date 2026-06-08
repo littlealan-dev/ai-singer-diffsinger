@@ -36,6 +36,7 @@ from src.backend.firebase_app import (
 )
 from src.backend.storage_client import download_bytes, upload_file
 from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
+from src.backend.turnstile import verify_turnstile_token
 from src.backend.playback_tokens import (
     PlaybackTokenClaims,
     PlaybackTokenError,
@@ -97,6 +98,14 @@ class MaintenanceStatusResponse(BaseModel):
     enabled: bool
     allowed: bool
     message: str | None = None
+
+
+class TurnstileVerifyRequest(BaseModel):
+    token: str
+
+
+class TurnstileVerifyResponse(BaseModel):
+    success: bool
 
 
 class FeedbackPromptedRequest(BaseModel):
@@ -179,6 +188,10 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174",
+            "http://localhost:5002",
+            "http://127.0.0.1:5002",
+            "http://localhost:5003",
+            "http://127.0.0.1:5003",
         ]
 
     app.add_middleware(
@@ -205,6 +218,22 @@ def create_app() -> FastAPI:
             "build": settings.backend_build_id,
             "mcp": mcp,
         }
+
+    @app.post("/auth/turnstile/verify", response_model=TurnstileVerifyResponse)
+    async def verify_turnstile(request: Request, body: TurnstileVerifyRequest) -> TurnstileVerifyResponse:
+        """Verify a Cloudflare Turnstile token before sign-in actions."""
+        token = body.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Missing Turnstile token.")
+        result = await verify_turnstile_token(
+            settings,
+            token=token,
+            remote_ip=_client_ip(request),
+        )
+        if not result.success:
+            logger.warning("turnstile_verification_failed errors=%s", result.error_codes)
+            raise HTTPException(status_code=403, detail="Human verification failed.")
+        return TurnstileVerifyResponse(success=True)
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -990,6 +1019,14 @@ def _should_require_app_check(request: Request) -> bool:
     if path in {"/billing/webhook", "/healthz", "/readyz"}:
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
+
+
+def _client_ip(request: Request) -> str | None:
+    """Return the best-effort client IP for abuse checks behind Cloud Run."""
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or None
+    return request.client.host if request.client else None
 
 
 def _backend_starting_http_exception(exc: McpStartupInProgressError) -> HTTPException:

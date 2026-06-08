@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { X, Mail, Loader2 } from "lucide-react";
 import {
     signInWithGoogleRedirect,
     sendMagicLink,
 } from "../firebase";
+import { verifyTurnstileToken } from "../api";
 import {
     MARKETING_AUTH_CONSENT_TEXT,
     clearPendingMarketingOptIn,
     storePendingMarketingOptIn,
 } from "../marketingOptIn";
+import { TurnstileChallenge } from "./TurnstileChallenge";
 import "./AuthModal.css";
 
 export interface AuthModalProps {
@@ -25,6 +27,8 @@ type AuthModalState =
     | "emailSent"
     | "error";
 
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() || "";
+
 /**
  * Modal for Google and Email magic link authentication.
  */
@@ -34,12 +38,32 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
     const [error, setError] = useState<string | null>(null);
     const [sentEmail, setSentEmail] = useState<string | null>(null);
     const [marketingOptIn, setMarketingOptIn] = useState(false);
+    const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+    const [turnstileKey, setTurnstileKey] = useState(0);
     const autoGoogleStarted = useRef(false);
+    const requiresHumanVerification = Boolean(TURNSTILE_SITE_KEY);
+    const hasHumanVerification = !requiresHumanVerification || Boolean(turnstileToken);
+
+    const resetTurnstile = useCallback(() => {
+        setTurnstileToken(null);
+        setTurnstileKey((current) => current + 1);
+    }, []);
+
+    const requireHumanVerification = async () => {
+        if (!requiresHumanVerification) return;
+        if (!turnstileToken) {
+            throw new Error("Please verify you are human first.");
+        }
+        await verifyTurnstileToken(turnstileToken);
+    };
 
     useEffect(() => {
         if (!isOpen || autoGoogleStarted.current || typeof window === "undefined") return;
         const params = new URLSearchParams(window.location.search);
         if (params.get("start") !== "google") return;
+        const localBridgeTurnstileVerified =
+            import.meta.env.VITE_APP_ENV === "dev" && params.get("turnstileVerified") === "1";
+        if (TURNSTILE_SITE_KEY && !localBridgeTurnstileVerified) return;
         const rawReturnUrl = params.get("returnUrl");
         let returnUrl: string | null = null;
         if (rawReturnUrl) {
@@ -78,6 +102,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setState("signingInGoogle");
         setError(null);
         try {
+            await requireHumanVerification();
             if (marketingOptIn) {
                 storePendingMarketingOptIn({
                     marketingOptIn: true,
@@ -91,6 +116,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
             // Page will redirect to Google, so we don't need to do anything else
         } catch (err) {
             clearPendingMarketingOptIn();
+            resetTurnstile();
             setState("error");
             setError(err instanceof Error ? err.message : "Google sign-in failed");
         }
@@ -103,6 +129,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setState("sendingEmail");
         setError(null);
         try {
+            await requireHumanVerification();
             if (marketingOptIn) {
                 storePendingMarketingOptIn({
                     marketingOptIn: true,
@@ -118,6 +145,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
             setState("emailSent");
         } catch (err) {
             clearPendingMarketingOptIn();
+            resetTurnstile();
             setState("error");
             setError(err instanceof Error ? err.message : "Failed to send magic link");
         }
@@ -141,6 +169,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
         setError(null);
         setSentEmail(null);
         setMarketingOptIn(false);
+        resetTurnstile();
         onClose();
     };
 
@@ -203,7 +232,11 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                     <button
                         className="auth-btn-google"
                         onClick={handleGoogleSignIn}
-                        disabled={state === "signingInGoogle" || state === "sendingEmail"}
+                        disabled={
+                            state === "signingInGoogle" ||
+                            state === "sendingEmail" ||
+                            !hasHumanVerification
+                        }
                     >
                         {state === "signingInGoogle" ? (
                             <>
@@ -240,7 +273,12 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                         <button
                             type="submit"
                             className="auth-btn-email"
-                            disabled={state === "signingInGoogle" || state === "sendingEmail" || !email.trim()}
+                            disabled={
+                                state === "signingInGoogle" ||
+                                state === "sendingEmail" ||
+                                !email.trim() ||
+                                !hasHumanVerification
+                            }
                         >
                             {state === "sendingEmail" ? (
                                 <>
@@ -265,6 +303,14 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                         />
                         <span>{MARKETING_AUTH_CONSENT_TEXT}</span>
                     </label>
+
+                    {TURNSTILE_SITE_KEY && (
+                        <TurnstileChallenge
+                            key={turnstileKey}
+                            siteKey={TURNSTILE_SITE_KEY}
+                            onTokenChange={setTurnstileToken}
+                        />
+                    )}
 
                     <p className="auth-modal-terms">
                         By continuing, you agree to our{" "}

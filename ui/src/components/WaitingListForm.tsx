@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../hooks/useAuth.tsx";
-import { subscribeToWaitlist } from "../api";
+import { subscribeToWaitlist, verifyTurnstileToken } from "../api";
+import { TurnstileChallenge } from "./TurnstileChallenge";
 import "./WaitingListForm.css";
 
 export type WaitlistSource =
@@ -14,6 +15,7 @@ export type WaitlistSource =
 
 const CONSENT_TEXT =
   "I agree to receive product updates, marketing emails, and announcements about SightSinger. I can unsubscribe at any time.";
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() || "";
 
 interface WaitingListFormProps {
   source: WaitlistSource;
@@ -34,6 +36,23 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileKey, setTurnstileKey] = useState(0);
+  const requiresHumanVerification = Boolean(TURNSTILE_SITE_KEY) && !user;
+  const hasHumanVerification = !requiresHumanVerification || Boolean(turnstileToken);
+
+  const resetTurnstile = useCallback(() => {
+    setTurnstileToken(null);
+    setTurnstileKey((current) => current + 1);
+  }, []);
+
+  const requireHumanVerification = async () => {
+    if (!requiresHumanVerification) return;
+    if (!turnstileToken) {
+      throw new Error("Please verify you are human first.");
+    }
+    await verifyTurnstileToken(turnstileToken);
+  };
 
   useEffect(() => {
     if (user?.email) {
@@ -54,6 +73,7 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
     setStatus("loading");
     setMessage(null);
     try {
+      await requireHumanVerification();
       const result = await subscribeToWaitlist({
         email: email.trim(),
         first_name: firstName.trim() || undefined,
@@ -66,7 +86,8 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
       setMessage(result.message);
     } catch (error) {
       setStatus("error");
-      setMessage("Something went wrong. Please try again later.");
+      resetTurnstile();
+      setMessage(error instanceof Error ? error.message : "Something went wrong. Please try again later.");
     }
   };
 
@@ -123,6 +144,15 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
         />
         <span>{CONSENT_TEXT}</span>
       </label>
+      {requiresHumanVerification && (
+        <div className="waitlist-protection">
+          <TurnstileChallenge
+            key={turnstileKey}
+            siteKey={TURNSTILE_SITE_KEY}
+            onTokenChange={setTurnstileToken}
+          />
+        </div>
+      )}
       <p className="waitlist-legal">
         By joining, you agree to our{" "}
         <a href="/legal/privacy" target="_blank" rel="noreferrer">
@@ -131,7 +161,7 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
         .
       </p>
       {message && <div className={`waitlist-message ${status}`}>{message}</div>}
-      <button type="submit" disabled={status === "loading"}>
+      <button type="submit" disabled={status === "loading" || !hasHumanVerification}>
         {status === "loading" ? "Submitting..." : "Get Updates"}
       </button>
     </form>
