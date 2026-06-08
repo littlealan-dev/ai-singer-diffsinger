@@ -21,6 +21,15 @@ class McpError(RuntimeError):
     pass
 
 
+class McpRequestTimeoutError(McpError):
+    """Raised when a single MCP JSON-RPC request exceeds its timeout."""
+
+    def __init__(self, message: str, *, method: str, timeout_seconds: float) -> None:
+        super().__init__(message)
+        self.method = method
+        self.timeout_seconds = timeout_seconds
+
+
 class McpStartupInProgressError(McpError):
     """Raised when MCP workers are still warming up."""
 
@@ -151,7 +160,11 @@ class McpProcess:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise McpError(f"MCP request timed out: {request.method}")
+                    raise McpRequestTimeoutError(
+                        f"MCP request timed out: {request.method}",
+                        method=request.method,
+                        timeout_seconds=timeout_seconds,
+                    )
                 ready, _, _ = select.select([self._proc.stdout], [], [], remaining)
                 if not ready:
                     continue
@@ -344,6 +357,16 @@ class McpRouter:
                 elapsed_ms,
             )
             return result
+        except McpRequestTimeoutError as exc:
+            logging.getLogger(__name__).warning(
+                "mcp_tool_timeout tool=%s worker=%s timeout_seconds=%.2f; restarting_without_retry",
+                name,
+                worker,
+                exc.timeout_seconds,
+            )
+            process.stop()
+            process.start()
+            raise
         except McpError as exc:
             logging.getLogger(__name__).warning(
                 "MCP call failed tool=%s worker=%s error=%s; restarting",

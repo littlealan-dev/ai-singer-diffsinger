@@ -308,7 +308,27 @@ async function errorFromResponse(response: Response, fallback: string): Promise<
   if (startupMessage || response.status === 503 || localProxyBackendDown) {
     return new BackendStartingError(startupMessage || BACKEND_STARTING_MESSAGE);
   }
-  return new Error(text || fallback);
+  return new Error(errorMessageFromBody(text) || fallback);
+}
+
+function errorMessageFromBody(text: string): string | null {
+  if (!text.trim()) return null;
+  try {
+    const payload = JSON.parse(text);
+    const detail = payload?.detail;
+    if (typeof detail === "string" && detail.trim()) {
+      return detail;
+    }
+    if (detail && typeof detail.message === "string" && detail.message.trim()) {
+      return detail.message;
+    }
+    if (typeof payload?.message === "string" && payload.message.trim()) {
+      return payload.message;
+    }
+  } catch {
+    // Non-JSON error bodies are already user-readable text in local/dev cases.
+  }
+  return text;
 }
 
 async function request<T>(path: string, options: RequestInit): Promise<T> {

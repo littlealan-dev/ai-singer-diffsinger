@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from src.api.score import parse_score
 from src.backend.main import _require_app_check, create_app
 from src.backend.llm_client import LlmRole, StaticLlmClient
+from src.backend.mcp_client import McpRequestTimeoutError
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
     MISSING_ORIGINAL_SCORE_MESSAGE,
@@ -1604,6 +1605,40 @@ def test_upload_rejects_oversized_mxl_archive(client_with_env):
     )
     assert response.status_code == 413
     assert "exceeds" in response.json()["detail"]
+
+
+def test_upload_parse_score_timeout_returns_bounded_client_error(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    calls = {"parse_score": 0}
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            calls["parse_score"] += 1
+            raise McpRequestTimeoutError(
+                "MCP request timed out: tools/call",
+                method="tools/call",
+                timeout_seconds=60,
+            )
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+
+    response = _upload_score(test_client, session_id)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "score_parse_timeout",
+        "message": (
+            "This score took too long to parse. Try a simpler "
+            "MusicXML export or contact support."
+        ),
+    }
+    assert calls["parse_score"] == 1
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["current_score"] is None
+    assert snapshot["files"] == {}
 
 
 def test_upload_returns_score_summary_with_verses(client):

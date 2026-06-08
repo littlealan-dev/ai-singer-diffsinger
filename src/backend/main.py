@@ -20,7 +20,12 @@ import logging
 
 from src.backend.config import Settings
 from src.backend.llm_factory import create_llm_client
-from src.backend.mcp_client import McpRouter, McpError, McpStartupInProgressError
+from src.backend.mcp_client import (
+    McpRouter,
+    McpError,
+    McpRequestTimeoutError,
+    McpStartupInProgressError,
+)
 from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore, FirestoreSessionStore
@@ -261,7 +266,7 @@ def create_app() -> FastAPI:
         temp_canonical_path = temp_upload_path
         try:
             upload_write_start = time.monotonic()
-            await _write_upload(temp_upload_path, file, settings.max_upload_bytes)
+            uploaded_bytes = await _write_upload(temp_upload_path, file, settings.max_upload_bytes)
             upload_write_ms = (time.monotonic() - upload_write_start) * 1000.0
             normalize_mxl_ms = 0.0
             if suffix == ".mxl":
@@ -286,16 +291,39 @@ def create_app() -> FastAPI:
                 parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
             except McpStartupInProgressError as exc:
                 raise _backend_starting_http_exception(exc) from exc
+            except McpRequestTimeoutError as exc:
+                parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
+                logger.warning(
+                    "upload_parse_timeout session_id=%s user_id=%s suffix=%s "
+                    "uploaded_bytes=%s parse_score_ms=%.2f timeout_seconds=%.2f retry_skipped=true",
+                    session_id,
+                    user_id,
+                    suffix,
+                    uploaded_bytes,
+                    parse_score_ms,
+                    exc.timeout_seconds,
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "score_parse_timeout",
+                        "message": (
+                            "This score took too long to parse. Try a simpler "
+                            "MusicXML export or contact support."
+                        ),
+                    },
+                ) from exc
             except McpError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             logger.info(
                 "upload_musicxml_timing session_id=%s suffix=%s upload_write_ms=%.2f "
-                "normalize_mxl_ms=%.2f parse_score_ms=%.2f",
+                "normalize_mxl_ms=%.2f parse_score_ms=%.2f uploaded_bytes=%s",
                 session_id,
                 suffix,
                 upload_write_ms,
                 normalize_mxl_ms,
                 parse_score_ms,
+                uploaded_bytes,
             )
 
             await sessions.reset_for_new_upload(session_id)
@@ -976,7 +1004,7 @@ def _backend_starting_http_exception(exc: McpStartupInProgressError) -> HTTPExce
     )
 
 
-async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
+async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> int:
     """Write an upload to disk while enforcing a size limit."""
     path.parent.mkdir(parents=True, exist_ok=True)
     total = 0
@@ -990,6 +1018,7 @@ async def _write_upload(path: Path, file: UploadFile, max_bytes: int) -> None:
                 if total > max_bytes:
                     raise HTTPException(status_code=413, detail="Upload too large.")
                 handle.write(chunk)
+        return total
     except HTTPException:
         path.unlink(missing_ok=True)
         raise
