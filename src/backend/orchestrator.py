@@ -64,6 +64,16 @@ LLM_TOOL_ALLOWLIST_BY_ROLE = {
 }
 
 
+class SynthesisActionRequired(RuntimeError):
+    """Raised when synthesize returns a user-remediable action_required payload."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        message = str(payload.get("message") or "Synthesis needs user action.").strip()
+        super().__init__(message)
+        self.payload = copy.deepcopy(payload)
+        self.message = message or "Synthesis needs user action."
+
+
 class Orchestrator:
     """Coordinate sessions, LLM decisions, and synthesis tool calls."""
     def __init__(
@@ -384,6 +394,13 @@ class Orchestrator:
             raise RuntimeError(
                 f"Synthesize returned non-object result: {type(synth_result).__name__}"
             )
+        if str(synth_result.get("status") or "").strip() == "action_required":
+            self._logger.warning(
+                "synthesize_action_required session=%s result=%s",
+                session_id,
+                summarize_payload(synth_result),
+            )
+            raise SynthesisActionRequired(synth_result)
         if "waveform" not in synth_result or "sample_rate" not in synth_result:
             self._logger.warning(
                 "synthesize_non_audio_result session=%s result=%s",
@@ -868,6 +885,61 @@ class Orchestrator:
                     ),
                 )
             raise
+        except SynthesisActionRequired as exc:
+            release_result = await retry_credit_op(
+                self._release_credits_with_retry_fault_injection,
+                user_id,
+                job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
+            self._release_fault_injection_remaining.pop(job_id, None)
+            self._logger.warning(
+                "synthesis_action_required session=%s job=%s release_status=%s action=%s message=%s",
+                session_id,
+                job_id,
+                release_result.status,
+                exc.payload.get("action"),
+                exc.message,
+            )
+            user_message = await self._render_synthesis_action_required_message(
+                session_id,
+                user_id,
+                score,
+                exc.payload,
+                fallback_message=exc.message,
+            )
+            if self._release_result_allows_terminal_status(release_result.status):
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="action_required",
+                    step="action_required",
+                    message=user_message,
+                    progress=1.0,
+                    actionRequired=exc.payload,
+                )
+            else:
+                await self._mark_reservation_reconciliation_required(
+                    user_id=user_id,
+                    job_id=job_id,
+                    reservation_error="release_failed_after_synthesis_action_required",
+                    reservation_error_message=(
+                        f"{user_message} | billing_rollback_status={release_result.status}"
+                    ),
+                )
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="credit_reconciliation_required",
+                    step="action_required",
+                    message=backend_message("job.audio_generation_and_billing_rollback_failed"),
+                    progress=1.0,
+                    errorMessage=(
+                        f"{user_message} | billing_rollback_status={release_result.status}"
+                    ),
+                    actionRequired=exc.payload,
+                )
         except Exception as exc:
             # Release credits
             release_result = await retry_credit_op(
@@ -1026,6 +1098,105 @@ class Orchestrator:
             )
         finally:
             clear_log_context()
+
+    async def _render_synthesis_action_required_message(
+        self,
+        session_id: str,
+        user_id: str,
+        score: Dict[str, Any],
+        payload: Dict[str, Any],
+        *,
+        fallback_message: str,
+    ) -> str:
+        """Ask the LLM to turn a synthesize action_required payload into user-facing prose."""
+        if self._llm_client is None:
+            return fallback_message
+        try:
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            followup_response, followup_error = await self._decide_followup_with_llm(
+                snapshot,
+                json.dumps(payload, sort_keys=True),
+                score,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "synthesis_action_required_llm_message_failed session=%s error=%s",
+                session_id,
+                exc,
+            )
+            return await self._render_synthesis_action_required_message_minimal(
+                session_id,
+                payload,
+                fallback_message=fallback_message,
+            )
+        if followup_error:
+            self._logger.warning(
+                "synthesis_action_required_llm_message_unavailable session=%s error=%s",
+                session_id,
+                followup_error,
+            )
+            return await self._render_synthesis_action_required_message_minimal(
+                session_id,
+                payload,
+                fallback_message=fallback_message,
+            )
+        if followup_response is None:
+            return await self._render_synthesis_action_required_message_minimal(
+                session_id,
+                payload,
+                fallback_message=fallback_message,
+            )
+        final_message = str(followup_response.final_message or "").strip()
+        if not final_message:
+            return await self._render_synthesis_action_required_message_minimal(
+                session_id,
+                payload,
+                fallback_message=fallback_message,
+            )
+        return self._format_followup_message_text(final_message)
+
+    async def _render_synthesis_action_required_message_minimal(
+        self,
+        session_id: str,
+        payload: Dict[str, Any],
+        *,
+        fallback_message: str,
+    ) -> str:
+        """Fallback LLM rendering for background jobs when rich session context is unavailable."""
+        if self._llm_client is None:
+            return fallback_message
+        history = [
+            {
+                "role": "user",
+                "content": f"{TOOL_RESULT_PREFIX}{json.dumps(payload, sort_keys=True)}",
+            }
+        ]
+        prompt_bundle = build_prompt_bundle(
+            self._llm_tools_for_role(LlmRole.DEFAULT),
+            score_available=False,
+            role=LlmRole.DEFAULT,
+        )
+        try:
+            text = await asyncio.to_thread(
+                self._call_llm_client_generate,
+                prompt_bundle,
+                history,
+                LlmRole.DEFAULT,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "synthesis_action_required_minimal_llm_failed session=%s error=%s",
+                session_id,
+                exc,
+            )
+            return fallback_message
+        response = parse_llm_response(text)
+        if response is not None and str(response.final_message or "").strip():
+            return self._format_followup_message_text(response.final_message)
+        prose_fallback = self._extract_followup_prose_fallback(text)
+        if prose_fallback:
+            return prose_fallback
+        return fallback_message
 
     def _apply_preprocess_planning_context_defaults(
         self,

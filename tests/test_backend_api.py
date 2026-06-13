@@ -571,7 +571,7 @@ def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
         assert response.status_code == 200
         payload = response.json()
         last_payload = payload
-        if payload.get("status") in ("done", "error"):
+        if payload.get("status") in ("done", "error", "action_required"):
             return payload
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for progress: {last_payload}")
@@ -3175,6 +3175,43 @@ def test_app_check_rejects_query_param_only(monkeypatch):
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_app_check_missing_token_returns_401_response(monkeypatch):
+    app, data_dir = _prepare_app(
+        monkeypatch,
+        overrides={"BACKEND_REQUIRE_APP_CHECK": "true"},
+    )
+    monkeypatch.setattr("src.backend.main.initialize_firebase_app", lambda: None)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.get("/")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Missing App Check token."}
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_app_check_invalid_token_returns_401_response(monkeypatch):
+    app, data_dir = _prepare_app(
+        monkeypatch,
+        overrides={"BACKEND_REQUIRE_APP_CHECK": "true"},
+    )
+    monkeypatch.setattr("src.backend.main.initialize_firebase_app", lambda: None)
+
+    def _verify_token(token):
+        raise ValueError("bad token")
+
+    monkeypatch.setattr("src.backend.main.app_check.verify_token", _verify_token)
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.get("/", headers={"X-Firebase-AppCheck": "invalid-token"})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid App Check token."}
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_audio_playback_bypasses_app_check_when_signed(monkeypatch):
     app, data_dir = _prepare_app(
         monkeypatch,
@@ -4541,6 +4578,111 @@ def test_settle_failure_releases_reservation_and_fails_job_without_audio(client,
     assert "no credits were charged" in payload["message"].lower()
     assert "audio_url" not in payload
     assert release_calls["count"] == 1
+
+
+def test_synthesize_action_required_marks_job_action_required_not_failed(
+    client, monkeypatch, caplog
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-synthesize-action-required"
+    release_calls = {"count": 0}
+
+    def fake_release(*_args, **_kwargs):
+        release_calls["count"] += 1
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    action_required = {
+        "status": "action_required",
+        "action": "infeasible_anchor_budget",
+        "message": (
+            "Timing allocation is infeasible for at least one lyric group "
+            "(phoneme count exceeds available anchor frames)."
+        ),
+        "diagnostics": {"lyric_group_index": 2},
+    }
+    llm_message = (
+        "I couldn't fit all of the lyrics into the available note timing. "
+        "Please simplify that lyric passage or adjust the notes, then try again."
+    )
+
+    class ActionRequiredParaphraseClient:
+        def __init__(self):
+            self.last_internal_prompt = ""
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            self.last_internal_prompt = history[-1].get("content", "")
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": llm_message,
+                    "include_score": False,
+                }
+            )
+
+    def call_tool(name, arguments):
+        if name == "synthesize":
+            return action_required
+        raise AssertionError(f"Unexpected tool call: {name}")
+
+    llm_client = ActionRequiredParaphraseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    app.state.router.call_tool = call_tool
+    caplog.set_level("ERROR")
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {"parts": []},
+            {"voicebank": "Dummy", "part_index": 0},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    latest = app.state.job_store.get_job_by_id(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is not None
+    _, job_data = latest
+    assert job_data["status"] == "action_required"
+    assert job_data["step"] == "action_required"
+    assert job_data["message"] == llm_message
+    assert job_data["actionRequired"] == action_required
+    assert "errorMessage" not in job_data
+    assert release_calls["count"] == 1
+    assert not any("synthesis_failed" in record.message for record in caplog.records)
+    assert llm_client.last_internal_prompt.startswith(
+        "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+    )
+    assert action_required["message"] in llm_client.last_internal_prompt
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "action_required"
+    assert payload["message"] == llm_message
+    assert payload["action_required"] == action_required
+    assert "audio_url" not in payload
 
 
 def test_settle_failure_with_release_failure_marks_reservation_for_ops_but_fails_job(

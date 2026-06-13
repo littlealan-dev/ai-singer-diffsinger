@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr
 import logging
 
@@ -240,6 +240,7 @@ def create_app() -> FastAPI:
         """Attach per-request logging context and timings."""
         start = time.monotonic()
         session_id = request.path_params.get("session_id") if request.path_params else None
+        response = None
         set_log_context(session_id=session_id)
         logger.debug(
             "http_request_start method=%s path=%s session_id=%s",
@@ -249,7 +250,15 @@ def create_app() -> FastAPI:
         )
         try:
             if request.method != "OPTIONS" and _should_require_app_check(request):
-                await _require_app_check(request)
+                try:
+                    await _require_app_check(request)
+                except HTTPException as exc:
+                    response = JSONResponse(
+                        status_code=exc.status_code,
+                        content={"detail": exc.detail},
+                        headers=exc.headers,
+                    )
+                    return response
             response = await call_next(request)
         finally:
             duration_ms = (time.monotonic() - start) * 1000.0
@@ -257,7 +266,7 @@ def create_app() -> FastAPI:
                 "http_request method=%s path=%s status=%s duration_ms=%.2f session_id=%s",
                 request.method,
                 request.url.path,
-                getattr(locals().get("response"), "status_code", "error"),
+                getattr(response, "status_code", "error"),
                 duration_ms,
                 session_id,
             )

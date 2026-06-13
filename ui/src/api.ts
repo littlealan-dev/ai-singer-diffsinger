@@ -68,7 +68,7 @@ export type ChatResponse =
   | { type: "chat_error"; message: string; details?: unknown };
 
 export type ProgressResponse = {
-  status: "idle" | "queued" | "running" | "done" | "error";
+  status: "idle" | "queued" | "running" | "done" | "error" | "action_required";
   message?: string;
   step?: string;
   progress?: number;
@@ -76,6 +76,7 @@ export type ProgressResponse = {
   job_id?: string;
   job_kind?: string;
   review_required?: boolean;
+  action_required?: unknown;
   error?: string;
   details?: unknown;
   warning?: string;

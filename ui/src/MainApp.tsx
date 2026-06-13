@@ -894,6 +894,10 @@ export default function MainApp() {
       const appendTerminalPreprocessMessage =
         payload.job_kind === "preprocess" &&
         (payload.status === "done" || payload.status === "error");
+      const isTerminalProgress =
+        payload.status === "done" ||
+        payload.status === "error" ||
+        payload.status === "action_required";
       const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) =>
         prev.map((msg) => {
@@ -913,7 +917,7 @@ export default function MainApp() {
             audioUrl: nextAudioUrl || msg.audioUrl,
             jobId: payload.job_id ?? msg.jobId,
             feedback: payload.feedback ?? msg.feedback,
-            isProgress: payload.status !== "done" && payload.status !== "error",
+            isProgress: !isTerminalProgress,
           };
         })
       );
@@ -948,6 +952,10 @@ export default function MainApp() {
               ? `${baseMessage} Reason: ${payload.error}`
               : baseMessage
           );
+        }
+        if (payload.status === "action_required") {
+          setActiveProgress(null);
+          setChatTurnBusy(false);
         }
       } catch (err: any) {
         if (!cancelled) {
