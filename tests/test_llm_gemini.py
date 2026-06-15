@@ -137,6 +137,13 @@ def test_gemini_generate_uses_preprocess_role_model_and_cache(
     assert cache_manager.calls[0]["model"] == "gemini-strong"
     payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
     assert payload["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "high"}
+    generation_config = payload["generationConfig"]
+    assert generation_config["responseMimeType"] == "application/json"
+    assert generation_config["responseSchema"]["required"] == [
+        "tool_calls",
+        "final_message",
+        "include_score",
+    ]
 
 
 def test_gemini_generate_retries_uncached_when_cached_content_missing(
@@ -253,6 +260,9 @@ def test_gemini_generate_falls_back_to_system_instruction_without_cache(
     payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
     assert payload["system_instruction"] == {"parts": [{"text": "STATIC"}]}
     assert "cachedContent" not in payload
+    generation_config = payload["generationConfig"]
+    assert generation_config["responseMimeType"] == "application/json"
+    assert generation_config["responseSchema"]["properties"]["tool_calls"]["type"] == "array"
 
 
 def test_gemini_generate_includes_thinking_config_when_level_set(
@@ -343,7 +353,11 @@ def test_gemini_generate_omits_thinking_config_when_level_blank(
     text = client.generate("system", [{"role": "user", "content": "hello"}])
     assert '"final_message":"ok"' in text
     payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
-    assert "generationConfig" not in payload
+    generation_config = payload.get("generationConfig")
+    assert isinstance(generation_config, dict)
+    assert "thinkingConfig" not in generation_config
+    assert generation_config["responseMimeType"] == "application/json"
+    assert generation_config["responseSchema"]["properties"]["final_message"]["type"] == "string"
 
 
 def test_gemini_generate_includes_thoughts_without_explicit_level(

@@ -127,7 +127,7 @@ def _preprocess_workflow_response(
     part_index: int = 0,
     part_id: str | None = None,
     voice_part_id: str | None = None,
-    verse_number: str | int | None = None,
+    verse_number: str | int | None = "1",
     final_message: str = "I'm splitting the requested part now.",
 ) -> str:
     request = {
@@ -1133,6 +1133,57 @@ def test_chat_returns_progress_immediately_for_preprocess(client):
     assert "job_id=" in chat_payload["progress_url"]
 
 
+def test_chat_rejects_malformed_preprocess_workflow_handoff(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    class MalformedHandoffClient:
+        def __init__(self):
+            self.internal_prompt = ""
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                self.internal_prompt = last
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": (
+                            "Please choose which part and verse you want me to prepare first."
+                        ),
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "start_preprocess_voice_part_workflow",
+                            "arguments": {},
+                        }
+                    ],
+                    "final_message": "Preparing the selected line.",
+                    "include_score": False,
+                }
+            )
+
+    llm_client = MalformedHandoffClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    chat_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.json()
+    assert chat_payload["type"] == "chat_text"
+    assert chat_payload["message"] == "Please choose which part and verse you want me to prepare first."
+    assert "invalid_preprocess_workflow_handoff" in llm_client.internal_prompt
+
+
 def test_deterministic_complex_selection_uses_default_message_and_preprocess_plan_roles(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -1200,6 +1251,7 @@ def test_deterministic_complex_selection_uses_default_message_and_preprocess_pla
                                     "request": {
                                         "part_index": 0,
                                         "voice_part_id": "soprano",
+                                        "verse_number": "1",
                                         "reason": "This part has multiple voice lanes.",
                                     }
                                 },
@@ -1491,6 +1543,33 @@ def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     assert prompt is not None
     assert "Latest attempted line-preparation plan (if available):" in prompt
     assert '"voice_part_id": "voice part 1"' in prompt
+
+
+def test_orchestrator_wraps_plain_prose_llm_response(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    llm_client = StaticLlmClient(
+        response_text=(
+            "I cannot change the tempo or slow down the score; "
+            "I can only sing the music as it is written."
+        )
+    )
+    orchestrator._llm_client = llm_client
+
+    response, error = asyncio.run(
+        orchestrator._decide_with_llm(
+            {"history": [{"role": "user", "content": "sing it slower"}]},
+            score_available=True,
+        )
+    )
+
+    assert error is None
+    assert response is not None
+    assert response.tool_calls == []
+    assert response.final_message == (
+        "I cannot change the tempo or slow down the score; "
+        "I can only sing the music as it is written."
+    )
 
 
 def test_orchestrator_excludes_hidden_default_lane_from_derived_mapping(client):
@@ -4515,6 +4594,8 @@ def test_execute_tool_calls_blocks_multiple_tools_with_followup_prompt(client):
     payload = json.loads(result.followup_prompt)
     assert payload["error"]["type"] == "multiple_tool_calls_not_allowed"
     assert payload["error"]["tool_names"] == ["reparse", "synthesize"]
+    assert "retry with exactly one tool call" in payload["error"]["message"]
+    assert "ask only for the missing clarification" in payload["error"]["message"]
 
 
 def test_settle_failure_releases_reservation_and_fails_job_without_audio(client, monkeypatch):

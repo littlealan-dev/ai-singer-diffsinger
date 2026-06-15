@@ -1381,8 +1381,11 @@ TOOLS: List[Tool] = [
                             "description": "Exact MusicXML part id requested by the user.",
                         },
                         "part_index": {
-                            "type": ["integer", "null"],
-                            "description": "0-based score.parts index requested by the user.",
+                            "type": "integer",
+                            "description": (
+                                "Required 0-based score.parts index requested by the user. "
+                                "Do not call this handoff without resolving the target part index."
+                            ),
                         },
                         "voice_id": {
                             "type": ["string", "null"],
@@ -1397,10 +1400,9 @@ TOOLS: List[Tool] = [
                             "description": "Whether later synthesis may use lyric propagation.",
                         },
                         "verse_number": {
-                            "type": ["integer", "string", "null"],
+                            "type": ["integer", "string"],
                             "description": (
-                                "Optional explicit verse selector. Required before "
-                                "preparing multi-verse scores."
+                                "Required explicit verse selector for the line-preparation workflow."
                             ),
                         },
                         "voicebank": {
@@ -1448,16 +1450,20 @@ TOOLS: List[Tool] = [
                         "other_instruction": {
                             "type": ["string", "null"],
                             "description": (
-                                "Free-text instruction for the line-preparation model, "
-                                "for example 'take the lower note in a chord'."
+                                "Optional planning hint for the line-preparation model. "
+                                "Use only for part-splitting/source-selection instructions "
+                                "that can be represented by preprocess_voice_parts.request.plan, "
+                                "such as choosing lower chord notes, choosing melody or lyric "
+                                "sources, choosing measure-local source changes, or choosing a "
+                                "verse lyric line. Do not use for transformations such as "
+                                "transposition, key changes, tempo/rhythm changes, lyric rewrites, "
+                                "style changes, tuning, mixing, or audio processing. This field "
+                                "is not an executable plan and does not add capabilities beyond "
+                                "the preprocess_voice_parts plan schema."
                             ),
                         },
                     },
-                    "required": ["reason"],
-                    "oneOf": [
-                        {"required": ["part_id"]},
-                        {"required": ["part_index"]},
-                    ],
+                    "required": ["part_index", "verse_number", "reason"],
                     "additionalProperties": False,
                 },
             },
