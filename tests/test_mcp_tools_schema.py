@@ -30,16 +30,6 @@ def test_synthesize_schema_requires_exactly_one_selector_and_describes_output() 
     assert output_schema["oneOf"][1]["description"]
 
 
-def test_start_preprocess_workflow_requires_target_verse_and_reason() -> None:
-    tool = _tool_schema_map()["start_preprocess_voice_part_workflow"]
-    request_schema = tool["inputSchema"]["properties"]["request"]
-
-    assert request_schema["required"] == ["part_index", "verse_number", "reason"]
-    assert request_schema["properties"]["part_index"]["type"] == "integer"
-    assert request_schema["properties"]["verse_number"]["type"] == ["integer", "string"]
-    assert "oneOf" not in request_schema
-
-
 def test_metadata_tools_have_field_descriptions() -> None:
     schema_map = _tool_schema_map()
 

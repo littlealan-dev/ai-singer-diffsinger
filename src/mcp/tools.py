@@ -1381,11 +1381,8 @@ TOOLS: List[Tool] = [
                             "description": "Exact MusicXML part id requested by the user.",
                         },
                         "part_index": {
-                            "type": "integer",
-                            "description": (
-                                "Required 0-based score.parts index requested by the user. "
-                                "Do not call this handoff without resolving the target part index."
-                            ),
+                            "type": ["integer", "null"],
+                            "description": "0-based score.parts index requested by the user.",
                         },
                         "voice_id": {
                             "type": ["string", "null"],
@@ -1400,9 +1397,10 @@ TOOLS: List[Tool] = [
                             "description": "Whether later synthesis may use lyric propagation.",
                         },
                         "verse_number": {
-                            "type": ["integer", "string"],
+                            "type": ["integer", "string", "null"],
                             "description": (
-                                "Required explicit verse selector for the line-preparation workflow."
+                                "Optional explicit verse selector. Required before "
+                                "preparing multi-verse scores."
                             ),
                         },
                         "voicebank": {
@@ -1463,7 +1461,11 @@ TOOLS: List[Tool] = [
                             ),
                         },
                     },
-                    "required": ["part_index", "verse_number", "reason"],
+                    "required": ["reason"],
+                    "oneOf": [
+                        {"required": ["part_id"]},
+                        {"required": ["part_index"]},
+                    ],
                     "additionalProperties": False,
                 },
             },

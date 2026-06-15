@@ -251,53 +251,6 @@ class Orchestrator:
                     await self._sessions.append_history(session_id, "assistant", response_message)
                     return {"type": "chat_text", "message": response_message}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
-                    handoff_error = self._validate_preprocess_workflow_handoff(
-                        llm_response.tool_calls
-                    )
-                    if handoff_error:
-                        self._logger.warning(
-                            "invalid_preprocess_workflow_handoff error=%s",
-                            handoff_error,
-                        )
-                        followup_response, followup_error = await self._decide_followup_with_llm(
-                            snapshot,
-                            json.dumps(
-                                {
-                                    "status": "action_required",
-                                    "action": "invalid_preprocess_workflow_handoff",
-                                    "message": (
-                                        "The line-preparation handoff is missing required "
-                                        "target details."
-                                    ),
-                                    "missing_fields": self._missing_preprocess_workflow_handoff_fields(
-                                        llm_response.tool_calls
-                                    ),
-                                    "required_fields": [
-                                        "part_index",
-                                        "verse_number",
-                                        "reason",
-                                    ],
-                                    "instruction": (
-                                        "Tell the user that you need the target part and verse "
-                                        "before preparing the singing line. Do not mention "
-                                        "internal tool names or schema fields."
-                                    ),
-                                },
-                                sort_keys=True,
-                            ),
-                        )
-                        if followup_response is not None and followup_response.final_message:
-                            response_message = self._format_followup_message_text(
-                                followup_response.final_message
-                            )
-                        elif followup_error:
-                            response_message = followup_error
-                        else:
-                            response_message = LLM_ERROR_FALLBACK
-                        await self._sessions.append_history(
-                            session_id, "assistant", response_message
-                        )
-                        return {"type": "chat_text", "message": response_message}
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
                         if isinstance(snapshot.get("files"), dict)
@@ -2994,11 +2947,9 @@ class Orchestrator:
                     "type": "multiple_tool_calls_not_allowed",
                     "message": (
                         "Only one tool call can be executed per assistant turn. "
-                        "If the correct single next tool call is clear from the user "
-                        "request and available context, retry with exactly one tool "
-                        "call and no extra tool calls. If the next action is not clear, "
-                        "respond to the user with no tool calls and ask only for the "
-                        "missing clarification."
+                        "Respond to the user with no tool calls. Explain what needs "
+                        "to happen next and ask them to choose or confirm the single "
+                        "next action."
                     ),
                     "tool_count": len(tool_calls),
                     "tool_names": tool_names,
@@ -3010,37 +2961,6 @@ class Orchestrator:
     def _should_start_preprocess_workflow(self, tool_calls: List[ToolCall]) -> bool:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
-
-    def _validate_preprocess_workflow_handoff(self, tool_calls: List[ToolCall]) -> str:
-        """Return a validation error for malformed preprocess handoff calls."""
-        missing_fields = self._missing_preprocess_workflow_handoff_fields(tool_calls)
-        if missing_fields:
-            return (
-                "start_preprocess_voice_part_workflow missing required request fields: "
-                + ", ".join(missing_fields)
-            )
-        return ""
-
-    def _missing_preprocess_workflow_handoff_fields(
-        self, tool_calls: List[ToolCall]
-    ) -> List[str]:
-        """Return required preprocess handoff fields missing from the first handoff call."""
-        for call in tool_calls:
-            if call.name != TOOL_START_PREPROCESS_WORKFLOW:
-                continue
-            raw_request = call.arguments.get("request")
-            request = raw_request if isinstance(raw_request, dict) else call.arguments
-            missing: List[str] = []
-            if not isinstance(request.get("part_index"), int):
-                missing.append("part_index")
-            verse_number = request.get("verse_number")
-            if verse_number is None or str(verse_number).strip() == "":
-                missing.append("verse_number")
-            reason = request.get("reason")
-            if not isinstance(reason, str) or not reason.strip():
-                missing.append("reason")
-            return missing
-        return ["part_index", "verse_number", "reason"]
 
     def _build_preprocess_workflow_planning_context(
         self,
@@ -3693,16 +3613,6 @@ class Orchestrator:
                 "llm_response_parse_failed raw_text=%s",
                 summarize_payload(text),
             )
-            prose_fallback = self._extract_followup_prose_fallback(text)
-            if prose_fallback:
-                return (
-                    LlmResponse(
-                        tool_calls=[],
-                        final_message=prose_fallback,
-                        include_score=False,
-                    ),
-                    None,
-                )
             return None, "LLM returned an invalid response. Please try again."
         invalid_tool = self._first_invalid_tool_for_role(response.tool_calls, role)
         if invalid_tool:

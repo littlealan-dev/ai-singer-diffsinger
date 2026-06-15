@@ -15,30 +15,6 @@ from src.backend.llm_prompt import PromptBundle
 from src.mcp.logging_utils import summarize_payload
 
 
-_GEMINI_LLM_RESPONSE_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "tool_calls": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "arguments": {
-                        "type": "object",
-                    },
-                },
-                "required": ["name", "arguments"],
-            },
-        },
-        "final_message": {"type": "string"},
-        "include_score": {"type": "boolean"},
-        "thought_summary": {"type": "string"},
-    },
-    "required": ["tool_calls", "final_message", "include_score"],
-}
-
-
 class GeminiRestClient:
     """Lightweight REST client for Google Gemini."""
     def __init__(
@@ -92,18 +68,13 @@ class GeminiRestClient:
             payload["cachedContent"] = cached_content_name
         else:
             payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
-        generation_config: Dict[str, Any] = {
-            "responseMimeType": "application/json",
-            "responseSchema": _GEMINI_LLM_RESPONSE_SCHEMA,
-        }
         thinking_config: Dict[str, Any] = {}
         if thinking_level:
             thinking_config["thinkingLevel"] = thinking_level
         if self._include_thought_summary:
             thinking_config["includeThoughts"] = True
         if thinking_config:
-            generation_config["thinkingConfig"] = thinking_config
-        payload["generationConfig"] = generation_config
+            payload["generationConfig"] = {"thinkingConfig": thinking_config}
         self._logger.debug(
             "gemini_request_payload role=%s model=%s thinking_level=%s payload=%s",
             role.value,

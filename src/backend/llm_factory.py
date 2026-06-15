@@ -40,14 +40,7 @@ def create_llm_client(settings: Settings) -> Optional[LlmClient]:
         if not response_text and not responses:
             response_text = json.dumps(
                 {
-                    "tool_calls": [
-                        {
-                            "name": "synthesize",
-                            "arguments": {
-                                "voicebank": settings.default_voicebank or "Dummy"
-                            },
-                        }
-                    ],
+                    "tool_calls": [{"name": "synthesize", "arguments": {}}],
                     "final_message": "Starting synthesis now.",
                     "include_score": False,
                 }
