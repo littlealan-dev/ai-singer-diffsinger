@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 import os
@@ -74,6 +75,16 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
             raise ValueError(f"Voicebank manifest entry missing id: {path}")
         if not isinstance(enabled, bool):
             raise ValueError(f"Voicebank manifest entry {voicebank_id} missing boolean enabled flag")
+        pitch_expression = entry.get("pitch_expression", 1.0)
+        if (
+            isinstance(pitch_expression, bool)
+            or not isinstance(pitch_expression, (int, float))
+            or not math.isfinite(float(pitch_expression))
+            or not 0.0 <= float(pitch_expression) <= 1.0
+        ):
+            raise ValueError(
+                f"Voicebank manifest entry {voicebank_id} pitch_expression must be between 0.0 and 1.0"
+            )
         if voicebank_id in seen:
             raise ValueError(f"Duplicate voicebank id in manifest: {voicebank_id}")
         seen.add(voicebank_id)
@@ -134,6 +145,15 @@ def resolve_manifest_voicebank_id(voicebank: str | Path) -> Optional[str]:
         if candidate.name in manifest_ids:
             return candidate.name
     return None
+
+
+def resolve_manifest_pitch_expression(voicebank: str | Path) -> float:
+    """Resolve the voicebank pitch-expression default, preserving legacy behavior."""
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    if voicebank_id is None:
+        return 1.0
+    metadata = get_manifest_voicebank_metadata(voicebank_id)
+    return float(metadata.get("pitch_expression", 1.0))
 
 
 def discover_voicebank_root(base_dir: Path) -> Optional[Path]:

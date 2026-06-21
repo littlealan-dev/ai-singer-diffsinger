@@ -33,6 +33,7 @@
         {"name": "07: Light", "suffix": "dsmain/embeds/acoustic/V5_Light"}
       ],
       "default_voice_color": "01: Default",
+      "pitch_expression": 1.0,
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
@@ -70,6 +71,7 @@
         {"name": "C: Casual (Obsolete)", "suffix": "dsmain/embeds/acoustic/CASUAL"}
       ],
       "default_voice_color": "A1: Solid",
+      "pitch_expression": 1.0,
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
@@ -91,6 +93,7 @@
       "speakers": [],
       "voice_colors": [],
       "default_voice_color": null,
+      "pitch_expression": 1.0,
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": true,

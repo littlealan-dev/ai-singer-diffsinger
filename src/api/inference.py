@@ -429,6 +429,7 @@ def predict_pitch(
     language_ids: Optional[List[int]] = None,
     encoder_out: Optional[np.ndarray] = None,
     speaker_name: Optional[str] = None,
+    expression: float = 1.0,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -444,6 +445,7 @@ def predict_pitch(
         language_ids: Language ID per phoneme (optional)
         encoder_out: Encoder output from predict_durations (optional)
         speaker_name: Optional speaker embedding name/suffix
+        expression: Pitch-model expression strength (0.0 to 1.0)
         device: Device for inference
         
     Returns:
@@ -471,6 +473,14 @@ def predict_pitch(
                 }
             ),
         )
+    if (
+        isinstance(expression, bool)
+        or not isinstance(expression, (int, float))
+        or not np.isfinite(float(expression))
+        or not 0.0 <= float(expression) <= 1.0
+    ):
+        raise ValueError("expression must be between 0.0 and 1.0.")
+
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
     dspitch_path = voicebank_path / "dspitch"
@@ -538,7 +548,7 @@ def predict_pitch(
     note_rest = np.array(note_rests, dtype=bool)[None, :]
     note_dur = np.array(note_durations, dtype=np.int64)[None, :]
     pitch = np.full((1, n_frames), 60.0, dtype=np.float32)
-    expr = np.ones((1, n_frames), dtype=np.float32)
+    expr = np.full((1, n_frames), float(expression), dtype=np.float32)
     retake = np.ones((1, n_frames), dtype=bool)
     spk_embed_frames = (
         np.repeat(spk_embed[None, None, :], n_frames, axis=1).astype(np.float32)

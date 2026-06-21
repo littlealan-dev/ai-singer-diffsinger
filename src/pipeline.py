@@ -13,6 +13,7 @@ from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, Varia
 from src.vocoder.model import Vocoder
 from src.musicxml.parser import parse_musicxml, ScoreData, NoteEvent, TempoEvent
 from src.api.voicebank import resolve_vocoder_model_path
+from src.api.voicebank_cache import resolve_manifest_pitch_expression
 
 
 @dataclass
@@ -123,13 +124,27 @@ class Pipeline:
     TAIL_FRAMES = 8
     PADDING_MS = 500.0
 
-    def __init__(self, voicebank_path: Path, device: str = "cpu"):
+    def __init__(
+        self,
+        voicebank_path: Path,
+        device: str = "cpu",
+        pitch_expression: Optional[float] = None,
+    ):
         """Initialize the pipeline and load all sub-models.
         Inputs: voicebank_path (Path), device (str).
         Outputs: configured Pipeline instance.
         """
         self.root = voicebank_path
         self.device = device
+        if isinstance(pitch_expression, bool):
+            raise ValueError("pitch_expression must be between 0.0 and 1.0.")
+        self.pitch_expression = float(
+            resolve_manifest_pitch_expression(voicebank_path)
+            if pitch_expression is None
+            else pitch_expression
+        )
+        if not np.isfinite(self.pitch_expression) or not 0.0 <= self.pitch_expression <= 1.0:
+            raise ValueError("pitch_expression must be between 0.0 and 1.0.")
         self.logger = logging.getLogger(__name__)
         self.variance_predict_energy = False
         self.variance_predict_breathiness = False
@@ -851,7 +866,11 @@ class Pipeline:
         Outputs: (pitch_pred, pitch_midi, f0).
         """
         spk_embed_frames = self._repeat_embed(self.spk_embed, pitch_ctx.n_frames).astype(np.float32)
-        expr = np.ones((1, pitch_ctx.n_frames), dtype=np.float32)
+        expr = np.full(
+            (1, pitch_ctx.n_frames),
+            self.pitch_expression,
+            dtype=np.float32,
+        )
         retake = np.ones((1, pitch_ctx.n_frames), dtype=bool)
 
         if self.pitch:

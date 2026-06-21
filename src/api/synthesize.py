@@ -27,6 +27,7 @@ from src.api.voicebank import (
 )
 from src.api.voice_parts import build_infeasible_anchor_action_required
 from src.api.voice_parts import synthesize_preflight_action_required
+from src.api.voicebank_cache import resolve_manifest_pitch_expression
 from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -1473,6 +1474,7 @@ def synthesize(
     airiness: float = 1.0,
     intensity: float = 0.5,
     clarity: float = 1.0,
+    pitch_expression: Optional[float] = None,
     skip_voice_part_preprocess: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
@@ -1493,6 +1495,7 @@ def synthesize(
         airiness: Global breathiness multiplier (0.0 to 1.0)
         intensity: Global tension multiplier (0.0 to 1.0)
         clarity: Global voicing multiplier (0.0 to 1.0)
+        pitch_expression: Optional pitch expression override (0.0 to 1.0)
         device: Device for inference
         progress_callback: Optional callback for step updates
         
@@ -1538,10 +1541,19 @@ def synthesize(
                     "airiness": airiness,
                     "intensity": intensity,
                     "clarity": clarity,
+                    "pitch_expression": pitch_expression,
                     "device": device,
                 }
             ),
         )
+    if pitch_expression is not None and (
+        isinstance(pitch_expression, bool)
+        or not isinstance(pitch_expression, (int, float))
+        or not np.isfinite(float(pitch_expression))
+        or not 0.0 <= float(pitch_expression) <= 1.0
+    ):
+        raise ValueError("pitch_expression must be between 0.0 and 1.0.")
+
     working_score = score
     effective_part_index = int(part_index)
     preflight = synthesize_preflight_action_required(
@@ -1557,6 +1569,11 @@ def synthesize(
 
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
+    resolved_pitch_expression = (
+        resolve_manifest_pitch_expression(voicebank_path)
+        if pitch_expression is None
+        else pitch_expression
+    )
 
     # Resolve voice color to an optional speaker embedding.
     sample_rate = config.get("sample_rate", 44100)
@@ -1713,6 +1730,7 @@ def synthesize(
         language_ids=language_ids,
         encoder_out=dur_result["encoder_out"],
         speaker_name=speaker_name,
+        expression=resolved_pitch_expression,
         device=device,
     )
     _log_step("pitch", start)

@@ -17,6 +17,7 @@ from src.api import (
 from src.backend.progress import write_progress
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import initialize_firebase_app
+from src.api.voicebank_cache import get_manifest_voicebank_metadata
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
@@ -113,7 +114,10 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
 
 def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     """Handle synthesize tool calls and wire optional progress updates."""
-    voicebank_path = resolve_voicebank_id(params["voicebank"])
+    voicebank_id = params["voicebank"]
+    voicebank_metadata = get_manifest_voicebank_metadata(voicebank_id)
+    pitch_expression = float(voicebank_metadata.get("pitch_expression", 1.0))
+    voicebank_path = resolve_voicebank_id(voicebank_id)
     part_index = _resolve_part_index(
         params.get("score", {}),
         part_id=params.get("part_id"),
@@ -168,6 +172,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         airiness=params.get("airiness", 1.0),
         intensity=params.get("intensity", 0.5),
         clarity=params.get("clarity", 1.0),
+        pitch_expression=pitch_expression,
         device=device,
         progress_callback=progress_callback,
     )
