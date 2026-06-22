@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 
 from src.musicxml import parse_musicxml
+from src.musicxml.parser import parse_musicxml_with_summary
 
 
 TEST_XML = (
@@ -19,9 +20,32 @@ TEST_CHRISTMAS_MXL = (
     / "test_data"
     / "all-i-want-for-christmas-is-you-mariah-carey.mxl"
 )
+TEST_SOLFEGE_MXL = (
+    Path(__file__).resolve().parents[1]
+    / "assets"
+    / "test_data"
+    / "amazing-grace-solfege.mxl"
+)
 
 
 class MusicXmlParserTests(unittest.TestCase):
+    def test_summary_includes_bounded_lyric_samples_per_part_and_verse(self) -> None:
+        _, summary = parse_musicxml_with_summary(TEST_SOLFEGE_MXL)
+        soprano = next(part for part in summary["parts"] if part["part_id"] == "Soprano")
+
+        verses = {
+            entry["verse_number"]: entry["sample"]
+            for entry in soprano["lyric_verses"]
+        }
+        self.assertEqual(list(verses), ["1", "2", "3"])
+        self.assertTrue(all(len(sample) <= 20 for sample in verses.values()))
+        self.assertEqual(
+            verses["3"][:6],
+            ["sol", "doh", "mi", "re", "doh", "mi"],
+        )
+        self.assertEqual(len(verses["3"]), 20)
+        self.assertNotIn("+", verses["3"])
+
     def test_parse_basic(self) -> None:
         score = parse_musicxml(TEST_XML)
         self.assertEqual(score.title, "Amazing Grace— How Sweet the Sound")

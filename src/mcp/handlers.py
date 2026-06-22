@@ -173,6 +173,9 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         intensity=params.get("intensity", 0.5),
         clarity=params.get("clarity", 1.0),
         pitch_expression=pitch_expression,
+        solfege_pronunciation_patch=params.get(
+            "solfege_pronunciation_patch", False
+        ),
         device=device,
         progress_callback=progress_callback,
     )

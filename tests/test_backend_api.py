@@ -1667,6 +1667,11 @@ def test_upload_returns_score_summary_with_verses(client):
     assert any(part.get("has_lyrics") for part in summary["parts"])
     assert "1" in summary.get("available_verses", [])
     assert "2" in summary.get("available_verses", [])
+    soprano = summary["parts"][0]
+    assert soprano["lyric_verses"] == [
+        {"verse_number": "1", "sample": ["O", "night"]},
+        {"verse_number": "2", "sample": ["Lo", "light"]},
+    ]
 
 
 def test_build_workflow_candidate_classifies_reviewable_postflight_result(client):

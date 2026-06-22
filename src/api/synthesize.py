@@ -1241,6 +1241,7 @@ def align_phonemes_to_notes(
     part_index: int = 0,
     voice_id: Optional[str] = None,
     include_phonemes: bool = False,
+    solfege_pronunciation_patch: bool = False,
 ) -> Dict[str, Any]:
     """
     Align phonemes to notes and compute timing inputs for inference steps.
@@ -1251,6 +1252,7 @@ def align_phonemes_to_notes(
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
         include_phonemes: Include phoneme strings in output
+        solfege_pronunciation_patch: Apply deterministic English solfege spellings
         
     Returns:
         Dict with:
@@ -1274,9 +1276,13 @@ def align_phonemes_to_notes(
                     "part_index": part_index,
                     "voice_id": voice_id,
                     "include_phonemes": include_phonemes,
+                    "solfege_pronunciation_patch": solfege_pronunciation_patch,
                 }
             ),
         )
+    if not isinstance(solfege_pronunciation_patch, bool):
+        raise ValueError("solfege_pronunciation_patch must be a boolean.")
+
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
 
@@ -1346,6 +1352,7 @@ def align_phonemes_to_notes(
             phonemizer=phonemizer,
             voicebank_path=voicebank_path,
             include_phonemes=include_phonemes,
+            solfege_pronunciation_patch=solfege_pronunciation_patch,
         )
         word_groups: List[Dict[str, Any]] = []
     else:
@@ -1360,7 +1367,11 @@ def align_phonemes_to_notes(
         word_phonemes: List[Dict[str, Any]] = []
         if lyrics:
             # Run phonemizer once per lyric word group.
-            phoneme_result = phonemize(lyrics, voicebank_path)
+            phoneme_result = phonemize(
+                lyrics,
+                voicebank_path,
+                solfege_pronunciation_patch=solfege_pronunciation_patch,
+            )
             word_phonemes = _split_phonemize_result(phoneme_result)
             if len(word_phonemes) != len(lyrics):
                 raise ValueError("Phonemize output does not match the selected notes.")
@@ -1475,6 +1486,7 @@ def synthesize(
     intensity: float = 0.5,
     clarity: float = 1.0,
     pitch_expression: Optional[float] = None,
+    solfege_pronunciation_patch: bool = False,
     skip_voice_part_preprocess: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
@@ -1496,6 +1508,7 @@ def synthesize(
         intensity: Global tension multiplier (0.0 to 1.0)
         clarity: Global voicing multiplier (0.0 to 1.0)
         pitch_expression: Optional pitch expression override (0.0 to 1.0)
+        solfege_pronunciation_patch: Apply deterministic English solfege spellings
         device: Device for inference
         progress_callback: Optional callback for step updates
         
@@ -1542,6 +1555,7 @@ def synthesize(
                     "intensity": intensity,
                     "clarity": clarity,
                     "pitch_expression": pitch_expression,
+                    "solfege_pronunciation_patch": solfege_pronunciation_patch,
                     "device": device,
                 }
             ),
@@ -1553,6 +1567,8 @@ def synthesize(
         or not 0.0 <= float(pitch_expression) <= 1.0
     ):
         raise ValueError("pitch_expression must be between 0.0 and 1.0.")
+    if not isinstance(solfege_pronunciation_patch, bool):
+        raise ValueError("solfege_pronunciation_patch must be a boolean.")
 
     working_score = score
     effective_part_index = int(part_index)
@@ -1615,6 +1631,7 @@ def synthesize(
             part_index=effective_part_index,
             voice_id=voice_id,
             include_phonemes=True,
+            solfege_pronunciation_patch=solfege_pronunciation_patch,
         )
     except InfeasibleAnchorError as exc:
         return build_infeasible_anchor_action_required(

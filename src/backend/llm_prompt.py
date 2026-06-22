@@ -80,33 +80,41 @@ def build_prompt_bundle(
             }
         )
 
-    tool_json = json.dumps(tool_specs, indent=2, sort_keys=True)
+    tool_json = json.dumps(tool_specs, indent=2, sort_keys=True, ensure_ascii=False)
     score_hint = "available" if score_available else "missing"
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
     score_summary_text = "none"
     if score_summary:
-        score_summary_text = json.dumps(score_summary, indent=2, sort_keys=True)
+        score_summary_text = json.dumps(
+            score_summary, indent=2, sort_keys=True, ensure_ascii=False
+        )
     parsed_score_json_text = "none"
     if parsed_score_json:
-        parsed_score_json_text = json.dumps(parsed_score_json, indent=2, sort_keys=True)
+        parsed_score_json_text = json.dumps(
+            parsed_score_json, indent=2, sort_keys=True, ensure_ascii=False
+        )
     voice_part_signals_text = "none"
     if voice_part_signals:
-        voice_part_signals_text = json.dumps(voice_part_signals, indent=2, sort_keys=True)
+        voice_part_signals_text = json.dumps(
+            voice_part_signals, indent=2, sort_keys=True, ensure_ascii=False
+        )
     preprocess_mapping_context_text = "none"
     if preprocess_mapping_context:
         preprocess_mapping_context_text = json.dumps(
-            preprocess_mapping_context, indent=2, sort_keys=True
+            preprocess_mapping_context, indent=2, sort_keys=True, ensure_ascii=False
         )
     last_preprocess_plan_text = "none"
     if last_preprocess_plan:
         last_preprocess_plan_text = json.dumps(
-            last_preprocess_plan, indent=2, sort_keys=True
+            last_preprocess_plan, indent=2, sort_keys=True, ensure_ascii=False
         )
     voicebank_details_text = "none"
     if voicebank_details:
-        voicebank_details_text = json.dumps(voicebank_details, indent=2, sort_keys=True)
+        voicebank_details_text = json.dumps(
+            voicebank_details, indent=2, sort_keys=True, ensure_ascii=False
+        )
     selected_voicebank_text = "none"
     if selected_voicebank_id:
         selected_voicebank_payload: Dict[str, Any] = {
@@ -128,6 +136,7 @@ def build_prompt_bundle(
             selected_voicebank_payload,
             indent=2,
             sort_keys=True,
+            ensure_ascii=False,
         )
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)

@@ -253,6 +253,7 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
     available_verses: set[str] = set()
     for index, part in enumerate(score.parts):
         lyric_numbers: set[str] = set()
+        lyric_samples: Dict[str, List[str]] = {}
         note_count = 0
 
         for element in part.recurse().notes:
@@ -264,7 +265,13 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                 if not text:
                     continue
                 number = lyric.number or "1"
-                lyric_numbers.add(str(number))
+                verse_number = str(number)
+                lyric_numbers.add(verse_number)
+                if text.startswith("+"):
+                    continue
+                sample = lyric_samples.setdefault(verse_number, [])
+                if len(sample) < 20:
+                    sample.append(text)
 
         if lyric_numbers:
             available_verses.update(lyric_numbers)
@@ -276,6 +283,13 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                 "part_name": part.partName,
                 "has_lyrics": bool(lyric_numbers),
                 "note_count": note_count,
+                "lyric_verses": [
+                    {
+                        "verse_number": verse_number,
+                        "sample": lyric_samples.get(verse_number, []),
+                    }
+                    for verse_number in sorted(lyric_numbers, key=_lyric_sort_key)
+                ],
             }
         )
 

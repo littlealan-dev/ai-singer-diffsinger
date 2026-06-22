@@ -95,6 +95,80 @@ _MEASURE_COVERAGE_SCHEMA: Dict[str, Any] = {
     "additionalProperties": True,
 }
 
+_LYRIC_VERSE_SUMMARY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Bounded lyric sample for one verse in one score part.",
+    "properties": {
+        "verse_number": {
+            "type": "string",
+            "description": "MusicXML lyric verse number.",
+        },
+        "sample": {
+            "type": "array",
+            "description": "First 20 non-rest, non-empty, non-extension lyric tokens in score order.",
+            "items": {"type": "string"},
+            "maxItems": 20,
+        },
+    },
+    "required": ["verse_number", "sample"],
+    "additionalProperties": False,
+}
+
+_SCORE_SUMMARY_PART_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Static metadata and lyric samples for one score part.",
+    "properties": {
+        "part_index": {"type": "integer", "description": "0-based score part index."},
+        "part_id": {"type": "string", "description": "MusicXML part id."},
+        "part_name": {"type": ["string", "null"], "description": "MusicXML part name."},
+        "has_lyrics": {"type": "boolean", "description": "Whether the part has lyric text."},
+        "note_count": {"type": "integer", "description": "Count of non-rest notes."},
+        "lyric_verses": {
+            "type": "array",
+            "description": "Available lyric verses and their bounded initial samples.",
+            "items": _LYRIC_VERSE_SUMMARY_SCHEMA,
+        },
+    },
+    "required": [
+        "part_index",
+        "part_id",
+        "part_name",
+        "has_lyrics",
+        "note_count",
+        "lyric_verses",
+    ],
+    "additionalProperties": False,
+}
+
+_SCORE_SUMMARY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Compact static score summary for UI and orchestration.",
+    "properties": {
+        "title": {"type": ["string", "null"]},
+        "composer": {"type": ["string", "null"]},
+        "lyricist": {"type": ["string", "null"]},
+        "duration_seconds": {"type": "number"},
+        "parts": {
+            "type": "array",
+            "items": _SCORE_SUMMARY_PART_SCHEMA,
+        },
+        "available_verses": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "selected_verse_number": {"type": ["string", "null"]},
+    },
+    "required": [
+        "title",
+        "composer",
+        "lyricist",
+        "duration_seconds",
+        "parts",
+        "available_verses",
+    ],
+    "additionalProperties": True,
+}
+
 _VOICE_PART_SIGNAL_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "description": "Voice-part planning signals for one score part.",
@@ -475,9 +549,7 @@ _PARSE_SCORE_OUTPUT_SCHEMA: Dict[str, Any] = {
             "additionalProperties": False,
         },
         "score_summary": {
-            "type": "object",
-            "description": "Compact static score summary for UI and orchestration.",
-            "additionalProperties": True,
+            **_SCORE_SUMMARY_SCHEMA,
         },
         "source_musicxml_path": {
             "type": "string",
@@ -1438,6 +1510,13 @@ TOOLS: List[Tool] = [
                             "maximum": 1.0,
                             "description": "Clarity value to preserve for later synthesis.",
                         },
+                        "solfege_pronunciation_patch": {
+                            "type": ["boolean", "null"],
+                            "description": (
+                                "Whether later synthesis should apply deterministic English "
+                                "solfege pronunciations."
+                            ),
+                        },
                         "reason": {
                             "type": "string",
                             "description": (
@@ -1599,6 +1678,14 @@ TOOLS: List[Tool] = [
                     "minimum": 0.0,
                     "maximum": 1.0,
                     "description": "Clarity control value for the synthesis backend.",
+                },
+                "solfege_pronunciation_patch": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Apply deterministic English singing pronunciations to whole-token "
+                        "solfege lyrics during phonemization."
+                    ),
                 },
             },
             "required": ["score"],

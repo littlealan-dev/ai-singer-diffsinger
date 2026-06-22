@@ -2988,6 +2988,7 @@ class Orchestrator:
             "airiness",
             "intensity",
             "clarity",
+            "solfege_pronunciation_patch",
             "allow_lyric_propagation",
         )
         target = {key: request.get(key) for key in target_keys if request.get(key) is not None}

@@ -86,6 +86,15 @@ Rules:
   - Call `preprocess_voice_parts` again only if the user explicitly asked to revise/rebuild the derived score, change lyric/melody sourcing, or otherwise change the line-preparation plan.
 - Verse lock:
   - Treat `score_summary.selected_verse_number` (and `voice_part_signals.requested_verse_number`) as the current verse for the loaded score.
+  - Solfege verse selection exception:
+    - When the user asks to sing/render a part "in solfege", treat that request as explicit permission to select the most solfege-like existing verse without asking the user to choose a verse number.
+    - Inspect `score_summary.parts[].lyric_verses[]` for the requested part. Each entry provides the verse number and an initial lyric sample, so do not call `reparse` merely to discover or compare verse contents.
+    - Judge the samples using whole-token solfege syllables, for example `do`, `re`, `mi`, `sol`, `ti`, or chromatic forms such as `fi`. Do not classify ordinary words merely because they contain a solfege syllable as a substring.
+    - Choose the most clearly solfege-like sample. If more than one sample is solfege-like, prefer the sample with the highest proportion and coverage of whole-token solfege lyrics; break a tie by the earlier verse in `score_summary.available_verses`.
+    - If the chosen solfege verse is already `score_summary.selected_verse_number`, keep it selected. Otherwise call `reparse` exactly once with only that chosen `verse_number`; do not call `reparse` for any other verse during discovery.
+    - After the chosen verse is active, include its `verse_number` in the render workflow. For a simple/directly singable target, call `synthesize` with `solfege_pronunciation_patch=true` and the correct part selector. If the target needs line preparation, pass the chosen `verse_number` and `solfege_pronunciation_patch=true` through `start_preprocess_voice_part_workflow`, then use both again in the eventual `synthesize` call.
+    - Do not call `synthesize` with `solfege_pronunciation_patch=true` unless the chosen sample is clearly solfege-like. The pronunciation patch changes pronunciation only; it does not convert ordinary lyrics into solfege.
+    - If no lyric sample for the requested part is clearly solfege-like, do not enable the patch for ordinary lyrics; tell the user that no solfege verse was found.
   - If user requests a different verse, call `reparse` with the requested `verse_number` first.
   - Call `reparse` only when the requested verse differs from the currently selected verse.
   - Do not call `reparse` to fix line-preparation/synthesize validation issues; fix the plan/selection instead.
@@ -155,7 +164,10 @@ Rules:
   - alto requests -> prefer Alto voicebanks
   - tenor requests -> prefer Tenor voicebanks
   - bass requests -> prefer Bass voicebanks
-- If the user does not specify a voice and the requested part is known, prefer the closest matching voice_type for that part instead of picking a random default voicebank.
+- Default voicebank policy:
+  - If the user does not specify a voicebank/voice/singer, use `Qixuan_v2.7.0_DiffSinger_OpenUtau` as the default voicebank.
+  - Override that default only when the user explicitly specifies another voicebank/voice/singer, or when the requested part is clearly male or a male lower part such as tenor, bass, baritone, or an equivalent lower male role.
+  - If there is no clear relationship between the user request and a male/lower voice type, keep `Qixuan_v2.7.0_DiffSinger_OpenUtau`.
 - If the user explicitly asks for a male or female singer and multiple voicebanks fit, use gender to break the tie after matching voice_type.
 - If no exact voice_type match exists, choose the nearest musically plausible option and briefly reflect that choice in natural language.
 - If the chosen voicebank has no voice colors, do not include voice_color.
@@ -165,8 +177,8 @@ Rules:
 - Do not use voice_color as a substitute for voicebank selection; voice_color only refines style within the already chosen voicebank.
 - voice_color must match exactly one of the voicebank's voice color IDs.
 - In the same turn where you call `synthesize`, your `final_message` must state which singer (voicebank) you selected and which style/color you selected, if any.
-- If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse.
-- For multi-verse scores, do not call `reparse`, `preprocess_voice_parts`, or `synthesize` until verse is explicitly selected by the user.
+- If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse, except for the solfege verse selection exception above.
+- For multi-verse scores, do not call `reparse`, `preprocess_voice_parts`, or `synthesize` until verse is explicitly selected by the user, except that an explicit request to sing/render "in solfege" authorizes the solfege verse selection workflow above.
 - If backend returns `action_required` with `action=verse_selection_required`, ask the user to pick one verse from the provided options and do not emit tool calls in that turn.
 - If there is only one lyric part, do not ask the user to pick a part.
 - If there is only one verse, do not ask the user to pick a verse.

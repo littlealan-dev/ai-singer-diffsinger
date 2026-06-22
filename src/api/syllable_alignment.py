@@ -492,6 +492,7 @@ def align(
     phonemizer: Phonemizer,
     voicebank_path: Path,
     include_phonemes: bool = False,
+    solfege_pronunciation_patch: bool = False,
 ) -> Dict[str, Any]:
     """Align score notes into DS-contract payload using syllable-based strategy."""
     sp_id = phonemizer._phoneme_to_id["SP"]
@@ -508,7 +509,13 @@ def align(
 
     word_phonemes: List[Dict[str, Any]] = []
     if lyrics:
-        word_phonemes = _split_phonemize_result(phonemize(lyrics, voicebank_path))
+        word_phonemes = _split_phonemize_result(
+            phonemize(
+                lyrics,
+                voicebank_path,
+                solfege_pronunciation_patch=solfege_pronunciation_patch,
+            )
+        )
         if len(word_phonemes) != len(lyrics):
             raise ValueError("Phonemize output does not match grouped lyrics.")
 

@@ -240,6 +240,69 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
     assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text
 
 
+def test_build_prompt_bundle_preserves_unicode_voicebank_names() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Qixuan_v2.7.0_DiffSinger_OpenUtau"],
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        selected_voicebank_id="Qixuan_v2.7.0_DiffSinger_OpenUtau",
+        voicebank_details=[
+            {
+                "id": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+                "name": "Qixuan / 绮萱 v2.7.0",
+            }
+        ],
+    )
+
+    assert "Qixuan / 绮萱 v2.7.0" in bundle.dynamic_prompt_text
+    assert r"\u7eee\u8431" not in bundle.dynamic_prompt_text
+
+
+def test_system_prompt_defaults_to_qixuan_unless_clear_male_lower_part() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["PM-31_Commercial_Indigo", "Qixuan_v2.7.0_DiffSinger_OpenUtau"],
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "use `Qixuan_v2.7.0_DiffSinger_OpenUtau` as the default voicebank" in prompt
+    assert "tenor, bass, baritone" in prompt
+    assert "If there is no clear relationship" in prompt
+
+
+def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Qixuan_v2.7.0_DiffSinger_OpenUtau"],
+        score_summary={"available_verses": ["1", "2"], "selected_verse_number": "1"},
+        parsed_score_json={"parts": []},
+        voice_part_signals={"parts": []},
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "Solfege verse selection exception" in prompt
+    assert "most solfege-like existing verse" in prompt
+    assert "`score_summary.parts[].lyric_verses[]`" in prompt
+    assert "do not call `reparse` merely to discover or compare verse contents" in prompt
+    assert "call `reparse` exactly once" in prompt
+    assert "solfege_pronunciation_patch=true" in prompt
+    assert "whole-token solfege syllables" in prompt
+    assert "does not convert ordinary lyrics into solfege" in prompt
+    assert "no solfege verse was found" in prompt
+
+
 def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     bundle = build_prompt_bundle(
         tools=[],
@@ -265,5 +328,5 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     assert "User-selected voicebank override:" in bundle.dynamic_prompt_text
     assert '"id": "VoiceB"' in bundle.dynamic_prompt_text
     assert '"name": "Voice B Display"' in bundle.dynamic_prompt_text
-    assert "Mandatory user-selected voicebank" in bundle.dynamic_prompt_text
-    assert "Do not choose or mention another voicebank" in bundle.dynamic_prompt_text
+    assert "VOICEBANK OVERRIDE ACTIVE" in bundle.dynamic_prompt_text
+    assert "Do not choose, recommend, or mention another voicebank" in bundle.dynamic_prompt_text

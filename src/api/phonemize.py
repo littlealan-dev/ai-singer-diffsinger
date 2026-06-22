@@ -13,6 +13,36 @@ from src.mcp.logging_utils import get_logger, summarize_payload
 logger = get_logger(__name__)
 
 
+_SOLFEGE_ENGLISH_PRONUNCIATIONS = {
+    "do": "doh",
+    "di": "dee",
+    "ra": "rah",
+    "re": "ray",
+    "ri": "ree",
+    "me": "may",
+    "mi": "mee",
+    "fa": "fah",
+    "fi": "fee",
+    "se": "say",
+    "so": "soh",
+    "sol": "soh",
+    "si": "see",
+    "le": "lay",
+    "la": "lah",
+    "li": "lee",
+    "te": "tay",
+    "ti": "tee",
+}
+
+
+def patch_solfege_pronunciations(lyrics: List[str]) -> List[str]:
+    """Return English singing spellings for recognized whole-token solfege lyrics."""
+    return [
+        _SOLFEGE_ENGLISH_PRONUNCIATIONS.get(lyric.strip().casefold(), lyric)
+        for lyric in lyrics
+    ]
+
+
 def _collect_needed_graphemes(lyrics: List[str]) -> set[str]:
     """Collect normalized lyric graphemes required for one phonemize call."""
     return {
@@ -27,6 +57,7 @@ def phonemize(
     voicebank: Union[str, Path],
     *,
     language: str = "en",
+    solfege_pronunciation_patch: bool = False,
 ) -> Dict[str, Any]:
     """
     Convert lyrics to phoneme sequences.
@@ -35,6 +66,7 @@ def phonemize(
         lyrics: List of lyric strings (one per note/word)
         voicebank: Voicebank path or ID
         language: Language code (default: "en")
+        solfege_pronunciation_patch: Apply deterministic English solfege spellings
         
     Returns:
         Dict with:
@@ -60,9 +92,17 @@ def phonemize(
                     "lyrics": lyrics,
                     "voicebank": str(voicebank),
                     "language": language,
+                    "solfege_pronunciation_patch": solfege_pronunciation_patch,
                 }
             ),
         )
+    if not isinstance(solfege_pronunciation_patch, bool):
+        raise ValueError("solfege_pronunciation_patch must be a boolean.")
+
+    effective_lyrics = list(lyrics)
+    if solfege_pronunciation_patch and language.strip().lower() == "en":
+        effective_lyrics = patch_solfege_pronunciations(effective_lyrics)
+
     voicebank_path = Path(voicebank)
     # Load voicebank config to locate phoneme and language assets.
     config = load_voicebank_config(voicebank_path)
@@ -83,7 +123,7 @@ def phonemize(
         languages_path=languages_path,
         language=language,
         allow_g2p=True,
-        needed_graphemes=_collect_needed_graphemes(lyrics),
+        needed_graphemes=_collect_needed_graphemes(effective_lyrics),
     )
     
     all_phonemes: List[str] = []
@@ -91,7 +131,7 @@ def phonemize(
     all_lang_ids: List[int] = []
     word_boundaries: List[int] = []
     
-    for lyric in lyrics:
+    for lyric in effective_lyrics:
         # Phonemize each lyric in isolation to preserve word boundaries.
         result = phonemizer.phonemize_tokens([lyric])
         all_phonemes.extend(result.phonemes)

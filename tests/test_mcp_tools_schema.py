@@ -30,6 +30,17 @@ def test_synthesize_schema_requires_exactly_one_selector_and_describes_output() 
     assert output_schema["oneOf"][1]["description"]
 
 
+def test_parse_score_schema_describes_per_part_lyric_verse_samples() -> None:
+    output_schema = _tool_schema_map()["parse_score"]["outputSchema"]
+    summary_schema = output_schema["properties"]["score_summary"]
+    part_schema = summary_schema["properties"]["parts"]["items"]
+    verse_schema = part_schema["properties"]["lyric_verses"]["items"]
+
+    assert verse_schema["required"] == ["verse_number", "sample"]
+    assert verse_schema["properties"]["sample"]["maxItems"] == 20
+    assert "First 20" in verse_schema["properties"]["sample"]["description"]
+
+
 def test_metadata_tools_have_field_descriptions() -> None:
     schema_map = _tool_schema_map()
 
