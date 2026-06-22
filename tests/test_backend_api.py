@@ -227,6 +227,25 @@ class WorkflowThenPreprocessClient:
 
 def _make_router_call_tool():
     def _call_tool(name, arguments):
+        if name == "add_solfege_lyric_verse":
+            from src.api.solfege import add_solfege_lyric_verse
+
+            return add_solfege_lyric_verse(
+                PROJECT_ROOT / arguments["source_musicxml_path"],
+                PROJECT_ROOT / arguments["output_musicxml_path"],
+                part_id=arguments.get("part_id"),
+                part_index=arguments.get("part_index"),
+                settings=arguments.get("settings"),
+            )
+        if name == "modify_solfege_settings":
+            from src.api.solfege import modify_solfege_settings
+
+            return modify_solfege_settings(
+                PROJECT_ROOT / arguments["source_musicxml_path"],
+                PROJECT_ROOT / arguments["output_musicxml_path"],
+                settings=arguments.get("settings"),
+                selected_verse_number=arguments.get("selected_verse_number"),
+            )
         if name == "parse_score":
             musicxml_path = arguments.get("musicxml_path")
             return {
@@ -1672,6 +1691,144 @@ def test_upload_returns_score_summary_with_verses(client):
         {"verse_number": "1", "sample": ["O", "night"]},
         {"verse_number": "2", "sample": ["Lo", "light"]},
     ]
+
+
+def test_solfege_settings_api_returns_defaults_and_applies_confirmed_change(client):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    initial = test_client.get(
+        f"/sessions/{session_id}/solfege-settings",
+        headers=_auth_headers(),
+    )
+    assert initial.status_code == 200
+    assert initial.json()["settings"] == {
+        "system": "movable_do",
+        "mode": "major",
+        "revision": 1,
+    }
+
+    updated = test_client.patch(
+        f"/sessions/{session_id}/solfege-settings",
+        headers=_auth_headers(),
+        json={"settings": {"system": "fixed_do", "mode": "major"}},
+    )
+    assert updated.status_code == 200
+    payload = updated.json()
+    assert payload["settings"] == {
+        "system": "fixed_do",
+        "mode": "major",
+        "revision": 2,
+    }
+    assert payload["updated_generated_verses"] == []
+    assert payload["current_score"]["version"] == payload["score_version"]
+
+
+def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("score.xml", VERSED_SCORE_XML, "application/xml")},
+    )
+    assert upload.status_code == 200
+    llm_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"add_solfege_lyric_verse",'
+            '"arguments":{"part_id":"Soprano","reason":"User requested solfege."}}],'
+            '"final_message":"Adding solfege.","include_score":false}'
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers=_auth_headers(),
+        json={"message": "add solfege to the first part"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_text"
+    assert '"operation_scope": "exactly_one_part"' in payload["message"]
+    assert '"completed_target"' in payload["message"]
+    assert '"part_name": "Soprano"' in payload["message"]
+    assert payload["current_score"]["score"]["selected_verse_number"] == "3"
+    assert "3" in payload["score_summary"]["available_verses"]
+    assert payload["solfege_settings"] == {
+        "system": "movable_do",
+        "mode": "major",
+        "revision": 1,
+    }
+    score_response = test_client.get(
+        f"/sessions/{session_id}/score", headers=_auth_headers()
+    )
+    assert score_response.status_code == 200
+    assert 'name="SightSinger Solfege"' in score_response.text
+
+    settings_response = test_client.patch(
+        f"/sessions/{session_id}/solfege-settings",
+        headers=_auth_headers(),
+        json={"settings": {"system": "fixed_do", "mode": "major"}},
+    )
+    assert settings_response.status_code == 200
+    settings_payload = settings_response.json()
+    assert settings_payload["settings"]["system"] == "fixed_do"
+    assert settings_payload["updated_generated_verses"] == [
+        {"part_id": "P1", "part_index": 0, "verse_number": "3", "notes_updated": 2}
+    ]
+
+
+def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("score.xml", VERSED_SCORE_XML, "application/xml")},
+    )
+    assert upload.status_code == 200
+
+    add_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"add_solfege_lyric_verse",'
+            '"arguments":{"part_index":0,"reason":"Create solfege."}}],'
+            '"final_message":"Adding solfege.","include_score":false}'
+        )
+    )
+    app.state.orchestrator._llm_client = add_client
+    add_response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers=_auth_headers(),
+        json={"message": "add solfege"},
+    )
+    assert add_response.status_code == 200
+
+    modify_client = StaticLlmClient(
+        response_text=(
+            '{"tool_calls":[{"name":"modify_solfege_settings",'
+            '"arguments":{"system":"fixed_do","reason":"User requested fixed do."}}],'
+            '"final_message":"Changing to fixed do.","include_score":false}'
+        )
+    )
+    app.state.orchestrator._llm_client = modify_client
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers=_auth_headers(),
+        json={"message": "change to fixed do"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["solfege_settings"] == {
+        "system": "fixed_do",
+        "mode": "major",
+        "revision": 2,
+    }
+    assert "current_score" in payload
 
 
 def test_build_workflow_candidate_classifies_reviewable_postflight_result(client):

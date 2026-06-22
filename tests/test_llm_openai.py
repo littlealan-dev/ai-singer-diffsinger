@@ -73,7 +73,8 @@ def test_openai_generate_includes_prompt_cache_fields_when_enabled(
     assert payload["prompt_cache_key"] == "sightsinger:llm:openai:gpt-5.5:build-123"
     assert payload["prompt_cache_retention"] == "24h"
     assert payload["input"][0] == {"role": "developer", "content": "STATIC"}
-    assert payload["input"][1]["content"].startswith("Dynamic Context:\n")
+    assert payload["input"][-1]["content"].startswith("Dynamic Context:\n")
+    assert payload["input"][-1]["content"].endswith("Current user request:\nhello")
     assert payload["text"]["format"]["type"] == "json_schema"
     assert payload["text"]["format"]["name"] == "sightsinger_llm_response"
     assert payload["text"]["format"]["strict"] is False

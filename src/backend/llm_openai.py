@@ -141,15 +141,25 @@ class OpenAIRestClient:
         static_prompt: str,
         dynamic_prompt: str,
     ) -> List[Dict[str, str]]:
-        """Convert prompt bundle and chat history into Responses API input items."""
-        items: List[Dict[str, str]] = [
-            {"role": "developer", "content": static_prompt},
-            {"role": "user", "content": dynamic_prompt},
-        ]
-        for entry in history[-10:]:
+        """Place current application state immediately before the latest request."""
+        items: List[Dict[str, str]] = [{"role": "developer", "content": static_prompt}]
+        recent_history = history[-10:]
+        history_before_current = recent_history
+        current_entry: Dict[str, str] | None = None
+        if recent_history and recent_history[-1].get("role", "user") != "assistant":
+            history_before_current = recent_history[:-1]
+            current_entry = recent_history[-1]
+        for entry in history_before_current:
             role = entry.get("role", "user")
             input_role = "assistant" if role == "assistant" else "user"
             items.append({"role": input_role, "content": entry.get("content", "")})
+        current_text = dynamic_prompt
+        if current_entry is not None:
+            current_text = (
+                f"{dynamic_prompt}\n\nCurrent user request:\n"
+                f"{current_entry.get('content', '')}"
+            )
+        items.append({"role": "user", "content": current_text})
         return items
 
     def _prompt_cache_key(self, model: str) -> str:

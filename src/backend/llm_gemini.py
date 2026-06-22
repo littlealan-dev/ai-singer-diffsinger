@@ -204,14 +204,27 @@ class GeminiRestClient:
         *,
         dynamic_prompt: str,
     ) -> List[Dict[str, Any]]:
-        """Convert chat history into Gemini content payloads."""
-        contents: List[Dict[str, Any]] = [
-            {"role": "user", "parts": [{"text": dynamic_prompt}]}
-        ]
-        for entry in history[-10:]:
+        """Place current application state immediately before the latest request."""
+        recent_history = history[-10:]
+        contents: List[Dict[str, Any]] = []
+        history_before_current = recent_history
+        current_entry: Dict[str, str] | None = None
+        if recent_history and recent_history[-1].get("role", "user") != "assistant":
+            history_before_current = recent_history[:-1]
+            current_entry = recent_history[-1]
+        if history_before_current and history_before_current[0].get("role") == "assistant":
+            history_before_current = history_before_current[1:]
+        for entry in history_before_current:
             role = entry.get("role", "user")
             content_role = "model" if role == "assistant" else "user"
             contents.append({"role": content_role, "parts": [{"text": entry.get("content", "")}]})
+        current_text = dynamic_prompt
+        if current_entry is not None:
+            current_text = (
+                f"{dynamic_prompt}\n\nCurrent user request:\n"
+                f"{current_entry.get('content', '')}"
+            )
+        contents.append({"role": "user", "parts": [{"text": current_text}]})
         return contents
 
 

@@ -263,6 +263,23 @@ def test_build_prompt_bundle_preserves_unicode_voicebank_names() -> None:
     assert r"\u7eee\u8431" not in bundle.dynamic_prompt_text
 
 
+def test_build_prompt_bundle_includes_canonical_solfege_settings() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        solfege_settings={
+            "system": "fixed_do",
+            "mode": "major",
+            "revision": 4,
+        },
+    )
+
+    assert "Canonical current solfege settings (authoritative):" in bundle.dynamic_prompt_text
+    assert "supersede any conflicting statements" in bundle.dynamic_prompt_text
+    assert '"system": "fixed_do"' in bundle.dynamic_prompt_text
+    assert '"revision": 4' in bundle.dynamic_prompt_text
+
+
 def test_system_prompt_defaults_to_qixuan_unless_clear_male_lower_part() -> None:
     prompt = build_system_prompt(
         tools=[],
@@ -294,13 +311,19 @@ def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> Non
     )
     assert "Solfege verse selection exception" in prompt
     assert "most solfege-like existing verse" in prompt
+    assert "copy the exact `score_summary.parts[].part_id` value" in prompt
+    assert "Never put `part_name`" in prompt
+    assert "One `add_solfege_lyric_verse` invocation modifies exactly one part" in prompt
+    assert "successful tool result explicitly identifies that part" in prompt
     assert "`score_summary.parts[].lyric_verses[]`" in prompt
     assert "do not call `reparse` merely to discover or compare verse contents" in prompt
     assert "call `reparse` exactly once" in prompt
     assert "solfege_pronunciation_patch=true" in prompt
     assert "whole-token solfege syllables" in prompt
     assert "does not convert ordinary lyrics into solfege" in prompt
-    assert "no solfege verse was found" in prompt
+    assert "call `add_solfege_lyric_verse`" in prompt
+    assert "call `modify_solfege_settings`" in prompt
+    assert "override conflicting statements in conversation history" in prompt
 
 
 def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:

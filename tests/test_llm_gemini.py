@@ -74,7 +74,30 @@ def test_gemini_generate_uses_cached_content_when_available(
     payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
     assert payload["cachedContent"] == "cachedContents/prompt-cache-123"
     assert "system_instruction" not in payload
-    assert payload["contents"][0]["parts"][0]["text"].startswith("Dynamic Context:\n")
+    current_request = payload["contents"][-1]["parts"][0]["text"]
+    assert current_request.startswith("Dynamic Context:\n")
+    assert current_request.endswith("Current user request:\nhello")
+
+
+def test_gemini_places_authoritative_context_after_stale_history() -> None:
+    client = GeminiRestClient(_settings(), api_key="dummy")
+
+    contents = client._history_to_contents(
+        [
+            {"role": "user", "content": "Use fixed do."},
+            {"role": "assistant", "content": "The setting is fixed do."},
+            {"role": "user", "content": "Sing soprano in solfege."},
+        ],
+        dynamic_prompt="Dynamic Context:\nsystem: movable_do\nEnd Dynamic Context.",
+    )
+
+    assert contents[1]["parts"][0]["text"] == "The setting is fixed do."
+    assert contents[-1]["parts"][0]["text"].startswith(
+        "Dynamic Context:\nsystem: movable_do"
+    )
+    assert contents[-1]["parts"][0]["text"].endswith(
+        "Current user request:\nSing soprano in solfege."
+    )
 
 
 def test_gemini_generate_uses_preprocess_role_model_and_cache(

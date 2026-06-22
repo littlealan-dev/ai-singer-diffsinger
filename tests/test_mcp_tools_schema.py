@@ -41,6 +41,26 @@ def test_parse_score_schema_describes_per_part_lyric_verse_samples() -> None:
     assert "First 20" in verse_schema["properties"]["sample"]["description"]
 
 
+def test_solfege_tools_expose_add_and_modify_contracts() -> None:
+    schemas = _tool_schema_map()
+    add_schema = schemas["add_solfege_lyric_verse"]["inputSchema"]
+    modify_schema = schemas["modify_solfege_settings"]["inputSchema"]
+
+    assert len(add_schema["oneOf"]) == 2
+    assert add_schema["oneOf"][0]["properties"]["part_id"]["type"] == "string"
+    assert "score_summary.parts[].part_id" in add_schema["properties"]["part_id"]["description"]
+    assert "not part_name" in add_schema["oneOf"][0]["properties"]["part_id"]["description"]
+    assert "instead of guessing" in add_schema["properties"]["part_index"]["description"]
+    assert "exactly one selected clean part" in schemas["add_solfege_lyric_verse"]["description"]
+    assert "one successful invocation per part" in schemas["add_solfege_lyric_verse"]["description"]
+    assert modify_schema["properties"]["system"]["enum"] == [
+        "movable_do",
+        "fixed_do",
+        None,
+    ]
+    assert len(modify_schema["anyOf"]) == 2
+
+
 def test_metadata_tools_have_field_descriptions() -> None:
     schema_map = _tool_schema_map()
 

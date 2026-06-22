@@ -14,6 +14,7 @@ export type ScoreSummary = {
   duration_seconds?: number;
   parts?: ScoreSummaryPart[];
   available_verses?: Array<string | number>;
+  selected_verse_number?: string | number | null;
 };
 
 export type ChatSelection = {
@@ -37,6 +38,30 @@ export type UploadResponse = {
   parsed: boolean;
   current_score?: unknown;
   score_summary?: ScoreSummary | null;
+  solfege_settings?: SolfegeSettings;
+};
+
+export type SolfegeSystem = "movable_do" | "fixed_do";
+export type SolfegeMode = "major" | "minor_la_based" | "minor_do_based";
+
+export type SolfegeSettings = {
+  system: SolfegeSystem;
+  mode: SolfegeMode;
+  revision: number;
+};
+
+export type SolfegeSettingsResponse = {
+  status?: "ready";
+  settings: SolfegeSettings;
+  score_version: number;
+  updated_generated_verses?: Array<{
+    part_id: string;
+    part_index?: number;
+    verse_number: string;
+    notes_updated: number;
+  }>;
+  current_score?: unknown;
+  score_summary?: ScoreSummary | null;
 };
 
 export type ChatResponse =
@@ -44,17 +69,21 @@ export type ChatResponse =
       type: "chat_text";
       message: string;
       current_score?: unknown;
+      score_summary?: ScoreSummary | null;
       suppress_selector?: boolean;
       details?: unknown;
       warning?: string;
+      solfege_settings?: SolfegeSettings;
     }
   | {
       type: "chat_audio";
       message: string;
       audio_url: string;
       current_score?: unknown;
+      score_summary?: ScoreSummary | null;
       details?: unknown;
       warning?: string;
+      solfege_settings?: SolfegeSettings;
     }
   | {
       type: "chat_progress";
@@ -62,8 +91,10 @@ export type ChatResponse =
       progress_url: string;
       job_id?: string;
       current_score?: unknown;
+      score_summary?: ScoreSummary | null;
       details?: unknown;
       warning?: string;
+      solfege_settings?: SolfegeSettings;
     }
   | { type: "chat_error"; message: string; details?: unknown };
 
@@ -450,6 +481,25 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
     throw await errorFromResponse(response, "Failed to load score.");
   }
   return response.text();
+}
+
+export async function fetchSolfegeSettings(
+  sessionId: string
+): Promise<SolfegeSettingsResponse> {
+  return request<SolfegeSettingsResponse>(`/sessions/${sessionId}/solfege-settings`, {
+    method: "GET",
+  });
+}
+
+export async function updateSolfegeSettings(
+  sessionId: string,
+  settings: Pick<SolfegeSettings, "system" | "mode">
+): Promise<SolfegeSettingsResponse> {
+  return request<SolfegeSettingsResponse>(`/sessions/${sessionId}/solfege-settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings }),
+  });
 }
 
 export async function fetchVoicebanks(): Promise<VoicebankOption[]> {

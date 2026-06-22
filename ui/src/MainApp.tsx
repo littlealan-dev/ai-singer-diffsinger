@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check, X } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check, X, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -10,15 +10,19 @@ import {
   createSession,
   fetchScoreXml,
   fetchProgress,
+  fetchSolfegeSettings,
   fetchVoicebanks,
   markFeedbackPrompted,
   submitAudioFeedback,
   uploadScore,
+  updateSolfegeSettings,
   type ChatSelection,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
   type ProgressResponse,
   type ScoreSummary,
+  type SolfegeMode,
+  type SolfegeSystem,
   type VoicebankOption,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
@@ -395,6 +399,12 @@ export default function MainApp() {
   const [selectedVoicebankId, setSelectedVoicebankId] = useState<string | null>(null);
   const [failedVoiceImages, setFailedVoiceImages] = useState<Record<string, boolean>>({});
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
+  const [solfegeMenuOpen, setSolfegeMenuOpen] = useState(false);
+  const [solfegeSystem, setSolfegeSystem] = useState<SolfegeSystem>("movable_do");
+  const [solfegeMode, setSolfegeMode] = useState<SolfegeMode>("major");
+  const [draftSolfegeSystem, setDraftSolfegeSystem] = useState<SolfegeSystem>("movable_do");
+  const [draftSolfegeMode, setDraftSolfegeMode] = useState<SolfegeMode>("major");
+  const [solfegeSettingsSaving, setSolfegeSettingsSaving] = useState(false);
   const [showWaitlistModal, setShowWaitlistModal] = useState(false);
   const [waitlistSource, setWaitlistSource] = useState<WaitlistSource>("studio_menu");
   const [showCreditsModal, setShowCreditsModal] = useState(false);
@@ -415,6 +425,7 @@ export default function MainApp() {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
+  const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
   const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
@@ -468,6 +479,13 @@ export default function MainApp() {
   const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
+  const solfegeSystemLabel = solfegeSystem === "movable_do" ? "Movable Do" : "Fixed Do";
+  const solfegeModeLabel =
+    solfegeMode === "major"
+      ? "Major"
+      : solfegeMode === "minor_la_based"
+        ? "Minor (La)"
+        : "Minor (Do)";
   const renderVoiceAvatar = (voice: VoicebankOption, className: string) => {
     const imageUrl = failedVoiceImages[voice.id] ? null : voiceImageUrl(voice);
     if (imageUrl) {
@@ -581,17 +599,41 @@ export default function MainApp() {
   }, [isAuthenticated, user]);
 
   useEffect(() => {
-    if (!voiceMenuOpen) return;
+    if (!sessionId) return;
+    let cancelled = false;
+    fetchSolfegeSettings(sessionId)
+      .then((response) => {
+        if (cancelled) return;
+        setSolfegeSystem(response.settings.system);
+        setSolfegeMode(response.settings.mode);
+        setDraftSolfegeSystem(response.settings.system);
+        setDraftSolfegeMode(response.settings.mode);
+      })
+      .catch(() => {
+        // Defaults remain usable while the session is still initializing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!voiceMenuOpen && !solfegeMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Node && voicePickerRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        (voicePickerRef.current?.contains(target) || solfegePickerRef.current?.contains(target))
+      ) {
         return;
       }
       setVoiceMenuOpen(false);
+      setSolfegeMenuOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setVoiceMenuOpen(false);
+        setSolfegeMenuOpen(false);
       }
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -600,7 +642,7 @@ export default function MainApp() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [voiceMenuOpen]);
+  }, [solfegeMenuOpen, voiceMenuOpen]);
 
   const ensureSession = async (): Promise<string> => {
     if (sessionId) {
@@ -1218,6 +1260,12 @@ export default function MainApp() {
       const activeSessionId = sessionId ?? await ensureSession();
       const uploadResponse = await uploadScore(activeSessionId, file);
       const summary = uploadResponse.score_summary ?? null;
+      if (uploadResponse.solfege_settings) {
+        setSolfegeSystem(uploadResponse.solfege_settings.system);
+        setSolfegeMode(uploadResponse.solfege_settings.mode);
+        setDraftSolfegeSystem(uploadResponse.solfege_settings.system);
+        setDraftSolfegeMode(uploadResponse.solfege_settings.mode);
+      }
       setScoreSummary(summary);
       setPendingSelection(shouldPromptSelection(summary));
       setSelectorShown(false);
@@ -1303,6 +1351,18 @@ export default function MainApp() {
       if ("current_score" in response && response.current_score) {
         await refreshScorePreview();
       }
+      if ("score_summary" in response && response.score_summary) {
+        setScoreSummary(response.score_summary);
+        if (response.score_summary.selected_verse_number != null) {
+          setSelectedVerse(String(response.score_summary.selected_verse_number));
+        }
+      }
+      if ("solfege_settings" in response && response.solfege_settings) {
+        setSolfegeSystem(response.solfege_settings.system);
+        setSolfegeMode(response.solfege_settings.mode);
+        setDraftSolfegeSystem(response.solfege_settings.system);
+        setDraftSolfegeMode(response.solfege_settings.mode);
+      }
       if ("warning" in response && response.warning) {
         setError(String(response.warning));
       }
@@ -1335,6 +1395,34 @@ export default function MainApp() {
     const voicebankId = selectedVoicebankId;
     setInput("");
     await sendMessage(content, undefined, voicebankId);
+  };
+
+  const handleConfirmSolfegeSettings = async () => {
+    if (!sessionId || solfegeSettingsSaving) return;
+    setSolfegeSettingsSaving(true);
+    setError(null);
+    try {
+      const response = await updateSolfegeSettings(sessionId, {
+        system: draftSolfegeSystem,
+        mode: draftSolfegeMode,
+      });
+      setSolfegeSystem(response.settings.system);
+      setSolfegeMode(response.settings.mode);
+      setDraftSolfegeSystem(response.settings.system);
+      setDraftSolfegeMode(response.settings.mode);
+      if (response.score_summary) {
+        setScoreSummary(response.score_summary);
+      }
+      if (score && response.current_score) {
+        const data = await fetchScoreXml(sessionId);
+        setScore({ name: score.name, data });
+      }
+      setSolfegeMenuOpen(false);
+    } catch (err: any) {
+      setError(err?.message || "Failed to update solfege settings.");
+    } finally {
+      setSolfegeSettingsSaving(false);
+    }
   };
 
   const handleSelectionSend = async () => {
@@ -1803,28 +1891,55 @@ export default function MainApp() {
             )}
           </div>
           <div className="chat-input">
-            <label
-              className="upload-button"
-              onClick={(event) => {
-                if (creditsLocked) {
-                  event.preventDefault();
-                  openPaywall("upload_blocked");
-                }
-              }}
-            >
-              <UploadCloud size={18} />
-              <span>{uploading ? "Uploading..." : "Upload Score"}</span>
-              <input
-                type="file"
-                accept=".xml,.mxl"
-                disabled={uploading || creditsLocked}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) handleUpload(file);
-                }}
-              />
-            </label>
             <div className="input-row composer-row">
+              <textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder="Ask me to sing a specific part or verse..."
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    if (chatTurnInProgress) return;
+                    handleSend();
+                  }
+                }}
+                disabled={creditsLocked}
+                rows={2}
+              />
+              <button
+                onClick={handleSend}
+                className="send-button"
+                disabled={!input.trim() || creditsLocked || chatTurnInProgress}
+                aria-disabled={creditsLocked || chatTurnInProgress}
+                aria-label="Send message"
+              >
+                <Send size={18} />
+              </button>
+            </div>
+            <div className="composer-menu-bar" aria-label="Composer settings">
+              <label
+                className="upload-button composer-upload-button"
+                title="Upload Score"
+                aria-label={uploading ? "Uploading score" : "Upload Score"}
+                onClick={(event) => {
+                  if (creditsLocked) {
+                    event.preventDefault();
+                    openPaywall("upload_blocked");
+                  }
+                }}
+              >
+                <UploadCloud size={18} />
+                <span>{uploading ? "Uploading..." : "Upload Score"}</span>
+                <input
+                  type="file"
+                  accept=".xml,.mxl"
+                  disabled={uploading || creditsLocked}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) handleUpload(file);
+                  }}
+                />
+              </label>
               <div className="voice-picker" ref={voicePickerRef}>
                 {voiceMenuOpen ? (
                   <div className="voice-picker-menu" role="listbox" aria-label="Select AI voice">
@@ -1872,7 +1987,10 @@ export default function MainApp() {
                   className={clsx("voice-picker-trigger", { open: voiceMenuOpen })}
                   aria-haspopup="listbox"
                   aria-expanded={voiceMenuOpen}
-                  onClick={() => setVoiceMenuOpen((open) => !open)}
+                  onClick={() => {
+                    setVoiceMenuOpen((open) => !open);
+                    setSolfegeMenuOpen(false);
+                  }}
                 >
                   {selectedVoice ? (
                     renderVoiceAvatar(selectedVoice, "voice-picker-trigger-avatar")
@@ -1893,28 +2011,121 @@ export default function MainApp() {
                   <ChevronsUpDown size={16} aria-hidden="true" />
                 </button>
               </div>
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder="Ask me to sing a specific part or verse..."
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    if (chatTurnInProgress) return;
-                    handleSend();
-                  }
-                }}
-                disabled={creditsLocked}
-                rows={2}
-              />
-              <button
-                onClick={handleSend}
-                className="send-button"
-                disabled={!input.trim() || creditsLocked || chatTurnInProgress}
-                aria-disabled={creditsLocked || chatTurnInProgress}
-              >
-                <Send size={18} />
-              </button>
+              <div className="solfege-picker" ref={solfegePickerRef}>
+                {solfegeMenuOpen ? (
+                  <div
+                    className="solfege-picker-menu"
+                    role="dialog"
+                    aria-label="Solfege settings"
+                  >
+                    <fieldset
+                      className="solfege-setting-group"
+                      disabled={solfegeSettingsSaving}
+                    >
+                      <legend>System</legend>
+                      <div className="solfege-segmented-control">
+                        {([
+                          ["movable_do", "Movable Do"],
+                          ["fixed_do", "Fixed Do"],
+                        ] as const).map(([value, label]) => (
+                          <button
+                            key={value}
+                            type="button"
+                            className={clsx({ selected: draftSolfegeSystem === value })}
+                            aria-pressed={draftSolfegeSystem === value}
+                            onClick={() => setDraftSolfegeSystem(value)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+                    <fieldset
+                      className="solfege-setting-group"
+                      disabled={draftSolfegeSystem === "fixed_do" || solfegeSettingsSaving}
+                    >
+                      <legend>Mode</legend>
+                      <div className="solfege-mode-options">
+                        {([
+                          ["major", "Major"],
+                          ["minor_la_based", "Minor - La based"],
+                          ["minor_do_based", "Minor - Do based"],
+                        ] as const).map(([value, label]) => (
+                          <label
+                            key={value}
+                            className={clsx("solfege-mode-option", {
+                              selected: draftSolfegeMode === value,
+                            })}
+                          >
+                            <input
+                              type="radio"
+                              name="solfege-mode"
+                              value={value}
+                              checked={draftSolfegeMode === value}
+                              onChange={() => setDraftSolfegeMode(value)}
+                            />
+                            <span className="solfege-radio-indicator" aria-hidden="true" />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                    <div className="solfege-menu-actions">
+                      <button
+                        type="button"
+                      className="solfege-cancel-button"
+                        disabled={solfegeSettingsSaving}
+                        aria-label="Cancel solfege settings changes"
+                        title="Cancel changes"
+                        onClick={() => {
+                          setDraftSolfegeSystem(solfegeSystem);
+                          setDraftSolfegeMode(solfegeMode);
+                          setSolfegeMenuOpen(false);
+                        }}
+                      >
+                        <X size={17} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="solfege-confirm-button"
+                        disabled={solfegeSettingsSaving}
+                        aria-label="Apply solfege settings"
+                        title="Apply solfege settings"
+                        onClick={() => void handleConfirmSolfegeSettings()}
+                      >
+                        <Check size={17} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className={clsx("solfege-picker-trigger", { open: solfegeMenuOpen })}
+                  aria-haspopup="dialog"
+                  aria-expanded={solfegeMenuOpen}
+                  disabled={!score || solfegeSettingsSaving}
+                  onClick={() => {
+                    if (!solfegeMenuOpen) {
+                      setDraftSolfegeSystem(solfegeSystem);
+                      setDraftSolfegeMode(solfegeMode);
+                    }
+                    setSolfegeMenuOpen((open) => !open);
+                    setVoiceMenuOpen(false);
+                  }}
+                >
+                  <span className="solfege-picker-trigger-icon" aria-hidden="true">
+                    <Music2 size={16} />
+                  </span>
+                  <span className="solfege-picker-trigger-copy">
+                    <span className="solfege-picker-trigger-label">Solfege</span>
+                    <span className="solfege-picker-trigger-name">
+                      {solfegeSystemLabel}
+                      {solfegeSystem === "movable_do" ? ` · ${solfegeModeLabel}` : ""}
+                    </span>
+                  </span>
+                  <ChevronsUpDown size={16} aria-hidden="true" />
+                </button>
+              </div>
             </div>
           </div>
         </section>

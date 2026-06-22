@@ -248,6 +248,8 @@ class McpRouter:
         self._tool_to_worker = {
             "parse_score": "cpu",
             "reparse": "cpu",
+            "add_solfege_lyric_verse": "cpu",
+            "modify_solfege_settings": "cpu",
             "preprocess_voice_parts": "cpu",
             "list_voicebanks": "cpu",
             "get_voicebank_info": "cpu",

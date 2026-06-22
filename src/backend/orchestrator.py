@@ -50,11 +50,15 @@ MAX_SECTION_CHANGE_RATIO = 0.7
 MAX_MEASURE_CHANGE_RATIO = 0.8
 TOOL_REPARSE = "reparse"
 TOOL_SYNTHESIZE = "synthesize"
+TOOL_ADD_SOLFEGE_VERSE = "add_solfege_lyric_verse"
+TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
 TOOL_PREPROCESS_VOICE_PARTS = "preprocess_voice_parts"
 TOOL_START_PREPROCESS_WORKFLOW = "start_preprocess_voice_part_workflow"
 DEFAULT_LLM_TOOL_ALLOWLIST = {
     TOOL_REPARSE,
     TOOL_SYNTHESIZE,
+    TOOL_ADD_SOLFEGE_VERSE,
+    TOOL_MODIFY_SOLFEGE_SETTINGS,
     TOOL_START_PREPROCESS_WORKFLOW,
 }
 PREPROCESS_LLM_TOOL_ALLOWLIST = {TOOL_PREPROCESS_VOICE_PARTS}
@@ -1294,6 +1298,8 @@ class Orchestrator:
                 forced_voicebank_id=forced_voicebank_id,
             )
             working_score = tool_result.score
+            if tool_result.session_state_changed:
+                include_score = True
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
@@ -1692,7 +1698,123 @@ class Orchestrator:
             updated_score = updated_snapshot.get("current_score")
             if updated_score is not None:
                 response["current_score"] = updated_score
+            updated_summary = updated_snapshot.get("score_summary")
+            if isinstance(updated_summary, dict):
+                response["score_summary"] = updated_summary
+            solfege_settings = updated_snapshot.get("solfege_settings")
+            if isinstance(solfege_settings, dict):
+                response["solfege_settings"] = solfege_settings
         return response
+
+    async def get_solfege_settings(
+        self, session_id: str, *, user_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Return canonical solfege settings and current score version."""
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        current_score = snapshot.get("current_score")
+        return {
+            "settings": dict(snapshot.get("solfege_settings") or {}),
+            "score_version": (
+                current_score.get("version") if isinstance(current_score, dict) else 0
+            ),
+        }
+
+    async def update_solfege_settings(
+        self,
+        session_id: str,
+        *,
+        user_id: Optional[str],
+        system: str,
+        mode: str,
+    ) -> Dict[str, Any]:
+        """Apply a direct UI settings change under the session chat lock."""
+        lock = await self._get_chat_lock(session_id)
+        async with lock:
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            return await self._apply_solfege_settings_change(
+                session_id,
+                snapshot=snapshot,
+                user_id=user_id,
+                desired={"system": system, "mode": mode},
+            )
+
+    async def _apply_solfege_settings_change(
+        self,
+        session_id: str,
+        *,
+        snapshot: Dict[str, Any],
+        user_id: Optional[str],
+        desired: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Rewrite generated verses and persist canonical score/settings state."""
+        current_settings = dict(snapshot.get("solfege_settings") or {})
+        settings = {
+            "system": str(desired.get("system") or current_settings.get("system") or "movable_do"),
+            "mode": str(desired.get("mode") or current_settings.get("mode") or "major"),
+        }
+        files = snapshot.get("files") or {}
+        source_path = files.get("musicxml_path") if isinstance(files, dict) else None
+        if not isinstance(source_path, str) or not source_path:
+            raise ValueError("Session is missing its active MusicXML path.")
+        output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
+        args = {
+            "source_musicxml_path": source_path,
+            "output_musicxml_path": str(output_path.relative_to(self._settings.project_root)),
+            "settings": settings,
+            "selected_verse_number": self._score_selected_verse_number(
+                ((snapshot.get("current_score") or {}).get("score") or {})
+                if isinstance(snapshot.get("current_score"), dict)
+                else {}
+            ),
+        }
+        result = await asyncio.to_thread(
+            self._router.call_tool, TOOL_MODIFY_SOLFEGE_SETTINGS, args
+        )
+        if not isinstance(result, dict):
+            raise ValueError("Unable to update solfege settings.")
+        if result.get("status") != "ready":
+            raise ValueError(str(result.get("message") or "Unable to update solfege settings."))
+        score, summary, version = await self._persist_solfege_result(
+            session_id,
+            result,
+            update_settings=settings,
+        )
+        return {
+            "status": "ready",
+            "settings": dict(result.get("settings") or settings) | {
+                "revision": int((await self._sessions.get_snapshot(session_id, user_id))["solfege_settings"]["revision"])
+            },
+            "score_version": version,
+            "updated_generated_verses": list(result.get("updated_generated_verses") or []),
+            "current_score": {"score": score, "version": version},
+            "score_summary": summary,
+        }
+
+    async def _persist_solfege_result(
+        self,
+        session_id: str,
+        result: Dict[str, Any],
+        *,
+        update_settings: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]], int]:
+        """Persist a successful solfege transform as the active session score."""
+        score = result.get("derived_score")
+        if not isinstance(score, dict):
+            raise ValueError("Solfege transform did not return a parsed score.")
+        summary = result.get("score_summary")
+        path_value = result.get("derived_musicxml_path")
+        if not isinstance(path_value, str) or not path_value:
+            raise ValueError("Solfege transform did not return an output path.")
+        path = Path(path_value).resolve()
+        await self._sessions.set_file(session_id, "musicxml_path", path)
+        await self._sessions.set_score_summary(
+            session_id, summary if isinstance(summary, dict) else None
+        )
+        await self._sessions.set_original_score(session_id, score)
+        version = await self._sessions.set_score(session_id, score)
+        if update_settings is not None:
+            await self._sessions.set_solfege_settings(session_id, update_settings)
+        return score, summary if isinstance(summary, dict) else None, version
 
     def _build_repair_planning_prompt(
         self,
@@ -3591,6 +3713,11 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                solfege_settings=(
+                    snapshot.get("solfege_settings")
+                    if isinstance(snapshot.get("solfege_settings"), dict)
+                    else None
+                ),
                 role=role,
             )
             text = await asyncio.to_thread(
@@ -3699,6 +3826,11 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                solfege_settings=(
+                    snapshot.get("solfege_settings")
+                    if isinstance(snapshot.get("solfege_settings"), dict)
+                    else None
+                ),
                 role=role,
             )
             text = await asyncio.to_thread(
@@ -4090,9 +4222,109 @@ class Orchestrator:
             if call.name == TOOL_START_PREPROCESS_WORKFLOW:
                 self._logger.warning("handoff_tool_reached_executor tool=%s", call.name)
                 continue
-            if call.name not in {TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_SYNTHESIZE}:
+            if call.name not in {
+                TOOL_REPARSE,
+                TOOL_PREPROCESS_VOICE_PARTS,
+                TOOL_SYNTHESIZE,
+                TOOL_ADD_SOLFEGE_VERSE,
+                TOOL_MODIFY_SOLFEGE_SETTINGS,
+            }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name == TOOL_ADD_SOLFEGE_VERSE:
+                snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                files = snapshot.get("files") or {}
+                source_path = files.get("musicxml_path") if isinstance(files, dict) else None
+                if not isinstance(source_path, str) or not source_path:
+                    raise ValueError("Session is missing its active MusicXML path.")
+                output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
+                args = dict(call.arguments)
+                args.pop("reason", None)
+                raw_part_id = args.get("part_id")
+                if raw_part_id is not None and args.get("part_index") is None:
+                    resolved_part_index = self._resolve_named_part_index(
+                        current_score,
+                        str(raw_part_id),
+                    )
+                    if resolved_part_index is not None:
+                        args.pop("part_id", None)
+                        args["part_index"] = resolved_part_index
+                args["source_musicxml_path"] = source_path
+                args["output_musicxml_path"] = str(
+                    output_path.relative_to(self._settings.project_root)
+                )
+                args["settings"] = dict(snapshot.get("solfege_settings") or {})
+                result = await asyncio.to_thread(
+                    self._router.call_tool, TOOL_ADD_SOLFEGE_VERSE, args
+                )
+                if not isinstance(result, dict):
+                    raise ValueError("Invalid add-solfege tool result.")
+                if result.get("status") != "ready":
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(result, sort_keys=True),
+                        action_required_payload=result,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                current_score, score_summary, _ = await self._persist_solfege_result(
+                    session_id, result
+                )
+                selected_explicit_verse_number = str(result["new_verse_number"])
+                await self._sessions.set_metadata(
+                    session_id,
+                    EXPLICIT_VERSE_METADATA_KEY,
+                    selected_explicit_verse_number,
+                )
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(
+                        {
+                            "status": "solfege_verse_ready",
+                            "operation_scope": "exactly_one_part",
+                            "completed_target": result.get("target"),
+                            "selected_verse_number": selected_explicit_verse_number,
+                            "message": (
+                                "A generated solfege verse was added only to completed_target. "
+                                "If the original user request names any additional parts, call "
+                                "add_solfege_lyric_verse once for the next requested part that does "
+                                "not yet have a generated solfege verse. Do not claim another part "
+                                "was updated without its own successful completed_target result."
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                    explicit_verse_number=selected_explicit_verse_number,
+                    session_state_changed=True,
+                )
+            if call.name == TOOL_MODIFY_SOLFEGE_SETTINGS:
+                snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                result = await self._apply_solfege_settings_change(
+                    session_id,
+                    snapshot=snapshot,
+                    user_id=user_id,
+                    desired=call.arguments,
+                )
+                current_score_payload = result.get("current_score")
+                if isinstance(current_score_payload, dict) and isinstance(
+                    current_score_payload.get("score"), dict
+                ):
+                    current_score = current_score_payload["score"]
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(
+                        {
+                            "status": "solfege_settings_updated",
+                            "settings": result.get("settings"),
+                            "updated_generated_verses": result.get("updated_generated_verses"),
+                        },
+                        sort_keys=True,
+                    ),
+                    explicit_verse_number=selected_explicit_verse_number,
+                    session_state_changed=True,
+                )
             if call.name == "reparse":
                 if self._tool_calls_require_verse_selection(
                     [call],
@@ -4636,6 +4868,49 @@ class Orchestrator:
             return part_index
         return 0
 
+    def _resolve_named_part_index(
+        self,
+        score: Dict[str, Any],
+        part_selector: str,
+    ) -> Optional[int]:
+        """Resolve a parsed score part ID or display name to its stable index."""
+        selector = part_selector.strip()
+        if not selector:
+            return None
+        parts = score.get("parts")
+        if not isinstance(parts, list):
+            return None
+
+        exact_id_matches = [
+            idx
+            for idx, part in enumerate(parts)
+            if isinstance(part, dict)
+            and str(part.get("part_id") or "").strip() == selector
+        ]
+        if len(exact_id_matches) == 1:
+            return exact_id_matches[0]
+        exact_name_matches = [
+            idx
+            for idx, part in enumerate(parts)
+            if isinstance(part, dict)
+            and str(part.get("part_name") or "").strip() == selector
+        ]
+        if len(exact_name_matches) == 1:
+            return exact_name_matches[0]
+
+        folded_selector = selector.casefold()
+        matches = [
+            idx
+            for idx, part in enumerate(parts)
+            if isinstance(part, dict)
+            and folded_selector
+            in {
+                str(part.get("part_id") or "").strip().casefold(),
+                str(part.get("part_name") or "").strip().casefold(),
+            }
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _build_preprocess_mapping_context(
         self,
         score: Dict[str, Any],
@@ -4767,6 +5042,7 @@ class ToolExecutionResult:
     action_required_payload: Optional[Dict[str, Any]] = None
     review_materialization: Optional[Dict[str, Any]] = None
     explicit_verse_number: Optional[str] = None
+    session_state_changed: bool = False
 
 
 @dataclass(frozen=True)

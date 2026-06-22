@@ -1397,6 +1397,142 @@ TOOLS: List[Tool] = [
         output_schema=_PARSE_SCORE_OUTPUT_SCHEMA,
     ),
     Tool(
+        name="add_solfege_lyric_verse",
+        description=(
+            "Add deterministic solfege to exactly one selected clean part as a new generated lyric "
+            "verse. One invocation never modifies any other part; multiple requested parts require "
+            "one successful invocation per part. "
+            "Select it with the exact part_id copied from score_summary.parts[].part_id, or with "
+            "part_index. Do not pass part_name as part_id. Backend injects source/output paths "
+            "and canonical solfege settings."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_musicxml_path": {"type": "string"},
+                "output_musicxml_path": {"type": "string"},
+                "settings": {"type": "object"},
+                "part_id": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Exact identifier copied verbatim from score_summary.parts[].part_id. "
+                        "This is not part_name; never pass the display name or user-facing label here. "
+                        "Use part_index instead if the exact part_id is unavailable or uncertain."
+                    ),
+                },
+                "part_index": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "description": (
+                        "Exact 0-based score_summary.parts[] index. Use this instead of guessing "
+                        "part_id from part_name."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Short reason the user needs a generated solfege verse.",
+                },
+            },
+            "oneOf": [
+                {
+                    "required": ["part_id"],
+                    "properties": {
+                        "part_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Exact score_summary.parts[].part_id value, not part_name."
+                            ),
+                        },
+                        "part_index": {"type": "null"},
+                    },
+                },
+                {
+                    "required": ["part_index"],
+                    "properties": {
+                        "part_index": {"type": "integer", "minimum": 0},
+                        "part_id": {"type": "null"},
+                    },
+                },
+            ],
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "message": {"type": ["string", "null"]},
+                "derived_score": {"type": ["object", "null"]},
+                "score_summary": {"type": ["object", "null"]},
+                "derived_musicxml_path": {"type": ["string", "null"]},
+                "new_verse_number": {"type": ["string", "null"]},
+                "selected_verse_number": {"type": ["string", "null"]},
+                "settings": {"type": ["object", "null"]},
+                "target": {"type": ["object", "null"]},
+                "notes_annotated": {"type": ["integer", "null"]},
+                "notes_extended": {"type": ["integer", "null"]},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+                "action": {"type": ["string", "null"]},
+                "code": {"type": ["string", "null"]},
+                "diagnostics": {"type": ["object", "null"]},
+            },
+            "required": ["status"],
+            "additionalProperties": True,
+        },
+    ),
+    Tool(
+        name="modify_solfege_settings",
+        description=(
+            "Change solfege system and/or mode, rewriting every SightSinger-generated "
+            "solfege verse in the active score. Backend injects paths and current settings."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_musicxml_path": {"type": "string"},
+                "output_musicxml_path": {"type": "string"},
+                "settings": {"type": "object"},
+                "selected_verse_number": {"type": ["string", "integer", "null"]},
+                "system": {
+                    "type": ["string", "null"],
+                    "enum": ["movable_do", "fixed_do", None],
+                },
+                "mode": {
+                    "type": ["string", "null"],
+                    "enum": ["major", "minor_la_based", "minor_do_based", None],
+                },
+                "reason": {"type": "string"},
+            },
+            "anyOf": [
+                {
+                    "required": ["system"],
+                    "properties": {"system": {"type": "string"}},
+                },
+                {
+                    "required": ["mode"],
+                    "properties": {"mode": {"type": "string"}},
+                },
+            ],
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "derived_score": {"type": "object"},
+                "score_summary": {"type": ["object", "null"]},
+                "derived_musicxml_path": {"type": "string"},
+                "settings": {"type": "object"},
+                "updated_generated_verses": {"type": "array", "items": {"type": "object"}},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["status", "settings", "updated_generated_verses"],
+            "additionalProperties": True,
+        },
+    ),
+    Tool(
         name="preprocess_voice_parts",
         description=(
             "Prepare clean derived singing lines from voice parts using a required plan payload "

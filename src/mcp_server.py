@@ -37,6 +37,8 @@ _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
     "cpu": {
         "parse_score",
         "reparse",
+        "add_solfege_lyric_verse",
+        "modify_solfege_settings",
         "preprocess_voice_parts",
         "list_voicebanks",
         "get_voicebank_info",
@@ -45,6 +47,8 @@ _MODE_TOOL_ALLOWLIST: Dict[str, Set[str]] = {
     "all": {
         "parse_score",
         "reparse",
+        "add_solfege_lyric_verse",
+        "modify_solfege_settings",
         "preprocess_voice_parts",
         "list_voicebanks",
         "get_voicebank_info",

@@ -16,6 +16,10 @@ from firebase_admin import firestore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.storage_client import download_bytes, upload_bytes
 
+
+def _default_solfege_settings() -> Dict[str, Any]:
+    return {"system": "movable_do", "mode": "major", "revision": 1}
+
 def _utcnow() -> datetime:
     """Return current UTC time."""
     return datetime.now(timezone.utc)
@@ -39,6 +43,7 @@ class SessionState:
     current_score_path: Optional[str] = None
     current_score_version: int = 0
     score_summary: Optional[Dict[str, Any]] = None
+    solfege_settings: Dict[str, Any] = field(default_factory=_default_solfege_settings)
     current_audio: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
@@ -60,6 +65,7 @@ class SessionState:
             ),
             "current_score": self._score_snapshot(),
             "score_summary": dict(self.score_summary) if self.score_summary else None,
+            "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
         }
 
@@ -220,6 +226,23 @@ class SessionStore:
             state.score_summary = summary
             state.last_active_at = _utcnow()
 
+    async def set_solfege_settings(
+        self, session_id: str, settings: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Persist canonical solfege settings and increment their revision."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            revision = int(state.solfege_settings.get("revision") or 1) + 1
+            state.solfege_settings = {
+                "system": str(settings["system"]),
+                "mode": str(settings["mode"]),
+                "revision": revision,
+            }
+            state.last_active_at = _utcnow()
+            return dict(state.solfege_settings)
+
     async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
         """Append a generated preprocess plan entry for debugging."""
         async with self._lock:
@@ -288,6 +311,7 @@ class SessionStore:
             state.current_score_path = None
             state.current_score_version = 0
             state.score_summary = None
+            state.solfege_settings = _default_solfege_settings()
             state.current_audio = None
             state.last_active_at = _utcnow()
             session_dir = self.session_dir(session_id)
@@ -446,6 +470,7 @@ class FirestoreSessionStore:
             current_score_path=data.get("currentScorePath"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
             score_summary=data.get("scoreSummary"),
+            solfege_settings=dict(data.get("solfegeSettings") or _default_solfege_settings()),
             current_audio=data.get("currentAudio"),
         )
 
@@ -469,6 +494,7 @@ class FirestoreSessionStore:
                 "currentScorePath": None,
                 "currentScoreVersion": 0,
                 "scoreSummary": None,
+                "solfegeSettings": _default_solfege_settings(),
                 "currentAudio": None,
             }
             self._doc_ref(session_id).set(payload)
@@ -606,6 +632,37 @@ class FirestoreSessionStore:
                 {"scoreSummary": summary, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
 
+    async def set_solfege_settings(
+        self, session_id: str, settings: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Persist canonical solfege settings and atomically increment their revision."""
+        async with self._lock:
+            doc_ref = self._doc_ref(session_id)
+            transaction = self._client.transaction()
+
+            @firestore.transactional
+            def _update(txn):
+                snapshot = doc_ref.get(transaction=txn)
+                if not snapshot.exists:
+                    raise KeyError(session_id)
+                data = snapshot.to_dict() or {}
+                current = data.get("solfegeSettings") or _default_solfege_settings()
+                next_settings = {
+                    "system": str(settings["system"]),
+                    "mode": str(settings["mode"]),
+                    "revision": int(current.get("revision") or 1) + 1,
+                }
+                txn.update(
+                    doc_ref,
+                    {
+                        "solfegeSettings": next_settings,
+                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                    },
+                )
+                return next_settings
+
+            return dict(_update(transaction))
+
     async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
         """Append a generated preprocess plan entry in Firestore for debugging."""
         async with self._lock:
@@ -676,6 +733,7 @@ class FirestoreSessionStore:
                     "currentScorePath": None,
                     "currentScoreVersion": 0,
                     "scoreSummary": None,
+                    "solfegeSettings": _default_solfege_settings(),
                     "currentAudio": None,
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }

@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.api import (
+    add_solfege_lyric_verse,
     get_voicebank_info,
     list_voicebanks,
     parse_score,
     preprocess_voice_parts,
     save_audio,
     synthesize,
+    modify_solfege_settings,
 )
 from src.backend.progress import write_progress
 from src.backend.job_store import JobStore
@@ -52,6 +54,36 @@ def handle_reparse(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         part_index=params.get("part_index"),
         verse_number=params.get("verse_number"),
         expand_repeats=params.get("expand_repeats", False),
+    )
+
+
+def handle_add_solfege_lyric_verse(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle deterministic solfege verse generation."""
+    source_path = resolve_project_path(params["source_musicxml_path"])
+    output_path = resolve_project_path(params["output_musicxml_path"])
+    return add_solfege_lyric_verse(
+        source_path,
+        output_path,
+        part_id=params.get("part_id"),
+        part_index=params.get("part_index"),
+        settings=params.get("settings"),
+    )
+
+
+def handle_modify_solfege_settings(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle rewriting every generated solfege verse."""
+    source_path = resolve_project_path(params["source_musicxml_path"])
+    output_path = resolve_project_path(params["output_musicxml_path"])
+    settings = dict(params.get("settings") or {})
+    if params.get("system") is not None:
+        settings["system"] = params["system"]
+    if params.get("mode") is not None:
+        settings["mode"] = params["mode"]
+    return modify_solfege_settings(
+        source_path,
+        output_path,
+        settings=settings,
+        selected_verse_number=params.get("selected_verse_number"),
     )
 
 
@@ -272,6 +304,8 @@ def _calculate_score_duration(score: Dict[str, Any]) -> float:
 HANDLERS = {
     "parse_score": handle_parse_score,
     "reparse": handle_reparse,
+    "add_solfege_lyric_verse": handle_add_solfege_lyric_verse,
+    "modify_solfege_settings": handle_modify_solfege_settings,
     "preprocess_voice_parts": handle_preprocess_voice_parts,
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,

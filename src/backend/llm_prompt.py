@@ -67,6 +67,7 @@ def build_prompt_bundle(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
@@ -138,6 +139,11 @@ def build_prompt_bundle(
             sort_keys=True,
             ensure_ascii=False,
         )
+    solfege_settings_text = "none"
+    if solfege_settings:
+        solfege_settings_text = json.dumps(
+            solfege_settings, indent=2, sort_keys=True, ensure_ascii=False
+        )
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
     ).replace("{tool_json}", tool_json)
@@ -153,6 +159,9 @@ def build_prompt_bundle(
     )
     dynamic_prompt = (
         "Dynamic Context:\n"
+        "AUTHORITATIVE CURRENT APPLICATION STATE: The values below are current and supersede "
+        "any conflicting statements or assumptions in conversation history. Use them in tool "
+        "decisions and user-facing replies.\n"
         f"Score status: {score_hint}.\n"
         "Score summary (if available):\n"
         f"{score_summary_text}\n"
@@ -168,6 +177,8 @@ def build_prompt_bundle(
         "Voicebank metadata (if available):\n"
         f"{voicebank_details_text}\n"
         f"User-selected voicebank override: {selected_voicebank_text}\n"
+        "Canonical current solfege settings (authoritative):\n"
+        f"{solfege_settings_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -187,6 +198,7 @@ def build_system_prompt(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
@@ -201,6 +213,7 @@ def build_system_prompt(
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
         selected_voicebank_id=selected_voicebank_id,
+        solfege_settings=solfege_settings,
         role=role,
     )
     return bundle.full_prompt_text

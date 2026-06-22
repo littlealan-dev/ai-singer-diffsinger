@@ -3,7 +3,7 @@ from __future__ import annotations
 """FastAPI entrypoint for the backend service."""
 
 from pathlib import Path
-from typing import Any, Dict, AsyncIterator, Iterator, Optional
+from typing import Any, Dict, AsyncIterator, Iterator, Literal, Optional
 import asyncio
 from contextlib import asynccontextmanager
 import time
@@ -60,6 +60,10 @@ from firebase_admin import app_check
 _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 
 
+def _default_solfege_settings_response() -> Dict[str, Any]:
+    return {"system": "movable_do", "mode": "major", "revision": 1}
+
+
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
     message: str
@@ -67,6 +71,17 @@ class ChatRequest(BaseModel):
     # Values are treated as authoritative user selections and avoid fragile text parsing.
     selection: dict[str, Any] | None = None
     selected_voicebank_id: str | None = None
+
+
+class SolfegeSettingsPayload(BaseModel):
+    """Canonical user-selectable solfege settings."""
+    system: Literal["movable_do", "fixed_do"]
+    mode: Literal["major", "minor_la_based", "minor_do_based"]
+
+
+class SolfegeSettingsRequest(BaseModel):
+    """Direct UI request to apply confirmed solfege settings."""
+    settings: SolfegeSettingsPayload
 
 
 class WaitlistSubscribeRequest(BaseModel):
@@ -412,6 +427,7 @@ def create_app() -> FastAPI:
             "parsed": True,
             "current_score": {"score": score, "version": version},
             "score_summary": score_summary,
+            "solfege_settings": _default_solfege_settings_response(),
         }
 
     @app.post("/sessions/{session_id}/chat")
@@ -440,6 +456,36 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/sessions/{session_id}/solfege-settings")
+    async def get_solfege_settings(session_id: str, request: Request) -> Dict[str, Any]:
+        """Return canonical solfege settings for the active score session."""
+        sessions: SessionStore = request.app.state.sessions
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
+        return await orchestrator.get_solfege_settings(session_id, user_id=user_id)
+
+    @app.patch("/sessions/{session_id}/solfege-settings")
+    async def patch_solfege_settings(
+        session_id: str,
+        request: Request,
+        payload: SolfegeSettingsRequest,
+    ) -> Dict[str, Any]:
+        """Apply confirmed UI settings and rewrite all generated solfege verses."""
+        sessions: SessionStore = request.app.state.sessions
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
+        try:
+            return await orchestrator.update_solfege_settings(
+                session_id,
+                user_id=user_id,
+                system=payload.settings.system,
+                mode=payload.settings.mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/voicebanks")
     async def list_available_voicebanks(request: Request) -> Dict[str, Any]:

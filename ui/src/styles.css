@@ -1619,19 +1619,58 @@ div[id^="fire_app_check_"] {
   align-items: stretch;
 }
 
+.composer-row .send-button {
+  flex: 0 0 52px;
+  width: 52px;
+  min-height: 56px;
+  padding: 0;
+}
+
+.composer-menu-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.2fr);
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+}
+
+.composer-upload-button {
+  min-width: 0;
+  min-height: 60px;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.composer-upload-button span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-menu-bar .voice-picker,
+.composer-menu-bar .solfege-picker {
+  width: 100%;
+  max-width: none;
+}
+
+.composer-menu-bar .voice-picker-trigger {
+  max-width: none;
+}
+
 .voice-picker {
   position: relative;
-  flex: 0 0 184px;
-  width: 184px;
-  min-width: 184px;
-  max-width: 184px;
+  flex: 0 1 220px;
+  width: 220px;
+  min-width: 0;
+  max-width: 220px;
 }
 
 .voice-picker-trigger {
   width: 100%;
-  max-width: 184px;
+  max-width: 220px;
   height: 100%;
-  min-height: 48px;
+  min-height: 60px;
   border-radius: 14px;
   border: 1px solid var(--glass-border);
   background: rgba(255, 255, 255, 0.04);
@@ -1786,6 +1825,261 @@ img.voice-picker-option-avatar {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.solfege-picker {
+  position: relative;
+  flex: 0 1 250px;
+  width: 250px;
+  min-width: 0;
+  max-width: 250px;
+}
+
+.solfege-picker-trigger {
+  width: 100%;
+  height: 100%;
+  min-height: 60px;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-strong);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease;
+}
+
+.solfege-picker-trigger:hover,
+.solfege-picker-trigger.open {
+  border-color: rgba(155, 134, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(155, 134, 255, 0.14);
+}
+
+.solfege-picker-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.solfege-picker-trigger-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  border: 1px solid rgba(155, 134, 255, 0.3);
+  background: rgba(155, 134, 255, 0.12);
+  color: #b7a5ff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.solfege-picker-trigger-copy {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.solfege-picker-trigger-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.solfege-picker-trigger-name {
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.solfege-picker-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  width: 310px;
+  display: grid;
+  gap: 14px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(18, 21, 29, 0.96);
+  border: 1px solid rgba(155, 134, 255, 0.24);
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+  z-index: 20;
+}
+
+.solfege-setting-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.solfege-setting-group legend {
+  margin-bottom: 7px;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.solfege-setting-group:disabled {
+  opacity: 0.45;
+}
+
+.solfege-setting-group:disabled button {
+  cursor: not-allowed;
+}
+
+.solfege-setting-group:disabled .solfege-mode-option {
+  cursor: not-allowed;
+}
+
+.solfege-segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.solfege-segmented-control button {
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.solfege-segmented-control button:hover,
+.solfege-segmented-control button.selected {
+  background: rgba(155, 134, 255, 0.14);
+  color: var(--text-strong);
+}
+
+.solfege-mode-options {
+  display: grid;
+  gap: 5px;
+}
+
+.solfege-mode-option {
+  position: relative;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-strong);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.solfege-mode-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.solfege-radio-indicator {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.solfege-mode-option.selected .solfege-radio-indicator {
+  border-color: #9b86ff;
+  box-shadow: inset 0 0 0 4px rgba(18, 21, 29, 0.96);
+  background: #9b86ff;
+}
+
+.solfege-mode-option:hover,
+.solfege-mode-option.selected {
+  border-color: rgba(155, 134, 255, 0.32);
+  background: rgba(155, 134, 255, 0.12);
+}
+
+.solfege-menu-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.solfege-cancel-button,
+.solfege-confirm-button {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.solfege-cancel-button {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+
+.solfege-cancel-button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.11);
+  color: var(--text-strong);
+}
+
+.solfege-confirm-button {
+  border: 1px solid rgba(111, 213, 156, 0.5);
+  background: #6fd59c;
+  color: #08140e;
+}
+
+.solfege-confirm-button:hover {
+  transform: translateY(-1px);
+  background: #84e2aa;
+  box-shadow: 0 8px 20px rgba(111, 213, 156, 0.22);
+}
+
+.solfege-cancel-button:disabled,
+.solfege-confirm-button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+  transform: none;
+  box-shadow: none;
 }
 
 .input-row input,
@@ -2019,7 +2313,32 @@ img.voice-picker-option-avatar {
     flex-direction: column;
   }
 
-  .voice-picker {
+  .composer-row {
+    flex-direction: row;
+  }
+
+  .composer-row .send-button {
+    width: 52px;
+    min-width: 52px;
+    padding: 0;
+  }
+
+  .composer-menu-bar {
+    grid-template-columns: 44px repeat(2, minmax(0, 1fr));
+  }
+
+  .composer-upload-button {
+    min-height: 60px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .composer-upload-button span {
+    display: none;
+  }
+
+  .voice-picker,
+  .solfege-picker {
     flex-basis: auto;
     width: 100%;
     min-width: 0;
@@ -2028,6 +2347,12 @@ img.voice-picker-option-avatar {
 
   .voice-picker-trigger {
     max-width: none;
+  }
+
+  .solfege-picker-menu {
+    right: 0;
+    left: auto;
+    width: min(310px, calc(200% + 10px));
   }
 
   .send-button {
