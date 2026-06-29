@@ -16,7 +16,7 @@ export const ANNOUNCEMENTS: Announcement[] = [
   {
     id: 'version_1_0_2',
     title: 'SightSinger 1.0.2 Update',
-    content: '- Added solfege support: SightSinger can now add and sing solfege lyrics.\n\n- Supports both movable-do and fixed-do solfege.\n\n- Solfege can be used to sing scores when the original lyric language is not supported yet.',
+    content: '- Added solfege support: SightSinger can now add and sing solfege lyrics.\n\n- Supports both movable-do and fixed-do solfege.\n\n- Solfege can be used to sing scores when the original lyric language is not supported yet.\n\n- Added Download score and Print score buttons to the Studio score preview.',
     effect: 'none',
     date: '2026-06-29',
     effectiveFrom: '2026-06-29',
