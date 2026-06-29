@@ -901,6 +901,42 @@ body.legal-active #root {
   gap: 8px;
 }
 
+.score-layout-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.score-layout-option {
+  min-width: 76px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.score-layout-option:hover,
+.score-layout-option.selected {
+  background: rgba(183, 125, 255, 0.18);
+  color: var(--text-strong);
+}
+
+.score-layout-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .score-action-button {
   width: 40px;
   height: 40px;
@@ -2314,6 +2350,16 @@ img.voice-picker-option-avatar {
 .score-surface svg {
   width: 100%;
   height: auto;
+}
+
+.score-canvas.horizontal-layout .score-surface {
+  width: max-content;
+  min-width: 100%;
+}
+
+.score-canvas.horizontal-layout .score-surface svg {
+  width: auto;
+  max-width: none;
 }
 
 .score-placeholder {

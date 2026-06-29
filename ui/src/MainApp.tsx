@@ -92,6 +92,8 @@ type ScorePayload = {
   data: string;
 };
 
+type ScorePreviewLayout = "page" | "horizontal";
+
 type PartOption = {
   key: string;
   label: string;
@@ -190,6 +192,39 @@ const buildPrintableScoreMarkup = (scoreElement: HTMLElement): string => {
       return `<section class="score-page">${printableSvg.outerHTML}</section>`;
     })
     .join("");
+};
+
+const renderScorePageLayoutForPrint = async (scoreData: string): Promise<string> => {
+  const container = document.createElement("div");
+  container.style.position = "absolute";
+  container.style.left = "-100000px";
+  container.style.top = "0";
+  container.style.width = "900px";
+  container.style.opacity = "0";
+  container.style.pointerEvents = "none";
+  document.body.appendChild(container);
+
+  let osmd: OpenSheetMusicDisplay | null = null;
+  try {
+    osmd = new OpenSheetMusicDisplay(container, {
+      autoResize: false,
+      drawTitle: true,
+      followCursor: false,
+      pageFormat: "A4_P",
+      renderSingleHorizontalStaffline: false,
+    });
+    await osmd.load(scoreData);
+    osmd.zoom = 1;
+    osmd.render();
+    return buildPrintableScoreMarkup(container);
+  } finally {
+    try {
+      osmd?.clear();
+    } catch {
+      // Ignore cleanup errors from a temporary print renderer.
+    }
+    container.remove();
+  }
 };
 
 const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
@@ -438,6 +473,7 @@ export default function MainApp() {
   const [isDragging, setIsDragging] = useState(false);
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
   const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
@@ -924,7 +960,8 @@ export default function MainApp() {
           autoResize: true,
           drawTitle: true,
           followCursor: false,
-          renderSingleHorizontalStaffline: false,
+          pageFormat: scorePreviewLayout === "page" ? "A4_P" : "Endless",
+          renderSingleHorizontalStaffline: scorePreviewLayout === "horizontal",
         });
         osmdRef.current = osmd;
 
@@ -954,7 +991,7 @@ export default function MainApp() {
         osmdRef.current = null;
       }
     };
-  }, [beginScorePreviewTrap, endScorePreviewTrap, handleScorePreviewFailure, score]);
+  }, [beginScorePreviewTrap, endScorePreviewTrap, handleScorePreviewFailure, score, scorePreviewLayout]);
 
   useEffect(() => {
     if (!scoreReady || !osmdRef.current) return;
@@ -1121,8 +1158,8 @@ export default function MainApp() {
     downloadTextFile(scoreDownloadFileName(score.name), score.data);
   };
 
-  const handleScorePrint = () => {
-    if (!score || !scoreReady || !scoreRef.current) {
+  const handleScorePrint = async () => {
+    if (!score || !scoreReady) {
       setError("No rendered score available to print.");
       return;
     }
@@ -1134,7 +1171,26 @@ export default function MainApp() {
     }
 
     const title = score.name ? `${score.name} score` : "SightSinger score";
-    const scoreMarkup = buildPrintableScoreMarkup(scoreRef.current);
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+  </head>
+  <body>Preparing score print preview...</body>
+</html>`);
+    printWindow.document.close();
+
+    let scoreMarkup: string;
+    try {
+      scoreMarkup = await renderScorePageLayoutForPrint(score.data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to prepare score print preview.";
+      setError(message);
+      printWindow.close();
+      return;
+    }
 
     printWindow.document.open();
     printWindow.document.write(`<!doctype html>
@@ -2348,6 +2404,26 @@ export default function MainApp() {
                 </button>
               </div>
               <div className="score-action-controls" aria-label="Score export controls">
+                <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
+                  <button
+                    type="button"
+                    className={clsx("score-layout-option", { selected: scorePreviewLayout === "page" })}
+                    aria-pressed={scorePreviewLayout === "page"}
+                    disabled={!score}
+                    onClick={() => setScorePreviewLayout("page")}
+                  >
+                    Page
+                  </button>
+                  <button
+                    type="button"
+                    className={clsx("score-layout-option", { selected: scorePreviewLayout === "horizontal" })}
+                    aria-pressed={scorePreviewLayout === "horizontal"}
+                    disabled={!score}
+                    onClick={() => setScorePreviewLayout("horizontal")}
+                  >
+                    Horizontal
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="score-action-button"
@@ -2371,7 +2447,7 @@ export default function MainApp() {
               </div>
             </div>
           </div>
-          <div className="score-canvas">
+          <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
             <div ref={scoreRef} className="score-surface" />
             {scorePreviewError ? (
               <div className="score-placeholder score-error-placeholder">
