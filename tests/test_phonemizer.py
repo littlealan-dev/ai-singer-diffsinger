@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 
 from src.api import phonemize
-from src.phonemizer import Phonemizer
+from src.phonemizer import Phonemizer, UnsupportedLyricTokenError
 
 
 VOICEBANK_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Raine_Rena_2.01"
@@ -58,6 +58,53 @@ class PhonemizerClassTests(unittest.TestCase):
             self.assertTrue(ph.startswith("en/"))
         for lang_id in result.language_ids:
             self.assertEqual(lang_id, 1)
+
+    def test_latin_diacritics_fold_before_g2p(self) -> None:
+        """Latin diacritics should fold generically for English G2P."""
+        self.assertEqual(Phonemizer._normalize_word_for_g2p("à"), "a")
+        self.assertEqual(Phonemizer._normalize_word_for_g2p("café"), "cafe")
+        self.assertEqual(Phonemizer._normalize_word_for_g2p("naïve"), "naive")
+
+    def test_non_latin_token_fails_before_english_g2p(self) -> None:
+        """Non-Latin lyrics should not fall through to English G2P."""
+        phonemizer = Phonemizer(
+            phonemes_path=PHONEMES_PATH,
+            dictionary_path=DICTIONARY_PATH,
+            languages_path=LANGUAGES_PATH,
+            language="en",
+        )
+
+        with self.assertRaises(UnsupportedLyricTokenError) as ctx:
+            phonemizer.phonemize_tokens(["Прийдіте"])
+
+        self.assertEqual(ctx.exception.code, "unsupported_lyric_language")
+        self.assertEqual(ctx.exception.reason, "non_latin_lyrics_for_english_g2p")
+        self.assertEqual(ctx.exception.unsupported_script, "Cyrillic")
+
+    def test_non_ascii_dictionary_entry_is_preserved_before_g2p(self) -> None:
+        """Dictionary lookup should still support intentional non-ASCII entries."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.txt"
+            dictionary_path = root / "dsdict-en.yaml"
+
+            phonemes_path.write_text("<PAD>\nSP\nAP\nhh\n", encoding="utf8")
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: Прийдіте\n"
+                "    phonemes: [hh]\n",
+                encoding="utf8",
+            )
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                language="en",
+                allow_g2p=True,
+            )
+
+            result = phonemizer.phonemize_tokens(["Прийдіте"])
+            self.assertEqual(result.phonemes, ["hh"])
 
     def test_missing_token_without_g2p_raises(self) -> None:
         """Unknown token without G2P should raise KeyError."""

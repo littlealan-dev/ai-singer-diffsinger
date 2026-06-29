@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
 from src.api.voice_part_lint_rules import get_lint_rule_spec, get_postflight_validation_spec
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 VOICE_PART_STATUSES = {
     "ready",
@@ -1310,6 +1311,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     targets = plan.get("targets") or []
     findings.extend(_lint_existing_target_voice_parts(score, targets))
     findings.extend(_lint_same_part_target_completeness(score, targets))
+    derived_part_indices = _derived_part_indices(score)
     by_part_claims: Dict[int, set[int]] = {}
     by_part_has_timeline_targets: Dict[int, bool] = {}
     visible_same_part_source_claims: Dict[tuple[int, str, int], set[str]] = {}
@@ -1412,6 +1414,38 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 lyric_source = section.get("lyric_source") or {}
                 melody_source_part = melody_source.get("part_index")
                 lyric_source_part = lyric_source.get("part_index")
+                lyric_source_voice_part_id = (
+                    str(lyric_source.get("voice_part_id")).strip()
+                    if isinstance(lyric_source.get("voice_part_id"), str)
+                    else None
+                )
+                target_is_derived = part_index in derived_part_indices
+                for source_kind, source_part in (
+                    ("melody_source", melody_source_part),
+                    ("lyric_source", lyric_source_part),
+                ):
+                    if (
+                        not target_is_derived
+                        and isinstance(source_part, int)
+                        and source_part != part_index
+                        and source_part in derived_part_indices
+                    ):
+                        findings.append(
+                            _lint_finding(
+                                "derived_part_source_for_original_target",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                source_kind=source_kind,
+                                source_part_index=source_part,
+                                failing_attributes={
+                                    "source_kind": source_kind,
+                                    "source_part_index": source_part,
+                                    "target_part_index": part_index,
+                                },
+                            )
+                        )
                 if (
                     decision_type == "SPLIT_CHORDS_SELECT_NOTES"
                     and method == "trivial"
@@ -1501,12 +1535,43 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     ),
                     melody_source_voice_part_id=melody_source_voice_part_id,
                 )
+                if isinstance(lyric_source_part, int) and lyric_source_voice_part_id:
+                    generated_stats = _generated_solfege_lyric_stats_for_voice_part_range(
+                        score=score,
+                        part_index=lyric_source_part,
+                        voice_part_id=lyric_source_voice_part_id,
+                        start_measure=start,
+                        end_measure=end,
+                    )
+                    if int(generated_stats["generated_solfege_lyric_note_count"]) > 0:
+                        findings.append(
+                            _lint_finding(
+                                "generated_solfege_lyric_source",
+                                target_index=target_idx,
+                                part_index=part_index,
+                                target_voice_part_id=target_voice_part_id,
+                                section={"start_measure": start, "end_measure": end},
+                                selected_lyric_source={
+                                    "part_index": lyric_source_part,
+                                    "voice_part_id": lyric_source_voice_part_id,
+                                    "stats": generated_stats,
+                                },
+                                failing_attributes={
+                                    "source_part_index": lyric_source_part,
+                                    "source_voice_part_id": lyric_source_voice_part_id,
+                                    "generated_solfege_lyric_note_count": generated_stats[
+                                        "generated_solfege_lyric_note_count"
+                                    ],
+                                    "generated_lyric_name": GENERATED_LYRIC_NAME,
+                                },
+                            )
+                        )
                 if (
                     isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
-                    and isinstance(lyric_source.get("voice_part_id"), str)
+                    and lyric_source_voice_part_id
                 ):
-                    chosen_voice_part_id = str(lyric_source["voice_part_id"]).strip()
+                    chosen_voice_part_id = lyric_source_voice_part_id
                     chosen_stats = _lyric_stats_for_voice_part_range(
                         score=score,
                         part_index=lyric_source_part,
@@ -1610,9 +1675,9 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 if (
                     isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
-                    and isinstance(lyric_source.get("voice_part_id"), str)
+                    and lyric_source_voice_part_id
                 ):
-                    chosen_voice_part_id = str(lyric_source["voice_part_id"]).strip()
+                    chosen_voice_part_id = lyric_source_voice_part_id
                     chosen_stats = _lyric_stats_for_voice_part_range(
                         score=score,
                         part_index=part_index,
@@ -1884,6 +1949,33 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 )
 
     return {"ok": len(findings) == 0, "findings": findings}
+
+
+def _derived_part_indices(score: Dict[str, Any]) -> set[int]:
+    """Return indices for visible parts appended by previous preprocessing."""
+    indices: set[int] = set()
+    parts = score.get("parts") or []
+    transforms = score.get("voice_part_transforms")
+    if isinstance(transforms, dict):
+        for value in transforms.values():
+            if not isinstance(value, dict):
+                continue
+            appended_ref = value.get("appended_part_ref")
+            if not isinstance(appended_ref, dict):
+                continue
+            if bool(appended_ref.get("hidden_default_lane")):
+                continue
+            part_index = appended_ref.get("part_index")
+            if isinstance(part_index, int):
+                indices.add(part_index)
+    for idx, part in enumerate(parts):
+        if not isinstance(part, dict):
+            continue
+        part_id = str(part.get("part_id") or "").strip()
+        part_name = str(part.get("part_name") or "").strip()
+        if part_id.startswith("P_DERIVED_") or "(Derived)" in part_name:
+            indices.add(idx)
+    return indices
 
 
 def _lint_existing_target_voice_parts(
@@ -3703,6 +3795,43 @@ def _lyric_stats_for_voice_part_range(
     return stats
 
 
+def _generated_solfege_lyric_stats_for_voice_part_range(
+    *,
+    score: Dict[str, Any],
+    part_index: int,
+    voice_part_id: str,
+    start_measure: int,
+    end_measure: int,
+) -> Dict[str, int | str]:
+    source_notes = _resolve_source_notes_allow_lyricless(
+        score,
+        source_part_index=part_index,
+        source_voice_part_id=voice_part_id,
+    )
+    if source_notes is None:
+        return {
+            "generated_lyric_name": GENERATED_LYRIC_NAME,
+            "generated_solfege_lyric_note_count": 0,
+            "source_sung_note_count": 0,
+        }
+    sung = [
+        note
+        for note in source_notes
+        if _is_countable_sung_note(note)
+        and _note_in_measure_range(note, (start_measure, end_measure))
+    ]
+    generated = [
+        note
+        for note in sung
+        if _is_generated_solfege_lyric(note)
+    ]
+    return {
+        "generated_lyric_name": GENERATED_LYRIC_NAME,
+        "generated_solfege_lyric_note_count": len(generated),
+        "source_sung_note_count": len(sung),
+    }
+
+
 def _best_same_part_word_lyric_source_for_range(
     *,
     score: Dict[str, Any],
@@ -4402,6 +4531,11 @@ def _copy_lyric_fields(target_note: Dict[str, Any], source_note: Dict[str, Any])
     target_note["lyric"] = source_note.get("lyric")
     target_note["syllabic"] = source_note.get("syllabic")
     target_note["lyric_is_extended"] = bool(source_note.get("lyric_is_extended"))
+    lyric_name = source_note.get("lyric_name")
+    if isinstance(lyric_name, str) and lyric_name.strip():
+        target_note["lyric_name"] = lyric_name.strip()
+    else:
+        target_note.pop("lyric_name", None)
 
 
 def _same_voice_ref(left: Any, right: Any) -> bool:
@@ -5240,7 +5374,7 @@ def _append_transformed_measures(
 
         ref_attributes = ref_measure.find(q("attributes"))
         if ref_attributes is not None:
-            measure_node.append(ET.fromstring(ET.tostring(ref_attributes)))
+            measure_node.append(_single_staff_attributes_copy(ref_attributes, q))
         elif idx == 0:
             attributes = ET.SubElement(measure_node, q("attributes"))
             ET.SubElement(attributes, q("divisions")).text = str(divisions)
@@ -5290,7 +5424,7 @@ def _append_transformed_measures(
                 1, int(round(duration_beats * float(divisions)))
             )
             ET.SubElement(note_node, q("duration")).text = str(duration_div)
-            ET.SubElement(note_node, q("voice")).text = str(note.get("voice") or "1")
+            ET.SubElement(note_node, q("voice")).text = "1"
             note_type = _duration_to_type(duration_beats)
             ET.SubElement(note_node, q("type")).text = note_type
             for _ in range(_coerce_dot_count(note.get("dot_count"))):
@@ -5299,6 +5433,27 @@ def _append_transformed_measures(
             if isinstance(lyric, str) and lyric.strip():
                 lyric_node = ET.SubElement(note_node, q("lyric"))
                 ET.SubElement(lyric_node, q("text")).text = lyric
+
+
+def _single_staff_attributes_copy(attributes: ET.Element, q: Any) -> ET.Element:
+    """Copy measure attributes while forcing derived singing parts to one staff."""
+    copied = ET.fromstring(ET.tostring(attributes))
+    for staves in list(copied.findall(q("staves"))):
+        staves.text = "1"
+
+    for child in list(copied):
+        number = child.get("number")
+        if number is None:
+            continue
+        try:
+            staff_number = int(str(number).strip())
+        except ValueError:
+            continue
+        if staff_number > 1:
+            copied.remove(child)
+        elif staff_number == 1:
+            child.attrib.pop("number", None)
+    return copied
 
 
 def _update_time_signature(
@@ -5374,6 +5529,8 @@ def _collect_global_lyric_source_options(
         for vp in analysis["voice_parts"]:
             if vp["lyric_note_count"] <= 0:
                 continue
+            if _voice_part_has_generated_solfege_lyrics(part, vp):
+                continue
             key = (idx, str(vp["voice_part_id"]))
             if key in seen:
                 continue
@@ -5390,6 +5547,8 @@ def _collect_all_lyric_source_options(score: Dict[str, Any]) -> List[Dict[str, A
         analysis = _analyze_part_voice_parts(part, idx)
         for vp in analysis["voice_parts"]:
             if vp["lyric_note_count"] <= 0:
+                continue
+            if _voice_part_has_generated_solfege_lyrics(part, vp):
                 continue
             key = (idx, str(vp["voice_part_id"]))
             if key in seen:
@@ -5570,6 +5729,21 @@ def _make_source_option(source_part_index: int, source_voice_part_id: str) -> Di
         "source_part_index": source_part_index,
         "source_voice_part_id": source_voice_part_id,
     }
+
+
+def _voice_part_has_generated_solfege_lyrics(
+    part: Dict[str, Any], voice_part: Dict[str, Any]
+) -> bool:
+    notes = _select_part_notes_for_voice(
+        part.get("notes") or [],
+        str(voice_part.get("source_voice_id") or ""),
+    )
+    return any(
+        _is_countable_sung_note(note)
+        and _has_lyric(note)
+        and _is_generated_solfege_lyric(note)
+        for note in notes
+    )
 
 
 def _match_source_option(
@@ -6696,6 +6870,10 @@ def _lyric_kind(note: Dict[str, Any]) -> str:
     if text.startswith("+") or bool(note.get("lyric_is_extended")):
         return "extension"
     return "word"
+
+
+def _is_generated_solfege_lyric(note: Dict[str, Any]) -> bool:
+    return str(note.get("lyric_name") or "").strip() == GENERATED_LYRIC_NAME
 
 
 def _part_has_any_lyric(notes: Sequence[Dict[str, Any]]) -> bool:

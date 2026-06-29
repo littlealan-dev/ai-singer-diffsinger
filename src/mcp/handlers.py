@@ -3,6 +3,7 @@ from __future__ import annotations
 """MCP tool handlers that bridge JSON-RPC calls to backend APIs."""
 
 import base64
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -23,6 +24,16 @@ from src.api.voicebank_cache import get_manifest_voicebank_metadata
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
+class InvalidMusicXmlError(ValueError):
+    """Raised when parse_score cannot parse the supplied score artifact."""
+
+    code = "invalid_musicxml"
+    retryable = False
+    user_message = (
+        "Uploaded file is not valid MusicXML. Please export a MusicXML score and try again."
+    )
+
+
 def _strip_path(info: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of voicebank info without the filesystem path."""
     info = dict(info)
@@ -33,13 +44,7 @@ def _strip_path(info: Dict[str, Any]) -> Dict[str, Any]:
 def handle_parse_score(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     """Handle parse_score tool calls."""
     file_path = resolve_project_path(params["file_path"])
-    return parse_score(
-        file_path,
-        part_id=params.get("part_id"),
-        part_index=params.get("part_index"),
-        verse_number=params.get("verse_number"),
-        expand_repeats=params.get("expand_repeats", False),
-    )
+    return _parse_musicxml(file_path, params)
 
 
 def handle_reparse(params: Dict[str, Any], device: str) -> Dict[str, Any]:
@@ -48,13 +53,27 @@ def handle_reparse(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     if not isinstance(file_path_param, str) or not file_path_param.strip():
         raise ValueError("reparse requires file_path for direct MCP calls.")
     file_path = resolve_project_path(file_path_param)
-    return parse_score(
-        file_path,
-        part_id=params.get("part_id"),
-        part_index=params.get("part_index"),
-        verse_number=params.get("verse_number"),
-        expand_repeats=params.get("expand_repeats", False),
-    )
+    return _parse_musicxml(file_path, params)
+
+
+def _parse_musicxml(file_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize every parser exception to one non-retryable tool error."""
+    try:
+        return parse_score(
+            file_path,
+            part_id=params.get("part_id"),
+            part_index=params.get("part_index"),
+            verse_number=params.get("verse_number"),
+            expand_repeats=params.get("expand_repeats", False),
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "parse_score_invalid_musicxml path=%s error_type=%s error=%s",
+            file_path,
+            type(exc).__name__,
+            exc,
+        )
+        raise InvalidMusicXmlError(InvalidMusicXmlError.user_message) from exc
 
 
 def handle_add_solfege_lyric_verse(params: Dict[str, Any], device: str) -> Dict[str, Any]:

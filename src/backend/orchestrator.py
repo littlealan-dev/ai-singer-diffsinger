@@ -34,11 +34,30 @@ from src.api.voice_parts import (
     finalize_review_materialization,
     synthesize_preflight_action_required,
 )
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
+PREPROCESS_PLANNING_ERROR_MESSAGE = (
+    "Couldn't create a line-preparation plan. Please retry the request."
+)
+MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS = (
+    "Render only a concise user-facing message. No tools will be executed from "
+    "this response, so return tool_calls as [] and do not claim that you are "
+    "starting or completing further work."
+)
+SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS = (
+    "This is a terminal synthesis action_required result for an already-started "
+    "background job. Render only a concise user-facing status message. No tools "
+    "will be executed from this response, so return tool_calls as [] and do not "
+    "claim that you are adding solfege, changing the score, retrying synthesis, "
+    "or starting any further work. If the action is unsupported_lyric_language, "
+    "explain that synthesis stopped because the lyrics cannot be phonemized by "
+    "the current pronunciation engine. You may say the user can ask to add a "
+    "generated solfege verse as a next step."
+)
 REVIEW_PENDING_KEY = "_preprocess_review_pending"
 EXPLICIT_VERSE_METADATA_KEY = "explicit_verse_number"
 MISSING_ORIGINAL_SCORE_MESSAGE = (
@@ -76,6 +95,10 @@ class SynthesisActionRequired(RuntimeError):
         super().__init__(message)
         self.payload = copy.deepcopy(payload)
         self.message = message or "Synthesis needs user action."
+
+
+class PreprocessPlanningError(RuntimeError):
+    """Raised when the preprocess planner cannot produce a valid initial plan."""
 
 
 class Orchestrator:
@@ -240,11 +263,18 @@ class Orchestrator:
                         len(llm_response.tool_calls),
                         [call.name for call in llm_response.tool_calls],
                     )
-                    followup_response, followup_error = await self._decide_followup_with_llm(
+                    followup_response, followup_error = await self._decide_message_only_followup_with_llm(
                         snapshot,
                         self._build_multiple_tool_calls_followup_prompt(llm_response.tool_calls),
                         current_score["score"],
                         selected_voicebank_id=forced_voicebank_id,
+                        instructions=(
+                            "This is a message-only correction for an invalid response "
+                            "that contained multiple tool calls. No tools will be "
+                            "executed from this response. Explain that only one next "
+                            "action can be handled at a time and ask the user to choose "
+                            "or confirm the single next action."
+                        ),
                     )
                     if followup_response is not None and followup_response.final_message:
                         response_message = self._format_followup_message_text(
@@ -339,6 +369,7 @@ class Orchestrator:
                     user_id=user_id,
                     user_email=user_email,
                     forced_voicebank_id=forced_voicebank_id,
+                    workflow_user_message=message,
                 )
                 await self._sessions.append_history(
                     session_id, "assistant", str(response.get("message", ""))
@@ -898,14 +929,37 @@ class Orchestrator:
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
             self._release_fault_injection_remaining.pop(job_id, None)
-            self._logger.warning(
-                "synthesis_action_required session=%s job=%s release_status=%s action=%s message=%s",
-                session_id,
-                job_id,
-                release_result.status,
-                exc.payload.get("action"),
-                exc.message,
-            )
+            action_code = str(
+                exc.payload.get("code") or exc.payload.get("action") or ""
+            ).strip()
+            if action_code == "unsupported_lyric_language":
+                diagnostics = (
+                    exc.payload.get("diagnostics")
+                    if isinstance(exc.payload.get("diagnostics"), dict)
+                    else {}
+                )
+                self._logger.error(
+                    "unsupported_lyric_language_action_required "
+                    "session=%s job=%s release_status=%s action=%s reason=%s "
+                    "token=%s script=%s message=%s",
+                    session_id,
+                    job_id,
+                    release_result.status,
+                    exc.payload.get("action"),
+                    exc.payload.get("reason"),
+                    diagnostics.get("token"),
+                    diagnostics.get("unsupported_script"),
+                    exc.message,
+                )
+            else:
+                self._logger.warning(
+                    "synthesis_action_required session=%s job=%s release_status=%s action=%s message=%s",
+                    session_id,
+                    job_id,
+                    release_result.status,
+                    exc.payload.get("action"),
+                    exc.message,
+                )
             user_message = await self._render_synthesis_action_required_message(
                 session_id,
                 user_id,
@@ -1034,9 +1088,9 @@ class Orchestrator:
                     planning_context,
                 )
                 if plan_error:
-                    raise RuntimeError(plan_error)
+                    raise PreprocessPlanningError(plan_error)
                 if plan_response is None or not plan_response.tool_calls:
-                    raise RuntimeError("LLM did not return an initial preprocess plan.")
+                    raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE)
                 tool_calls = list(plan_response.tool_calls)
                 tool_calls = self._apply_preprocess_planning_context_defaults(
                     tool_calls,
@@ -1088,8 +1142,16 @@ class Orchestrator:
                     warningMessage=warning_message,
                 )
         except Exception as exc:
-            self._logger.exception("preprocess_job_failed session=%s error=%s", session_id, exc)
-            safe_message = "Couldn't finish preparing the selected singing line."
+            if isinstance(exc, PreprocessPlanningError):
+                self._logger.warning(
+                    "preprocess_job_planning_failed session=%s error=%s",
+                    session_id,
+                    exc,
+                )
+                safe_message = str(exc).strip() or PREPROCESS_PLANNING_ERROR_MESSAGE
+            else:
+                self._logger.exception("preprocess_job_failed session=%s error=%s", session_id, exc)
+                safe_message = "Couldn't finish preparing the selected singing line."
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
@@ -1117,10 +1179,13 @@ class Orchestrator:
             return fallback_message
         try:
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
-            followup_response, followup_error = await self._decide_followup_with_llm(
-                snapshot,
-                json.dumps(payload, sort_keys=True),
-                score,
+            followup_response, followup_error = (
+                await self._decide_message_only_followup_with_llm(
+                    snapshot,
+                    json.dumps(payload, sort_keys=True),
+                    score,
+                    instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
+                )
             )
         except Exception as exc:
             self._logger.warning(
@@ -1172,11 +1237,17 @@ class Orchestrator:
         history = [
             {
                 "role": "user",
-                "content": f"{TOOL_RESULT_PREFIX}{json.dumps(payload, sort_keys=True)}",
+                "content": (
+                    TOOL_RESULT_PREFIX
+                    + self._message_only_tool_summary(
+                        json.dumps(payload, sort_keys=True),
+                        instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
+                    )
+                ),
             }
         ]
         prompt_bundle = build_prompt_bundle(
-            self._llm_tools_for_role(LlmRole.DEFAULT),
+            [],
             score_available=False,
             role=LlmRole.DEFAULT,
         )
@@ -1196,6 +1267,13 @@ class Orchestrator:
             return fallback_message
         response = parse_llm_response(text)
         if response is not None and str(response.final_message or "").strip():
+            if response.tool_calls:
+                self._logger.warning(
+                    "synthesis_action_required_message_only_tool_calls_ignored "
+                    "session=%s tools=%s",
+                    session_id,
+                    [call.name for call in response.tool_calls],
+                )
             return self._format_followup_message_text(response.final_message)
         prose_fallback = self._extract_followup_prose_fallback(text)
         if prose_fallback:
@@ -1248,6 +1326,7 @@ class Orchestrator:
         user_email: str,
         forced_voicebank_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
+        workflow_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns."""
         include_score = initial_include_score
@@ -1606,12 +1685,28 @@ class Orchestrator:
                 continue
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
-            followup_response, followup_error = await self._decide_followup_with_llm(
-                latest_snapshot,
-                followup_prompt,
-                working_score,
-                selected_voicebank_id=forced_voicebank_id,
-            )
+            if tool_result.followup_message_only:
+                followup_response, followup_error = (
+                    await self._decide_message_only_followup_with_llm(
+                        latest_snapshot,
+                        followup_prompt,
+                        working_score,
+                        selected_voicebank_id=forced_voicebank_id,
+                        instructions=(
+                            "This is a message-only follow-up for a tool execution "
+                            "blocker. No tools will be executed from this response. "
+                            "Explain the blocker concisely and ask the user to choose "
+                            "or confirm the single next action."
+                        ),
+                    )
+                )
+            else:
+                followup_response, followup_error = await self._decide_followup_with_llm(
+                    latest_snapshot,
+                    followup_prompt,
+                    working_score,
+                    selected_voicebank_id=forced_voicebank_id,
+                )
             if followup_error:
                 best_valid_candidate = await self._materialize_review_candidate_if_needed(
                     session_id, best_valid_candidate
@@ -1668,6 +1763,50 @@ class Orchestrator:
                 followup_response.thought_summary,
                 followup_response.tool_calls,
             ) or thought_block_for_response
+
+            if self._should_start_preprocess_workflow(followup_response.tool_calls):
+                if progress_callback is not None:
+                    raise RuntimeError(
+                        "Preprocess workflow handoff cannot start from inside a preprocess job."
+                    )
+                latest_files = latest_snapshot.get("files")
+                handoff_explicit_verse_number = self._normalize_verse_number(
+                    latest_files.get(EXPLICIT_VERSE_METADATA_KEY)
+                    if isinstance(latest_files, dict)
+                    else None
+                )
+                requires_verse_selection = self._tool_calls_require_verse_selection(
+                    followup_response.tool_calls,
+                    score=working_score,
+                    score_summary=latest_snapshot.get("score_summary"),
+                    explicit_verse_number=handoff_explicit_verse_number,
+                )
+                if requires_verse_selection:
+                    action_required = self._build_verse_selection_required_action(
+                        score=working_score,
+                        score_summary=latest_snapshot.get("score_summary"),
+                        tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
+                        explicit_verse_number=handoff_explicit_verse_number,
+                    )
+                    return {
+                        "type": "chat_text",
+                        "message": str(action_required.get("message") or response_message),
+                        "action_required": action_required,
+                    }
+                planning_context = self._build_preprocess_workflow_planning_context(
+                    followup_response.tool_calls,
+                    user_message=workflow_user_message or "",
+                )
+                return await self._start_preprocess_job(
+                    session_id,
+                    working_score,
+                    [],
+                    initial_message=response_message,
+                    initial_thought_summary=followup_response.thought_summary,
+                    user_id=user_id,
+                    user_email=user_email,
+                    planning_context=planning_context,
+                )
 
             if not followup_response.tool_calls:
                 best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -1755,7 +1894,23 @@ class Orchestrator:
         files = snapshot.get("files") or {}
         source_path = files.get("musicxml_path") if isinstance(files, dict) else None
         if not isinstance(source_path, str) or not source_path:
-            raise ValueError("Session is missing its active MusicXML path.")
+            persisted_settings = await self._sessions.set_solfege_settings(
+                session_id, settings
+            )
+            current_score = snapshot.get("current_score")
+            score_version = (
+                int(current_score.get("version") or 0)
+                if isinstance(current_score, dict)
+                else 0
+            )
+            return {
+                "status": "ready",
+                "settings": persisted_settings,
+                "score_version": score_version,
+                "updated_generated_verses": [],
+                "current_score": current_score,
+                "score_summary": snapshot.get("score_summary"),
+            }
         output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
         args = {
             "source_musicxml_path": source_path,
@@ -2834,7 +2989,11 @@ class Orchestrator:
             final_metadata = finalized.setdefault("metadata", {})
             final_metadata.update(metadata)
         review_score = self._mark_review_pending(score, finalized)
-        await self._sessions.set_score(session_id, review_score)
+        await self._activate_preprocessed_score(
+            session_id,
+            review_score,
+            modified_musicxml_path=finalized.get("modified_musicxml_path"),
+        )
         updated_payload = dict(candidate.result_payload)
         for key in (
             "score",
@@ -2859,6 +3018,57 @@ class Orchestrator:
             review_materialization=None,
         )
 
+    async def _activate_preprocessed_score(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        *,
+        modified_musicxml_path: Any,
+    ) -> None:
+        """Make a validated derived score the active artifact for downstream tools."""
+        path_value = modified_musicxml_path or score.get("source_musicxml_path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            await self._sessions.set_score(session_id, score)
+            return
+
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = self._settings.project_root / path
+        path = path.resolve()
+        score["source_musicxml_path"] = str(path)
+
+        summary: Optional[Dict[str, Any]] = None
+        try:
+            parser_path = path.relative_to(self._settings.project_root.resolve())
+        except ValueError as exc:
+            raise ValueError("Derived MusicXML path is outside the project root.") from exc
+        parse_args: Dict[str, Any] = {"file_path": str(parser_path)}
+        selected_verse = self._score_selected_verse_number(score)
+        if selected_verse is not None:
+            parse_args["verse_number"] = selected_verse
+        try:
+            parsed = await asyncio.to_thread(
+                self._router.call_tool, "parse_score", parse_args
+            )
+            parsed_summary = parsed.get("score_summary") if isinstance(parsed, dict) else None
+            if isinstance(parsed_summary, dict):
+                summary = parsed_summary
+        except Exception as exc:
+            # The preprocess result is already validated. Keep it active even if
+            # refreshing optional LLM context fails independently.
+            self._logger.warning(
+                "preprocess_score_summary_refresh_failed session=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
+
+        await self._sessions.set_file(session_id, "musicxml_path", path)
+        await self._sessions.set_score_summary(
+            session_id, summary if isinstance(summary, dict) else None
+        )
+        await self._sessions.set_score(session_id, score)
+
     async def _render_selected_candidate_response(
         self,
         session_id: str,
@@ -2878,10 +3088,16 @@ class Orchestrator:
         summary_payload["stop_reason"] = stop_reason
         summary_payload["quality_class"] = candidate.quality_class
         latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        followup_response, followup_error = await self._decide_followup_with_llm(
+        followup_response, followup_error = await self._decide_message_only_followup_with_llm(
             latest_snapshot,
             self._build_terminal_candidate_prompt(summary_payload),
             current_score,
+            instructions=(
+                "This is a terminal prepared-score review message. No tools will "
+                "be executed from this response. Summarize what remains unresolved "
+                "in singer-friendly language, explain why the workflow is stopping "
+                "here, and ask the user to review the score or request revisions."
+            ),
         )
         if followup_error:
             return candidate_response
@@ -3410,10 +3626,103 @@ class Orchestrator:
         """Return the score context the LLM should use for preprocess planning."""
         if not isinstance(current_score, dict):
             return current_score
-        original_score = snapshot.get("original_score")
-        if isinstance(original_score, dict):
-            return original_score
-        raise ValueError(MISSING_ORIGINAL_SCORE_MESSAGE)
+        return self._resolve_preprocess_planning_score(snapshot, current_score)
+
+    def _resolve_preprocess_planning_score(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return active-score context with generated solfege verses excluded."""
+        verse_number = self._preprocess_source_verse_number(snapshot, current_score)
+        if verse_number is None:
+            return current_score
+        try:
+            reparsed = self._reparse_active_musicxml_for_preprocess(
+                snapshot,
+                current_score,
+                verse_number=verse_number,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "preprocess_planning_reparse_failed selected_verse=%s error=%s",
+                verse_number,
+                exc,
+            )
+            return current_score
+        return reparsed if isinstance(reparsed, dict) else current_score
+
+    def _preprocess_source_verse_number(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Dict[str, Any],
+    ) -> Optional[str]:
+        """Choose a non-generated lyric verse for preprocess source analysis."""
+        if not self._score_contains_generated_solfege_lyrics(current_score):
+            return None
+        selected = self._score_selected_verse_number(current_score)
+        score_summary = snapshot.get("score_summary")
+        if not isinstance(score_summary, dict):
+            score_summary = current_score.get("score_summary")
+        available_verses = self._available_verses(
+            score_summary if isinstance(score_summary, dict) else None
+        )
+        for verse in available_verses:
+            if verse != selected:
+                return verse
+        return None
+
+    def _score_contains_generated_solfege_lyrics(self, score: Dict[str, Any]) -> bool:
+        for part in score.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            for note in part.get("notes") or []:
+                if not isinstance(note, dict):
+                    continue
+                if str(note.get("lyric_name") or "").strip() == GENERATED_LYRIC_NAME:
+                    return True
+        return False
+
+    def _reparse_active_musicxml_for_preprocess(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Dict[str, Any],
+        *,
+        verse_number: str,
+    ) -> Dict[str, Any]:
+        """Parse the active MusicXML artifact on the lyric verse preprocess should use."""
+        files = snapshot.get("files") if isinstance(snapshot.get("files"), dict) else {}
+        path_value = files.get("musicxml_path") or current_score.get("source_musicxml_path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            return current_score
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = self._settings.project_root / path
+        path = path.resolve()
+        try:
+            parser_path = path.relative_to(self._settings.project_root.resolve())
+            file_path = str(parser_path)
+        except ValueError:
+            file_path = str(path)
+        reparsed = self._router.call_tool(
+            "parse_score",
+            {"file_path": file_path, "verse_number": verse_number},
+        )
+        if not isinstance(reparsed, dict):
+            return current_score
+        self._carry_preprocess_active_metadata(current_score, reparsed)
+        return reparsed
+
+    def _carry_preprocess_active_metadata(
+        self,
+        current_score: Dict[str, Any],
+        reparsed_score: Dict[str, Any],
+    ) -> None:
+        """Keep derived-part identity metadata after reparsing the active MusicXML."""
+        for key in ("voice_part_transforms", REVIEW_PENDING_KEY):
+            value = current_score.get(key)
+            if isinstance(value, dict) and value:
+                reparsed_score[key] = copy.deepcopy(value)
 
     async def _resolve_preprocess_score(
         self,
@@ -3423,15 +3732,21 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         """Return the score baseline to use for preprocess execution."""
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        original_score = snapshot.get("original_score")
-        if isinstance(original_score, dict):
+        current_score = snapshot.get("current_score")
+        if isinstance(current_score, dict) and isinstance(current_score.get("score"), dict):
+            score = current_score["score"]
+            preprocess_score = await asyncio.to_thread(
+                self._resolve_preprocess_planning_score,
+                snapshot,
+                score,
+            )
             self._logger.info(
                 "preprocess_baseline_ready session=%s source_musicxml_path=%s selected_verse=%s",
                 session_id,
-                original_score.get("source_musicxml_path"),
-                original_score.get("selected_verse_number"),
+                preprocess_score.get("source_musicxml_path"),
+                preprocess_score.get("selected_verse_number"),
             )
-            return original_score
+            return preprocess_score
         raise ValueError(MISSING_ORIGINAL_SCORE_MESSAGE)
 
     async def _resolve_voicebank(self) -> str:
@@ -3564,12 +3879,18 @@ class Orchestrator:
                 "Return no tool calls.",
             ],
         }
-        response, error = await self._decide_followup_with_llm(
+        response, error = await self._decide_message_only_followup_with_llm(
             snapshot,
             json.dumps(payload, sort_keys=True),
             score,
             selected_voicebank_id=selected_voicebank_id,
-            role=LlmRole.DEFAULT,
+            instructions=(
+                "This is a message-only line-preparation start notice. No tools "
+                "will be executed from this response. Tell the user the selected "
+                "part needs splitting before singing and that you are preparing "
+                "that selected part now. Do not use the words preprocess or "
+                "preprocessing. Do not claim the derived score or audio is ready."
+            ),
         )
         if error:
             return "", error
@@ -3584,24 +3905,79 @@ class Orchestrator:
         planning_context: Dict[str, Any],
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the preprocess LLM role to author the initial preprocess plan."""
-        response, error = await self._decide_followup_with_llm(
-            snapshot,
-            json.dumps(planning_context, sort_keys=True),
-            score,
-            role=LlmRole.PREPROCESS,
+        max_llm_responses = max(
+            1,
+            self._settings.preprocess_initial_plan_llm_max_responses,
         )
-        if error:
-            return None, error
-        if response is None:
-            return None, "LLM did not return an initial preprocess plan."
-        preprocess_calls = [
-            call for call in response.tool_calls if call.name == TOOL_PREPROCESS_VOICE_PARTS
+        for attempt in range(1, max_llm_responses + 1):
+            attempt_context = self._preprocess_planning_context_for_attempt(
+                planning_context,
+                attempt=attempt,
+            )
+            response, error = await self._decide_followup_with_llm(
+                snapshot,
+                json.dumps(attempt_context, sort_keys=True),
+                score,
+                role=LlmRole.PREPROCESS,
+            )
+            if error:
+                return None, error
+            if response is None:
+                self._logger.warning(
+                    "preprocess_initial_plan_empty_response llm_response_attempt=%s max_llm_responses=%s",
+                    attempt,
+                    max_llm_responses,
+                )
+                continue
+            preprocess_calls = [
+                call for call in response.tool_calls if call.name == TOOL_PREPROCESS_VOICE_PARTS
+            ]
+            if not preprocess_calls:
+                self._logger.warning(
+                    "preprocess_initial_plan_missing_tool_call llm_response_attempt=%s max_llm_responses=%s",
+                    attempt,
+                    max_llm_responses,
+                )
+                continue
+            if len(preprocess_calls) != len(response.tool_calls):
+                response = replace(response, tool_calls=preprocess_calls)
+            return response, None
+        return None, PREPROCESS_PLANNING_ERROR_MESSAGE
+
+    def _preprocess_planning_context_for_attempt(
+        self,
+        planning_context: Dict[str, Any],
+        *,
+        attempt: int,
+    ) -> Dict[str, Any]:
+        """Return stricter planning instructions after an empty initial response."""
+        if attempt <= 1:
+            return planning_context
+        retry_context = copy.deepcopy(planning_context)
+        instructions = retry_context.get("instructions")
+        if not isinstance(instructions, list):
+            instructions = []
+        retry_context["instructions"] = [
+            *instructions,
+            (
+                "The previous preprocess planning response did not include the "
+                "required tool call."
+            ),
+            (
+                "You must return exactly one `preprocess_voice_parts` tool call "
+                "and no prose-only response."
+            ),
+            (
+                "The tool call must include `request.plan.targets` for the selected "
+                "singing line."
+            ),
         ]
-        if not preprocess_calls:
-            return None, "LLM did not return an initial preprocess plan."
-        if len(preprocess_calls) != len(response.tool_calls):
-            response = replace(response, tool_calls=preprocess_calls)
-        return response, None
+        retry_context["retry"] = {
+            "attempt": attempt,
+            "required_tool": TOOL_PREPROCESS_VOICE_PARTS,
+            "reason": "missing_required_preprocess_voice_parts_tool_call",
+        }
+        return retry_context
 
     def _format_llm_error(self, exc: RuntimeError) -> str:
         """Return a user-facing LLM error message."""
@@ -3756,12 +4132,144 @@ class Orchestrator:
         self, snapshot: Dict[str, Any], tool_summary: str
     ) -> str:
         """Ask the LLM to turn a tool summary into a user-facing response."""
-        response, error = await self._decide_followup_with_llm(snapshot, tool_summary)
+        response, error = await self._decide_message_only_followup_with_llm(
+            snapshot,
+            tool_summary,
+            instructions=MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
+        )
         if error:
             return error
         if response is None or not response.final_message:
             return tool_summary
         return self._format_followup_message_text(response.final_message)
+
+    def _message_only_tool_summary(
+        self,
+        tool_summary: str,
+        *,
+        instructions: str,
+    ) -> str:
+        """Wrap a tool summary with a message-only contract for terminal statuses."""
+        normalized_instructions = (
+            str(instructions or "").strip() or MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS
+        )
+        return (
+            f"{normalized_instructions}\n\n"
+            "Message-only payload:\n"
+            f"{tool_summary}"
+        )
+
+    async def _decide_message_only_followup_with_llm(
+        self,
+        snapshot: Dict[str, Any],
+        tool_summary: str,
+        current_score: Optional[Dict[str, Any]] = None,
+        *,
+        selected_voicebank_id: Optional[str] = None,
+        instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
+    ) -> tuple[Optional[LlmResponse], Optional[str]]:
+        """Ask the LLM for prose only, with no executable follow-up tool affordance."""
+        if self._llm_client is None:
+            return None, tool_summary
+        history = list(snapshot.get("history", []))
+        history.append(
+            {
+                "role": "user",
+                "content": (
+                    TOOL_RESULT_PREFIX
+                    + self._message_only_tool_summary(
+                        tool_summary,
+                        instructions=instructions,
+                    )
+                ),
+            }
+        )
+        try:
+            voicebank_ids = await self._get_voicebank_ids()
+            voicebank_details = await self._get_voicebank_details()
+            planning_score = self._resolve_llm_planning_score(snapshot, current_score)
+            voice_part_signals = (
+                planning_score.get("voice_part_signals")
+                if isinstance(planning_score, dict)
+                else None
+            )
+            last_preprocess_plan = snapshot.get("last_preprocess_plan")
+            preprocess_mapping_context = (
+                self._build_preprocess_mapping_context(
+                    current_score,
+                    score_summary=snapshot.get("score_summary"),
+                )
+                if isinstance(current_score, dict)
+                else None
+            )
+            prompt_bundle = build_prompt_bundle(
+                [],
+                score_available=True,
+                voicebank_ids=voicebank_ids,
+                score_summary=snapshot.get("score_summary"),
+                parsed_score_json=(
+                    planning_score
+                    if (
+                        self._settings.inject_full_parsed_score_json
+                        and isinstance(planning_score, dict)
+                    )
+                    else None
+                ),
+                voice_part_signals=voice_part_signals,
+                preprocess_mapping_context=preprocess_mapping_context,
+                last_preprocess_plan=(
+                    last_preprocess_plan
+                    if isinstance(last_preprocess_plan, dict)
+                    else None
+                ),
+                voicebank_details=voicebank_details,
+                selected_voicebank_id=selected_voicebank_id,
+                solfege_settings=(
+                    snapshot.get("solfege_settings")
+                    if isinstance(snapshot.get("solfege_settings"), dict)
+                    else None
+                ),
+                role=LlmRole.DEFAULT,
+            )
+            text = await asyncio.to_thread(
+                self._call_llm_client_generate,
+                prompt_bundle,
+                history,
+                LlmRole.DEFAULT,
+            )
+        except ValueError as exc:
+            self._logger.warning("llm_message_only_context_failed error=%s", exc)
+            return None, str(exc)
+        except RuntimeError as exc:
+            self._logger.warning("llm_message_only_failed error=%s", exc)
+            return None, self._format_llm_error(exc)
+        except Exception as exc:
+            self._logger.exception("llm_message_only_unexpected error=%s", exc)
+            return None, LLM_ERROR_FALLBACK
+        response = parse_llm_response(text)
+        if response is None:
+            self._logger.warning(
+                "llm_message_only_parse_failed raw_text=%s",
+                summarize_payload(text),
+            )
+            prose_fallback = self._extract_followup_prose_fallback(text)
+            if prose_fallback:
+                return (
+                    LlmResponse(
+                        tool_calls=[],
+                        final_message=prose_fallback,
+                        include_score=False,
+                    ),
+                    None,
+                )
+            return None, tool_summary
+        if response.tool_calls:
+            self._logger.warning(
+                "llm_message_only_tool_calls_ignored tools=%s",
+                [call.name for call in response.tool_calls],
+            )
+            response = replace(response, tool_calls=[])
+        return response, None
 
     async def _decide_followup_with_llm(
         self,
@@ -4210,6 +4718,7 @@ class Orchestrator:
                     "message": "",
                 },
                 followup_prompt=self._build_multiple_tool_calls_followup_prompt(tool_calls),
+                followup_message_only=True,
                 explicit_verse_number=selected_explicit_verse_number,
             )
         for call in tool_calls:
@@ -4220,8 +4729,9 @@ class Orchestrator:
                 summarize_payload(call.arguments),
             )
             if call.name == TOOL_START_PREPROCESS_WORKFLOW:
-                self._logger.warning("handoff_tool_reached_executor tool=%s", call.name)
-                continue
+                raise RuntimeError(
+                    "Preprocess workflow handoff reached the generic executor without interception."
+                )
             if call.name not in {
                 TOOL_REPARSE,
                 TOOL_PREPROCESS_VOICE_PARTS,
@@ -4240,15 +4750,6 @@ class Orchestrator:
                 output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
                 args = dict(call.arguments)
                 args.pop("reason", None)
-                raw_part_id = args.get("part_id")
-                if raw_part_id is not None and args.get("part_index") is None:
-                    resolved_part_index = self._resolve_named_part_index(
-                        current_score,
-                        str(raw_part_id),
-                    )
-                    if resolved_part_index is not None:
-                        args.pop("part_id", None)
-                        args["part_index"] = resolved_part_index
                 args["source_musicxml_path"] = source_path
                 args["output_musicxml_path"] = str(
                     output_path.relative_to(self._settings.project_root)
@@ -4471,7 +4972,11 @@ class Orchestrator:
                     result.get("score"), dict
                 ):
                     current_score = self._mark_review_pending(result["score"], result)
-                    await self._sessions.set_score(session_id, current_score)
+                    await self._activate_preprocessed_score(
+                        session_id,
+                        current_score,
+                        modified_musicxml_path=result.get("modified_musicxml_path"),
+                    )
                     mapping_context = self._build_preprocess_mapping_context(
                         current_score,
                         score_summary=score_summary,
@@ -4515,6 +5020,31 @@ class Orchestrator:
                     )
                 continue
             if call.name == "synthesize":
+                synth_args = dict(call.arguments)
+                target_error = self._validate_active_synthesis_target(
+                    score_summary,
+                    part_id=synth_args.get("part_id"),
+                    part_index=synth_args.get("part_index"),
+                )
+                if target_error is not None:
+                    self._logger.warning(
+                        "synthesize_target_invalid session=%s diagnostics=%s",
+                        session_id,
+                        summarize_payload(target_error.get("diagnostics")),
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_error",
+                            "message": str(target_error["message"]),
+                        },
+                        action_required_payload=target_error,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                synth_args = self._canonicalize_active_synthesis_target(
+                    synth_args,
+                    current_score=current_score,
+                )
                 if self._tool_calls_require_verse_selection(
                     [call],
                     score=current_score,
@@ -4561,7 +5091,6 @@ class Orchestrator:
                     )
 
                 # Launch an async synthesis job.
-                synth_args = dict(call.arguments)
                 synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
                 synth_args = await self._normalize_synthesize_voice_color(synth_args)
                 synth_args.pop("score", None)
@@ -4861,12 +5390,106 @@ class Orchestrator:
         """Resolve part index for synth prechecks."""
         parts = score.get("parts") or []
         if part_id is not None:
+            selector = str(part_id).strip()
             for idx, part in enumerate(parts):
-                if part.get("part_id") == part_id:
+                current_part_id = str(part.get("part_id") or "").strip()
+                if current_part_id == selector:
+                    return idx
+                if (
+                    current_part_id.startswith("P_DERIVED_")
+                    and selector.startswith(f"{current_part_id}-")
+                ):
                     return idx
         if isinstance(part_index, int):
             return part_index
+        if part_id is not None:
+            return -1
         return 0
+
+    def _validate_active_synthesis_target(
+        self,
+        score_summary: Optional[Dict[str, Any]],
+        *,
+        part_id: Any,
+        part_index: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Reject explicit selectors absent from the active MusicXML summary."""
+        if part_id is None and part_index is None:
+            return None
+        summary_parts = (
+            score_summary.get("parts") if isinstance(score_summary, dict) else None
+        )
+        if not isinstance(summary_parts, list):
+            return {
+                "status": "action_required",
+                "action": "target_not_found",
+                "code": "target_not_found",
+                "message": (
+                    "The selected score part could not be validated against the active MusicXML."
+                ),
+                "diagnostics": {
+                    "part_id": part_id,
+                    "part_index": part_index,
+                    "detail": "active score summary is unavailable",
+                },
+            }
+
+        if part_id is not None:
+            selector = str(part_id)
+            matches = [
+                part
+                for part in summary_parts
+                if isinstance(part, dict)
+                and str(part.get("part_id") or "") == selector
+            ]
+            if len(matches) == 1:
+                return None
+            detail = "part_id not found" if not matches else "part_id is not unique"
+        elif isinstance(part_index, int) and not isinstance(part_index, bool):
+            if 0 <= part_index < len(summary_parts):
+                return None
+            detail = f"part_index out of range: {part_index}"
+        else:
+            detail = "part_index must be a non-negative integer"
+
+        return {
+            "status": "action_required",
+            "action": "target_not_found",
+            "code": "target_not_found",
+            "message": "The selected score part could not be found in the active MusicXML.",
+            "diagnostics": {
+                "part_id": part_id,
+                "part_index": part_index,
+                "parts_count": len(summary_parts),
+                "detail": detail,
+            },
+        }
+
+    def _canonicalize_active_synthesis_target(
+        self,
+        arguments: Dict[str, Any],
+        *,
+        current_score: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize parsed MusicXML staff IDs back to active score selectors."""
+        normalized = dict(arguments)
+        part_index = normalized.get("part_index")
+        if isinstance(part_index, int) and not isinstance(part_index, bool):
+            return normalized
+        raw_part_id = normalized.get("part_id")
+        if raw_part_id is None:
+            return normalized
+
+        selector = str(raw_part_id).strip()
+        resolved_index = self._resolve_synthesize_part_index(
+            current_score,
+            part_id=selector,
+            part_index=None,
+        )
+        if resolved_index >= 0:
+            normalized.pop("part_id", None)
+            normalized["part_index"] = resolved_index
+        return normalized
 
     def _resolve_named_part_index(
         self,
@@ -5038,6 +5661,7 @@ class ToolExecutionResult:
     score: Dict[str, Any]
     audio_response: Optional[Dict[str, Any]]
     followup_prompt: Optional[str] = None
+    followup_message_only: bool = False
     review_required: bool = False
     action_required_payload: Optional[Dict[str, Any]] = None
     review_materialization: Optional[Dict[str, Any]] = None

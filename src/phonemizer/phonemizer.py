@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import unicodedata
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from g2p_en import G2p
@@ -77,6 +78,46 @@ class DictionaryBundle:
     vowels: set[str]
     glides: set[str]
     load_strategy: str
+
+
+class UnsupportedLyricTokenError(ValueError):
+    """Raised when a lyric token cannot be handled by the selected language path."""
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        language: str,
+        reason: str,
+        normalized_token: str = "",
+        unsupported_character: str = "",
+        unsupported_character_name: str = "",
+        unsupported_script: str = "",
+    ) -> None:
+        self.token = token
+        self.language = language
+        self.reason = reason
+        self.normalized_token = normalized_token
+        self.unsupported_character = unsupported_character
+        self.unsupported_character_name = unsupported_character_name
+        self.unsupported_script = unsupported_script
+        if reason == "non_latin_lyrics_for_english_g2p":
+            self.code = "unsupported_lyric_language"
+        else:
+            self.code = "invalid_lyric_token"
+        super().__init__(self.error_message)
+
+    @property
+    def error_message(self) -> str:
+        if self.reason == "non_latin_lyrics_for_english_g2p":
+            return (
+                f"Token '{self.token}' contains non-Latin text that cannot be "
+                f"phonemized by the '{self.language}' G2P fallback."
+            )
+        return (
+            f"Token '{self.token}' has no usable letters for the "
+            f"'{self.language}' G2P fallback."
+        )
 
 
 def _env_int(name: str, default: int) -> int:
@@ -197,10 +238,24 @@ class Phonemizer:
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 "Update the voicebank dsdict.yaml to include this grapheme, or enable G2P."
             )
+        unsupported = self._first_non_latin_letter(raw)
+        if unsupported is not None:
+            character, character_name, script = unsupported
+            raise UnsupportedLyricTokenError(
+                token=raw,
+                language=self.language,
+                reason="non_latin_lyrics_for_english_g2p",
+                unsupported_character=character,
+                unsupported_character_name=character_name,
+                unsupported_script=script,
+            )
         cleaned = self._normalize_word_for_g2p(raw)
         if not cleaned:
-            raise KeyError(
-                f"Token '{raw}' has no usable letters for G2P lookup."
+            raise UnsupportedLyricTokenError(
+                token=raw,
+                language=self.language,
+                reason="invalid_lyric_token_for_g2p",
+                normalized_token=cleaned,
             )
         phones = [p for p in self._get_g2p()(cleaned) if self._is_arpabet(p)]
         if not phones:
@@ -247,14 +302,33 @@ class Phonemizer:
     @staticmethod
     def _normalize_grapheme(value: str) -> str:
         """Normalize a grapheme for dictionary lookup."""
-        cleaned = re.sub(r"[^A-Za-z']+", "", value).lower()
+        cleaned = Phonemizer._normalize_word_for_g2p(value)
         return cleaned or value.strip()
 
     @staticmethod
     def _normalize_word_for_g2p(value: str) -> str:
-        """Normalize a word for G2P processing."""
-        cleaned = re.sub(r"[^A-Za-z']+", "", value).lower()
+        """Normalize a Latin word for English G2P processing."""
+        decomposed = unicodedata.normalize("NFKD", value)
+        without_marks = "".join(
+            character
+            for character in decomposed
+            if not unicodedata.combining(character)
+        )
+        cleaned = re.sub(r"[^A-Za-z']+", "", without_marks).lower()
         return cleaned
+
+    @staticmethod
+    def _first_non_latin_letter(value: str) -> Optional[tuple[str, str, str]]:
+        """Return the first alphabetic character outside the Latin script."""
+        for character in value:
+            if not character.isalpha():
+                continue
+            character_name = unicodedata.name(character, "")
+            if "LATIN" in character_name:
+                continue
+            script = character_name.split(" ", 1)[0].title() if character_name else "Unknown"
+            return character, character_name, script
+        return None
 
     @staticmethod
     def _is_arpabet(value: str) -> bool:

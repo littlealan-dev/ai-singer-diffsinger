@@ -21,6 +21,18 @@ class McpError(RuntimeError):
     pass
 
 
+class McpToolError(McpError):
+    """Raised when a healthy MCP worker reports a tool execution error."""
+
+    def __init__(self, error: Any) -> None:
+        payload = dict(error) if isinstance(error, dict) else {"message": str(error)}
+        self.payload = payload
+        self.code = str(payload.get("code") or "") or None
+        self.error_type = str(payload.get("type") or "") or None
+        self.retryable = bool(payload.get("retryable", False))
+        super().__init__(str(payload.get("message") or error))
+
+
 class McpRequestTimeoutError(McpError):
     """Raised when a single MCP JSON-RPC request exceeds its timeout."""
 
@@ -131,7 +143,7 @@ class McpProcess:
             timeout_seconds=self._timeout_seconds,
         )
         if isinstance(result, dict) and "error" in result:
-            raise McpError(result["error"])
+            raise McpToolError(result["error"])
         return result
 
     def _send_request(self, request: McpRequest, timeout_seconds: float) -> Any:
@@ -359,6 +371,15 @@ class McpRouter:
                 elapsed_ms,
             )
             return result
+        except McpToolError as exc:
+            logging.getLogger(__name__).warning(
+                "mcp_tool_error tool=%s worker=%s code=%s error_type=%s retry_skipped=true",
+                name,
+                worker,
+                exc.code,
+                exc.error_type,
+            )
+            raise
         except McpRequestTimeoutError as exc:
             logging.getLogger(__name__).warning(
                 "mcp_tool_timeout tool=%s worker=%s timeout_seconds=%.2f; restarting_without_retry",

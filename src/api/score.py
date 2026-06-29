@@ -86,6 +86,7 @@ def parse_score(
 
     # Convert dataclass to dict for JSON serialization.
     score_dict = dataclasses.asdict(score_data)
+    _strip_empty_lyric_names(score_dict)
     
     # Add structure placeholder (to be populated when parser supports it).
     score_dict["structure"] = {
@@ -118,6 +119,16 @@ def parse_score(
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(score_dict))
     return score_dict
+
+
+def _strip_empty_lyric_names(score_dict: Dict[str, Any]) -> None:
+    """Keep generated lyric provenance without adding null fields to normal notes."""
+    for part in score_dict.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        for note in part.get("notes") or []:
+            if isinstance(note, dict) and note.get("lyric_name") is None:
+                note.pop("lyric_name", None)
 
 
 def _resolve_selected_verse_number(

@@ -58,6 +58,28 @@ class TestMcpServer(unittest.TestCase):
             args, kwargs = mock_parse.call_args
             self.assertTrue(isinstance(args[0], Path))
 
+    def test_parse_score_generalizes_parser_exception(self):
+        with mock.patch("src.mcp.handlers.parse_score", side_effect=RuntimeError("unexpected tag")):
+            result = self._call_tool(
+                "parse_score",
+                {"file_path": self.score_path, "expand_repeats": False},
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "error": {
+                    "message": (
+                        "Uploaded file is not valid MusicXML. "
+                        "Please export a MusicXML score and try again."
+                    ),
+                    "type": "InvalidMusicXmlError",
+                    "code": "invalid_musicxml",
+                    "retryable": False,
+                }
+            },
+        )
+
     def test_reparse(self):
         with mock.patch("src.mcp.handlers.parse_score") as mock_parse:
             mock_parse.return_value = {"title": "ok"}

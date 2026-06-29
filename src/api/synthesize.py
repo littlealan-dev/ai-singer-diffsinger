@@ -29,7 +29,7 @@ from src.api.voice_parts import build_infeasible_anchor_action_required
 from src.api.voice_parts import synthesize_preflight_action_required
 from src.api.voicebank_cache import resolve_manifest_pitch_expression
 from src.api.timing_errors import InfeasibleAnchorError
-from src.phonemizer.phonemizer import Phonemizer
+from src.phonemizer.phonemizer import Phonemizer, UnsupportedLyricTokenError
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -38,6 +38,40 @@ logger = get_logger(__name__)
 def _env_flag_enabled(name: str) -> bool:
     raw = str(os.environ.get(name, "")).strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _build_unsupported_lyric_action_required(
+    *,
+    error: UnsupportedLyricTokenError,
+    voicebank: Path,
+    part_index: int,
+    voice_id: Optional[str],
+    voice_part_id: Optional[str],
+) -> Dict[str, Any]:
+    """Build a structured action-required payload for unsupported lyric tokens."""
+    return {
+        "status": "action_required",
+        "action": error.code,
+        "code": error.code,
+        "reason": error.reason,
+        "message": error.error_message,
+        "error_message": error.error_message,
+        "failed_validation_rules": ["lyrics.unsupported_for_voicebank_g2p"],
+        "diagnostics": {
+            "token": error.token,
+            "normalized_token": error.normalized_token,
+            "language": error.language,
+            "voicebank": str(voicebank),
+            "part_index": part_index,
+            "voice_id": voice_id,
+            "voice_part_id": voice_part_id,
+            "reason": error.reason,
+            "unsupported_character": error.unsupported_character,
+            "unsupported_character_name": error.unsupported_character_name,
+            "unsupported_script": error.unsupported_script,
+        },
+    }
+
 
 class TimeAxis:
     """Tempo-aware time axis for converting beats to milliseconds."""
@@ -1636,6 +1670,14 @@ def synthesize(
     except InfeasibleAnchorError as exc:
         return build_infeasible_anchor_action_required(
             error=exc,
+            part_index=effective_part_index,
+            voice_id=voice_id,
+            voice_part_id=voice_part_id,
+        )
+    except UnsupportedLyricTokenError as exc:
+        return _build_unsupported_lyric_action_required(
+            error=exc,
+            voicebank=voicebank_path,
             part_index=effective_part_index,
             voice_id=voice_id,
             voice_part_id=voice_part_id,

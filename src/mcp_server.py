@@ -111,9 +111,16 @@ def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional
             logger.debug("MCP response id=%s result=%s", request_id, summarize_payload(result))
             return _result_response(request_id, result)
         except Exception as exc:
+            error = {"message": str(exc), "type": exc.__class__.__name__}
+            error_code = getattr(exc, "code", None)
+            if isinstance(error_code, str) and error_code:
+                error["code"] = error_code
+            retryable = getattr(exc, "retryable", None)
+            if isinstance(retryable, bool):
+                error["retryable"] = retryable
             return _result_response(
                 request_id,
-                {"error": {"message": str(exc), "type": exc.__class__.__name__}},
+                {"error": error},
             )
 
     if request_id is None:

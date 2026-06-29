@@ -25,6 +25,7 @@ from src.backend.mcp_client import (
     McpError,
     McpRequestTimeoutError,
     McpStartupInProgressError,
+    McpToolError,
 )
 from src.backend.orchestrator import Orchestrator
 from src.backend.job_store import JobStore, build_progress_payload
@@ -366,6 +367,24 @@ def create_app() -> FastAPI:
                         ),
                     },
                 ) from exc
+            except McpToolError as exc:
+                if exc.code == "invalid_musicxml":
+                    logger.warning(
+                        "upload_invalid_musicxml session_id=%s user_id=%s suffix=%s "
+                        "uploaded_bytes=%s retry_skipped=true",
+                        session_id,
+                        user_id,
+                        suffix,
+                        uploaded_bytes,
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "invalid_musicxml",
+                            "message": str(exc),
+                        },
+                    ) from exc
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
             except McpError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             logger.info(

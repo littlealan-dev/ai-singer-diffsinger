@@ -8,6 +8,7 @@ import unittest
 import tempfile
 import zipfile
 from pathlib import Path
+import importlib
 import json
 import os
 from unittest import mock
@@ -27,6 +28,7 @@ from src.api.voicebank import resolve_vocoder_model_path
 from src.api.voicebank_cache import get_enabled_manifest_voicebanks
 from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
 from src.api.voice_parts import preprocess_voice_parts
+from src.phonemizer import UnsupportedLyricTokenError
 
 
 ROOT_DIR = Path(__file__).parent.parent
@@ -557,6 +559,62 @@ class TestAlignPhonemesToNotes(unittest.TestCase):
         self.assertEqual(len(result["note_durations"]), len(result["note_pitches"]))
         self.assertEqual(len(result["note_durations"]), len(result["note_rests"]))
         self.assertEqual(sum(result["word_boundaries"]), len(result["phoneme_ids"]))
+
+
+class TestSynthesizeActions(unittest.TestCase):
+    """Tests for synthesize action-required conversion."""
+
+    def test_unsupported_lyric_token_returns_action_required(self):
+        """Unsupported lyric tokens should not surface as generic exceptions."""
+        synthesize_module = importlib.import_module("src.api.synthesize")
+        score = {"parts": [{"part_id": "P1", "part_name": "Solo", "notes": []}]}
+        unsupported = UnsupportedLyricTokenError(
+            token="Прийдіте",
+            language="en",
+            reason="non_latin_lyrics_for_english_g2p",
+            unsupported_character="П",
+            unsupported_character_name="CYRILLIC CAPITAL LETTER PE",
+            unsupported_script="Cyrillic",
+        )
+
+        with mock.patch.object(
+            synthesize_module,
+            "synthesize_preflight_action_required",
+            return_value=None,
+        ), mock.patch.object(
+            synthesize_module,
+            "load_voicebank_config",
+            return_value={"sample_rate": 44100, "hop_size": 512},
+        ), mock.patch.object(
+            synthesize_module,
+            "resolve_manifest_pitch_expression",
+            return_value=0.0,
+        ), mock.patch.object(
+            synthesize_module,
+            "resolve_default_voice_color",
+            return_value=None,
+        ), mock.patch.object(
+            synthesize_module,
+            "resolve_voice_color_speaker",
+            return_value=None,
+        ), mock.patch.object(
+            synthesize_module,
+            "align_phonemes_to_notes",
+            side_effect=unsupported,
+        ):
+            result = synthesize_module.synthesize(
+                score,
+                Path("/tmp/test-voicebank"),
+                part_index=0,
+                voice_id="voice-1",
+            )
+
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("code"), "unsupported_lyric_language")
+        self.assertEqual(result.get("error_message"), unsupported.error_message)
+        diagnostics = result.get("diagnostics") or {}
+        self.assertEqual(diagnostics.get("token"), "Прийдіте")
+        self.assertEqual(diagnostics.get("unsupported_script"), "Cyrillic")
 
 
 class TestVoicebankAPIs(unittest.TestCase):

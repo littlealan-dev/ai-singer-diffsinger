@@ -6,11 +6,13 @@ import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 import src.api.voice_parts as voice_parts_module
 from src.api import parse_score, synthesize
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
     _choose_notes_ranked,
@@ -24,12 +26,14 @@ from src.api.voice_parts import (
     _reviewable_action_required_from_finalized,
     _run_preflight_plan_lint,
     _validate_structural_singability,
+    analyze_score_voice_parts,
     finalize_review_materialization,
     parse_voice_part_plan,
     prepare_score_for_voice_part,
     preprocess_voice_parts,
     validate_voice_part_status,
 )
+from src.musicxml.parser import parse_musicxml_with_summary
 
 
 ROOT_DIR = Path(__file__).parent.parent
@@ -146,7 +150,7 @@ class VoicePartFlowTests(unittest.TestCase):
         suggested = diagnostics.get("suggested_derived_targets_for_input_part") or []
         self.assertTrue(suggested)
         self.assertTrue(any(isinstance(item.get("part_index"), int) for item in suggested))
-        self.assertIn("targeted an original complex part", str(result.get("message") or ""))
+        self.assertIn("targeted the original complex part", str(result.get("message") or ""))
 
 
 class VoicePartAnalysisAndPlanTests(unittest.TestCase):
@@ -204,6 +208,109 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ),
             "score",
         )
+
+    def test_materialized_derived_parts_reparse_with_matching_part_count(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>1</duration>
+        <voice>1</voice>
+        <type>quarter</type>
+        <staff>1</staff>
+        <lyric><text>la</text></lyric>
+      </note>
+      <backup><duration>1</duration></backup>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration>
+        <voice>2</voice>
+        <type>quarter</type>
+        <staff>1</staff>
+      </note>
+      <backup><duration>1</duration></backup>
+      <note>
+        <pitch><step>C</step><octave>3</octave></pitch>
+        <duration>4</duration>
+        <voice>5</voice>
+        <type>whole</type>
+        <staff>2</staff>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "two-staff.xml"
+            source_path.write_text(xml, encoding="utf-8")
+            score = parse_score(source_path, verse_number=1)
+
+            result = preprocess_voice_parts(
+                score=score,
+                request={
+                    "plan": {
+                        "targets": [
+                            {
+                                "target": {
+                                    "part_index": 0,
+                                    "voice_part_id": "voice part 2",
+                                },
+                                "actions": [
+                                    {
+                                        "type": "propagate_lyrics",
+                                        "source_priority": [
+                                            {
+                                                "part_index": 0,
+                                                "voice_part_id": "voice part 1",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+            )
+
+            self.assertEqual(result.get("status"), "ready")
+            current_parts = result["score"]["parts"]
+            derived_path = Path(result["modified_musicxml_path"])
+            _, summary = parse_musicxml_with_summary(derived_path)
+            tree = ET.parse(derived_path)
+
+        self.assertEqual(len(summary["parts"]), len(current_parts))
+        derived_summary_parts = [
+            part for part in summary["parts"] if part.get("is_derived_part")
+        ]
+        self.assertEqual(len(derived_summary_parts), 2)
+        self.assertEqual(
+            [part["part_index"] for part in derived_summary_parts],
+            [2, 3],
+        )
+
+        root = tree.getroot()
+        derived_xml_parts = [
+            part
+            for part in root.findall("part")
+            if str(part.get("id") or "").startswith("P_DERIVED_")
+        ]
+        self.assertEqual(len(derived_xml_parts), 2)
+        for part in derived_xml_parts:
+            for staves in part.findall(".//staves"):
+                self.assertEqual(staves.text, "1")
+            self.assertFalse(part.findall(".//clef[@number='2']"))
 
     def test_trivial_chord_split_maps_rank_to_rank_when_counts_match(self) -> None:
         grouped = {
@@ -376,6 +483,153 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
         self.assertIn("When one non-default sibling lane", finding.get("rule_definition", ""))
         self.assertIn("Include all required same-part sibling targets", finding.get("suggestion", ""))
         self.assertIsInstance(finding.get("failing_attributes"), dict)
+
+    def test_lint_rejects_derived_part_source_for_original_target(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        derived_part_index = len(score["parts"])
+        derived_part = deepcopy(score["parts"][0])
+        derived_part["part_id"] = "P_DERIVED_FAKE"
+        derived_part["part_name"] = "Women - voice part 1 (Derived)"
+        score["parts"].append(derived_part)
+        score["voice_part_transforms"] = {
+            "fake": {
+                "target_voice_part_id": "soprano",
+                "source_part_index": 0,
+                "source_voice_part_id": "soprano",
+                "appended_part_ref": {
+                    "part_index": derived_part_index,
+                    "part_id": "P_DERIVED_FAKE",
+                    "part_name": "Women - voice part 1 (Derived)",
+                },
+            }
+        }
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 1, "voice_part_id": "tenor"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": derived_part_index,
+                                "voice_part_id": "soprano",
+                            },
+                            "lyric_source": {
+                                "part_index": derived_part_index,
+                                "voice_part_id": "soprano",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        lint = _run_preflight_plan_lint(score, plan)
+
+        self.assertFalse(lint.get("ok"))
+        findings = lint.get("findings") or []
+        derived_source_findings = [
+            finding
+            for finding in findings
+            if finding.get("rule") == "derived_part_source_for_original_target"
+        ]
+        self.assertEqual(
+            {finding.get("source_kind") for finding in derived_source_findings},
+            {"melody_source", "lyric_source"},
+        )
+        self.assertTrue(
+            all(
+                finding.get("source_part_index") == derived_part_index
+                for finding in derived_source_findings
+            )
+        )
+
+    def test_lint_rejects_generated_solfege_lyric_source(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        for note in score["parts"][0]["notes"]:
+            if note.get("lyric"):
+                note["lyric_name"] = GENERATED_LYRIC_NAME
+        plan = {
+            "targets": [
+                {
+                    "target": {"part_index": 1, "voice_part_id": "tenor"},
+                    "sections": [
+                        {
+                            "start_measure": 1,
+                            "end_measure": 2,
+                            "mode": "derive",
+                            "melody_source": {
+                                "part_index": 1,
+                                "voice_part_id": "tenor",
+                            },
+                            "lyric_source": {
+                                "part_index": 0,
+                                "voice_part_id": "soprano",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        lint = _run_preflight_plan_lint(score, plan)
+
+        self.assertFalse(lint.get("ok"))
+        findings = lint.get("findings") or []
+        generated_findings = [
+            finding
+            for finding in findings
+            if finding.get("rule") == "generated_solfege_lyric_source"
+        ]
+        self.assertEqual(len(generated_findings), 1)
+        finding = generated_findings[0]
+        self.assertEqual(
+            finding["selected_lyric_source"]["stats"][
+                "generated_solfege_lyric_note_count"
+            ],
+            4,
+        )
+        self.assertEqual(
+            finding["failing_attributes"]["generated_lyric_name"],
+            GENERATED_LYRIC_NAME,
+        )
+
+    def test_source_candidate_hints_exclude_generated_solfege_lyrics(self) -> None:
+        score = parse_score(TEST_XML, part_index=0, verse_number=1)
+        for note in score["parts"][0]["notes"]:
+            if note.get("lyric"):
+                note["lyric_name"] = GENERATED_LYRIC_NAME
+
+        signals = analyze_score_voice_parts(score, verse_number="2")
+
+        part_signals = signals.get("parts") or []
+        all_candidates = [
+            candidate
+            for part in part_signals
+            for candidate in part.get("lyric_source_candidates", [])
+        ]
+        self.assertFalse(
+            any(
+                candidate.get("source_part_index") == 0
+                and candidate.get("source_voice_part_id") == "soprano"
+                for candidate in all_candidates
+            )
+        )
+        ranked_sources = [
+            source
+            for part in part_signals
+            for hint in part.get("source_candidate_hints", [])
+            for source in hint.get("ranked_sources", [])
+        ]
+        self.assertFalse(
+            any(
+                source.get("part_index") == 0
+                and source.get("voice_part_id") == "soprano"
+                for source in ranked_sources
+            )
+        )
 
     def test_lint_findings_use_structured_details_and_templated_message(self) -> None:
         finding = _lint_finding(

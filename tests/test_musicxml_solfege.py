@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from xml.etree import ElementTree
 
+from src.api.score import parse_score
 from src.musicxml.solfege import (
     GENERATED_LYRIC_NAME,
     add_solfege_lyric_verse,
@@ -57,6 +58,13 @@ def test_add_movable_major_uses_key_tonic_and_preserves_existing_lyrics(tmp_path
     assert result["new_verse_number"] == "2"
     assert _lyrics(output, name=GENERATED_LYRIC_NAME) == ["do", "re", "mi", "fa", "so"]
     assert _lyrics(output)[:5] == ["one", "do", "two", "re", "three"]
+    parsed = parse_score(output, verse_number="2")
+    solfege_notes = [
+        note
+        for note in parsed["parts"][0]["notes"]
+        if note.get("lyric_name") == GENERATED_LYRIC_NAME
+    ]
+    assert [note.get("lyric") for note in solfege_notes[:5]] == ["do", "re", "mi", "fa", "so"]
 
 
 def test_unknown_part_returns_action_required_instead_of_raising(tmp_path: Path) -> None:

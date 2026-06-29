@@ -4,9 +4,11 @@ import time
 from src.backend.config import Settings
 from src.backend.mcp_client import (
     McpError,
+    McpProcess,
     McpRequestTimeoutError,
     McpRouter,
     McpStartupInProgressError,
+    McpToolError,
 )
 
 
@@ -26,6 +28,32 @@ class DummyProcess:
 
     def call_tool(self, name, arguments):
         return {"ok": True, "tool": name}
+
+
+def test_mcp_process_preserves_structured_tool_error(monkeypatch):
+    process = McpProcess.__new__(McpProcess)
+    process._timeout_seconds = 30
+    monkeypatch.setattr(
+        process,
+        "_send_request",
+        lambda request, timeout_seconds: {
+            "error": {
+                "code": "invalid_musicxml",
+                "message": "Invalid MusicXML.",
+                "type": "InvalidMusicXmlError",
+                "retryable": False,
+            }
+        },
+    )
+
+    try:
+        process.call_tool("parse_score", {})
+    except McpToolError as exc:
+        assert exc.code == "invalid_musicxml"
+        assert exc.error_type == "InvalidMusicXmlError"
+        assert exc.retryable is False
+    else:
+        raise AssertionError("Expected McpToolError")
 
 
 def test_mcp_tool_call_logs(caplog):
@@ -78,6 +106,43 @@ def test_mcp_tool_timeout_restarts_without_retry(caplog):
         "mcp_tool_timeout tool=parse_score worker=cpu" in record.message
         for record in caplog.records
     )
+
+
+def test_mcp_tool_error_does_not_restart_or_retry(caplog):
+    class ToolErrorProcess(DummyProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def call_tool(self, name, arguments):
+            self.call_count += 1
+            raise McpToolError(
+                {
+                    "code": "invalid_musicxml",
+                    "message": "Invalid MusicXML.",
+                    "type": "InvalidMusicXmlError",
+                    "retryable": False,
+                }
+            )
+
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    process = ToolErrorProcess()
+    router._cpu = process
+    router._gpu = DummyProcess()
+
+    caplog.set_level(logging.WARNING)
+    try:
+        router._call_with_retry("cpu", "parse_score", {})
+    except McpToolError as exc:
+        assert exc.code == "invalid_musicxml"
+    else:
+        raise AssertionError("Expected McpToolError")
+
+    assert process.call_count == 1
+    assert process.stop_count == 0
+    assert process.start_count == 0
+    assert any("retry_skipped=true" in record.message for record in caplog.records)
 
 
 def test_mcp_router_background_start_does_not_block_calls_after_ready():

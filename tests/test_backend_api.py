@@ -18,10 +18,9 @@ from fastapi.testclient import TestClient
 from src.api.score import parse_score
 from src.backend.main import _require_app_check, create_app
 from src.backend.llm_client import LlmRole, StaticLlmClient
-from src.backend.mcp_client import McpRequestTimeoutError
+from src.backend.mcp_client import McpRequestTimeoutError, McpToolError
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
-    MISSING_ORIGINAL_SCORE_MESSAGE,
     TOOL_RESULT_PREFIX,
     ToolExecutionResult,
     WorkflowCandidate,
@@ -36,6 +35,7 @@ from src.backend.credits import (
     ReleaseCreditsResult,
     ReserveCreditsResult,
 )
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 
 def test_format_synthesis_error_extracts_tool_error_message():
@@ -206,12 +206,19 @@ class WorkflowThenPreprocessClient:
         *,
         workflow_response: str | None = None,
         preprocess_response: str | None = None,
+        preprocess_responses: list[str] | None = None,
     ):
         self.workflow_response = workflow_response or _preprocess_workflow_response()
         self.preprocess_response = preprocess_response or _preprocess_plan_response()
+        self.preprocess_responses = list(preprocess_responses or [])
+        self.preprocess_prompts: list[str] = []
 
     def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
         if role == LlmRole.PREPROCESS:
+            if history:
+                self.preprocess_prompts.append(str(history[-1].get("content", "")))
+            if self.preprocess_responses:
+                return self.preprocess_responses.pop(0)
             return self.preprocess_response
         last = history[-1].get("content", "") if history else ""
         if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
@@ -1299,6 +1306,107 @@ def test_deterministic_complex_selection_uses_default_message_and_preprocess_pla
     )
 
 
+def test_preprocess_job_retries_empty_initial_plan_response(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    preprocess_calls: list[dict] = []
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_calls.append(dict(arguments))
+            return {
+                "status": "ready",
+                "score": arguments.get("score", {}),
+                "part_index": 0,
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    empty_plan_response = json.dumps(
+        {
+            "tool_calls": [],
+            "final_message": "I need to plan that first.",
+            "include_score": False,
+        }
+    )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="Preparing that line now.",
+        ),
+        preprocess_responses=[
+            empty_plan_response,
+            _preprocess_plan_response(voice_part_id="soprano"),
+        ],
+    )
+    app.state.router.call_tool = call_tool
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "done"
+    assert preprocess_calls
+    assert len(llm_client.preprocess_prompts) == 2
+    assert "previous preprocess planning response did not include" in llm_client.preprocess_prompts[1]
+
+
+def test_preprocess_job_fails_controlled_after_repeated_empty_initial_plan_responses(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    preprocess_calls: list[dict] = []
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_calls.append(dict(arguments))
+            return {"status": "ready", "score": arguments.get("score", {})}
+        return _make_router_call_tool()(name, arguments)
+
+    empty_plan_response = json.dumps(
+        {
+            "tool_calls": [],
+            "final_message": "I need to plan that first.",
+            "include_score": False,
+        }
+    )
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="Preparing that line now.",
+        ),
+        preprocess_responses=[
+            empty_plan_response,
+            empty_plan_response,
+            empty_plan_response,
+        ],
+    )
+    app.state.router.call_tool = call_tool
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "error"
+    assert progress_payload["message"] == "Couldn't create a line-preparation plan. Please retry the request."
+    assert not preprocess_calls
+    assert len(llm_client.preprocess_prompts) == 3
+
+
 def test_repreprocess_uses_original_uploaded_score_context(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -1324,20 +1432,33 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
         if name == "parse_score":
             parse_score_calls.append(dict(arguments))
             verse_number = arguments.get("verse_number", "1")
+            parsed_path = str(arguments["file_path"])
             return {
                 "title": "Test",
                 "tempos": [],
-                "parts": [{"notes": []}],
+                "parts": [
+                    {
+                        "part_id": "P_DERIVED",
+                        "part_name": "Soprano",
+                        "notes": [],
+                    }
+                ],
                 "structure": {},
                 "score_summary": {
                     "title": "Test",
                     "composer": None,
                     "lyricist": None,
-                    "parts": [],
+                    "parts": [
+                        {
+                            "part_id": "P_DERIVED",
+                            "part_name": "Soprano",
+                            "part_index": 0,
+                        }
+                    ],
                     "available_verses": ["1"],
                 },
                 "selected_verse_number": str(verse_number),
-                "source_musicxml_path": str(original_path),
+                "source_musicxml_path": parsed_path,
             }
         if name == "preprocess_voice_parts":
             score = dict(arguments.get("score", {}))
@@ -1383,17 +1504,23 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
     second_progress = _wait_for_progress(test_client, second_payload["progress_url"])
     assert bool(second_progress.get("review_required")) is True
 
-    assert len(parse_score_calls) == 0
+    assert len(parse_score_calls) == 2
+    assert all(
+        (PROJECT_ROOT / call["file_path"]).resolve() == derived_path.resolve()
+        for call in parse_score_calls
+    )
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"]["source_musicxml_path"] == str(original_path)
     assert snapshot["current_score"]["score"]["source_musicxml_path"] == str(derived_path)
+    assert Path(snapshot["files"]["musicxml_path"]).resolve() == derived_path.resolve()
+    assert snapshot["score_summary"]["parts"][0]["part_id"] == "P_DERIVED"
     assert len(snapshot["preprocess_plan_history"]) == 0
     assert snapshot["last_preprocess_plan"] is not None
     latest_plan = snapshot["last_preprocess_plan"]
     assert latest_plan["targets"][0]["target"]["voice_part_id"] == "soprano"
 
 
-def test_orchestrator_uses_original_score_for_preprocess_planning(client):
+def test_orchestrator_uses_active_score_for_preprocess_planning(client):
     _, app = client
     orchestrator = app.state.orchestrator
     original_score = {
@@ -1412,10 +1539,10 @@ def test_orchestrator_uses_original_score_for_preprocess_planning(client):
 
     planning_score = orchestrator._resolve_llm_planning_score(snapshot, current_score)
 
-    assert planning_score == original_score
+    assert planning_score == current_score
 
 
-def test_orchestrator_errors_when_original_score_missing_for_preprocess_planning(client):
+def test_orchestrator_uses_active_score_when_original_score_missing_for_preprocess_planning(client):
     _, app = client
     orchestrator = app.state.orchestrator
     current_score = {
@@ -1426,45 +1553,133 @@ def test_orchestrator_errors_when_original_score_missing_for_preprocess_planning
         "current_score": {"score": current_score, "version": 2},
     }
 
-    with pytest.raises(ValueError, match="original parsed score baseline"):
-        orchestrator._resolve_llm_planning_score(snapshot, current_score)
+    planning_score = orchestrator._resolve_llm_planning_score(snapshot, current_score)
+
+    assert planning_score == current_score
 
 
-def test_chat_returns_explicit_error_when_original_score_missing_for_repreprocess(client):
+def test_resolve_preprocess_score_uses_active_score_when_original_score_missing(client):
     test_client, app = client
     session_id = _create_session(test_client)
     upload_response = _upload_score(test_client, session_id)
     assert upload_response.status_code == 200
 
+    active_score = {
+        "title": "Derived",
+        "parts": [{"notes": []}],
+        "voice_part_transforms": {"x": {}},
+        "source_musicxml_path": "/tmp/derived.xml",
+    }
     asyncio.run(app.state.sessions.set_original_score(session_id, None))
-    asyncio.run(
-        app.state.sessions.set_score(
-            session_id,
+    asyncio.run(app.state.sessions.set_score(session_id, active_score))
+
+    preprocess_score = asyncio.run(
+        app.state.orchestrator._resolve_preprocess_score(
+            session_id, user_id="test-user"
+        )
+    )
+
+    assert preprocess_score == active_score
+
+
+def test_resolve_preprocess_score_reparses_non_generated_verse_after_solfege(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    active_path = app.state.sessions.session_dir(session_id) / "active-derived-solfege.xml"
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    active_path.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+    active_file_path = str(active_path.relative_to(PROJECT_ROOT))
+    active_score = {
+        "selected_verse_number": "3",
+        "source_musicxml_path": str(active_path),
+        "parts": [
             {
-                "title": "Derived",
-                "parts": [{"notes": []}],
-                "voice_part_transforms": {"x": {}},
-                "source_musicxml_path": "/tmp/derived.xml",
+                "part_id": "P_DERIVED_WOMEN",
+                "part_name": "Women - soprano (Derived)",
+                "notes": [
+                    {
+                        "lyric": "do",
+                        "lyric_name": GENERATED_LYRIC_NAME,
+                        "is_rest": False,
+                    }
+                ],
+            },
+            {
+                "part_id": "Men",
+                "part_name": "Men",
+                "notes": [{"lyric": None, "is_rest": False}],
+            },
+        ],
+        "voice_part_transforms": {
+            "women": {
+                "target_voice_part_id": "soprano",
+                "source_part_index": 0,
+                "source_voice_part_id": "soprano",
+                "appended_part_ref": {
+                    "part_index": 0,
+                    "part_id": "P_DERIVED_WOMEN",
+                    "part_name": "Women - soprano (Derived)",
+                },
+            }
+        },
+    }
+    reparsed_score = {
+        "selected_verse_number": "1",
+        "source_musicxml_path": str(active_path),
+        "parts": [
+            {
+                "part_id": "P_DERIVED_WOMEN",
+                "part_name": "Women - soprano (Derived)",
+                "notes": [{"lyric": "word", "is_rest": False}],
+            },
+            {
+                "part_id": "Men",
+                "part_name": "Men",
+                "notes": [{"lyric": "men", "is_rest": False}],
+            },
+        ],
+    }
+    calls = []
+
+    def fake_call_tool(name, arguments):
+        calls.append((name, dict(arguments)))
+        assert name == "parse_score"
+        return dict(reparsed_score)
+
+    app.state.router.call_tool = fake_call_tool
+    asyncio.run(app.state.sessions.set_score(session_id, active_score))
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {"available_verses": ["1", "3"], "selected_verse_number": "3"},
+        )
+    )
+    asyncio.run(
+        app.state.sessions.set_file(
+            session_id,
+            "musicxml_path",
+            active_path,
+        )
+    )
+
+    preprocess_score = asyncio.run(
+        app.state.orchestrator._resolve_preprocess_score(
+            session_id, user_id="test-user"
+        )
+    )
+
+    assert calls == [
+        (
+            "parse_score",
+            {
+                "file_path": active_file_path,
+                "verse_number": "1",
             },
         )
-    )
-
-    llm_client = StaticLlmClient(
-        response_text=(
-            '{"tool_calls":[{"name":"preprocess_voice_parts","arguments":{"request":{"plan":{"targets":[{"target":{"part_index":0,"voice_part_id":"soprano"},"sections":[{"start_measure":1,"end_measure":1,"mode":"derive","melody_source":{"part_index":0,"voice_part_id":"soprano"}}]}]}}}}],'
-            '"final_message":"Please review the derived score.","include_score":false}'
-        )
-    )
-    app.state.llm_client = llm_client
-    app.state.orchestrator._llm_client = llm_client
-
-    response = test_client.post(
-        f"/sessions/{session_id}/chat", json={"message": "regenerate soprano"}
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["type"] == "chat_error"
-    assert payload["message"] == MISSING_ORIGINAL_SCORE_MESSAGE
+    ]
+    assert preprocess_score["selected_verse_number"] == "1"
+    assert preprocess_score["parts"][1]["notes"][0]["lyric"] == "men"
+    assert preprocess_score["voice_part_transforms"] == active_score["voice_part_transforms"]
 
 
 def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
@@ -1660,6 +1875,51 @@ def test_upload_parse_score_timeout_returns_bounded_client_error(client):
     assert snapshot["files"] == {}
 
 
+def test_upload_parse_error_returns_invalid_musicxml_and_preserves_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    first_upload = _upload_score(test_client, session_id)
+    assert first_upload.status_code == 200
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    calls = {"parse_score": 0}
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            calls["parse_score"] += 1
+            raise McpToolError(
+                {
+                    "code": "invalid_musicxml",
+                    "message": (
+                        "Uploaded file is not valid MusicXML. "
+                        "Please export a MusicXML score and try again."
+                    ),
+                    "type": "InvalidMusicXmlError",
+                    "retryable": False,
+                }
+            )
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("ocr.xml", b"<CoolUtils-ocr/>", "application/xml")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "invalid_musicxml",
+        "message": (
+            "Uploaded file is not valid MusicXML. "
+            "Please export a MusicXML score and try again."
+        ),
+    }
+    assert calls["parse_score"] == 1
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["current_score"] == before["current_score"]
+    assert after["files"] == before["files"]
+
+
 def test_upload_returns_score_summary_with_verses(client):
     test_client, app = client
 
@@ -1723,6 +1983,38 @@ def test_solfege_settings_api_returns_defaults_and_applies_confirmed_change(clie
     }
     assert payload["updated_generated_verses"] == []
     assert payload["current_score"]["version"] == payload["score_version"]
+
+
+def test_solfege_settings_can_change_before_score_upload(client):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+
+    updated = test_client.patch(
+        f"/sessions/{session_id}/solfege-settings",
+        headers=_auth_headers(),
+        json={"settings": {"system": "fixed_do", "mode": "major"}},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "status": "ready",
+        "settings": {
+            "system": "fixed_do",
+            "mode": "major",
+            "revision": 2,
+        },
+        "score_version": 0,
+        "updated_generated_verses": [],
+        "current_score": None,
+        "score_summary": None,
+    }
+
+    fetched = test_client.get(
+        f"/sessions/{session_id}/solfege-settings",
+        headers=_auth_headers(),
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["settings"]["system"] == "fixed_do"
 
 
 def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client):
@@ -2022,6 +2314,7 @@ def test_workflow_returns_best_valid_candidate_when_followup_step_fails(client):
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2046,6 +2339,122 @@ def test_workflow_returns_best_valid_candidate_when_followup_step_fails(client):
     assert response["details"]["quality_class"] == 1
     assert response["details"]["issues"][0]["rule"] == "validation_failed_needs_review"
     assert response["current_score"] == {"score": {"title": "Derived"}, "version": 2}
+
+
+def test_followup_preprocess_handoff_starts_background_job(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    score = {
+        "title": "Test",
+        "parts": [{"part_id": "Women", "part_name": "Women", "notes": []}],
+        "selected_verse_number": "1",
+    }
+    snapshot = {
+        "files": {"explicit_verse_number": "1"},
+        "history": [{"role": "user", "content": "sing women in solfege"}],
+        "score_summary": {
+            "available_verses": ["1"],
+            "selected_verse_number": "1",
+        },
+    }
+    execute_calls = 0
+    started: dict[str, object] = {}
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        return ToolExecutionResult(
+            score=score,
+            audio_response={"type": "chat_text", "message": ""},
+            followup_prompt=json.dumps(
+                {
+                    "status": "action_required",
+                    "code": "complex_target_requires_preparation",
+                }
+            ),
+        )
+
+    async def fake_decide_followup(*args, **kwargs):
+        return (
+            LlmResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="start_preprocess_voice_part_workflow",
+                        arguments={
+                            "request": {
+                                "part_id": "Women",
+                                "verse_number": "1",
+                                "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+                                "solfege_pronunciation_patch": True,
+                                "reason": "The selected line needs preparation.",
+                            }
+                        },
+                    )
+                ],
+                final_message="Preparing the Women's line now.",
+                include_score=False,
+            ),
+            None,
+        )
+
+    async def fake_start_preprocess_job(
+        session_id,
+        current_score,
+        tool_calls,
+        **kwargs,
+    ):
+        started.update(
+            {
+                "session_id": session_id,
+                "score": current_score,
+                "tool_calls": tool_calls,
+                **kwargs,
+            }
+        )
+        return {
+            "type": "chat_progress",
+            "message": kwargs["initial_message"],
+            "progress_url": "/jobs/preprocess-1",
+        }
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return snapshot
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup
+    orchestrator._start_preprocess_job = fake_start_preprocess_job
+    app.state.sessions.get_snapshot = fake_get_snapshot
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-1",
+            snapshot,
+            score,
+            [ToolCall(name="add_solfege_lyric_verse", arguments={"part_index": 0})],
+            initial_response_message="Adding solfege.",
+            initial_include_score=False,
+            initial_thought_block=None,
+            initial_thought_summary=None,
+            user_id="test-user",
+            user_email="test@example.com",
+            workflow_user_message="sing women in solfege",
+        )
+    )
+
+    assert execute_calls == 1
+    assert response["type"] == "chat_progress"
+    assert response["progress_url"] == "/jobs/preprocess-1"
+    assert started["tool_calls"] == []
+    assert started["planning_context"]["target"] == {
+        "part_id": "Women",
+        "verse_number": "1",
+    }
+    assert started["planning_context"]["future_synthesis_request"] == {
+        "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+        "solfege_pronunciation_patch": True,
+    }
+    assert started["planning_context"]["user_request"] == "sing women in solfege"
 
 
 def test_workflow_returns_best_invalid_error_when_no_structurally_valid_candidate_exists(client):
@@ -2092,6 +2501,7 @@ def test_workflow_returns_best_invalid_error_when_no_structurally_valid_candidat
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2437,6 +2847,7 @@ def test_workflow_keeps_better_later_valid_candidate_when_followup_fails(client)
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2498,6 +2909,7 @@ def test_workflow_stops_after_class3_candidate_even_if_followup_returns_tool_cal
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2600,6 +3012,7 @@ def test_workflow_publishes_attempt_messages_during_preprocess_repairs(client):
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2703,6 +3116,7 @@ def test_workflow_reprompts_when_class1_candidate_stops_early(client):
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
     app.state.sessions.get_snapshot = fake_get_snapshot
     app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
 
@@ -2985,6 +3399,7 @@ def test_workflow_persists_preprocess_attempt_summary(client):
 
     orchestrator._execute_tool_calls = fake_execute_tool_calls
     orchestrator._decide_followup_with_llm = fake_decide_followup_with_llm
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup_with_llm
 
     response = asyncio.run(
         orchestrator._run_llm_tool_workflow(
@@ -4383,6 +4798,225 @@ def test_preprocess_with_explicit_verse_argument_bypasses_selection_blocker(clie
     assert preprocess_called["count"] == 1
 
 
+def test_synthesis_aborts_when_target_is_absent_from_active_musicxml(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload_response = _upload_score(test_client, session_id)
+    assert upload_response.status_code == 200
+
+    llm_client = StaticLlmClient(
+        response_text=json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "name": "synthesize",
+                        "arguments": {
+                            "part_index": 99,
+                            "voicebank": "Dummy",
+                        },
+                    }
+                ],
+                "final_message": "Starting synthesis.",
+                "include_score": False,
+            }
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    synthesis_started = {"value": False}
+
+    async def fake_start_synthesis_job(*args, **kwargs):
+        synthesis_started["value"] = True
+        return {"type": "chat_progress", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the missing part"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_error"
+    assert payload["action_required"]["code"] == "target_not_found"
+    assert payload["action_required"]["diagnostics"]["detail"] == (
+        "part_index out of range: 99"
+    )
+    assert synthesis_started["value"] is False
+
+
+def test_synthesis_keeps_derived_part_index_after_preprocess(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    current_score = {
+        "title": "Prepared",
+        "selected_verse_number": "1",
+        "parts": [
+            {"part_id": "P1-Staff1", "part_name": "Piano", "notes": []},
+            {"part_id": "P1-Staff2", "part_name": "Piano", "notes": []},
+            {
+                "part_id": "P_DERIVED_02F3BA60A5",
+                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                "notes": [{"is_rest": False, "lyric": "do"}],
+            },
+            {
+                "part_id": "P_DERIVED_230977F3D6",
+                "part_name": "P1-Staff1 - voice part 2 (Derived)",
+                "notes": [{"is_rest": False, "lyric": "re"}],
+            },
+        ],
+        "voice_part_transforms": {
+            "part:0|target:voice part 1": {
+                "target_voice_part_id": "voice part 1",
+                "source_part_index": 0,
+                "source_voice_part_id": "voice part 2",
+                "appended_part_ref": {
+                    "part_index": 2,
+                    "part_id": "P_DERIVED_02F3BA60A5",
+                    "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                },
+            }
+        },
+    }
+    score_summary = {
+        "title": "Prepared",
+        "available_verses": ["1"],
+        "selected_verse_number": "1",
+        "duration_seconds": 10,
+        "parts": [
+            {"part_index": 0, "part_id": "P1-Staff1", "part_name": "Piano"},
+            {"part_index": 1, "part_id": "P1-Staff2", "part_name": "Piano"},
+            {
+                "part_index": 2,
+                "part_id": "P_DERIVED_02F3BA60A5-Staff1",
+                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+            },
+            {
+                "part_index": 3,
+                "part_id": "P_DERIVED_02F3BA60A5-Staff2",
+                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+            },
+        ],
+    }
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    asyncio.run(app.state.sessions.set_score_summary(session_id, score_summary))
+
+    llm_client = StaticLlmClient(
+        response_text=json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "name": "synthesize",
+                        "arguments": {
+                            "part_index": 2,
+                            "voicebank": "Dummy",
+                        },
+                    }
+                ],
+                "final_message": "Starting synthesis.",
+                "include_score": False,
+            }
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["session_id"] = session_id_arg
+        started["score"] = score_arg
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "can you sing the part 1?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert started["session_id"] == session_id
+    assert started["arguments"]["part_index"] == 2
+    assert "part_id" not in started["arguments"]
+
+
+def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    current_score = {
+        "title": "Prepared",
+        "selected_verse_number": "1",
+        "parts": [
+            {"part_id": "P1-Staff1", "part_name": "Piano", "notes": []},
+            {"part_id": "P1-Staff2", "part_name": "Piano", "notes": []},
+            {
+                "part_id": "P_DERIVED_02F3BA60A5",
+                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                "notes": [{"is_rest": False, "lyric": "do"}],
+            },
+        ],
+    }
+    score_summary = {
+        "title": "Prepared",
+        "available_verses": ["1"],
+        "selected_verse_number": "1",
+        "duration_seconds": 10,
+        "parts": [
+            {"part_index": 0, "part_id": "P1-Staff1", "part_name": "Piano"},
+            {"part_index": 1, "part_id": "P1-Staff2", "part_name": "Piano"},
+            {
+                "part_index": 2,
+                "part_id": "P_DERIVED_02F3BA60A5-Staff1",
+                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+            },
+        ],
+    }
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    asyncio.run(app.state.sessions.set_score_summary(session_id, score_summary))
+
+    llm_client = StaticLlmClient(
+        response_text=json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "name": "synthesize",
+                        "arguments": {
+                            "part_id": "P_DERIVED_02F3BA60A5-Staff1",
+                            "voicebank": "Dummy",
+                        },
+                    }
+                ],
+                "final_message": "Starting synthesis.",
+                "include_score": False,
+            }
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["session_id"] = session_id_arg
+        started["score"] = score_arg
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "can you sing the prepared staff?"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert started["session_id"] == session_id
+    assert started["arguments"]["part_index"] == 2
+    assert "part_id" not in started["arguments"]
+
+
 def test_chat_reparse_same_verse_noop_allows_direct_synthesis(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -4615,7 +5249,10 @@ def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkey
         def generate(self, system_prompt, history):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
-                payload = json.loads(last[len(TOOL_RESULT_PREFIX):])
+                wrapped_payload = last[len(TOOL_RESULT_PREFIX):]
+                assert "No tools will be executed from this response" in wrapped_payload
+                payload_text = wrapped_payload.split("Message-only payload:\n", 1)[1]
+                payload = json.loads(payload_text)
                 followup_payloads.append(payload)
                 return json.dumps(
                     {
@@ -4833,6 +5470,7 @@ def test_synthesize_action_required_marks_job_action_required_not_failed(
     assert llm_client.last_internal_prompt.startswith(
         "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
     )
+    assert "No tools will be executed from this response" in llm_client.last_internal_prompt
     assert action_required["message"] in llm_client.last_internal_prompt
 
     progress = test_client.get(
@@ -4845,6 +5483,226 @@ def test_synthesize_action_required_marks_job_action_required_not_failed(
     assert payload["message"] == llm_message
     assert payload["action_required"] == action_required
     assert "audio_url" not in payload
+
+
+def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
+    client, monkeypatch, caplog
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-synthesize-action-required-message-only"
+    release_calls = {"count": 0}
+
+    def fake_release(*_args, **_kwargs):
+        release_calls["count"] += 1
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    action_required = {
+        "status": "action_required",
+        "action": "unsupported_lyric_language",
+        "code": "unsupported_lyric_language",
+        "reason": "non_latin_lyrics_for_english_g2p",
+        "message": "Token 'Прийдіте' contains non-Latin text.",
+        "diagnostics": {
+            "token": "Прийдіте",
+            "unsupported_script": "Cyrillic",
+            "part_index": 2,
+        },
+    }
+    llm_message = (
+        "I can't sing these Cyrillic lyrics with the current pronunciation engine. "
+        "You can ask me to add a generated solfege verse."
+    )
+
+    class ToolCallingActionRequiredClient:
+        def __init__(self):
+            self.prompt_text = ""
+            self.last_internal_prompt = ""
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            self.prompt_text = prompt_bundle.full_prompt_text
+            self.last_internal_prompt = history[-1].get("content", "")
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "add_solfege_lyric_verse",
+                            "arguments": {"part_index": 2},
+                        }
+                    ],
+                    "final_message": llm_message,
+                    "include_score": False,
+                }
+            )
+
+    def call_tool(name, arguments):
+        if name == "synthesize":
+            return action_required
+        raise AssertionError(f"Unexpected tool call: {name}")
+
+    llm_client = ToolCallingActionRequiredClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    app.state.router.call_tool = call_tool
+    caplog.set_level("WARNING")
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {"parts": []},
+            {"voicebank": "Dummy", "part_index": 0},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    latest = app.state.job_store.get_job_by_id(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is not None
+    _, job_data = latest
+    assert job_data["status"] == "action_required"
+    assert job_data["message"] == llm_message
+    assert job_data["actionRequired"] == action_required
+    assert release_calls["count"] == 1
+    assert "No tools will be executed from this response" in llm_client.last_internal_prompt
+    assert '"name": "add_solfege_lyric_verse"' not in llm_client.prompt_text
+    assert any(
+        "llm_message_only_tool_calls_ignored" in record.message
+        for record in caplog.records
+    )
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "action_required"
+    assert payload["message"] == llm_message
+    assert payload["action_required"] == action_required
+    assert "audio_url" not in payload
+
+
+def test_unsupported_lyric_language_action_required_logs_error_for_triage(
+    client, monkeypatch, caplog
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "job-unsupported-lyric-language"
+    release_calls = {"count": 0}
+
+    def fake_release(*_args, **_kwargs):
+        release_calls["count"] += 1
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    action_required = {
+        "status": "action_required",
+        "action": "unsupported_lyric_language",
+        "code": "unsupported_lyric_language",
+        "reason": "non_latin_lyrics_for_english_g2p",
+        "message": (
+            "Token 'Прийдіте' contains non-Latin text that cannot be "
+            "phonemized by the 'en' G2P fallback."
+        ),
+        "error_message": (
+            "Token 'Прийдіте' contains non-Latin text that cannot be "
+            "phonemized by the 'en' G2P fallback."
+        ),
+        "failed_validation_rules": ["lyrics.unsupported_for_voicebank_g2p"],
+        "diagnostics": {
+            "token": "Прийдіте",
+            "language": "en",
+            "unsupported_script": "Cyrillic",
+        },
+    }
+    llm_message = "Please switch to supported lyrics or use a compatible voicebank."
+
+    class ActionRequiredParaphraseClient:
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": llm_message,
+                    "include_score": False,
+                }
+            )
+
+    def call_tool(name, arguments):
+        if name == "synthesize":
+            return action_required
+        raise AssertionError(f"Unexpected tool call: {name}")
+
+    llm_client = ActionRequiredParaphraseClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    app.state.router.call_tool = call_tool
+    caplog.set_level("ERROR")
+
+    asyncio.run(
+        app.state.orchestrator._run_synthesis_job(
+            session_id,
+            {"parts": []},
+            {"voicebank": "Dummy", "part_index": 0},
+            job_id,
+            "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+        )
+    )
+
+    latest = app.state.job_store.get_job_by_id(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is not None
+    _, job_data = latest
+    assert job_data["status"] == "action_required"
+    assert job_data["actionRequired"] == action_required
+    assert release_calls["count"] == 1
+    assert any(
+        record.levelname == "ERROR"
+        and "unsupported_lyric_language_action_required" in record.message
+        for record in caplog.records
+    )
+    assert not any("synthesis_failed" in record.message for record in caplog.records)
+
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "action_required"
+    assert payload["message"] == llm_message
+    assert payload["action_required"] == action_required
 
 
 def test_settle_failure_with_release_failure_marks_reservation_for_ops_but_fails_job(

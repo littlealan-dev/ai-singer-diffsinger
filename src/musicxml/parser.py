@@ -32,6 +32,7 @@ class NoteEvent:
     lyric: Optional[str]
     syllabic: Optional[str]
     lyric_is_extended: bool
+    lyric_name: Optional[str]
     is_rest: bool
     tie_type: Optional[str]
     dot_count: int
@@ -233,7 +234,9 @@ def _part_has_lyrics(part: stream.Part, *, verse_number: Optional[str | int]) ->
     for element in part.recurse().notes:
         if element.isRest:
             continue
-        lyric_text, _, _ = _extract_lyric_text(element, verse_number=verse_number)
+        lyric_text, _, _, _, _ = _extract_lyric_text(
+            element, verse_number=verse_number
+        )
         if lyric_text:
             return True
     return False
@@ -281,6 +284,7 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                 "part_index": index,
                 "part_id": str(part.id) if part.id is not None else "",
                 "part_name": part.partName,
+                "is_derived_part": _is_derived_part(part),
                 "has_lyrics": bool(lyric_numbers),
                 "note_count": note_count,
                 "lyric_verses": [
@@ -296,6 +300,12 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
     summary["parts"] = parts_summary
     summary["available_verses"] = sorted(available_verses, key=_lyric_sort_key)
     return summary
+
+
+def _is_derived_part(part: stream.Part) -> bool:
+    part_id = str(part.id) if part.id is not None else ""
+    part_name = str(part.partName or "")
+    return part_id.startswith("P_DERIVED_") or "(Derived)" in part_id or "(Derived)" in part_name
 
 
 def _estimate_duration_seconds(score: stream.Score) -> float:
@@ -438,10 +448,11 @@ def _collect_part_events(
             state["lyric"] = None
             state["syllabic"] = None
             state["lyric_line_index"] = None
+            state["lyric_name"] = None
             state["extend"] = False
             state["end_offset"] = end_offset
             continue
-        lyric_text, syllabic, is_extended, lyric_line_index = _extract_lyric_text(
+        lyric_text, syllabic, is_extended, lyric_line_index, lyric_name = _extract_lyric_text(
             element, verse_number=verse_number
         )
         tie_type = element.tie.type if element.tie is not None else None
@@ -449,6 +460,7 @@ def _collect_part_events(
         lyric_value = lyric_text
         syllabic_value = syllabic
         lyric_line_value = lyric_line_index
+        lyric_name_value = lyric_name
         lyric_extended = False
         contiguous = state["end_offset"] is not None and abs(float(state["end_offset"]) - offset) < 1e-6
         has_active_lyric = state["lyric"] is not None
@@ -462,6 +474,11 @@ def _collect_part_events(
             lyric_line_value = (
                 str(state["lyric_line_index"])
                 if state.get("lyric_line_index") is not None
+                else None
+            )
+            lyric_name_value = (
+                str(state["lyric_name"])
+                if state.get("lyric_name") is not None
                 else None
             )
             lyric_extended = True
@@ -479,6 +496,7 @@ def _collect_part_events(
                             syllabic=syllabic_value,
                             lyric_extended=lyric_extended,
                             lyric_line_index=lyric_line_value,
+                            lyric_name=lyric_name_value,
                             pitch_override=pitch,
                             fallback_voice=fallback_voice,
                         )
@@ -492,6 +510,7 @@ def _collect_part_events(
                         syllabic=syllabic_value,
                         lyric_extended=lyric_extended,
                         lyric_line_index=lyric_line_value,
+                        lyric_name=lyric_name_value,
                         fallback_voice=fallback_voice,
                     )
                 )
@@ -499,6 +518,7 @@ def _collect_part_events(
             state["lyric"] = lyric_text
             state["syllabic"] = syllabic
             state["lyric_line_index"] = lyric_line_index
+            state["lyric_name"] = lyric_name
             state["extend"] = is_extended
         elif lyric_extended or tie_type in ("start", "continue"):
             state["extend"] = True
@@ -514,9 +534,9 @@ def _extract_lyric_text(
     element: note.NotRest,
     *,
     verse_number: Optional[str | int],
-) -> tuple[Optional[str], Optional[str], bool, Optional[str]]:
+) -> tuple[Optional[str], Optional[str], bool, Optional[str], Optional[str]]:
     if not element.lyrics:
-        return None, None, False, None
+        return None, None, False, None, None
     lyric = None
     if verse_number is None:
         lyric = element.lyrics[0]
@@ -528,19 +548,20 @@ def _extract_lyric_text(
                 lyric = candidate
                 break
     if lyric is None:
-        return None, None, False, None
+        return None, None, False, None, None
     text = lyric.text if lyric.text is not None else ""
     text = text.strip()
     if not text:
         text = None
     syllabic = getattr(lyric, "syllabic", None)
     lyric_line_index = _normalize_verse_number(lyric.number) or "1"
+    lyric_name = str(getattr(lyric, "identifier", "") or "").strip() or None
     is_extended = False
     if hasattr(lyric, "isExtended"):
         is_extended = bool(lyric.isExtended)
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
-    return text, syllabic, is_extended, lyric_line_index
+    return text, syllabic, is_extended, lyric_line_index, lyric_name
 
 
 def _make_note_event(
@@ -551,6 +572,7 @@ def _make_note_event(
     syllabic: Optional[str],
     lyric_extended: bool,
     lyric_line_index: Optional[str],
+    lyric_name: Optional[str],
     pitch_override: Optional[Any] = None,
     fallback_voice: Optional[str] = None,
 ) -> NoteEvent:
@@ -601,6 +623,7 @@ def _make_note_event(
         lyric=lyric,
         syllabic=syllabic,
         lyric_is_extended=lyric_extended,
+        lyric_name=lyric_name,
         is_rest=False,
         tie_type=tie_type,
         dot_count=int(getattr(element.duration, "dots", 0) or 0),
@@ -641,6 +664,7 @@ def _make_rest_event(
         lyric=None,
         syllabic=None,
         lyric_is_extended=False,
+        lyric_name=None,
         is_rest=True,
         tie_type=None,
         dot_count=int(getattr(element.duration, "dots", 0) or 0),

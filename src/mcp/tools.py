@@ -432,7 +432,9 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
             "description": (
                 "Source lane for lyric tokens. Required for every derive section that "
                 "has melody_source. For lyric-only propagation, ensure target already "
-                "has singable notes in this section."
+                "has singable notes in this section. Must not use SightSinger-generated "
+                "solfege lyrics; those are post-preprocess output and preflight lint "
+                "rejects them as lyric_source."
             ),
         },
         "lyric_strategy": {

@@ -145,6 +145,26 @@ def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() ->
     assert "must return exactly one `preprocess_voice_parts` tool call" in prompt
 
 
+def test_build_system_prompt_includes_message_only_followup_contract() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "If the Tool list is empty" in prompt
+    assert "Message-only payload:" in prompt
+    assert "No tools will be executed from this response" in prompt
+    assert "Return `tool_calls: []`" in prompt
+    assert "message-only `unsupported_lyric_language` action" in prompt
+    assert "Do not say that solfege is being added" in prompt
+
+
 def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None:
     prompt = build_system_prompt(
         tools=[],
