@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download, ChevronsUpDown, Check, X, Music2 } from "lucide-react";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -55,6 +55,14 @@ import {
 
 const SCORE_PREVIEW_RENDER_ERROR =
   "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
+
+const STARTING_CONVERSATIONS = [
+  "sing the vocal part, verse 1",
+  "sing the soprano part",
+  "sing the alto part in solfege / solfa",
+] as const;
+
+const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 
 type Role = "user" | "assistant";
 
@@ -141,6 +149,47 @@ const buildVerseOptions = (summary: ScoreSummary | null): string[] => {
       ? summary.available_verses
       : ["1"];
   return verses.map((value) => String(value));
+};
+
+const downloadTextFile = (fileName: string, content: string) => {
+  const blob = new Blob([content], { type: "application/vnd.recordare.musicxml+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+};
+
+const scoreDownloadFileName = (fileName: string): string => {
+  const trimmed = fileName.replace(/\.(mxl|musicxml|xml)$/i, "");
+  return `${trimmed || "score"}-sightsinger.xml`;
+};
+
+const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+const buildPrintableScoreMarkup = (scoreElement: HTMLElement): string => {
+  const svgPages = Array.from(scoreElement.querySelectorAll("svg"));
+  if (svgPages.length === 0) {
+    return `<div class="score-page">${scoreElement.innerHTML}</div>`;
+  }
+  return svgPages
+    .map((svg) => {
+      const printableSvg = svg.cloneNode(true) as SVGSVGElement;
+      printableSvg.removeAttribute("style");
+      printableSvg.removeAttribute("x");
+      printableSvg.removeAttribute("y");
+      printableSvg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+      return `<section class="score-page">${printableSvg.outerHTML}</section>`;
+    })
+    .join("");
 };
 
 const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
@@ -379,6 +428,7 @@ export default function MainApp() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
@@ -400,6 +450,11 @@ export default function MainApp() {
   const [failedVoiceImages, setFailedVoiceImages] = useState<Record<string, boolean>>({});
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [solfegeMenuOpen, setSolfegeMenuOpen] = useState(false);
+  const [showSolfegeHint, setShowSolfegeHint] = useState(
+    () =>
+      typeof window === "undefined" ||
+      window.localStorage.getItem(SOLFEGE_GUIDE_DISMISSED_KEY) !== "true"
+  );
   const [solfegeSystem, setSolfegeSystem] = useState<SolfegeSystem>("movable_do");
   const [solfegeMode, setSolfegeMode] = useState<SolfegeMode>("major");
   const [draftSolfegeSystem, setDraftSolfegeSystem] = useState<SolfegeSystem>("movable_do");
@@ -1056,6 +1111,90 @@ export default function MainApp() {
     if (!sessionId || !score) return;
     const data = await fetchScoreXml(sessionId);
     setScore({ name: score.name, data });
+  };
+
+  const handleScoreDownload = () => {
+    if (!score) {
+      setError("No score available to download.");
+      return;
+    }
+    downloadTextFile(scoreDownloadFileName(score.name), score.data);
+  };
+
+  const handleScorePrint = () => {
+    if (!score || !scoreReady || !scoreRef.current) {
+      setError("No rendered score available to print.");
+      return;
+    }
+
+    const printWindow = window.open("", "_blank", "width=1024,height=768");
+    if (!printWindow) {
+      window.print();
+      return;
+    }
+
+    const title = score.name ? `${score.name} score` : "SightSinger score";
+    const scoreMarkup = buildPrintableScoreMarkup(scoreRef.current);
+
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      @page { margin: 8mm; }
+      * {
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        color: #111827;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .score {
+        width: 100%;
+      }
+      .score-page {
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        break-after: page;
+        page-break-after: always;
+      }
+      .score-page:last-child {
+        break-after: auto;
+        page-break-after: auto;
+      }
+      .score-page svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        max-width: 100%;
+        margin: 0 auto;
+        overflow: visible;
+      }
+      @media print {
+        .score-page {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="score">${scoreMarkup}</div>
+    <script>
+      window.addEventListener("load", () => {
+        window.focus();
+        window.print();
+      });
+    </script>
+  </body>
+</html>`);
+    printWindow.document.close();
   };
 
   const progressUrlForJob = (progressUrl: string, jobId?: string): string => {
@@ -1891,8 +2030,26 @@ export default function MainApp() {
             )}
           </div>
           <div className="chat-input">
+            <div className="starting-conversations" aria-label="Suggested starting conversations">
+              {STARTING_CONVERSATIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  className="starting-conversation-button"
+                  disabled={creditsLocked}
+                  onClick={() => {
+                    setInput(suggestion);
+                    composerInputRef.current?.focus();
+                  }}
+                >
+                  <Music2 size={15} aria-hidden="true" />
+                  <span>{suggestion}</span>
+                </button>
+              ))}
+            </div>
             <div className="input-row composer-row">
               <textarea
+                ref={composerInputRef}
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="Ask me to sing a specific part or verse..."
@@ -2012,6 +2169,21 @@ export default function MainApp() {
                 </button>
               </div>
               <div className="solfege-picker" ref={solfegePickerRef}>
+                {showSolfegeHint && !solfegeMenuOpen ? (
+                  <div className="solfege-feature-hint" role="note">
+                    <span>Change the solfege system here</span>
+                    <button
+                      type="button"
+                      aria-label="Dismiss solfege settings hint"
+                      onClick={() => {
+                        window.localStorage.setItem(SOLFEGE_GUIDE_DISMISSED_KEY, "true");
+                        setShowSolfegeHint(false);
+                      }}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
                 {solfegeMenuOpen ? (
                   <div
                     className="solfege-picker-menu"
@@ -2103,8 +2275,9 @@ export default function MainApp() {
                   className={clsx("solfege-picker-trigger", { open: solfegeMenuOpen })}
                   aria-haspopup="dialog"
                   aria-expanded={solfegeMenuOpen}
-                  disabled={!score || solfegeSettingsSaving}
+                  disabled={solfegeSettingsSaving}
                   onClick={() => {
+                    setShowSolfegeHint(false);
                     if (!solfegeMenuOpen) {
                       setDraftSolfegeSystem(solfegeSystem);
                       setDraftSolfegeMode(solfegeMode);
@@ -2172,6 +2345,28 @@ export default function MainApp() {
                   disabled={!score || Boolean(scorePreviewError)}
                 >
                   <Plus size={16} />
+                </button>
+              </div>
+              <div className="score-action-controls" aria-label="Score export controls">
+                <button
+                  type="button"
+                  className="score-action-button"
+                  onClick={handleScoreDownload}
+                  aria-label="Download score"
+                  title="Download score"
+                  disabled={!score}
+                >
+                  <Download size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="score-action-button"
+                  onClick={handleScorePrint}
+                  aria-label="Print score"
+                  title="Print score"
+                  disabled={!scoreReady || Boolean(scorePreviewError)}
+                >
+                  <Printer size={16} />
                 </button>
               </div>
             </div>

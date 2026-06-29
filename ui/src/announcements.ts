@@ -14,12 +14,12 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
-    id: 'version_1_0_1',
-    title: 'SightSinger 1.0.1 Update',
-    content: '- Added dynamic model switching: simple songs now use Gemini 3.1 Flash Lite for quicker responses, while complex part splitting uses a more advanced thinking model for more careful score splitting.\n\n- Shorter and more musician-friendly AI responses.\n\n**Bug Fixes**\n\n- Fixed missing dots on dotted notes in derived score previews.\n- Fixed several edge cases in part splitting.',
+    id: 'version_1_0_2',
+    title: 'SightSinger 1.0.2 Update',
+    content: '- Added solfege support: SightSinger can now add and sing solfege lyrics.\n\n- Supports both movable-do and fixed-do solfege.\n\n- Solfege can be used to sing scores when the original lyric language is not supported yet.',
     effect: 'none',
-    date: '2026-05-26',
-    effectiveFrom: '2026-05-26',
+    date: '2026-06-29',
+    effectiveFrom: '2026-06-29',
   },
   {
     id: 'trial_reset_v1',
