@@ -62,7 +62,7 @@ def run_credit_refresh(
     scanned = 0
     query = (
         db.collection("users")
-        .where("billing.nextCreditRefreshAt", "<=", current_time)
+        .where(filter=firestore.FieldFilter("billing.nextCreditRefreshAt", "<=", current_time))
         .order_by("billing.nextCreditRefreshAt")
         .limit(limit)
     )

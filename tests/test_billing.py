@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+import warnings
 
 import pytest
 
@@ -955,6 +956,38 @@ def test_scheduler_limits_due_users_and_records_reserved_status():
         if (user.get("billing") or {}).get("refreshScheduler", {}).get("lastStatus") == "applied"
     ]
     assert len(applied) == 1
+
+
+def test_scheduler_due_user_query_uses_filter_keyword_without_firestore_warning():
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    uid = "user-refresh-query-warning"
+    get_or_create_credits(uid, "refresh-query-warning@example.com")
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "free",
+                "billingInterval": "none",
+                "creditRefreshAnchor": now - timedelta(days=31),
+                "nextCreditRefreshAt": now - timedelta(minutes=1),
+            },
+            "credits": {
+                "balance": 0,
+                "reserved": 0,
+            },
+        },
+        merge=True,
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run_credit_refresh(now=now, max_users=1, run_id="refresh_test_query_warning")
+
+    assert result["scanned"] == 1
+    assert not any(
+        "Detected filter using positional arguments" in str(warning.message)
+        for warning in caught
+    )
 
 
 def test_scheduler_refreshes_free_user_without_stripe_secret(monkeypatch):
