@@ -79,6 +79,7 @@ export type ChatResponse =
       type: "chat_audio";
       message: string;
       audio_url: string;
+      audio_track?: AudioTrackMetadata;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
       details?: unknown;
@@ -104,6 +105,7 @@ export type ProgressResponse = {
   step?: string;
   progress?: number;
   audio_url?: string;
+  audio_track?: AudioTrackMetadata;
   job_id?: string;
   job_kind?: string;
   review_required?: boolean;
@@ -112,6 +114,14 @@ export type ProgressResponse = {
   details?: unknown;
   warning?: string;
   feedback?: FeedbackPromptState;
+};
+
+export type AudioTrackMetadata = {
+  key?: string;
+  label?: string;
+  part_id?: string | null;
+  part_index?: number | null;
+  verse_number?: string | number | null;
 };
 
 export type FeedbackPromptState = {

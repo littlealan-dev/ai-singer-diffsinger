@@ -539,6 +539,7 @@ class Orchestrator:
                 user_id, session_id, job_id, self._settings.audio_format
             )
         voicebank_metadata = await self._build_synthesis_voicebank_metadata(arguments)
+        audio_track = self._build_synthesis_audio_track_metadata(score, arguments)
         await asyncio.to_thread(
             self._job_store.create_job,
             job_id=job_id,
@@ -548,6 +549,7 @@ class Orchestrator:
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
             voicebank_metadata=voicebank_metadata,
+            audio_track=audio_track,
         )
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -3683,6 +3685,53 @@ class Orchestrator:
                     return True
         return False
 
+    def _part_selected_verse_is_generated_solfege(
+        self,
+        score: Dict[str, Any],
+        *,
+        part_index: int,
+    ) -> bool:
+        """Return True when the selected synth target uses generated solfege lyrics."""
+        parts = score.get("parts")
+        if not isinstance(parts, list) or part_index < 0 or part_index >= len(parts):
+            return False
+        part = parts[part_index]
+        if not isinstance(part, dict):
+            return False
+        for note in part.get("notes") or []:
+            if not isinstance(note, dict):
+                continue
+            if str(note.get("lyric_name") or "").strip() == GENERATED_LYRIC_NAME:
+                return True
+        return False
+
+    def _auto_enable_generated_solfege_pronunciation(
+        self,
+        synth_args: Dict[str, Any],
+        *,
+        current_score: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Force solfege pronunciation when rendering a SightSinger-generated verse."""
+        part_index = self._resolve_synthesize_part_index(
+            current_score,
+            part_id=synth_args.get("part_id"),
+            part_index=synth_args.get("part_index"),
+        )
+        if not self._part_selected_verse_is_generated_solfege(
+            current_score,
+            part_index=part_index,
+        ):
+            return synth_args
+        updated = dict(synth_args)
+        if updated.get("solfege_pronunciation_patch") is not True:
+            self._logger.info(
+                "solfege_pronunciation_auto_enabled part_index=%s selected_verse=%s",
+                part_index,
+                self._score_selected_verse_number(current_score),
+            )
+        updated["solfege_pronunciation_patch"] = True
+        return updated
+
     def _reparse_active_musicxml_for_preprocess(
         self,
         snapshot: Dict[str, Any],
@@ -4563,6 +4612,35 @@ class Orchestrator:
                 metadata["voicebankStyle"] = default_style
         return metadata
 
+    def _build_synthesis_audio_track_metadata(
+        self,
+        score: Dict[str, Any],
+        synth_args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return stable UI track metadata for a completed synthesis target."""
+        part_index = self._resolve_synthesize_part_index(
+            score,
+            part_id=synth_args.get("part_id"),
+            part_index=synth_args.get("part_index"),
+        )
+        parts = score.get("parts")
+        part: Dict[str, Any] = {}
+        if isinstance(parts, list) and 0 <= part_index < len(parts):
+            candidate = parts[part_index]
+            if isinstance(candidate, dict):
+                part = candidate
+        part_id = str(part.get("part_id") or synth_args.get("part_id") or "").strip()
+        part_name = str(part.get("part_name") or "").strip()
+        label = part_name or (f"Part {part_id}" if part_id else f"Part {part_index + 1}")
+        key = f"id:{part_id}" if part_id else f"index:{part_index}"
+        return {
+            "key": key,
+            "label": label,
+            "part_id": part_id or None,
+            "part_index": part_index,
+            "verse_number": self._score_selected_verse_number(score),
+        }
+
     async def _normalize_synthesize_voice_color(
         self,
         synth_args: Dict[str, Any],
@@ -5134,6 +5212,10 @@ class Orchestrator:
                         EXPLICIT_VERSE_METADATA_KEY,
                         requested_verse_number,
                     )
+                synth_args = self._auto_enable_generated_solfege_pronunciation(
+                    synth_args,
+                    current_score=current_score,
+                )
                 mapping_context = self._build_preprocess_mapping_context(
                     current_score,
                     score_summary=score_summary,

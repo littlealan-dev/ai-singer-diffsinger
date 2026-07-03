@@ -1948,8 +1948,18 @@ def test_upload_returns_score_summary_with_verses(client):
     assert "2" in summary.get("available_verses", [])
     soprano = summary["parts"][0]
     assert soprano["lyric_verses"] == [
-        {"verse_number": "1", "sample": ["O", "night"]},
-        {"verse_number": "2", "sample": ["Lo", "light"]},
+        {
+            "verse_number": "1",
+            "sample": ["O", "night"],
+            "lyric_names": [],
+            "is_generated_solfege": False,
+        },
+        {
+            "verse_number": "2",
+            "sample": ["Lo", "light"],
+            "lyric_names": [],
+            "is_generated_solfege": False,
+        },
     ]
 
 
@@ -2072,6 +2082,180 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     assert settings_payload["updated_generated_verses"] == [
         {"part_id": "P1", "part_index": 0, "verse_number": "3", "notes_updated": 2}
     ]
+
+
+def test_synthesize_auto_enables_patch_for_generated_solfege_verse(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    current_score = {
+        "title": "Generated Solfege",
+        "selected_verse_number": "1",
+        "parts": [
+            {
+                "part_id": "Soprano",
+                "part_name": "Soprano",
+                "notes": [
+                    {
+                        "offset_beats": 0.0,
+                        "duration_beats": 1.0,
+                        "pitch_midi": 60.0,
+                        "lyric": "do",
+                        "lyric_name": GENERATED_LYRIC_NAME,
+                        "is_rest": False,
+                    }
+                ],
+            }
+        ],
+    }
+    score_summary = {
+        "title": "Generated Solfege",
+        "available_verses": ["1"],
+        "selected_verse_number": "1",
+        "duration_seconds": 4,
+        "parts": [
+            {
+                "part_index": 0,
+                "part_id": "Soprano",
+                "part_name": "Soprano",
+                "lyric_verses": [
+                    {
+                        "verse_number": "1",
+                        "sample": ["do"],
+                        "lyric_names": [GENERATED_LYRIC_NAME],
+                        "is_generated_solfege": True,
+                    }
+                ],
+            }
+        ],
+    }
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    asyncio.run(app.state.sessions.set_score_summary(session_id, score_summary))
+    llm_client = StaticLlmClient(
+        response_text=json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "name": "synthesize",
+                        "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                    }
+                ],
+                "final_message": "Starting synthesis.",
+                "include_score": False,
+            }
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["session_id"] = session_id_arg
+        started["score"] = score_arg
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the soprano part"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert started["arguments"]["solfege_pronunciation_patch"] is True
+
+
+def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
+    client,
+    monkeypatch,
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    current_score = {
+        "title": "User Solfege",
+        "selected_verse_number": "1",
+        "parts": [
+            {
+                "part_id": "Soprano",
+                "part_name": "Soprano",
+                "notes": [
+                    {
+                        "offset_beats": 0.0,
+                        "duration_beats": 1.0,
+                        "pitch_midi": 60.0,
+                        "lyric": "do",
+                        "is_rest": False,
+                    }
+                ],
+            }
+        ],
+    }
+    score_summary = {
+        "title": "User Solfege",
+        "available_verses": ["1"],
+        "selected_verse_number": "1",
+        "duration_seconds": 4,
+        "parts": [
+            {
+                "part_index": 0,
+                "part_id": "Soprano",
+                "part_name": "Soprano",
+                "lyric_verses": [
+                    {
+                        "verse_number": "1",
+                        "sample": ["do"],
+                        "lyric_names": [],
+                        "is_generated_solfege": False,
+                    }
+                ],
+            }
+        ],
+    }
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    asyncio.run(app.state.sessions.set_score_summary(session_id, score_summary))
+    llm_client = StaticLlmClient(
+        response_text=json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "name": "synthesize",
+                        "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                    }
+                ],
+                "final_message": "Starting synthesis.",
+                "include_score": False,
+            }
+        )
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["session_id"] = session_id_arg
+        started["score"] = score_arg
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the soprano part"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert "solfege_pronunciation_patch" not in started["arguments"]
 
 
 def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):

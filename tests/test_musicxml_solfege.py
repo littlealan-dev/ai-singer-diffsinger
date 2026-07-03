@@ -65,6 +65,14 @@ def test_add_movable_major_uses_key_tonic_and_preserves_existing_lyrics(tmp_path
         if note.get("lyric_name") == GENERATED_LYRIC_NAME
     ]
     assert [note.get("lyric") for note in solfege_notes[:5]] == ["do", "re", "mi", "fa", "so"]
+    soprano_summary = parsed["score_summary"]["parts"][0]
+    generated_verse = next(
+        verse
+        for verse in soprano_summary["lyric_verses"]
+        if verse["verse_number"] == "2"
+    )
+    assert generated_verse["lyric_names"] == [GENERATED_LYRIC_NAME]
+    assert generated_verse["is_generated_solfege"] is True
 
 
 def test_unknown_part_returns_action_required_instead_of_raising(tmp_path: Path) -> None:

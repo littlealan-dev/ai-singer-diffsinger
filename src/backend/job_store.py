@@ -31,6 +31,7 @@ class JobStore:
         input_path: Optional[str] = None,
         render_type: Optional[str] = None,
         voicebank_metadata: Optional[Dict[str, Any]] = None,
+        audio_track: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Create a new job record with initial metadata."""
         payload: Dict[str, Any] = {
@@ -46,6 +47,8 @@ class JobStore:
             payload["renderType"] = render_type
         if voicebank_metadata:
             payload.update(voicebank_metadata)
+        if audio_track:
+            payload["audioTrack"] = audio_track
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload)
 
@@ -121,6 +124,7 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "review_required": data.get("reviewRequired"),
         "action_required": data.get("actionRequired"),
         "details": data.get("details"),
+        "audio_track": data.get("audioTrack"),
         "feedback": data.get("feedback"),
         "updated_at": data.get("updatedAt"),
     }

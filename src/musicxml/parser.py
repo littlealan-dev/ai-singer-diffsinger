@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 from music21 import chord, converter, harmony, note, stream, tempo
 
 from src.musicxml.io import read_musicxml_content
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,7 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
     for index, part in enumerate(score.parts):
         lyric_numbers: set[str] = set()
         lyric_samples: Dict[str, List[str]] = {}
+        lyric_names: Dict[str, set[str]] = {}
         note_count = 0
 
         for element in part.recurse().notes:
@@ -270,6 +272,9 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                 number = lyric.number or "1"
                 verse_number = str(number)
                 lyric_numbers.add(verse_number)
+                lyric_name = _extract_lyric_name(lyric)
+                if lyric_name:
+                    lyric_names.setdefault(verse_number, set()).add(lyric_name)
                 if text.startswith("+"):
                     continue
                 sample = lyric_samples.setdefault(verse_number, [])
@@ -291,6 +296,9 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                     {
                         "verse_number": verse_number,
                         "sample": lyric_samples.get(verse_number, []),
+                        "lyric_names": sorted(lyric_names.get(verse_number, set())),
+                        "is_generated_solfege": GENERATED_LYRIC_NAME
+                        in lyric_names.get(verse_number, set()),
                     }
                     for verse_number in sorted(lyric_numbers, key=_lyric_sort_key)
                 ],
@@ -555,13 +563,24 @@ def _extract_lyric_text(
         text = None
     syllabic = getattr(lyric, "syllabic", None)
     lyric_line_index = _normalize_verse_number(lyric.number) or "1"
-    lyric_name = str(getattr(lyric, "identifier", "") or "").strip() or None
+    lyric_name = _extract_lyric_name(lyric)
     is_extended = False
     if hasattr(lyric, "isExtended"):
         is_extended = bool(lyric.isExtended)
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
     return text, syllabic, is_extended, lyric_line_index, lyric_name
+
+
+def _extract_lyric_name(lyric: Any) -> Optional[str]:
+    """Return MusicXML lyric name, ignoring music21's numeric identifier fallback."""
+    identifier = str(getattr(lyric, "identifier", "") or "").strip()
+    if not identifier:
+        return None
+    number = _normalize_verse_number(getattr(lyric, "number", None)) or "1"
+    if identifier == number:
+        return None
+    return identifier
 
 
 def _make_note_event(

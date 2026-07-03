@@ -21,6 +21,30 @@ def test_build_progress_payload_maps_status_and_fields():
     assert payload["progress"] == 1.0
 
 
+def test_build_progress_payload_includes_audio_track_metadata():
+    payload = build_progress_payload(
+        "job-track",
+        {
+            "status": "completed",
+            "audioUrl": "/sessions/abc/audio",
+            "audioTrack": {
+                "key": "id:Soprano",
+                "label": "Soprano",
+                "part_id": "Soprano",
+                "part_index": 0,
+                "verse_number": "1",
+            },
+        },
+    )
+    assert payload["audio_track"] == {
+        "key": "id:Soprano",
+        "label": "Soprano",
+        "part_id": "Soprano",
+        "part_index": 0,
+        "verse_number": "1",
+    }
+
+
 def test_build_progress_payload_maps_error_status():
     payload = build_progress_payload(
         "job-err",

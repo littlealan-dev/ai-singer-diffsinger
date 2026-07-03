@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2 } from "lucide-react";
+import WaveSurfer from "wavesurfer.js";
+import { UploadCloud, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -16,6 +17,7 @@ import {
   submitAudioFeedback,
   uploadScore,
   updateSolfegeSettings,
+  type AudioTrackMetadata,
   type ChatSelection,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
@@ -71,6 +73,7 @@ type Message = {
   role: Role;
   content: string;
   audioUrl?: string;
+  audioTrack?: AudioTrackMetadata;
   details?: unknown;
   attemptMessages?: AttemptMessage[];
   showSelector?: boolean;
@@ -93,6 +96,152 @@ type ScorePayload = {
 };
 
 type ScorePreviewLayout = "page" | "horizontal";
+
+type MultiTrackAudioTrack = {
+  key: string;
+  label: string;
+  audioUrl: string;
+  partId?: string | null;
+  partIndex?: number | null;
+  verseNumber?: string | number | null;
+  jobId?: string;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+};
+
+const shouldMuteMultiTrackForPlayback = (
+  track: MultiTrackAudioTrack,
+  tracks: MultiTrackAudioTrack[]
+): boolean => {
+  const hasSolo = tracks.some((candidate) => candidate.solo);
+  return hasSolo ? !track.solo : track.muted;
+};
+
+type MultiTrackWaveformLaneProps = {
+  track: MultiTrackAudioTrack;
+  index: number;
+  onWaveSurferMount: (trackKey: string, instance: WaveSurfer) => void;
+  onWaveSurferUnmount: (trackKey: string) => void;
+  onTrackFinished: () => void;
+  onTrackSeek: (trackKey: string, time: number) => void;
+  onMuteChange: (trackKey: string, muted: boolean) => void;
+  onSoloChange: (trackKey: string, solo: boolean) => void;
+  onVolumeChange: (trackKey: string, volume: number) => void;
+};
+
+const MultiTrackWaveformLane = ({
+  track,
+  index,
+  onWaveSurferMount,
+  onWaveSurferUnmount,
+  onTrackFinished,
+  onTrackSeek,
+  onMuteChange,
+  onSoloChange,
+  onVolumeChange,
+}: MultiTrackWaveformLaneProps) => {
+  const waveformRef = useRef<HTMLDivElement | null>(null);
+  const waveSurferRef = useRef<WaveSurfer | null>(null);
+
+  useEffect(() => {
+    if (!waveformRef.current) return;
+    const waveSurfer = WaveSurfer.create({
+      container: waveformRef.current,
+      url: track.audioUrl,
+      height: 36,
+      waveColor: "rgba(125, 211, 252, 0.42)",
+      progressColor: "rgba(183, 125, 255, 0.95)",
+      cursorColor: "rgba(255, 255, 255, 0.95)",
+      cursorWidth: 2,
+      barWidth: 2,
+      barGap: 3,
+      barRadius: 2,
+      normalize: true,
+      dragToSeek: true,
+    });
+    waveSurferRef.current = waveSurfer;
+    waveSurfer.setVolume(track.volume);
+    waveSurfer.setMuted(track.muted);
+    onWaveSurferMount(track.key, waveSurfer);
+
+    const unsubscribeFinish = waveSurfer.on("finish", onTrackFinished);
+    const unsubscribeInteraction = waveSurfer.on("interaction", (time) => {
+      onTrackSeek(track.key, time);
+    });
+
+    return () => {
+      unsubscribeInteraction();
+      unsubscribeFinish();
+      onWaveSurferUnmount(track.key);
+      waveSurfer.destroy();
+      waveSurferRef.current = null;
+    };
+  }, [
+    onTrackFinished,
+    onTrackSeek,
+    onWaveSurferMount,
+    onWaveSurferUnmount,
+    track.audioUrl,
+    track.key,
+  ]);
+
+  useEffect(() => {
+    waveSurferRef.current?.setMuted(track.muted);
+  }, [track.muted]);
+
+  useEffect(() => {
+    waveSurferRef.current?.setVolume(track.volume);
+  }, [track.volume]);
+
+  return (
+    <div className="multitrack-lane">
+      <div className="multitrack-lane-header">
+        <span className="multitrack-lane-number">{index + 1}</span>
+        <div className="multitrack-lane-title">
+          <strong>{track.label}</strong>
+          <span>
+            {track.verseNumber ? `Verse ${track.verseNumber}` : "Generated vocal"}
+            {track.jobId ? ` · ${track.jobId.slice(0, 8)}` : ""}
+          </span>
+        </div>
+      </div>
+      <div className="multitrack-clip">
+        <div ref={waveformRef} className="multitrack-waveform" />
+      </div>
+      <div className="multitrack-lane-controls">
+        <button
+          type="button"
+          className={clsx("multitrack-toggle", { active: track.muted })}
+          onClick={() => onMuteChange(track.key, !track.muted)}
+          aria-label={track.muted ? `Unmute ${track.label}` : `Mute ${track.label}`}
+          title={track.muted ? "Unmute" : "Mute"}
+        >
+          M
+        </button>
+        <button
+          type="button"
+          className={clsx("multitrack-solo", { active: track.solo })}
+          onClick={() => onSoloChange(track.key, !track.solo)}
+          aria-label={track.solo ? `Disable solo for ${track.label}` : `Solo ${track.label}`}
+          title={track.solo ? "Disable solo" : "Solo"}
+        >
+          S
+        </button>
+        <input
+          className="multitrack-volume"
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={track.volume}
+          onChange={(event) => onVolumeChange(track.key, Number(event.target.value))}
+          aria-label={`${track.label} volume`}
+        />
+      </div>
+    </div>
+  );
+};
 
 type PartOption = {
   key: string;
@@ -468,6 +617,8 @@ export default function MainApp() {
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [multiTrackAudioTracks, setMultiTrackAudioTracks] = useState<MultiTrackAudioTrack[]>([]);
+  const [multiTrackPlaying, setMultiTrackPlaying] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -514,6 +665,7 @@ export default function MainApp() {
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const multiTrackWaveSurferRefs = useRef<Record<string, WaveSurfer | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
@@ -527,6 +679,7 @@ export default function MainApp() {
   const lastBillingSyncAtRef = useRef(0);
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
+  const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
 
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
@@ -577,6 +730,157 @@ export default function MainApp() {
       : solfegeMode === "minor_la_based"
         ? "Minor (La)"
         : "Minor (Do)";
+
+  const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
+  const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
+
+  const resolveMultiTrackIdentity = useCallback(
+    (
+      audioTrack?: AudioTrackMetadata
+    ): Omit<MultiTrackAudioTrack, "audioUrl" | "jobId" | "muted" | "solo" | "volume"> => {
+      const partIndex =
+        typeof audioTrack?.part_index === "number" && Number.isFinite(audioTrack.part_index)
+          ? audioTrack.part_index
+          : null;
+      const partId = typeof audioTrack?.part_id === "string" ? audioTrack.part_id.trim() : "";
+      const key =
+        (typeof audioTrack?.key === "string" && audioTrack.key.trim()) ||
+        (partId ? `id:${partId}` : partIndex !== null ? `index:${partIndex}` : selectedPartKey || "latest-vocal");
+      const matchingPart = partOptions.find((option) => option.key === key);
+      const label =
+        (typeof audioTrack?.label === "string" && audioTrack.label.trim()) ||
+        matchingPart?.label ||
+        (partId ? `Part ${partId}` : partIndex !== null ? `Part ${partIndex + 1}` : "Latest vocal");
+      return {
+        key,
+        label,
+        partId: partId || matchingPart?.part_id || null,
+        partIndex: partIndex ?? matchingPart?.part_index ?? null,
+        verseNumber: audioTrack?.verse_number ?? selectedVerse ?? null,
+      };
+    },
+    [partOptions, selectedPartKey, selectedVerse]
+  );
+
+  const addOrReplaceMultiTrackAudio = useCallback(
+    (audioUrl: string, audioTrack?: AudioTrackMetadata, jobId?: string) => {
+      if (!audioUrl) return;
+      const identity = resolveMultiTrackIdentity(audioTrack);
+      setMultiTrackAudioTracks((current) => {
+        const existing = current.find((track) => track.key === identity.key);
+        const nextTrack: MultiTrackAudioTrack = {
+          ...identity,
+          audioUrl,
+          jobId,
+          muted: existing?.muted ?? false,
+          solo: existing?.solo ?? false,
+          volume: existing?.volume ?? 1,
+        };
+        if (existing) {
+          return current.map((track) => (track.key === identity.key ? nextTrack : track));
+        }
+        return [...current, nextTrack];
+      });
+    },
+    [resolveMultiTrackIdentity]
+  );
+
+  const handleMultiTrackPlay = useCallback(() => {
+    const playable = multiTrackAudioTracks
+      .map((track) => ({ track, waveSurfer: multiTrackWaveSurferRefs.current[track.key] }))
+      .filter((entry): entry is { track: MultiTrackAudioTrack; waveSurfer: WaveSurfer } =>
+        Boolean(entry.waveSurfer)
+      );
+    if (!playable.length) return;
+    const baseTime =
+      playable.find(({ waveSurfer }) => waveSurfer.getCurrentTime() > 0)?.waveSurfer.getCurrentTime() ?? 0;
+    playable.forEach(({ track, waveSurfer }) => {
+      const duration = waveSurfer.getDuration();
+      waveSurfer.setTime(Math.min(baseTime, Number.isFinite(duration) ? duration : baseTime));
+      waveSurfer.setVolume(track.volume);
+      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, multiTrackAudioTracks));
+    });
+    void Promise.allSettled(playable.map(({ waveSurfer }) => waveSurfer.play())).then(() => {
+      setMultiTrackPlaying(true);
+    });
+  }, [multiTrackAudioTracks]);
+
+  const handleMultiTrackPause = useCallback(() => {
+    Object.values(multiTrackWaveSurferRefs.current).forEach((waveSurfer) => waveSurfer?.pause());
+    setMultiTrackPlaying(false);
+  }, []);
+
+  const handleMultiTrackStop = useCallback(() => {
+    Object.values(multiTrackWaveSurferRefs.current).forEach((waveSurfer) => {
+      waveSurfer?.stop();
+    });
+    setMultiTrackPlaying(false);
+  }, []);
+
+  const handleMultiTrackWaveSurferMount = useCallback((trackKey: string, instance: WaveSurfer) => {
+    multiTrackWaveSurferRefs.current[trackKey] = instance;
+  }, []);
+
+  const handleMultiTrackWaveSurferUnmount = useCallback((trackKey: string) => {
+    delete multiTrackWaveSurferRefs.current[trackKey];
+  }, []);
+
+  const handleMultiTrackFinished = useCallback(() => {
+    const allStopped = Object.values(multiTrackWaveSurferRefs.current).every(
+      (waveSurfer) => !waveSurfer || !waveSurfer.isPlaying()
+    );
+    if (allStopped) setMultiTrackPlaying(false);
+  }, []);
+
+  const handleMultiTrackSeek = useCallback((sourceTrackKey: string, time: number) => {
+    Object.entries(multiTrackWaveSurferRefs.current).forEach(([trackKey, waveSurfer]) => {
+      if (!waveSurfer || trackKey === sourceTrackKey) return;
+      const duration = waveSurfer.getDuration();
+      waveSurfer.setTime(Math.min(time, Number.isFinite(duration) ? duration : time));
+    });
+  }, []);
+
+  const updateMultiTrackMute = useCallback((trackKey: string, muted: boolean) => {
+    setMultiTrackAudioTracks((current) =>
+      current.map((track) =>
+        track.key === trackKey ? { ...track, muted, solo: muted ? false : track.solo } : track
+      )
+    );
+  }, []);
+
+  const updateMultiTrackSolo = useCallback((trackKey: string, solo: boolean) => {
+    setMultiTrackAudioTracks((current) =>
+      current.map((track) =>
+        track.key === trackKey ? { ...track, solo, muted: solo ? false : track.muted } : track
+      )
+    );
+  }, []);
+
+  const updateMultiTrackVolume = useCallback((trackKey: string, volume: number) => {
+    const normalized = Math.max(0, Math.min(1, volume));
+    setMultiTrackAudioTracks((current) =>
+      current.map((track) => (track.key === trackKey ? { ...track, volume: normalized } : track))
+    );
+    multiTrackWaveSurferRefs.current[trackKey]?.setVolume(normalized);
+  }, []);
+
+  useEffect(() => {
+    multiTrackAudioTracks.forEach((track) => {
+      const waveSurfer = multiTrackWaveSurferRefs.current[track.key];
+      if (!waveSurfer) return;
+      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, multiTrackAudioTracks));
+      waveSurfer.setVolume(track.volume);
+    });
+  }, [multiTrackAudioTracks]);
+
+  useEffect(() => {
+    messages.forEach((message) => {
+      if (message.role !== "assistant" || !message.audioUrl) return;
+      if (suppressedMultiTrackMessageIdsRef.current.has(message.id)) return;
+      addOrReplaceMultiTrackAudio(message.audioUrl, message.audioTrack, message.jobId);
+    });
+  }, [addOrReplaceMultiTrackAudio, messages]);
+
   const renderVoiceAvatar = (voice: VoicebankOption, className: string) => {
     const imageUrl = failedVoiceImages[voice.id] ? null : voiceImageUrl(voice);
     if (imageUrl) {
@@ -1049,6 +1353,7 @@ export default function MainApp() {
             attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
             audioUrl: nextAudioUrl || msg.audioUrl,
+            audioTrack: payload.audio_track ?? msg.audioTrack,
             jobId: payload.job_id ?? msg.jobId,
             feedback: payload.feedback ?? msg.feedback,
             isProgress: !isTerminalProgress,
@@ -1057,6 +1362,9 @@ export default function MainApp() {
       );
       if (nextAudioUrl) {
         setAudioUrl(nextAudioUrl);
+        if (payload.job_kind !== "preprocess") {
+          addOrReplaceMultiTrackAudio(nextAudioUrl, payload.audio_track, payload.job_id);
+        }
       }
     };
 
@@ -1106,7 +1414,7 @@ export default function MainApp() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [activeProgress]);
+  }, [activeProgress, addOrReplaceMultiTrackAudio]);
 
   useEffect(() => {
     const container = chatStreamRef.current;
@@ -1122,9 +1430,6 @@ export default function MainApp() {
       container.scrollHeight - container.scrollTop - container.clientHeight;
     shouldAutoScrollRef.current = distanceFromBottom < 48;
   };
-
-  const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
-  const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
 
   const appendMessage = (message: Message) => {
     setMessages((prev) => [...prev, message]);
@@ -1287,6 +1592,7 @@ export default function MainApp() {
             ? {
                 ...msg,
                 audioUrl: nextAudioUrl,
+                audioTrack: payload.audio_track ?? msg.audioTrack,
                 progressUrl: refreshUrl,
                 jobId: payload.job_id ?? msg.jobId,
                 feedback: payload.feedback ?? msg.feedback,
@@ -1295,6 +1601,9 @@ export default function MainApp() {
         )
       );
       setAudioUrl((current) => (current ? nextAudioUrl : current));
+      if (payload.job_kind !== "preprocess") {
+        addOrReplaceMultiTrackAudio(nextAudioUrl, payload.audio_track, payload.job_id);
+      }
       return nextAudioUrl;
     })();
     audioRefreshPromisesRef.current[messageId] = refreshPromise;
@@ -1451,6 +1760,14 @@ export default function MainApp() {
     setUploading(true);
     setError(null);
     setScorePreviewError(null);
+    messages.forEach((message) => {
+      if (message.audioUrl) {
+        suppressedMultiTrackMessageIdsRef.current.add(message.id);
+      }
+    });
+    handleMultiTrackStop();
+    setMultiTrackAudioTracks([]);
+    multiTrackWaveSurferRefs.current = {};
     try {
       const activeSessionId = sessionId ?? await ensureSession();
       const uploadResponse = await uploadScore(activeSessionId, file);
@@ -1529,7 +1846,9 @@ export default function MainApp() {
       }
       if (response.type === "chat_audio") {
         assistantMessage.audioUrl = response.audio_url;
+        assistantMessage.audioTrack = response.audio_track;
         setAudioUrl(response.audio_url);
+        addOrReplaceMultiTrackAudio(response.audio_url, response.audio_track);
         if (pendingSelection) {
           setPendingSelection(false);
         }
@@ -2367,7 +2686,65 @@ export default function MainApp() {
           onPointerDown={handleResizeStart}
         />
 
-        <section className="score-panel">
+        <div className="score-column">
+          <div className="multitrack-player" aria-label="Multitrack audio player">
+            <div className="multitrack-toolbar">
+              <div>
+                <h3>Multitrack Player</h3>
+                <p>
+                  {multiTrackAudioTracks.length
+                    ? "Generated parts are added here as separate synchronized tracks."
+                    : "Generated vocal parts will appear here after synthesis."}
+                </p>
+              </div>
+              <div className="multitrack-transport">
+                <button
+                  type="button"
+                  className="multitrack-transport-button"
+                  onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
+                  disabled={!multiTrackAudioTracks.length}
+                  aria-label={multiTrackPlaying ? "Pause all tracks" : "Play all tracks"}
+                  title={multiTrackPlaying ? "Pause all tracks" : "Play all tracks"}
+                >
+                  {multiTrackPlaying ? <Pause size={16} /> : <Play size={16} />}
+                </button>
+                <button
+                  type="button"
+                  className="multitrack-transport-button"
+                  onClick={handleMultiTrackStop}
+                  disabled={!multiTrackAudioTracks.length}
+                  aria-label="Stop all tracks"
+                  title="Stop all tracks"
+                >
+                  <Square size={15} />
+                </button>
+              </div>
+            </div>
+            <div className="multitrack-lanes">
+              {multiTrackAudioTracks.length ? (
+                multiTrackAudioTracks.map((track, index) => (
+                  <MultiTrackWaveformLane
+                    key={track.key}
+                    track={track}
+                    index={index}
+                    onWaveSurferMount={handleMultiTrackWaveSurferMount}
+                    onWaveSurferUnmount={handleMultiTrackWaveSurferUnmount}
+                    onTrackFinished={handleMultiTrackFinished}
+                    onTrackSeek={handleMultiTrackSeek}
+                    onMuteChange={updateMultiTrackMute}
+                    onSoloChange={updateMultiTrackSolo}
+                    onVolumeChange={updateMultiTrackVolume}
+                  />
+                ))
+              ) : (
+                <div className="multitrack-empty">
+                  <span>No tracks yet</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <section className="score-panel">
           <div className="score-header">
             <h2>Score Preview</h2>
             <div className="score-controls">
@@ -2460,6 +2837,7 @@ export default function MainApp() {
             ) : null}
           </div>
         </section>
+        </div>
       </main>
       {showAnnouncement && currentAnnouncement && (
         <AnnouncementModal 
