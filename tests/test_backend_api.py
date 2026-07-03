@@ -3768,6 +3768,35 @@ def test_app_check_missing_token_returns_401_response(monkeypatch):
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_turnstile_verify_bypasses_app_check_for_pre_auth_signup(monkeypatch):
+    app, data_dir = _prepare_app(
+        monkeypatch,
+        overrides={"BACKEND_REQUIRE_APP_CHECK": "true"},
+    )
+
+    async def _verify_turnstile_token(settings, *, token, remote_ip=None):
+        assert token == "turnstile-token"
+        return type("Result", (), {"success": True, "error_codes": []})()
+
+    monkeypatch.setattr("src.backend.main.verify_turnstile_token", _verify_turnstile_token)
+    monkeypatch.setattr(
+        "src.backend.main.initialize_firebase_app",
+        lambda: pytest.fail("Turnstile verification must not require App Check."),
+    )
+
+    keep_outputs = os.environ.get("KEEP_TEST_OUTPUT", "1").lower() not in ("0", "false", "no")
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        response = test_client.post(
+            "/auth/turnstile/verify",
+            json={"token": "turnstile-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    if not keep_outputs:
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_app_check_invalid_token_returns_401_response(monkeypatch):
     app, data_dir = _prepare_app(
         monkeypatch,

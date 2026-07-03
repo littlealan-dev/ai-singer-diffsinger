@@ -1088,9 +1088,9 @@ async def _require_app_check(request: Request) -> None:
 
 
 def _should_require_app_check(request: Request) -> bool:
-    """Skip App Check only for signed audio playback routes."""
+    """Skip generic App Check where a route applies its own protection."""
     path = request.url.path
-    if path in {"/billing/webhook", "/healthz", "/readyz"}:
+    if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 
