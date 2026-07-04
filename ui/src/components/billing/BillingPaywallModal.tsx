@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { Check, Loader2, X } from "lucide-react";
+import { Check, Loader2, Zap, X } from "lucide-react";
 import {
   startBillingPortal,
   startCheckout,
+  startTopupCheckout,
 } from "../../billing/api";
 import {
   getDisplayPlans,
@@ -83,6 +84,18 @@ export function BillingPaywallModal({
       window.location.assign(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open billing.");
+      setBusyAction(null);
+    }
+  };
+
+  const handleTopupCheckout = async () => {
+    setBusyAction("topup");
+    setError(null);
+    try {
+      const url = await startTopupCheckout();
+      window.location.assign(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start credit pack checkout.");
       setBusyAction(null);
     }
   };
@@ -172,6 +185,13 @@ export function BillingPaywallModal({
             />
           ))}
         </div>
+        <TopupCard
+          billing={billing}
+          busy={busyAction === "topup"}
+          emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
+          disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
+          onCheckout={handleTopupCheckout}
+        />
         <div className="billing-shared-features" aria-label="Included in every plan">
           <h3>Included in every plan</h3>
           <ul>
@@ -282,6 +302,42 @@ function PlanCard({
         )}
       </div>
     </article>
+  );
+}
+
+type TopupCardProps = {
+  billing: BillingState;
+  busy: boolean;
+  emphasized: boolean;
+  disabled: boolean;
+  onCheckout: () => void;
+};
+
+function TopupCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
+  const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
+  return (
+    <section className={clsx("billing-topup-card", emphasized && "emphasized")} aria-label="Credit pack">
+      <div className="billing-topup-icon" aria-hidden="true">
+        <Zap size={18} />
+      </div>
+      <div className="billing-topup-copy">
+        <h3>Need more credits right now?</h3>
+        <p>
+          Credit Pack - 15 credits for $5. Use alongside your plan. Expires in 180 days.
+          Non-refundable.
+        </p>
+        <span>{remainingSlots > 0 ? `You can buy up to ${remainingSlots} more active pack${remainingSlots === 1 ? "" : "s"}.` : "Maximum 3 active packs reached."}</span>
+      </div>
+      <button
+        type="button"
+        className="billing-topup-button"
+        onClick={onCheckout}
+        disabled={disabled || busy}
+        title={billing.topupActivePackCount >= 3 ? "Maximum 3 active packs" : undefined}
+      >
+        {busy ? "Opening Checkout..." : "Buy Credit Pack"}
+      </button>
+    </section>
   );
 }
 

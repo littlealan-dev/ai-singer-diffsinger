@@ -67,7 +67,7 @@ def handle_event(
     )
 
     if event_type == "checkout.session.completed":
-        _handle_checkout_session_completed(payload)
+        _handle_checkout_session_completed(payload, config=config, stripe_client=stripe_client)
     elif event_type == "invoice.paid":
         _handle_invoice_paid(payload, config=config)
     elif event_type == "invoice.payment_failed":
@@ -85,7 +85,19 @@ def handle_event(
     mark_stripe_event_processed(event_id)
 
 
-def _handle_checkout_session_completed(payload: dict[str, Any]) -> None:
+def _handle_checkout_session_completed(
+    payload: dict[str, Any],
+    *,
+    config: BillingConfig | None = None,
+    stripe_client: Any | None = None,
+) -> None:
+    metadata = payload.get("metadata") or {}
+    if metadata.get("purchaseType") == "topup":
+        from src.backend.billing_topup import apply_topup_checkout_completed
+
+        apply_topup_checkout_completed(payload, config=config, stripe_client=stripe_client)
+        return
+
     uid = _resolve_user_id(payload)
     if not uid:
         raise BillingHttpError(409, "Unable to resolve Firebase user for checkout session.")
@@ -423,6 +435,7 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "canceled_at": payload.get("canceled_at"),
         "current_period_end": payload.get("current_period_end"),
         "payment_status": payload.get("payment_status"),
+        "purchaseType": (payload.get("metadata") or {}).get("purchaseType"),
         "payment_intent_status": _payment_intent_status(payload),
     }
 

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import warnings
 
 import pytest
+from google.cloud import firestore
 
 from src.backend.billing_checkout import create_checkout_session
 from src.backend.billing_checkout_sync import sync_checkout_session
@@ -12,6 +13,7 @@ from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh, run_credit_refresh
 from src.backend.billing_store import get_billing_state
 from src.backend.billing_subscription_sync import sync_current_subscription
+from src.backend.billing_topup import create_topup_checkout_session
 from src.backend.billing_webhooks import handle_event
 from src.backend.credits import get_or_create_credits
 from src.backend.firebase_app import get_firestore_client
@@ -31,6 +33,11 @@ class _FakeCustomer:
         self.id = customer_id
 
 
+class _StripeObject:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
 class _FakeStripeClient:
     def __init__(self):
         self.created_customers = []
@@ -39,6 +46,7 @@ class _FakeStripeClient:
         self.checkout_session_payload = None
         self.subscription_payload = None
         self.subscription_list_payload = []
+        self.line_items_payload = {"data": []}
         self.v1 = type("V1Api", (), {})()
         self.v1.customers = type("CustomersApi", (), {})()
         self.v1.checkout = type("CheckoutApi", (), {})()
@@ -49,6 +57,7 @@ class _FakeStripeClient:
         self.v1.customers.create = self._create_customer
         self.v1.checkout.sessions.create = self._create_checkout_session
         self.v1.checkout.sessions.retrieve = self._retrieve_checkout_session
+        self.v1.checkout.sessions.list_line_items = self._list_line_items
         self.v1.billing_portal.sessions.create = self._create_portal_session
         self.v1.subscriptions.retrieve = self._retrieve_subscription
         self.v1.subscriptions.list = self._list_subscriptions
@@ -68,6 +77,10 @@ class _FakeStripeClient:
     def _retrieve_checkout_session(self, session_id, *, params=None):
         assert session_id
         return self.checkout_session_payload
+
+    def _list_line_items(self, session_id, *, params=None):
+        assert session_id
+        return self.line_items_payload
 
     def _retrieve_subscription(self, subscription_id, *, params=None):
         assert subscription_id
@@ -99,6 +112,14 @@ def billing_env(monkeypatch):
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_EARLY_ANNUAL", "price_choir_early_annual")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_MONTHLY", "price_choir_monthly")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_ANNUAL", "price_choir_annual")
+    monkeypatch.setenv("STRIPE_PRODUCT_TOPUP", "prod_topup")
+    monkeypatch.setenv("STRIPE_PRICE_TOPUP_15", "price_topup_15")
+    monkeypatch.setenv("STRIPE_TOPUP_SUCCESS_URL", "https://app.test/topup-success")
+    monkeypatch.setenv("STRIPE_TOPUP_CANCEL_URL", "https://app.test/topup-cancel")
+    monkeypatch.setenv("TOPUP_PACK_EXPIRY_DAYS", "180")
+    monkeypatch.setenv("TOPUP_PACK_CREDIT_AMOUNT", "15")
+    monkeypatch.setenv("TOPUP_MAX_ACTIVE_PACKS", "3")
+    monkeypatch.setenv("TOPUP_CHECKOUT_HOLD_TTL_MINUTES", "30")
     monkeypatch.setenv("CHOIR_EARLY_SUPPORTER_ENABLED", "true")
     monkeypatch.setenv("STRIPE_CHECKOUT_SUCCESS_URL", "https://app.test/success")
     monkeypatch.setenv("STRIPE_CHECKOUT_CANCEL_URL", "https://app.test/cancel")
@@ -108,7 +129,14 @@ def billing_env(monkeypatch):
     get_stripe_client.cache_clear()
 
     db = get_firestore_client()
-    for collection in ["users", "credit_ledger", "stripe_events", "credit_reservations"]:
+    for collection in [
+        "users",
+        "credit_ledger",
+        "stripe_events",
+        "credit_reservations",
+        "topup_packs",
+        "topup_checkout_holds",
+    ]:
         for doc in db.collection(collection).list_documents():
             doc.delete()
     yield
@@ -139,6 +167,147 @@ def test_create_checkout_session_creates_customer_and_session():
     billing = get_billing_state("user-1")
     assert billing["stripeCustomerId"] == "cus_test_123"
     assert billing["stripeCheckoutSessionId"] == "cs_test_123"
+
+
+def test_create_topup_checkout_session_sets_adjustable_quantity_limit():
+    uid = "user-topup-checkout"
+    ensure_billing_state_for_login(uid, "topup@example.com")
+    fake_stripe = _FakeStripeClient()
+
+    result = create_topup_checkout_session(
+        uid,
+        "topup@example.com",
+        config=get_billing_config(),
+        stripe_client=fake_stripe,
+    )
+
+    assert result["url"] == "https://checkout.stripe.test/session"
+    assert result["maxQuantity"] == 3
+    params = fake_stripe.created_checkout_sessions[0]
+    assert params["mode"] == "payment"
+    line_item = params["line_items"][0]
+    assert line_item["price"] == "price_topup_15"
+    assert line_item["adjustable_quantity"]["maximum"] == 3
+    assert params["metadata"]["purchaseType"] == "topup"
+
+
+def test_topup_checkout_completed_grants_quantity_and_ledger():
+    uid = "user-topup-webhook"
+    get_or_create_credits(uid, "topup-webhook@example.com")
+    fake_stripe = _FakeStripeClient()
+    create_topup_checkout_session(
+        uid,
+        "topup-webhook@example.com",
+        config=get_billing_config(),
+        stripe_client=fake_stripe,
+    )
+    hold_id = fake_stripe.created_checkout_sessions[0]["metadata"]["checkoutHoldId"]
+    fake_stripe.line_items_payload = {
+        "data": [
+            {
+                "quantity": 2,
+                "price": {"id": "price_topup_15"},
+            }
+        ]
+    }
+
+    handle_event(
+        {
+            "id": "evt_topup_checkout_completed",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "mode": "payment",
+                    "status": "complete",
+                    "payment_status": "paid",
+                    "customer": "cus_test_123",
+                    "client_reference_id": uid,
+                    "payment_intent": "pi_topup_123",
+                    "metadata": {
+                        "firebaseUserId": uid,
+                        "purchaseType": "topup",
+                        "checkoutHoldId": hold_id,
+                    },
+                }
+            },
+        },
+        stripe_client=fake_stripe,
+    )
+
+    db = get_firestore_client()
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["topupCredits"]["totalRemaining"] == 30
+    assert user["topupCredits"]["activePackCount"] == 2
+    packs = list(
+        db.collection("topup_packs")
+        .where(filter=firestore.FieldFilter("userId", "==", uid))
+        .stream()
+    )
+    assert len(packs) == 2
+    assert db.collection("credit_ledger").document("topup_grant_cs_test_123_1").get().exists
+    assert db.collection("credit_ledger").document("topup_grant_cs_test_123_2").get().exists
+    hold = db.collection("topup_checkout_holds").document(hold_id).get().to_dict() or {}
+    assert hold["status"] == "completed"
+
+
+def test_topup_checkout_completed_fetches_sdk_line_item_objects(monkeypatch):
+    import stripe
+
+    uid = "user-topup-sdk-line-items"
+    get_or_create_credits(uid, "topup-sdk-line-items@example.com")
+    fake_stripe = _FakeStripeClient()
+    create_topup_checkout_session(
+        uid,
+        "topup-sdk-line-items@example.com",
+        config=get_billing_config(),
+        stripe_client=fake_stripe,
+    )
+    hold_id = fake_stripe.created_checkout_sessions[0]["metadata"]["checkoutHoldId"]
+    delattr(fake_stripe.v1.checkout.sessions, "list_line_items")
+
+    def fake_list_line_items(session_id, **params):
+        assert session_id == "cs_test_123"
+        assert params["limit"] == 100
+        return _StripeObject(
+            data=[
+                _StripeObject(
+                    quantity=1,
+                    price=_StripeObject(id="price_topup_15"),
+                )
+            ]
+        )
+
+    monkeypatch.setattr(stripe.checkout.Session, "list_line_items", fake_list_line_items)
+
+    handle_event(
+        {
+            "id": "evt_topup_checkout_completed_sdk_line_items",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "mode": "payment",
+                    "status": "complete",
+                    "payment_status": "paid",
+                    "customer": "cus_test_123",
+                    "client_reference_id": uid,
+                    "payment_intent": "pi_topup_123",
+                    "metadata": {
+                        "firebaseUserId": uid,
+                        "purchaseType": "topup",
+                        "checkoutHoldId": hold_id,
+                    },
+                }
+            },
+        },
+        stripe_client=fake_stripe,
+    )
+
+    db = get_firestore_client()
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["topupCredits"]["totalRemaining"] == 15
+    assert db.collection("credit_ledger").document("topup_grant_cs_test_123_1").get().exists
 
 
 def test_prod_billing_config_reads_stripe_secrets_from_secret_manager(monkeypatch):

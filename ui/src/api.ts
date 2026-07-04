@@ -200,6 +200,11 @@ export type BillingCheckoutResponse = {
   url: string;
 };
 
+export type TopupCheckoutResponse = {
+  url: string;
+  maxQuantity: number;
+};
+
 export type BillingPortalResponse = {
   url: string;
 };
@@ -445,6 +450,14 @@ export async function createCheckoutSession(planKey: string): Promise<BillingChe
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ planKey }),
+  });
+}
+
+export async function createTopupCheckoutSession(packKey = "topup_15"): Promise<TopupCheckoutResponse> {
+  return request("/billing/topup-checkout-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ packKey }),
   });
 }
 

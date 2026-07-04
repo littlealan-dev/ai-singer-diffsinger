@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
+import { collection, doc, onSnapshot, query, where } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "./useAuth";
 import type { BillingPlanKey, PlanFamily } from "../billing/plans";
@@ -7,6 +7,14 @@ import { isBillingPlanKey } from "../billing/plans";
 
 type FirestoreTimestampLike = {
   toDate?: () => Date;
+};
+
+export type BillingTopupPack = {
+  id: string;
+  creditsAvailable: number;
+  creditsRemaining: number;
+  creditsReserved: number;
+  expiresAt: Date | null;
 };
 
 export type BillingState = {
@@ -26,6 +34,11 @@ export type BillingState = {
   monthlyAllowance: number;
   availableCredits: number;
   reservedCredits: number;
+  subscriptionCredits: number;
+  topupCredits: number;
+  topupActivePackCount: number;
+  topupEarliestExpiresAt: Date | null;
+  topupPacks: BillingTopupPack[];
   overdrafted: boolean;
   isExpired: boolean;
   loading: boolean;
@@ -49,6 +62,11 @@ const DEFAULT_STATE: Omit<BillingState, "loading" | "error"> = {
   monthlyAllowance: 8,
   availableCredits: 0,
   reservedCredits: 0,
+  subscriptionCredits: 0,
+  topupCredits: 0,
+  topupActivePackCount: 0,
+  topupEarliestExpiresAt: null,
+  topupPacks: [],
   overdrafted: false,
   isExpired: false,
 };
@@ -67,7 +85,7 @@ export function useBillingState(): BillingState {
       return;
     }
 
-    setState((current) => ({ ...current, loading: true, error: null }));
+    setState((current) => ({ ...current, topupPacks: [], loading: true, error: null }));
 
     const unsubscribe = onSnapshot(
       doc(db, "users", user.uid),
@@ -80,13 +98,20 @@ export function useBillingState(): BillingState {
         const data = snapshot.data();
         const billing = data.billing || {};
         const credits = data.credits || {};
+        const topupCredits = data.topupCredits || {};
         const balance = Number(credits.balance || 0);
         const reserved = Number(credits.reserved || 0);
+        const topupTotalRemaining = Number(topupCredits.totalRemaining || 0);
+        const topupReserved = Number(topupCredits.totalReserved || 0);
+        const topupAvailable = Number(
+          topupCredits.totalAvailable ?? Math.max(0, topupTotalRemaining - topupReserved)
+        );
         const expiresAt = toDate(credits.expiresAt);
         const rawPlanKey = String(billing.activePlanKey || "free");
         const activePlanKey = isBillingPlanKey(rawPlanKey) ? rawPlanKey : "free";
 
-        setState({
+        setState((current) => ({
+          ...current,
           activePlanKey,
           family: normalizeFamily(billing.family),
           billingInterval: normalizeInterval(billing.billingInterval),
@@ -101,13 +126,17 @@ export function useBillingState(): BillingState {
           currentPeriodEnd: toDate(billing.currentPeriodEnd),
           nextCreditRefreshAt: toDate(billing.nextCreditRefreshAt),
           monthlyAllowance: Number(credits.monthlyAllowance || 0),
-          availableCredits: balance - reserved,
+          availableCredits: balance - reserved + topupAvailable,
           reservedCredits: reserved,
+          subscriptionCredits: balance - reserved,
+          topupCredits: topupAvailable,
+          topupActivePackCount: Number(topupCredits.activePackCount || 0),
+          topupEarliestExpiresAt: toDate(topupCredits.earliestExpiresAt),
           overdrafted: Boolean(credits.overdrafted),
           isExpired: expiresAt ? Date.now() > expiresAt.getTime() : false,
           loading: false,
           error: null,
-        });
+        }));
       },
       (error) => {
         console.error("Error listening to billing state:", error);
@@ -119,7 +148,43 @@ export function useBillingState(): BillingState {
       }
     );
 
-    return () => unsubscribe();
+    const packsQuery = query(collection(db, "topup_packs"), where("userId", "==", user.uid));
+    const unsubscribePacks = onSnapshot(
+      packsQuery,
+      (snapshot) => {
+        const topupPacks = snapshot.docs
+          .map((packSnapshot) => {
+            const data = packSnapshot.data();
+            const creditsRemaining = Number(data.creditsRemaining || 0);
+            const creditsReserved = Number(data.creditsReserved || 0);
+            return {
+              id: packSnapshot.id,
+              creditsAvailable: Math.max(0, creditsRemaining - creditsReserved),
+              creditsRemaining,
+              creditsReserved,
+              expiresAt: toDate(data.expiresAt),
+              status: String(data.status || ""),
+            };
+          })
+          .filter((pack) => pack.status === "active" && pack.creditsAvailable > 0)
+          .sort((left, right) => {
+            const leftTime = left.expiresAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            const rightTime = right.expiresAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            return leftTime - rightTime;
+          })
+          .map(({ status: _status, ...pack }) => pack);
+        setState((current) => ({ ...current, topupPacks }));
+      },
+      (error) => {
+        console.error("Error listening to top-up packs:", error);
+        setState((current) => ({ ...current, topupPacks: [] }));
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      unsubscribePacks();
+    };
   }, [user]);
 
   return state;

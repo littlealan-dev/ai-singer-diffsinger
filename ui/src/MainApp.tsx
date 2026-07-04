@@ -1345,20 +1345,30 @@ export default function MainApp() {
 
     const url = new URL(window.location.href);
     const checkoutStatus = url.searchParams.get("checkout");
+    const topupStatus = url.searchParams.get("topup");
     const sessionId = url.searchParams.get("session_id");
     const billingSync = url.searchParams.get("billing") === "sync";
-    const returnedFromCheckout = checkoutStatus === "success" || Boolean(sessionId);
+    const returnedFromTopup = topupStatus === "success" || topupStatus === "cancel";
+    const returnedFromCheckout = !returnedFromTopup && (checkoutStatus === "success" || Boolean(sessionId));
     const returnedFromPortal = billingSync || hasPendingBillingPortalSync();
-    if (!returnedFromCheckout && !returnedFromPortal) return;
+    if (!returnedFromCheckout && !returnedFromPortal && !returnedFromTopup) return;
 
-    checkoutReturnSyncStartedRef.current = true;
     const cleanupReturnUrl = () => {
       url.searchParams.delete("checkout");
+      url.searchParams.delete("topup");
       url.searchParams.delete("session_id");
       url.searchParams.delete("billing");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     };
 
+    if (returnedFromTopup) {
+      cleanupReturnUrl();
+      setPaywallTrigger(null);
+      setPaywallDetail(null);
+      return;
+    }
+
+    checkoutReturnSyncStartedRef.current = true;
     const syncPromise =
       returnedFromCheckout && sessionId
         ? syncCheckoutSession(sessionId)
@@ -1434,6 +1444,7 @@ export default function MainApp() {
     const planKey = isPaidPlanKey(queryPlan) ? queryPlan : storedPlan;
     const returnedFromHostedBilling =
       params.get("checkout") === "success" ||
+      params.has("topup") ||
       params.get("billing") === "sync" ||
       params.has("session_id") ||
       hasPendingBillingPortalSync();
@@ -2279,6 +2290,11 @@ export default function MainApp() {
         <div className="header-actions">
           <CreditsHeader
             available={available}
+            subscriptionAvailable={billing.subscriptionCredits}
+            topupAvailable={billing.topupCredits}
+            topupEarliestExpiresAt={billing.topupEarliestExpiresAt}
+            topupPacks={billing.topupPacks}
+            planFamily={billing.family}
             nextCreditRefreshAt={billing.nextCreditRefreshAt}
             isExpired={isExpired}
             overdrafted={overdrafted}

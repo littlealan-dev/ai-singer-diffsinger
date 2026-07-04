@@ -15,10 +15,25 @@
     font-family: inherit;
 }
 
+button.credits-pill {
+    border-style: solid;
+    cursor: pointer;
+}
+
+button.credits-pill:focus-visible {
+    outline: 2px solid rgba(147, 197, 253, 0.95);
+    outline-offset: 2px;
+}
+
 .credits-pill.loading {
     width: 80px;
     justify-content: center;
     color: #94a3b8;
+}
+
+.credits-popover-anchor {
+    position: relative;
+    display: inline-flex;
 }
 
 .credits-main {
@@ -98,6 +113,69 @@
     animation: pulse-soft 2s infinite ease-in-out;
 }
 
+.credits-breakdown-popover {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    z-index: 80;
+    min-width: 360px;
+    padding: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.98);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.36);
+    color: #e2e8f0;
+}
+
+.credits-breakdown-popover::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    right: 34px;
+    width: 10px;
+    height: 10px;
+    border-left: 1px solid rgba(148, 163, 184, 0.24);
+    border-top: 1px solid rgba(148, 163, 184, 0.24);
+    background: rgba(15, 23, 42, 0.98);
+    transform: rotate(45deg);
+}
+
+.credits-breakdown-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+.credits-breakdown-table th,
+.credits-breakdown-table td {
+    padding: 7px 8px;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.credits-breakdown-table th {
+    color: #94a3b8;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.credits-breakdown-table td:nth-child(2),
+.credits-breakdown-table th:nth-child(2) {
+    text-align: right;
+}
+
+.credits-breakdown-table tbody tr + tr td {
+    border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.credits-breakdown-table tfoot td {
+    border-top: 1px solid rgba(226, 232, 240, 0.2);
+    color: #f8fafc;
+    font-weight: 800;
+}
+
 @media (max-width: 600px) {
     .credits-pill {
         padding: 4px 10px;
@@ -112,5 +190,16 @@
 
     .credits-expiry {
         font-size: 0.7rem;
+    }
+
+    .credits-breakdown-popover {
+        right: auto;
+        left: 0;
+        min-width: min(340px, calc(100vw - 28px));
+    }
+
+    .credits-breakdown-popover::before {
+        right: auto;
+        left: 32px;
     }
 }

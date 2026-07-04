@@ -39,6 +39,8 @@ def cleanup_firestore():
         "jobs",
         "stripe_events",
         "audio_feedback",
+        "topup_packs",
+        "topup_checkout_holds",
     ]:
         for doc in db.collection(collection).list_documents():
             doc.delete()
@@ -178,6 +180,230 @@ def test_reserve_credits_insufficient():
     assert result.status == "insufficient_balance"
 
 
+def test_reserve_and_settle_consumes_topup_after_subscription_balance():
+    uid = "test-topup-consume"
+    get_or_create_credits(uid, "topup-consume@example.com")
+    db = get_firestore_client()
+    now = datetime.now(timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "credits": {"balance": 2, "reserved": 0, "overdrafted": False},
+            "topupCredits": {
+                "totalRemaining": 3,
+                "activePackCount": 1,
+                "earliestExpiresAt": now + timedelta(days=180),
+            },
+        },
+        merge=True,
+    )
+    db.collection("topup_packs").document("topup-pack-1").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-1",
+            "creditsGranted": 15,
+            "creditsRemaining": 3,
+            "status": "active",
+            "expiresAt": now + timedelta(days=180),
+            "createdAt": now,
+        }
+    )
+
+    reserve_result = reserve_credits(uid, "job-topup-1", 5)
+    assert reserve_result.status == "reserved"
+    reserved_user = db.collection("users").document(uid).get().to_dict() or {}
+    assert reserved_user["credits"]["reserved"] == 2
+    assert reserved_user["topupCredits"]["totalRemaining"] == 3
+    assert reserved_user["topupCredits"]["totalReserved"] == 3
+    assert reserved_user["topupCredits"]["totalAvailable"] == 0
+    reservation = db.collection("credit_reservations").document("job-topup-1").get().to_dict() or {}
+    assert reservation["reservedMonthlyCredits"] == 2
+    assert reservation["reservedTopupCredits"] == 3
+    assert reservation["reservedTopupPacks"] == [{"packId": "topup-pack-1", "credits": 3}]
+    reserved_pack = db.collection("topup_packs").document("topup-pack-1").get().to_dict() or {}
+    assert reserved_pack["creditsRemaining"] == 3
+    assert reserved_pack["creditsReserved"] == 3
+
+    settle_result = settle_credits(uid, "job-topup-1", 150.0)
+    assert settle_result.status == "settled"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 0
+    assert user["credits"]["reserved"] == 0
+    assert user["topupCredits"]["totalRemaining"] == 0
+    pack = db.collection("topup_packs").document("topup-pack-1").get().to_dict() or {}
+    assert pack["creditsRemaining"] == 0
+    assert pack["status"] == "exhausted"
+    settle_ledger = db.collection("credit_ledger").document("settle_job-topup-1").get().to_dict() or {}
+    assert settle_ledger["subscriptionCreditsConsumed"] == 2
+    assert settle_ledger["topupCreditsConsumed"] == 3
+    assert db.collection("credit_ledger").document("topup_consume_job-topup-1_topup-pack-1").get().exists
+
+
+def test_settle_consumes_monthly_then_topup_packs_by_earliest_expiry():
+    uid = "test-topup-consume-expiry-order"
+    get_or_create_credits(uid, "topup-expiry-order@example.com")
+    db = get_firestore_client()
+    now = datetime.now(timezone.utc)
+    earlier_expiry = now + timedelta(days=30)
+    later_expiry = now + timedelta(days=180)
+    db.collection("users").document(uid).set(
+        {
+            "credits": {"balance": 2, "reserved": 0, "overdrafted": False},
+            "topupCredits": {
+                "totalRemaining": 10,
+                "totalReserved": 0,
+                "totalAvailable": 10,
+                "activePackCount": 2,
+                "earliestExpiresAt": earlier_expiry,
+            },
+        },
+        merge=True,
+    )
+    db.collection("topup_packs").document("topup-pack-early").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-early",
+            "creditsGranted": 15,
+            "creditsRemaining": 4,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": earlier_expiry,
+            "createdAt": now,
+        }
+    )
+    db.collection("topup_packs").document("topup-pack-late").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-late",
+            "creditsGranted": 15,
+            "creditsRemaining": 6,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": later_expiry,
+            "createdAt": now,
+        }
+    )
+
+    reserve_result = reserve_credits(uid, "job-topup-expiry-order", 8)
+    assert reserve_result.status == "reserved"
+    reservation = db.collection("credit_reservations").document("job-topup-expiry-order").get().to_dict() or {}
+    assert reservation["reservedMonthlyCredits"] == 2
+    assert reservation["reservedTopupCredits"] == 6
+    assert reservation["reservedTopupPacks"] == [
+        {"packId": "topup-pack-early", "credits": 4},
+        {"packId": "topup-pack-late", "credits": 2},
+    ]
+
+    settle_result = settle_credits(uid, "job-topup-expiry-order", 240.0)
+
+    assert settle_result.status == "settled"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 0
+    assert user["credits"]["reserved"] == 0
+    assert user["topupCredits"]["totalRemaining"] == 4
+    assert user["topupCredits"]["totalReserved"] == 0
+    assert user["topupCredits"]["totalAvailable"] == 4
+    early_pack = db.collection("topup_packs").document("topup-pack-early").get().to_dict() or {}
+    late_pack = db.collection("topup_packs").document("topup-pack-late").get().to_dict() or {}
+    assert early_pack["creditsRemaining"] == 0
+    assert early_pack["creditsReserved"] == 0
+    assert early_pack["status"] == "exhausted"
+    assert late_pack["creditsRemaining"] == 4
+    assert late_pack["creditsReserved"] == 0
+    assert late_pack["status"] == "active"
+    settle_ledger = db.collection("credit_ledger").document("settle_job-topup-expiry-order").get().to_dict() or {}
+    assert settle_ledger["subscriptionCreditsConsumed"] == 2
+    assert settle_ledger["topupCreditsConsumed"] == 6
+    assert db.collection("credit_ledger").document(
+        "topup_consume_job-topup-expiry-order_topup-pack-early"
+    ).get().exists
+    assert db.collection("credit_ledger").document(
+        "topup_consume_job-topup-expiry-order_topup-pack-late"
+    ).get().exists
+
+
+def test_settle_skips_expired_topup_pack_and_consumes_later_pack():
+    uid = "test-topup-skip-expired"
+    get_or_create_credits(uid, "topup-skip-expired@example.com")
+    db = get_firestore_client()
+    now = datetime.now(timezone.utc)
+    expired_at = now - timedelta(days=1)
+    later_expiry = now + timedelta(days=180)
+    db.collection("users").document(uid).set(
+        {
+            "credits": {"balance": 2, "reserved": 0, "overdrafted": False},
+            "topupCredits": {
+                "totalRemaining": 10,
+                "totalReserved": 0,
+                "totalAvailable": 10,
+                "activePackCount": 2,
+                "earliestExpiresAt": expired_at,
+            },
+        },
+        merge=True,
+    )
+    db.collection("topup_packs").document("topup-pack-expired").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-expired",
+            "creditsGranted": 15,
+            "creditsRemaining": 4,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": expired_at,
+            "createdAt": now - timedelta(days=181),
+        }
+    )
+    db.collection("topup_packs").document("topup-pack-valid").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-valid",
+            "creditsGranted": 15,
+            "creditsRemaining": 6,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": later_expiry,
+            "createdAt": now,
+        }
+    )
+
+    reserve_result = reserve_credits(uid, "job-topup-skip-expired", 5)
+    assert reserve_result.status == "reserved"
+    reservation = db.collection("credit_reservations").document("job-topup-skip-expired").get().to_dict() or {}
+    assert reservation["reservedMonthlyCredits"] == 2
+    assert reservation["reservedTopupCredits"] == 3
+    assert reservation["reservedTopupPacks"] == [{"packId": "topup-pack-valid", "credits": 3}]
+    expired_pack_after_reserve = db.collection("topup_packs").document("topup-pack-expired").get().to_dict() or {}
+    assert expired_pack_after_reserve["status"] == "expired"
+    assert expired_pack_after_reserve["creditsRemaining"] == 0
+    assert expired_pack_after_reserve["creditsReserved"] == 0
+
+    settle_result = settle_credits(uid, "job-topup-skip-expired", 150.0)
+
+    assert settle_result.status == "settled"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 0
+    assert user["credits"]["reserved"] == 0
+    assert user["topupCredits"]["totalRemaining"] == 3
+    assert user["topupCredits"]["totalReserved"] == 0
+    assert user["topupCredits"]["totalAvailable"] == 3
+    valid_pack = db.collection("topup_packs").document("topup-pack-valid").get().to_dict() or {}
+    assert valid_pack["creditsRemaining"] == 3
+    assert valid_pack["creditsReserved"] == 0
+    assert valid_pack["status"] == "active"
+    settle_ledger = db.collection("credit_ledger").document("settle_job-topup-skip-expired").get().to_dict() or {}
+    assert settle_ledger["subscriptionCreditsConsumed"] == 2
+    assert settle_ledger["topupCreditsConsumed"] == 3
+    assert db.collection("credit_ledger").document(
+        "topup_expire_topup-pack-expired"
+    ).get().exists
+    assert not db.collection("credit_ledger").document(
+        "topup_consume_job-topup-skip-expired_topup-pack-expired"
+    ).get().exists
+    assert db.collection("credit_ledger").document(
+        "topup_consume_job-topup-skip-expired_topup-pack-valid"
+    ).get().exists
+
+
 def test_settle_credits_exact():
     uid = "test-user-4"
     get_or_create_credits(uid, "test4@example.com")
@@ -191,6 +417,57 @@ def test_settle_credits_exact():
     credits = get_or_create_credits(uid, "test4@example.com")
     assert credits.balance == TRIAL_CREDIT_AMOUNT - 2
     assert credits.reserved == 0
+
+
+def test_settle_releases_unused_reserved_topup_when_actual_is_lower():
+    uid = "test-topup-lower-actual"
+    get_or_create_credits(uid, "topup-lower-actual@example.com")
+    db = get_firestore_client()
+    now = datetime.now(timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "credits": {"balance": 2, "reserved": 0, "overdrafted": False},
+            "topupCredits": {
+                "totalRemaining": 5,
+                "totalReserved": 0,
+                "totalAvailable": 5,
+                "activePackCount": 1,
+                "earliestExpiresAt": now + timedelta(days=180),
+            },
+        },
+        merge=True,
+    )
+    db.collection("topup_packs").document("topup-pack-lower").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-lower",
+            "creditsGranted": 15,
+            "creditsRemaining": 5,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": now + timedelta(days=180),
+            "createdAt": now,
+        }
+    )
+
+    reserve_result = reserve_credits(uid, "job-topup-lower", 5)
+    assert reserve_result.status == "reserved"
+
+    settle_result = settle_credits(uid, "job-topup-lower", 60.0)
+
+    assert settle_result.status == "settled"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 0
+    assert user["credits"]["reserved"] == 0
+    assert user["topupCredits"]["totalRemaining"] == 5
+    assert user["topupCredits"]["totalReserved"] == 0
+    assert user["topupCredits"]["totalAvailable"] == 5
+    pack = db.collection("topup_packs").document("topup-pack-lower").get().to_dict() or {}
+    assert pack["creditsRemaining"] == 5
+    assert pack["creditsReserved"] == 0
+    settle_ledger = db.collection("credit_ledger").document("settle_job-topup-lower").get().to_dict() or {}
+    assert settle_ledger["subscriptionCreditsConsumed"] == 2
+    assert settle_ledger["topupCreditsConsumed"] == 0
 
 
 def test_settle_credits_overdraft():
@@ -219,6 +496,55 @@ def test_release_credits():
     credits = get_or_create_credits(uid, "test6@example.com")
     assert credits.reserved == 0
     assert credits.balance == TRIAL_CREDIT_AMOUNT
+
+
+def test_release_credits_releases_reserved_topup_packs():
+    uid = "test-topup-release"
+    get_or_create_credits(uid, "topup-release@example.com")
+    db = get_firestore_client()
+    now = datetime.now(timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "credits": {"balance": 1, "reserved": 0, "overdrafted": False},
+            "topupCredits": {
+                "totalRemaining": 4,
+                "totalReserved": 0,
+                "totalAvailable": 4,
+                "activePackCount": 1,
+                "earliestExpiresAt": now + timedelta(days=180),
+            },
+        },
+        merge=True,
+    )
+    db.collection("topup_packs").document("topup-pack-release").set(
+        {
+            "userId": uid,
+            "packId": "topup-pack-release",
+            "creditsGranted": 15,
+            "creditsRemaining": 4,
+            "creditsReserved": 0,
+            "status": "active",
+            "expiresAt": now + timedelta(days=180),
+            "createdAt": now,
+        }
+    )
+    reserve_result = reserve_credits(uid, "job-topup-release", 5)
+    assert reserve_result.status == "reserved"
+
+    result = release_credits(uid, "job-topup-release")
+
+    assert result.status == "released"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["reserved"] == 0
+    assert user["topupCredits"]["totalRemaining"] == 4
+    assert user["topupCredits"]["totalReserved"] == 0
+    assert user["topupCredits"]["totalAvailable"] == 4
+    pack = db.collection("topup_packs").document("topup-pack-release").get().to_dict() or {}
+    assert pack["creditsRemaining"] == 4
+    assert pack["creditsReserved"] == 0
+    release_ledger = db.collection("credit_ledger").document("release_job-topup-release").get().to_dict() or {}
+    assert release_ledger["monthlyReservedDelta"] == -1
+    assert release_ledger["topupReservedDelta"] == -4
 
 
 def test_release_credits_preserves_export_mix_ledger_metadata():

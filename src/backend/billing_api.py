@@ -33,6 +33,10 @@ class BillingCheckoutRequest(BaseModel):
     planKey: str
 
 
+class TopupCheckoutRequest(BaseModel):
+    packKey: str = "topup_15"
+
+
 class BillingCheckoutSyncRequest(BaseModel):
     sessionId: str
 
@@ -120,6 +124,25 @@ def create_billing_app() -> FastAPI:
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}
+
+    @app.post("/billing/topup-checkout-session")
+    async def create_billing_topup_checkout_session(
+        body: TopupCheckoutRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id, user_email = await _get_user_context_or_401(request)
+        from src.backend.billing_topup import create_topup_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(
+                create_topup_checkout_session,
+                user_id,
+                user_email,
+                body.packKey,
+            )
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     @app.post("/billing/checkout-session/sync")
     async def sync_billing_checkout_session(

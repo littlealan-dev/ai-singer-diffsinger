@@ -1,6 +1,7 @@
 import {
   createCheckoutSession as createCheckoutSessionRequest,
   createPortalSession,
+  createTopupCheckoutSession,
   syncBillingSubscription as syncBillingSubscriptionRequest,
   syncCheckoutSession as syncCheckoutSessionRequest,
 } from "../api";
@@ -10,6 +11,11 @@ const PENDING_BILLING_PORTAL_SYNC_KEY = "sightsinger.pendingBillingPortalSync";
 
 export async function startCheckout(planKey: BillingPlanKey): Promise<string> {
   const { url } = await createCheckoutSessionRequest(planKey);
+  return url;
+}
+
+export async function startTopupCheckout(): Promise<string> {
+  const { url } = await createTopupCheckoutSession("topup_15");
   return url;
 }
 

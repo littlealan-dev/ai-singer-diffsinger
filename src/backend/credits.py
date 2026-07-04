@@ -12,6 +12,15 @@ from google.cloud import firestore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.config import Settings
 from src.backend.billing_migration import FREE_TIER_MONTHLY_ALLOWANCE, ensure_billing_state_for_login
+from src.backend.billing_topup import (
+    TopupPack,
+    consume_reserved_topup_credits_in_transaction,
+    consume_topup_credits_in_transaction,
+    release_reserved_topup_credits_in_transaction,
+    reserve_topup_credits_in_transaction,
+    refresh_topup_pack_state_in_transaction,
+    topup_aggregate_fields,
+)
 from src.backend.message_catalog import backend_message
 from src.mcp.logging_utils import get_logger
 
@@ -71,13 +80,23 @@ class UserCredits:
     trial_granted_at: Optional[datetime] = None
     trial_reset_v1: bool = False
     monthly_allowance: Optional[int] = None
+    topup_total_remaining: int = 0
+    topup_total_reserved: int = 0
+    topup_total_available: int = 0
+    topup_active_pack_count: int = 0
+    topup_earliest_expires_at: Optional[datetime] = None
     last_grant_type: Optional[str] = None
     last_grant_at: Optional[datetime] = None
     last_grant_invoice_id: Optional[str] = None
 
     @property
     def available_balance(self) -> int:
-        return self.balance - self.reserved
+        topup_available = (
+            self.topup_total_available
+            if self.topup_total_available or self.topup_total_reserved
+            else max(0, self.topup_total_remaining - self.topup_total_reserved)
+        )
+        return self.balance - self.reserved + topup_available
 
     @property
     def is_expired(self) -> bool:
@@ -187,6 +206,7 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
     """Fetch user credits after ensuring billing bootstrap or migration is applied."""
     data = ensure_billing_state_for_login(uid, email)
     credits_data = data.get("credits") or {}
+    topup_data = data.get("topupCredits") or {}
     return UserCredits(
         balance=int(credits_data.get("balance", 0) or 0),
         reserved=int(credits_data.get("reserved", 0) or 0),
@@ -195,6 +215,21 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
         trial_granted_at=credits_data.get("trialGrantedAt"),
         trial_reset_v1=bool(credits_data.get("trial_reset_v1", False)),
         monthly_allowance=credits_data.get("monthlyAllowance"),
+        topup_total_remaining=int(topup_data.get("totalRemaining", 0) or 0),
+        topup_total_reserved=int(topup_data.get("totalReserved", 0) or 0),
+        topup_total_available=int(
+            topup_data.get(
+                "totalAvailable",
+                max(
+                    0,
+                    int(topup_data.get("totalRemaining", 0) or 0)
+                    - int(topup_data.get("totalReserved", 0) or 0),
+                ),
+            )
+            or 0
+        ),
+        topup_active_pack_count=int(topup_data.get("activePackCount", 0) or 0),
+        topup_earliest_expires_at=topup_data.get("earliestExpiresAt"),
         last_grant_type=credits_data.get("lastGrantType"),
         last_grant_at=credits_data.get("lastGrantAt"),
         last_grant_invoice_id=credits_data.get("lastGrantInvoiceId"),
@@ -243,6 +278,140 @@ def _billing_metadata_fields(
     if billing_reference_job_id:
         fields["billingReferenceJobId"] = billing_reference_job_id
     return fields
+
+
+@dataclass(frozen=True)
+class _CreditSettlementAccounting:
+    new_balance: int
+    new_reserved: int
+    subscription_consumed: int
+    topup_consumed: int
+    active_topup_after: list[TopupPack]
+    overdrafted: bool
+
+
+def _reservation_topup_allocations(res_data: Dict[str, Any]) -> list[dict[str, Any]]:
+    raw_allocations = res_data.get("reservedTopupPacks")
+    if not isinstance(raw_allocations, list):
+        return []
+    allocations: list[dict[str, Any]] = []
+    for raw in raw_allocations:
+        if not isinstance(raw, dict):
+            continue
+        pack_id = raw.get("packId")
+        credits = int(raw.get("credits", 0) or 0)
+        if isinstance(pack_id, str) and pack_id and credits > 0:
+            allocations.append({"packId": pack_id, "credits": credits})
+    return allocations
+
+
+def _reservation_has_split(res_data: Dict[str, Any]) -> bool:
+    return "reservedMonthlyCredits" in res_data or "reservedTopupPacks" in res_data
+
+
+def _settle_credit_accounting_in_transaction(
+    *,
+    transaction: Any,
+    db: Any,
+    uid: str,
+    job_id: str,
+    user_data: Dict[str, Any],
+    res_data: Dict[str, Any],
+    actual_credits: int,
+    now: datetime,
+) -> _CreditSettlementAccounting:
+    credits = user_data.get("credits", {})
+    balance = int(credits.get("balance", 0) or 0)
+    reserved = int(credits.get("reserved", 0) or 0)
+    estimated_credits = int(res_data.get("estimatedCredits", 0) or 0)
+    topup_state = refresh_topup_pack_state_in_transaction(
+        transaction,
+        db,
+        uid,
+        now,
+        expire_stale=False,
+    )
+
+    if not _reservation_has_split(res_data):
+        new_reserved = max(0, reserved - estimated_credits)
+        subscription_available = max(0, balance - new_reserved)
+        from_subscription = min(actual_credits, subscription_available)
+        topup_needed = actual_credits - from_subscription
+        new_balance = balance - from_subscription
+        topup_consumed, active_topup_after = consume_topup_credits_in_transaction(
+            transaction,
+            db,
+            uid,
+            job_id,
+            topup_needed,
+            topup_state.active_packs,
+            now,
+            subscription_balance_after=new_balance,
+        )
+        unmet_credits = max(0, topup_needed - topup_consumed)
+        if unmet_credits:
+            new_balance -= unmet_credits
+        return _CreditSettlementAccounting(
+            new_balance=new_balance,
+            new_reserved=new_reserved,
+            subscription_consumed=from_subscription,
+            topup_consumed=topup_consumed,
+            active_topup_after=active_topup_after,
+            overdrafted=new_balance < 0,
+        )
+
+    reserved_monthly = max(0, int(res_data.get("reservedMonthlyCredits", 0) or 0))
+    reserved_topup_allocations = _reservation_topup_allocations(res_data)
+    reserved_topup = sum(allocation["credits"] for allocation in reserved_topup_allocations)
+    new_reserved = max(0, reserved - reserved_monthly)
+
+    remaining_actual = actual_credits
+    from_reserved_monthly = min(remaining_actual, reserved_monthly)
+    remaining_actual -= from_reserved_monthly
+    new_balance = balance - from_reserved_monthly
+
+    reserved_topup_to_consume = min(remaining_actual, reserved_topup)
+    remaining_actual -= reserved_topup_to_consume
+    topup_consumed, active_topup_after = consume_reserved_topup_credits_in_transaction(
+        transaction,
+        db,
+        uid,
+        job_id,
+        reserved_topup_allocations,
+        reserved_topup_to_consume,
+        topup_state.active_packs,
+        now,
+        subscription_balance_after=new_balance,
+    )
+
+    extra_from_subscription = min(remaining_actual, max(0, new_balance - new_reserved))
+    remaining_actual -= extra_from_subscription
+    new_balance -= extra_from_subscription
+
+    extra_topup_consumed, active_topup_after = consume_topup_credits_in_transaction(
+        transaction,
+        db,
+        uid,
+        job_id,
+        remaining_actual,
+        active_topup_after,
+        now,
+        subscription_balance_after=new_balance,
+    )
+    remaining_actual -= extra_topup_consumed
+    topup_consumed += extra_topup_consumed
+
+    if remaining_actual:
+        new_balance -= remaining_actual
+
+    return _CreditSettlementAccounting(
+        new_balance=new_balance,
+        new_reserved=new_reserved,
+        subscription_consumed=from_reserved_monthly + extra_from_subscription,
+        topup_consumed=topup_consumed,
+        active_topup_after=active_topup_after,
+        overdrafted=new_balance < 0,
+    )
 
 
 def reserve_credits(
@@ -321,24 +490,55 @@ def reserve_credits(
                 estimated_credits=estimated_credits,
             )
             
-        balance = credits.get("balance", 0)
-        reserved = credits.get("reserved", 0)
+        balance = int(credits.get("balance", 0) or 0)
+        reserved = int(credits.get("reserved", 0) or 0)
+        now = datetime.now(timezone.utc)
+        topup_state = refresh_topup_pack_state_in_transaction(
+            transaction,
+            db,
+            uid,
+            now,
+            expire_stale=True,
+        )
+        available = balance - reserved + topup_state.total_available
         
-        if (balance - reserved) < estimated_credits:
-            logger.warning("Reservation rejected: user %s insufficient balance (%d available, %d requested)", 
-                           uid, balance - reserved, estimated_credits)
+        if available < estimated_credits:
+            logger.warning("Reservation rejected: user %s insufficient balance (%d available, %d requested)",
+                           uid, available, estimated_credits)
             return ReserveCreditsResult(
                 status="insufficient_balance",
                 estimated_credits=estimated_credits,
             )
+
+        monthly_available = max(0, balance - reserved)
+        reserved_monthly_credits = min(estimated_credits, monthly_available)
+        topup_to_reserve = estimated_credits - reserved_monthly_credits
+        reserved_topup_credits, reserved_topup_packs, active_topup_after = reserve_topup_credits_in_transaction(
+            transaction,
+            topup_to_reserve,
+            topup_state.active_packs,
+        )
+        if reserved_monthly_credits + reserved_topup_credits < estimated_credits:
+            logger.error(
+                "Reservation split failed: user %s only split %d/%d credits",
+                uid,
+                reserved_monthly_credits + reserved_topup_credits,
+                estimated_credits,
+            )
+            return ReserveCreditsResult(
+                status="infra_error",
+                estimated_credits=estimated_credits,
+            )
             
-        # Update user reserved amount
-        transaction.update(user_ref, {
-            "credits.reserved": reserved + estimated_credits
-        })
+        transaction.update(
+            user_ref,
+            {
+                "credits.reserved": reserved + reserved_monthly_credits,
+                **topup_aggregate_fields(active_topup_after),
+            },
+        )
         
         # Create reservation record
-        now = datetime.now(timezone.utc)
         ttl_seconds = reservation_ttl_seconds or DEFAULT_RESERVATION_TTL_SECONDS
         metadata_fields = _billing_metadata_fields(
             session_id=session_id,
@@ -352,6 +552,9 @@ def reserve_credits(
             "jobId": job_id,
             "userId": uid,
             "estimatedCredits": estimated_credits,
+            "reservedMonthlyCredits": reserved_monthly_credits,
+            "reservedTopupCredits": reserved_topup_credits,
+            "reservedTopupPacks": reserved_topup_packs,
             "createdAt": now,
             "expiresAt": now + timedelta(seconds=ttl_seconds),
             "status": "pending",
@@ -365,8 +568,14 @@ def reserve_credits(
             "type": "reserve",
             "jobId": job_id,
             "amount": 0,
-            "reservedDelta": estimated_credits,
-            "reservedAfter": reserved + estimated_credits,
+            "reservedDelta": reserved_monthly_credits,
+            "reservedAfter": reserved + reserved_monthly_credits,
+            "monthlyReservedDelta": reserved_monthly_credits,
+            "monthlyReservedAfter": reserved + reserved_monthly_credits,
+            "topupReservedDelta": reserved_topup_credits,
+            "topupReservedAfter": sum(pack.credits_reserved for pack in active_topup_after),
+            "totalReservedDelta": estimated_credits,
+            "reservedTopupPacks": reserved_topup_packs,
             "balanceAfter": balance,
             "createdAt": now,
             **metadata_fields,
@@ -451,46 +660,65 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Set
             )
             
         user_data = user_snapshot.to_dict() or {}
-        credits = user_data.get("credits", {})
-        
-        balance = credits.get("balance", 0)
-        reserved = credits.get("reserved", 0)
-        
-        new_balance = balance - actual_credits
-        new_reserved = max(0, reserved - estimated_credits)
-        overdrafted = new_balance < 0
+        now = datetime.now(timezone.utc)
+        accounting = _settle_credit_accounting_in_transaction(
+            transaction=transaction,
+            db=db,
+            uid=uid,
+            job_id=job_id,
+            user_data=user_data,
+            res_data=res_data,
+            actual_credits=actual_credits,
+            now=now,
+        )
         
         # Update user
-        transaction.update(user_ref, {
-            "credits.balance": new_balance,
-            "credits.reserved": new_reserved,
-            "credits.overdrafted": overdrafted
-        })
+        transaction.update(
+            user_ref,
+            {
+                "credits.balance": accounting.new_balance,
+                "credits.reserved": accounting.new_reserved,
+                "credits.overdrafted": accounting.overdrafted,
+                **topup_aggregate_fields(accounting.active_topup_after),
+            },
+        )
         
         # Update reservation
-        transaction.update(res_ref, {
-            "status": "settled",
-            "actualCredits": actual_credits,
-            "settledAt": datetime.now(timezone.utc)
-        })
+        transaction.update(
+            res_ref,
+            {
+                "status": "settled",
+                "actualCredits": actual_credits,
+                "settledAt": now,
+            },
+        )
         
         # Log to ledger (optional but recommended in spec)
         ledger_ref = db.collection("credit_ledger").document(f"settle_{job_id}")
-        transaction.set(ledger_ref, {
-            "userId": uid,
-            "type": "settle",
-            "jobId": job_id,
-            "amount": -actual_credits,
-            "reservedDelta": -estimated_credits,
-            "reservedAfter": new_reserved,
-            "balanceAfter": new_balance,
-            "createdAt": datetime.now(timezone.utc)
-        })
+        transaction.set(
+            ledger_ref,
+            {
+                "userId": uid,
+                "type": "settle",
+                "jobId": job_id,
+                "amount": -actual_credits,
+                "reservedDelta": -estimated_credits,
+                "reservedAfter": accounting.new_reserved,
+                "monthlyReservedDelta": -int(res_data.get("reservedMonthlyCredits", estimated_credits) or 0),
+                "monthlyReservedAfter": accounting.new_reserved,
+                "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
+                "topupReservedAfter": sum(pack.credits_reserved for pack in accounting.active_topup_after),
+                "balanceAfter": accounting.new_balance,
+                "subscriptionCreditsConsumed": accounting.subscription_consumed,
+                "topupCreditsConsumed": accounting.topup_consumed,
+                "createdAt": now,
+            },
+        )
         
         return SettleCreditsResult(
             status="settled",
             actual_credits=actual_credits,
-            overdrafted=overdrafted,
+            overdrafted=accounting.overdrafted,
         )
 
     transaction = db.transaction()
@@ -601,13 +829,17 @@ def settle_credits_and_complete_job(
             )
 
         user_data = user_snapshot.to_dict() or {}
-        credits = user_data.get("credits", {})
-        balance = int(credits.get("balance", 0) or 0)
-        reserved = int(credits.get("reserved", 0) or 0)
-        new_balance = balance - actual_credits
-        new_reserved = max(0, reserved - estimated_credits)
-        overdrafted = new_balance < 0
         now = datetime.now(timezone.utc)
+        accounting = _settle_credit_accounting_in_transaction(
+            transaction=transaction,
+            db=db,
+            uid=uid,
+            job_id=job_id,
+            user_data=user_data,
+            res_data=res_data,
+            actual_credits=actual_credits,
+            now=now,
+        )
         feedback_user_update, feedback_prompt_candidate = _feedback_candidate_update(
             now=now,
             user_data=user_data,
@@ -618,9 +850,10 @@ def settle_credits_and_complete_job(
         transaction.update(
             user_ref,
             {
-                "credits.balance": new_balance,
-                "credits.reserved": new_reserved,
-                "credits.overdrafted": overdrafted,
+                "credits.balance": accounting.new_balance,
+                "credits.reserved": accounting.new_reserved,
+                "credits.overdrafted": accounting.overdrafted,
+                **topup_aggregate_fields(accounting.active_topup_after),
                 **feedback_user_update,
             },
         )
@@ -642,8 +875,14 @@ def settle_credits_and_complete_job(
                 "jobId": job_id,
                 "amount": -actual_credits,
                 "reservedDelta": -estimated_credits,
-                "reservedAfter": new_reserved,
-                "balanceAfter": new_balance,
+                "reservedAfter": accounting.new_reserved,
+                "monthlyReservedDelta": -int(res_data.get("reservedMonthlyCredits", estimated_credits) or 0),
+                "monthlyReservedAfter": accounting.new_reserved,
+                "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
+                "topupReservedAfter": sum(pack.credits_reserved for pack in accounting.active_topup_after),
+                "balanceAfter": accounting.new_balance,
+                "subscriptionCreditsConsumed": accounting.subscription_consumed,
+                "topupCreditsConsumed": accounting.topup_consumed,
                 "createdAt": now,
             },
         )
@@ -674,7 +913,7 @@ def settle_credits_and_complete_job(
         return CompleteJobAndSettleCreditsResult(
             status="completed_and_settled",
             actual_credits=actual_credits,
-            overdrafted=overdrafted,
+            overdrafted=accounting.overdrafted,
         )
 
     transaction = db.transaction()
@@ -771,13 +1010,17 @@ def settle_export_mix_credits_and_complete_job(
             )
 
         user_data = user_snapshot.to_dict() or {}
-        credits = user_data.get("credits", {})
-        balance = int(credits.get("balance", 0) or 0)
-        reserved = int(credits.get("reserved", 0) or 0)
-        new_balance = balance - actual_credits
-        new_reserved = max(0, reserved - estimated_credits)
-        overdrafted = new_balance < 0
         now = datetime.now(timezone.utc)
+        accounting = _settle_credit_accounting_in_transaction(
+            transaction=transaction,
+            db=db,
+            uid=uid,
+            job_id=job_id,
+            user_data=user_data,
+            res_data=res_data,
+            actual_credits=actual_credits,
+            now=now,
+        )
         pricing = str(res_data.get("pricing") or "export_mix_v1")
         pricing_unit_seconds = int(
             res_data.get("pricingUnitSeconds") or EXPORT_MIX_CREDIT_DURATION_SECONDS
@@ -800,9 +1043,10 @@ def settle_export_mix_credits_and_complete_job(
         transaction.update(
             user_ref,
             {
-                "credits.balance": new_balance,
-                "credits.reserved": new_reserved,
-                "credits.overdrafted": overdrafted,
+                "credits.balance": accounting.new_balance,
+                "credits.reserved": accounting.new_reserved,
+                "credits.overdrafted": accounting.overdrafted,
+                **topup_aggregate_fields(accounting.active_topup_after),
             },
         )
         transaction.update(
@@ -822,8 +1066,14 @@ def settle_export_mix_credits_and_complete_job(
                 "jobId": job_id,
                 "amount": -actual_credits,
                 "reservedDelta": -estimated_credits,
-                "reservedAfter": new_reserved,
-                "balanceAfter": new_balance,
+                "reservedAfter": accounting.new_reserved,
+                "monthlyReservedDelta": -int(res_data.get("reservedMonthlyCredits", estimated_credits) or 0),
+                "monthlyReservedAfter": accounting.new_reserved,
+                "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
+                "topupReservedAfter": sum(pack.credits_reserved for pack in accounting.active_topup_after),
+                "balanceAfter": accounting.new_balance,
+                "subscriptionCreditsConsumed": accounting.subscription_consumed,
+                "topupCreditsConsumed": accounting.topup_consumed,
                 "createdAt": now,
                 **metadata_fields,
             },
@@ -862,7 +1112,7 @@ def settle_export_mix_credits_and_complete_job(
         return CompleteJobAndSettleCreditsResult(
             status="completed_and_settled",
             actual_credits=actual_credits,
-            overdrafted=overdrafted,
+            overdrafted=accounting.overdrafted,
         )
 
     transaction = db.transaction()
@@ -906,7 +1156,15 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
         if reservation_status != "pending":
             return ReleaseCreditsResult(status="reconciliation_required")
             
-        estimated_credits = res_data.get("estimatedCredits", 0)
+        estimated_credits = int(res_data.get("estimatedCredits", 0) or 0)
+        reserved_monthly_credits = int(
+            res_data.get(
+                "reservedMonthlyCredits",
+                estimated_credits if not _reservation_has_split(res_data) else 0,
+            )
+            or 0
+        )
+        reserved_topup_packs = _reservation_topup_allocations(res_data)
         
         user_snapshot = user_ref.get(transaction=transaction)
         if not user_snapshot.exists:
@@ -914,17 +1172,29 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
             
         user_data = user_snapshot.to_dict() or {}
         credits = user_data.get("credits", {})
-        reserved = credits.get("reserved", 0)
+        reserved = int(credits.get("reserved", 0) or 0)
+        now = datetime.now(timezone.utc)
+        topup_state = refresh_topup_pack_state_in_transaction(
+            transaction,
+            db,
+            uid,
+            now,
+            expire_stale=False,
+        )
+        active_topup_after = release_reserved_topup_credits_in_transaction(
+            transaction,
+            reserved_topup_packs,
+            topup_state.active_packs,
+        )
         
-        # Update user
         transaction.update(user_ref, {
-            "credits.reserved": max(0, reserved - estimated_credits)
+            "credits.reserved": max(0, reserved - reserved_monthly_credits),
+            **topup_aggregate_fields(active_topup_after),
         })
         
-        # Update reservation
         transaction.update(res_ref, {
             "status": "released",
-            "releasedAt": datetime.now(timezone.utc)
+            "releasedAt": now,
         })
 
         # Log to ledger for audit trail.
@@ -942,10 +1212,15 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
             "type": "release",
             "jobId": job_id,
             "amount": 0,
-            "reservedDelta": -estimated_credits,
-            "reservedAfter": max(0, reserved - estimated_credits),
+            "reservedDelta": -reserved_monthly_credits,
+            "reservedAfter": max(0, reserved - reserved_monthly_credits),
+            "monthlyReservedDelta": -reserved_monthly_credits,
+            "monthlyReservedAfter": max(0, reserved - reserved_monthly_credits),
+            "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
+            "topupReservedAfter": sum(pack.credits_reserved for pack in active_topup_after),
+            "reservedTopupPacks": reserved_topup_packs,
             "balanceAfter": credits.get("balance", 0),
-            "createdAt": datetime.now(timezone.utc),
+            "createdAt": now,
             **metadata_fields,
         })
         

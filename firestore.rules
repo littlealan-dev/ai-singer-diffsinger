@@ -26,6 +26,15 @@ service cloud.firestore {
       allow write: if false; 
     }
 
+    match /topup_packs/{packId} {
+      allow read: if isNonAnonymousUser() && resource.data.userId == request.auth.uid;
+      allow write: if false;
+    }
+
+    match /topup_checkout_holds/{holdId} {
+      allow read, write: if false;
+    }
+
     match /jobs/{jobId} {
       allow create: if isNonAnonymousUser()
                     && request.resource.data.userId == request.auth.uid;
