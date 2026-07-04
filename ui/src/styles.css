@@ -837,7 +837,8 @@ body.legal-active #root {
 }
 
 .chat-header h2,
-.score-header h2 {
+.score-header h2,
+.multitrack-toolbar h3 {
   margin: 0;
   font-size: 20px;
 }
@@ -2343,7 +2344,6 @@ img.voice-picker-option-avatar {
 
 .multitrack-toolbar h3 {
   margin: 0;
-  font-size: 14px;
   line-height: 1.2;
 }
 
@@ -2421,6 +2421,28 @@ img.voice-picker-option-avatar {
   opacity: 0.45;
 }
 
+.multitrack-export-button {
+  min-width: 34px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.multitrack-export-button.exporting {
+  width: auto;
+  min-width: 44px;
+  padding: 0 8px;
+  color: #08111d;
+  background: linear-gradient(135deg, rgba(183, 125, 255, 0.95), rgba(125, 211, 252, 0.85));
+  border-color: rgba(224, 242, 254, 0.85);
+  opacity: 1;
+}
+
+.multitrack-export-error {
+  margin-top: -4px;
+  color: #ffd7d7;
+  font-size: 12px;
+}
+
 .multitrack-lanes {
   display: flex;
   flex-direction: column;
@@ -2433,7 +2455,7 @@ img.voice-picker-option-avatar {
 
 .multitrack-lane {
   display: grid;
-  grid-template-columns: minmax(130px, 180px) minmax(180px, 1fr) minmax(120px, 150px);
+  grid-template-columns: minmax(130px, 180px) minmax(180px, 1fr) minmax(200px, 230px);
   flex: 0 0 auto;
   gap: 10px;
   align-items: center;
@@ -2507,6 +2529,10 @@ img.voice-picker-option-avatar {
   align-items: center;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.multitrack-track-download {
+  margin: 0;
 }
 
 .multitrack-volume {

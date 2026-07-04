@@ -116,6 +116,23 @@ export type ProgressResponse = {
   feedback?: FeedbackPromptState;
 };
 
+export type ExportMixTrackRequest = {
+  job_id: string;
+  part_id: string;
+  key?: string;
+  label?: string;
+  verse_number?: string | number | null;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+};
+
+export type ExportMixResponse = {
+  status: "queued";
+  progress_url: string;
+  job_id: string;
+};
+
 export type AudioTrackMetadata = {
   key?: string;
   label?: string;
@@ -566,6 +583,21 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
     payload.audio_url = withApiBase(payload.audio_url);
   }
   return payload;
+}
+
+export async function exportMix(
+  sessionId: string,
+  tracks: ExportMixTrackRequest[]
+): Promise<ExportMixResponse> {
+  const payload = await request<ExportMixResponse>(`/sessions/${sessionId}/export-mix`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ format: "wav", tracks }),
+  });
+  return {
+    ...payload,
+    progress_url: withApiBase(payload.progress_url),
+  };
 }
 
 export async function markFeedbackPrompted(

@@ -3,12 +3,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import WaveSurfer from "wavesurfer.js";
-import { UploadCloud, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square } from "lucide-react";
+import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
   chat,
   createSession,
+  exportMix,
   fetchScoreXml,
   fetchProgress,
   fetchSolfegeSettings,
@@ -29,6 +30,7 @@ import {
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
+import { logAnalyticsEvent } from "./firebase";
 import { useCredits } from "./hooks/useCredits";
 import { useBillingState } from "./hooks/useBillingState";
 import { useAuth } from "./hooks/useAuth";
@@ -118,6 +120,43 @@ const shouldMuteMultiTrackForPlayback = (
   return hasSolo ? !track.solo : track.muted;
 };
 
+const multiTrackAnalyticsParams = (tracks: MultiTrackAudioTrack[]) => {
+  const soloTrackCount = tracks.filter((track) => track.solo).length;
+  const mutedTrackCount = tracks.filter((track) => track.muted).length;
+  const audibleTrackCount = soloTrackCount
+    ? soloTrackCount
+    : tracks.filter((track) => !track.muted).length;
+  return {
+    feature_area: "multitrack_player",
+    track_count: tracks.length,
+    audible_track_count: audibleTrackCount,
+    solo_track_count: soloTrackCount,
+    muted_track_count: mutedTrackCount,
+  };
+};
+
+const synthesisAudioAnalyticsParams = (message: Message) => ({
+  feature_area: "individual_synthesis_audio",
+  has_audio_track_metadata: Boolean(message.audioTrack),
+  has_part_id: Boolean(message.audioTrack?.part_id),
+  has_verse_number: Boolean(message.audioTrack?.verse_number),
+  has_feedback_prompt_candidate: Boolean(message.feedback?.promptCandidate),
+});
+
+const wait = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+const downloadAudioUrl = (audioUrl: string, fileName: string) => {
+  const url = new URL(audioUrl, window.location.origin);
+  url.searchParams.set("download", "1");
+  const link = document.createElement("a");
+  link.href = url.toString();
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+};
+
 type MultiTrackWaveformLaneProps = {
   track: MultiTrackAudioTrack;
   index: number;
@@ -128,6 +167,7 @@ type MultiTrackWaveformLaneProps = {
   onMuteChange: (trackKey: string, muted: boolean) => void;
   onSoloChange: (trackKey: string, solo: boolean) => void;
   onVolumeChange: (trackKey: string, volume: number) => void;
+  onDownloadTrack: (track: MultiTrackAudioTrack) => void;
 };
 
 const MultiTrackWaveformLane = ({
@@ -140,6 +180,7 @@ const MultiTrackWaveformLane = ({
   onMuteChange,
   onSoloChange,
   onVolumeChange,
+  onDownloadTrack,
 }: MultiTrackWaveformLaneProps) => {
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveSurferRef = useRef<WaveSurfer | null>(null);
@@ -238,6 +279,15 @@ const MultiTrackWaveformLane = ({
           onChange={(event) => onVolumeChange(track.key, Number(event.target.value))}
           aria-label={`${track.label} volume`}
         />
+        <button
+          type="button"
+          className="audio-download-button multitrack-track-download"
+          onClick={() => onDownloadTrack(track)}
+          aria-label={`Download ${track.label}`}
+          title="Download"
+        >
+          <Download size={15} aria-hidden="true" />
+        </button>
       </div>
     </div>
   );
@@ -619,6 +669,8 @@ export default function MainApp() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [multiTrackAudioTracks, setMultiTrackAudioTracks] = useState<MultiTrackAudioTrack[]>([]);
   const [multiTrackPlaying, setMultiTrackPlaying] = useState(false);
+  const [multiTrackExportProgress, setMultiTrackExportProgress] = useState<number | null>(null);
+  const [multiTrackExportError, setMultiTrackExportError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -730,6 +782,10 @@ export default function MainApp() {
       : solfegeMode === "minor_la_based"
         ? "Minor (La)"
         : "Minor (Do)";
+  const multiTrackExportPercent =
+    multiTrackExportProgress !== null
+      ? `${Math.round(Math.max(0, Math.min(1, multiTrackExportProgress)) * 100)}%`
+      : null;
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
@@ -794,6 +850,10 @@ export default function MainApp() {
     if (!playable.length) return;
     const baseTime =
       playable.find(({ waveSurfer }) => waveSurfer.getCurrentTime() > 0)?.waveSurfer.getCurrentTime() ?? 0;
+    logAnalyticsEvent("multitrack_play", {
+      ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+      playback_start_seconds: Math.round(baseTime),
+    });
     playable.forEach(({ track, waveSurfer }) => {
       const duration = waveSurfer.getDuration();
       waveSurfer.setTime(Math.min(baseTime, Number.isFinite(duration) ? duration : baseTime));
@@ -863,6 +923,92 @@ export default function MainApp() {
     );
     multiTrackWaveSurferRefs.current[trackKey]?.setVolume(normalized);
   }, []);
+
+  const handleMultiTrackExport = useCallback(async () => {
+    if (!sessionId || multiTrackExportProgress !== null) return;
+    setMultiTrackExportError(null);
+    const hasSolo = multiTrackAudioTracks.some((track) => track.solo);
+    const audibleTracks = hasSolo
+      ? multiTrackAudioTracks.filter((track) => track.solo)
+      : multiTrackAudioTracks.filter((track) => !track.muted);
+    if (!audibleTracks.length) {
+      setMultiTrackExportError("No audible tracks selected.");
+      return;
+    }
+    const missingMetadata = audibleTracks.find((track) => !track.jobId || !track.partId);
+    if (missingMetadata) {
+      setMultiTrackExportError("Export requires generated tracks with part IDs.");
+      return;
+    }
+    logAnalyticsEvent("multitrack_export_mix", {
+      ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+    });
+    setMultiTrackExportProgress(0);
+    try {
+      const response = await exportMix(
+        sessionId,
+        multiTrackAudioTracks.map((track) => ({
+          job_id: track.jobId as string,
+          part_id: track.partId as string,
+          key: track.key,
+          label: track.label,
+          verse_number: track.verseNumber ?? null,
+          muted: track.muted,
+          solo: track.solo,
+          volume: track.volume,
+        }))
+      );
+      let latestProgress = 0;
+      for (;;) {
+        await wait(1200);
+        const payload = await fetchProgress(response.progress_url);
+        if (typeof payload.progress === "number") {
+          latestProgress = Math.max(latestProgress, payload.progress);
+          setMultiTrackExportProgress(latestProgress);
+        }
+        if (payload.status === "done" && payload.audio_url) {
+          setMultiTrackExportProgress(1);
+          downloadAudioUrl(payload.audio_url, "sightsinger-mix.wav");
+          break;
+        }
+        if (payload.status === "error") {
+          throw new Error(payload.error || "Export failed.");
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Export failed.";
+      setMultiTrackExportError(message);
+    } finally {
+      setMultiTrackExportProgress(null);
+    }
+  }, [multiTrackAudioTracks, multiTrackExportProgress, sessionId]);
+
+  const handleMultiTrackTrackDownload = useCallback(
+    async (track: MultiTrackAudioTrack) => {
+      try {
+        let nextAudioUrl = track.audioUrl;
+        if (sessionId && track.jobId) {
+          const payload = await fetchProgress(
+            `/sessions/${sessionId}/progress?job_id=${encodeURIComponent(track.jobId)}`
+          );
+          nextAudioUrl = payload.audio_url || nextAudioUrl;
+        }
+        if (!nextAudioUrl) {
+          setError("No audio available to download.");
+          return;
+        }
+        logAnalyticsEvent("multitrack_track_download", {
+          ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+          has_part_id: Boolean(track.partId),
+          has_verse_number: Boolean(track.verseNumber),
+        });
+        downloadAudioUrl(nextAudioUrl, "");
+      } catch (err: any) {
+        setError(err?.message || "Failed to refresh audio download.");
+      }
+    },
+    [multiTrackAudioTracks, sessionId]
+  );
 
   useEffect(() => {
     multiTrackAudioTracks.forEach((track) => {
@@ -1745,6 +1891,7 @@ export default function MainApp() {
       document.body.removeChild(link);
       const message = messages.find((item) => item.id === messageId);
       if (message) {
+        logAnalyticsEvent("synthesis_audio_download", synthesisAudioAnalyticsParams(message));
         openFeedbackPrompt(message, "audio_downloaded");
       }
     } catch (err: any) {
@@ -1767,6 +1914,8 @@ export default function MainApp() {
     });
     handleMultiTrackStop();
     setMultiTrackAudioTracks([]);
+    setMultiTrackExportProgress(null);
+    setMultiTrackExportError(null);
     multiTrackWaveSurferRefs.current = {};
     try {
       const activeSessionId = sessionId ?? await ensureSession();
@@ -2344,6 +2493,7 @@ export default function MainApp() {
                       controls
                       src={msg.audioUrl}
                       onPlay={() => {
+                        logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));
                         openFeedbackPrompt(msg, "audio_played");
                       }}
                       onError={() => {
@@ -2700,6 +2850,18 @@ export default function MainApp() {
               <div className="multitrack-transport">
                 <button
                   type="button"
+                  className={clsx("multitrack-transport-button", "multitrack-export-button", {
+                    exporting: multiTrackExportProgress !== null,
+                  })}
+                  onClick={handleMultiTrackExport}
+                  disabled={!multiTrackAudioTracks.length || multiTrackExportProgress !== null}
+                  aria-label="Export mix"
+                  title="Export mix"
+                >
+                  {multiTrackExportPercent ?? <Upload size={16} />}
+                </button>
+                <button
+                  type="button"
                   className="multitrack-transport-button"
                   onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
                   disabled={!multiTrackAudioTracks.length}
@@ -2720,6 +2882,11 @@ export default function MainApp() {
                 </button>
               </div>
             </div>
+            {multiTrackExportError && (
+              <div className="multitrack-export-error" role="alert">
+                {multiTrackExportError}
+              </div>
+            )}
             <div className="multitrack-lanes">
               {multiTrackAudioTracks.length ? (
                 multiTrackAudioTracks.map((track, index) => (
@@ -2734,6 +2901,7 @@ export default function MainApp() {
                     onMuteChange={updateMultiTrackMute}
                     onSoloChange={updateMultiTrackSolo}
                     onVolumeChange={updateMultiTrackVolume}
+                    onDownloadTrack={handleMultiTrackTrackDownload}
                   />
                 ))
               ) : (

@@ -10,6 +10,7 @@ import time
 import os
 import shutil
 import tempfile
+import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -28,6 +29,7 @@ from src.backend.mcp_client import (
     McpToolError,
 )
 from src.backend.orchestrator import Orchestrator
+from src.backend.audio_mix import MixTrackSource, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.session import SessionStore, FirestoreSessionStore
 from src.backend.firebase_app import (
@@ -108,6 +110,22 @@ class BillingCheckoutRequest(BaseModel):
 
 class BillingCheckoutSyncRequest(BaseModel):
     sessionId: str
+
+
+class ExportMixTrackRequest(BaseModel):
+    job_id: str
+    part_id: str
+    key: str | None = None
+    label: str | None = None
+    verse_number: str | int | None = None
+    muted: bool = False
+    solo: bool = False
+    volume: float = 1.0
+
+
+class ExportMixRequest(BaseModel):
+    tracks: list[ExportMixTrackRequest]
+    format: Literal["wav"] = "wav"
 
 
 class MaintenanceStatusResponse(BaseModel):
@@ -193,6 +211,7 @@ def create_app() -> FastAPI:
     app.state.router = router
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
+    app.state.export_mix_tasks = {}
 
     cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
     if cors_env:
@@ -628,6 +647,71 @@ def create_app() -> FastAPI:
             resource_path=data.get("outputPath") if isinstance(data.get("outputPath"), str) else None,
         )
 
+    @app.post("/sessions/{session_id}/export-mix")
+    async def export_mix(
+        session_id: str,
+        request: Request,
+        payload: ExportMixRequest,
+    ) -> Dict[str, Any]:
+        """Start an async mixdown job for the current multitrack state."""
+        sessions: SessionStore = request.app.state.sessions
+        settings: Settings = request.app.state.settings
+        job_store: JobStore = request.app.state.job_store
+        user_id, _user_email = await _get_user_context_or_401(request)
+        await _get_session_or_404(sessions, session_id, user_id)
+        selected_tracks = _select_export_mix_tracks(payload.tracks)
+        job_id = uuid.uuid4().hex
+        await asyncio.to_thread(
+            job_store.create_job,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+            status="queued",
+            render_type="export_mix",
+        )
+        await asyncio.to_thread(
+            job_store.update_job,
+            job_id,
+            status="queued",
+            step="export_mix",
+            progress=0.0,
+            jobKind="export_mix",
+            mix={
+                "format": payload.format,
+                "trackCount": len(selected_tracks),
+                "tracks": [_export_mix_track_metadata(track) for track in selected_tracks],
+            },
+        )
+        task = asyncio.create_task(
+            _run_export_mix_job(
+                settings=settings,
+                sessions=sessions,
+                job_store=job_store,
+                session_id=session_id,
+                user_id=user_id,
+                job_id=job_id,
+                tracks=selected_tracks,
+            )
+        )
+        request.app.state.export_mix_tasks[job_id] = task
+
+        def _cleanup(_: asyncio.Task) -> None:
+            request.app.state.export_mix_tasks.pop(job_id, None)
+
+        task.add_done_callback(_cleanup)
+        logger.info(
+            "mix_export_job_created session_id=%s user_id=%s job_id=%s tracks=%s",
+            session_id,
+            user_id,
+            job_id,
+            len(selected_tracks),
+        )
+        return {
+            "status": "queued",
+            "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+            "job_id": job_id,
+        }
+
     @app.post("/feedback/prompted")
     async def mark_audio_feedback_prompted(
         request: Request,
@@ -886,6 +970,245 @@ def _log_onnx_providers() -> None:
         logger.info("onnxruntime_providers=%s", providers)
     except Exception as exc:
         logger.warning("onnxruntime_providers_error=%s", exc)
+
+
+def _select_export_mix_tracks(
+    tracks: list[ExportMixTrackRequest],
+) -> list[ExportMixTrackRequest]:
+    if not tracks:
+        raise HTTPException(status_code=400, detail="No tracks were provided for export.")
+    has_solo = any(track.solo for track in tracks)
+    selected = [track for track in tracks if track.solo] if has_solo else [
+        track for track in tracks if not track.muted
+    ]
+    if not selected:
+        raise HTTPException(status_code=400, detail="No audible tracks are selected for export.")
+    for track in selected:
+        if not track.job_id.strip():
+            raise HTTPException(status_code=400, detail="Every exported track must include a job_id.")
+        if not track.part_id.strip():
+            raise HTTPException(status_code=400, detail="Every exported track must include a part_id.")
+        if not 0 <= float(track.volume) <= 1:
+            raise HTTPException(status_code=400, detail="Track volume must be between 0 and 1.")
+    return selected
+
+
+def _export_mix_track_metadata(track: ExportMixTrackRequest) -> dict[str, Any]:
+    return {
+        "key": track.key,
+        "label": track.label,
+        "part_id": track.part_id.strip(),
+        "job_id": track.job_id.strip(),
+        "verse_number": track.verse_number,
+        "muted": track.muted,
+        "solo": track.solo,
+        "volume": float(track.volume),
+    }
+
+
+async def _run_export_mix_job(
+    *,
+    settings: Settings,
+    sessions: SessionStore,
+    job_store: JobStore,
+    session_id: str,
+    user_id: str,
+    job_id: str,
+    tracks: list[ExportMixTrackRequest],
+) -> None:
+    log = get_logger("backend.api")
+    set_log_context(session_id=session_id, user_id=user_id, job_id=job_id)
+    work_dir = settings.data_dir / "export-mix" / job_id
+    output_path = sessions.session_dir(session_id) / f"mix-{job_id}.wav"
+    output_storage_path = (
+        f"sessions/{user_id}/{session_id}/jobs/{job_id}/mix.wav"
+        if settings.backend_use_storage
+        else None
+    )
+    try:
+        log.info(
+            "mix_export_job_running session_id=%s user_id=%s job_id=%s tracks=%s",
+            session_id,
+            user_id,
+            job_id,
+            len(tracks),
+        )
+        await asyncio.to_thread(
+            job_store.update_job,
+            job_id,
+            status="running",
+            step="export_mix",
+            progress=0.02,
+            jobKind="export_mix",
+        )
+        work_dir.mkdir(parents=True, exist_ok=True)
+        sources: list[MixTrackSource] = []
+        for index, track in enumerate(tracks):
+            source_job_id = track.job_id.strip()
+            source_job = await asyncio.to_thread(
+                job_store.get_job_by_id,
+                job_id=source_job_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if source_job is None:
+                raise ValueError(f"Source synthesis job not found: {source_job_id}")
+            _source_id, source_data = source_job
+            source_path = await _resolve_export_mix_source_path(
+                settings=settings,
+                sessions=sessions,
+                session_id=session_id,
+                user_id=user_id,
+                source_job_id=source_job_id,
+                source_data=source_data,
+                work_dir=work_dir,
+                requested_part_id=track.part_id.strip(),
+            )
+            sources.append(
+                MixTrackSource(
+                    key=track.key or f"id:{track.part_id.strip()}",
+                    part_id=track.part_id.strip(),
+                    label=track.label or track.part_id.strip(),
+                    source_path=source_path,
+                    volume=float(track.volume),
+                )
+            )
+            await asyncio.to_thread(
+                job_store.update_job,
+                job_id,
+                progress=0.05 + 0.1 * ((index + 1) / len(tracks)),
+            )
+            log.info(
+                "mix_export_source_resolved session_id=%s user_id=%s job_id=%s "
+                "source_job_id=%s part_id=%s",
+                session_id,
+                user_id,
+                job_id,
+                source_job_id,
+                track.part_id.strip(),
+            )
+
+        last_reported_percent = 15
+
+        def _report_render_progress(progress: float) -> None:
+            nonlocal last_reported_percent
+            progress_value = 0.15 + max(0.0, min(1.0, progress)) * 0.75
+            percent = int(progress_value * 100)
+            if percent < last_reported_percent + 5 and progress_value < 0.9:
+                return
+            last_reported_percent = percent
+            job_store.update_job(job_id, progress=round(progress_value, 3))
+
+        mix_metadata = await asyncio.to_thread(
+            render_mix_to_wav,
+            sources,
+            output_path,
+            progress_callback=_report_render_progress,
+        )
+        if output_storage_path:
+            await asyncio.to_thread(
+                upload_file,
+                settings.storage_bucket,
+                output_path,
+                output_storage_path,
+                "audio/wav",
+            )
+        await asyncio.to_thread(
+            job_store.update_job,
+            job_id,
+            status="completed",
+            step="done",
+            progress=1.0,
+            audioUrl=f"/sessions/{session_id}/audio?file={output_path.name}",
+            outputPath=output_storage_path
+            or str(output_path.relative_to(settings.project_root)),
+            jobKind="export_mix",
+            mix={
+                **mix_metadata,
+                "format": "wav",
+                "trackCount": len(sources),
+                "tracks": [_export_mix_track_metadata(track) for track in tracks],
+            },
+        )
+        log.info(
+            "mix_export_job_completed session_id=%s user_id=%s job_id=%s output_path=%s "
+            "duration_seconds=%s",
+            session_id,
+            user_id,
+            job_id,
+            output_storage_path or output_path,
+            mix_metadata.get("duration_seconds"),
+        )
+    except Exception as exc:
+        log.exception(
+            "mix_export_job_failed session_id=%s user_id=%s job_id=%s",
+            session_id,
+            user_id,
+            job_id,
+        )
+        await asyncio.to_thread(
+            job_store.update_job,
+            job_id,
+            status="failed",
+            step="error",
+            progress=1.0,
+            errorMessage=str(exc) or "Export mix failed.",
+            jobKind="export_mix",
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        clear_log_context()
+
+
+async def _resolve_export_mix_source_path(
+    *,
+    settings: Settings,
+    sessions: SessionStore,
+    session_id: str,
+    user_id: str,
+    source_job_id: str,
+    source_data: dict[str, Any],
+    work_dir: Path,
+    requested_part_id: str,
+) -> Path:
+    status = str(source_data.get("status") or "").strip()
+    if status != "completed":
+        raise ValueError(f"Source job is not completed: {source_job_id}")
+    job_kind = str(source_data.get("jobKind") or "").strip()
+    if job_kind in {"preprocess", "export_mix"}:
+        raise ValueError(f"Source job is not a synthesis job: {source_job_id}")
+    audio_track = source_data.get("audioTrack")
+    if not isinstance(audio_track, dict):
+        raise ValueError(f"Source job is missing audio track metadata: {source_job_id}")
+    job_part_id = str(audio_track.get("part_id") or "").strip()
+    if not job_part_id or job_part_id != requested_part_id:
+        raise ValueError(
+            f"Source job part_id mismatch for {source_job_id}: "
+            f"{job_part_id or '<missing>'} != {requested_part_id}"
+        )
+    output_path = source_data.get("outputPath")
+    if not isinstance(output_path, str) or not output_path.strip():
+        raise ValueError(f"Source job is missing outputPath: {source_job_id}")
+    output_path = output_path.strip()
+    if settings.backend_use_storage:
+        expected_prefix = f"sessions/{user_id}/{session_id}/jobs/{source_job_id}/"
+        if not output_path.startswith(expected_prefix):
+            raise ValueError(f"Source job output path is not in the expected storage prefix.")
+        suffix = Path(output_path).suffix or ".wav"
+        local_path = work_dir / f"source-{source_job_id}{suffix}"
+        data = await asyncio.to_thread(download_bytes, settings.storage_bucket, output_path)
+        local_path.write_bytes(data)
+        return local_path
+    candidate = Path(output_path)
+    local_path = (candidate if candidate.is_absolute() else settings.project_root / candidate).resolve()
+    session_dir = sessions.session_dir(session_id).resolve()
+    try:
+        local_path.relative_to(session_dir)
+    except ValueError as exc:
+        raise ValueError("Source job output path is outside the session directory.") from exc
+    if not local_path.exists():
+        raise ValueError(f"Source audio file is missing: {source_job_id}")
+    return local_path
 
 
 async def _get_session_or_404(

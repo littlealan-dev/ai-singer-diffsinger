@@ -45,6 +45,19 @@ def test_build_progress_payload_includes_audio_track_metadata():
     }
 
 
+def test_build_progress_payload_includes_export_mix_job_kind():
+    payload = build_progress_payload(
+        "job-mix",
+        {
+            "status": "running",
+            "progress": 0.42,
+            "jobKind": "export_mix",
+        },
+    )
+    assert payload["job_kind"] == "export_mix"
+    assert payload["progress"] == 0.42
+
+
 def test_build_progress_payload_maps_error_status():
     payload = build_progress_payload(
         "job-err",

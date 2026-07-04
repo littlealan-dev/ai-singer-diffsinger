@@ -118,6 +118,20 @@ export function logPageView(instance?: Analytics | null) {
   });
 }
 
+export function logAnalyticsEvent(eventName: string, params: Record<string, unknown> = {}) {
+  const active = analytics ?? initAnalytics();
+  if (!active || typeof window === "undefined") return;
+  const env = import.meta.env.VITE_APP_ENV as string | undefined;
+  try {
+    logEvent(active, eventName, {
+      ...params,
+      ...(env ? { env } : {}),
+    });
+  } catch (error) {
+    console.warn("[analytics] failed to log event", eventName, error);
+  }
+}
+
 function hasUtmParams(search: string): boolean {
   if (!search) return false;
   const params = new URLSearchParams(search);
