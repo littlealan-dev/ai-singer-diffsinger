@@ -114,6 +114,11 @@ export type ProgressResponse = {
   details?: unknown;
   warning?: string;
   feedback?: FeedbackPromptState;
+  actual_duration_seconds?: number;
+  consumed_credits?: number;
+  required_credits?: number;
+  billable_duration_seconds?: number;
+  billing?: Record<string, unknown>;
 };
 
 export type ExportMixTrackRequest = {
@@ -131,6 +136,8 @@ export type ExportMixResponse = {
   status: "queued";
   progress_url: string;
   job_id: string;
+  required_credits: number;
+  billable_duration_seconds: number;
 };
 
 export type AudioTrackMetadata = {
@@ -587,12 +594,17 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
 
 export async function exportMix(
   sessionId: string,
-  tracks: ExportMixTrackRequest[]
+  tracks: ExportMixTrackRequest[],
+  billingReferenceJobId: string
 ): Promise<ExportMixResponse> {
   const payload = await request<ExportMixResponse>(`/sessions/${sessionId}/export-mix`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ format: "wav", tracks }),
+    body: JSON.stringify({
+      format: "wav",
+      billing_reference_job_id: billingReferenceJobId,
+      tracks,
+    }),
   });
   return {
     ...payload,

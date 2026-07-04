@@ -73,6 +73,13 @@ def render_mix_to_wav(
     }
 
 
+def get_audio_duration_seconds(path: Path) -> float:
+    data, rate = _read_audio(path)
+    if rate <= 0:
+        raise ValueError(f"Invalid audio sample rate: {path}")
+    return round(float(data.shape[0]) / float(rate), 3)
+
+
 def _read_audio(path: Path) -> tuple[np.ndarray, int]:
     try:
         data, rate = sf.read(str(path), dtype="float32", always_2d=True)

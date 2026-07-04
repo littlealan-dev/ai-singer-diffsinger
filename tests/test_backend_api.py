@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
-from src.backend.main import _require_app_check, create_app
+from src.backend.main import _require_app_check, _resolve_export_mix_source_path, create_app
 from src.backend.llm_client import LlmRole, StaticLlmClient
 from src.backend.mcp_client import McpRequestTimeoutError, McpToolError
 from src.backend.orchestrator import (
@@ -293,9 +293,6 @@ def _make_router_call_tool():
             abs_path = PROJECT_ROOT / rel_path
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_bytes(b"RIFFTESTDATA")
-            if arguments.get("format") == "mp3" and arguments.get("keep_wav"):
-                wav_path = abs_path.with_suffix(".wav")
-                wav_path.write_bytes(b"RIFFTESTDATA")
             return {
                 "audio_base64": "",
                 "duration_seconds": 0.01,
@@ -388,6 +385,7 @@ def _prepare_app(monkeypatch, overrides=None):
         input_path: str | None = None,
         render_type: str | None = None,
         voicebank_metadata: dict | None = None,
+        audio_track: dict | None = None,
     ) -> None:
         payload = {
             "userId": user_id,
@@ -401,6 +399,8 @@ def _prepare_app(monkeypatch, overrides=None):
             payload["renderType"] = render_type
         if voicebank_metadata:
             payload.update(voicebank_metadata)
+        if audio_track:
+            payload["audioTrack"] = audio_track
         fake_jobs[job_id] = payload
 
     def _fake_update_job(self, job_id: str, **fields) -> None:
@@ -455,6 +455,7 @@ def _prepare_app(monkeypatch, overrides=None):
         *,
         output_path: str | None = None,
         audio_url: str | None = None,
+        lossless_output_path: str | None = None,
     ) -> CompleteJobAndSettleCreditsResult:
         payload = fake_jobs.setdefault(job_id, {})
         payload.update(
@@ -467,6 +468,8 @@ def _prepare_app(monkeypatch, overrides=None):
                 "progress": 1.0,
                 "audioUrl": audio_url,
                 "outputPath": output_path,
+                "losslessOutputPath": lossless_output_path,
+                "losslessAudioFormat": "wav" if lossless_output_path else None,
                 "actualDurationSeconds": float(duration_seconds),
                 "consumedCredits": 1,
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -661,6 +664,37 @@ def test_progress_can_refresh_an_older_job_after_newer_audio_exists(client):
     first_payload = first_response.json()
     assert first_payload["job_id"] == "first-job"
     assert "file=first.wav" in first_payload["audio_url"]
+
+
+def test_export_mix_source_resolver_prefers_lossless_output_path(client, tmp_path):
+    _test_client, app = client
+    session_id = "lossless-source-session"
+    session_dir = app.state.sessions.session_dir(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    mp3_path = session_dir / "source.mp3"
+    wav_path = session_dir / "source.wav"
+    mp3_path.write_bytes(b"mp3")
+    wav_path.write_bytes(b"wav")
+
+    resolved = asyncio.run(
+        _resolve_export_mix_source_path(
+            settings=app.state.settings,
+            sessions=app.state.sessions,
+            session_id=session_id,
+            user_id="test-user",
+            source_job_id="source-job",
+            source_data={
+                "status": "completed",
+                "outputPath": str(mp3_path.relative_to(app.state.settings.project_root)),
+                "losslessOutputPath": str(wav_path.relative_to(app.state.settings.project_root)),
+                "audioTrack": {"part_id": "P1"},
+            },
+            work_dir=tmp_path,
+            requested_part_id="P1",
+        )
+    )
+
+    assert resolved == wav_path.resolve()
 
 
 def test_missing_auth_header_returns_401(monkeypatch):
@@ -6420,7 +6454,7 @@ def test_run_synthesis_job_can_inject_three_release_failures_before_ops_failure(
     [{"BACKEND_AUDIO_FORMAT": "mp3", "BACKEND_DEBUG": "0"}],
     indirect=True,
 )
-def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
+def test_chat_audio_outputs_mp3_and_lossless_wav_source(client_with_env):
     test_client, app = client_with_env
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
@@ -6444,7 +6478,16 @@ def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
-    assert not audio_path.with_suffix(".wav").exists()
+    job = app.state.job_store.get_job_by_id(
+        job_id=progress_payload["job_id"],
+        user_id="test-user",
+        session_id=session_id,
+    )[1]
+    assert job["losslessAudioFormat"] == "wav"
+    lossless_path = app.state.settings.project_root / job["losslessOutputPath"]
+    assert lossless_path.suffix == ".wav"
+    assert lossless_path.exists()
+    assert lossless_path != audio_path
 
 
 @pytest.mark.parametrize(
@@ -6452,7 +6495,7 @@ def test_chat_audio_outputs_mp3_only_when_not_debug(client_with_env):
     [{"BACKEND_AUDIO_FORMAT": "mp3", "BACKEND_DEBUG": "1"}],
     indirect=True,
 )
-def test_chat_audio_outputs_wav_when_debug(client_with_env):
+def test_chat_audio_lossless_wav_source_is_not_debug_gated(client_with_env):
     test_client, app = client_with_env
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
@@ -6476,4 +6519,12 @@ def test_chat_audio_outputs_wav_when_debug(client_with_env):
     audio_path = app.state.settings.sessions_dir / session_id / file_name
     assert audio_path.suffix == ".mp3"
     assert audio_path.exists()
-    assert audio_path.with_suffix(".wav").exists()
+    job = app.state.job_store.get_job_by_id(
+        job_id=progress_payload["job_id"],
+        user_id="test-user",
+        session_id=session_id,
+    )[1]
+    lossless_path = app.state.settings.project_root / job["losslessOutputPath"]
+    assert lossless_path.suffix == ".wav"
+    assert lossless_path.exists()
+    assert lossless_path != audio_path

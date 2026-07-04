@@ -108,9 +108,8 @@ Save waveform to disk and return file metadata.
 | `waveform` | array[number] | yes | n/a | Mono PCM samples in the range -1..1. | `[0.0, 0.0012, -0.0008]` |
 | `output_path` | string | yes | n/a | Target output path (extension is normalized). | `data/output/demo.wav` |
 | `sample_rate` | integer | no | `44100` | Sample rate to write. | `44100` |
-| `format` | string | no | `wav` | Output format: `wav` or `mp3`. | `"mp3"` |
+| `format` | string | no | Python API: `wav`; MCP tool: `mp3` | Output format. The MCP tool exposes only the playback artifact format `mp3`; backend-owned lossless WAV artifacts are created separately by backend code. | `"mp3"` |
 | `mp3_bitrate` | string | no | `256k` | MP3 bitrate when `format=mp3`. | `"256k"` |
-| `keep_wav` | boolean | no | `false` | When writing mp3, keep the wav as well. | `false` |
 
 **Output structure**
 | field | type | description | example |

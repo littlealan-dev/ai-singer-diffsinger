@@ -29,6 +29,7 @@ from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
+from src.api.audio import save_audio
 from src.api.voice_parts import (
     build_preprocessing_required_action,
     finalize_review_materialization,
@@ -462,6 +463,21 @@ class Orchestrator:
         extension = "mp3" if audio_format == "mp3" else "wav"
         file_name = f"audio-{uuid.uuid4().hex}.{extension}"
         output_path = self._sessions.session_dir(session_id) / file_name
+        lossless_output_path = output_path
+        lossless_storage_path = output_storage_path if extension == "wav" else None
+        if extension != "wav":
+            lossless_output_path = output_path.with_suffix(".source.wav")
+            await asyncio.to_thread(
+                save_audio,
+                waveform,
+                lossless_output_path,
+                sample_rate=sample_rate,
+                format="wav",
+            )
+            if self._settings.backend_use_storage and job_id and user_id:
+                lossless_storage_path = _job_storage_lossless_output_path(
+                    user_id, session_id, job_id
+                )
         save_args = {
             "waveform": waveform,
             "output_path": str(output_path.relative_to(self._settings.project_root)),
@@ -470,7 +486,6 @@ class Orchestrator:
         }
         if audio_format == "mp3":
             save_args["mp3_bitrate"] = self._settings.audio_mp3_bitrate
-            save_args["keep_wav"] = bool(self._settings.backend_debug)
         if job_id is not None:
             await asyncio.to_thread(
                 self._job_store.update_job,
@@ -491,6 +506,14 @@ class Orchestrator:
                 output_storage_path,
                 "audio/mpeg" if extension == "mp3" else "audio/wav",
             )
+            if lossless_storage_path and lossless_storage_path != output_storage_path:
+                await asyncio.to_thread(
+                    upload_file,
+                    self._settings.storage_bucket,
+                    lossless_output_path,
+                    lossless_storage_path,
+                    "audio/wav",
+                )
             await self._sessions.set_audio(
                 session_id, output_path, duration, storage_path=output_storage_path
             )
@@ -502,6 +525,10 @@ class Orchestrator:
             "audio_url": f"/sessions/{session_id}/audio?file={file_name}",
             "output_path": str(output_path.relative_to(self._settings.project_root)),
             "output_storage_path": output_storage_path,
+            "lossless_output_path": str(
+                lossless_output_path.relative_to(self._settings.project_root)
+            ),
+            "lossless_output_storage_path": lossless_storage_path,
             "duration_seconds": duration,
         }
         return response
@@ -705,6 +732,7 @@ class Orchestrator:
         *,
         output_path: Optional[str],
         audio_url: Optional[str],
+        lossless_output_path: Optional[str] = None,
     ):
         from src.backend.credits import (
             CompleteJobAndSettleCreditsResult,
@@ -741,6 +769,7 @@ class Orchestrator:
             duration_seconds,
             output_path=output_path,
             audio_url=audio_url,
+            lossless_output_path=lossless_output_path,
         )
 
     def _release_credits_with_retry_fault_injection(
@@ -815,6 +844,10 @@ class Orchestrator:
             )
             duration_seconds = response.get("duration_seconds", 0.0)
             output_path = response.get("output_storage_path") or response.get("output_path")
+            lossless_output_path = (
+                response.get("lossless_output_storage_path")
+                or response.get("lossless_output_path")
+            )
             settle_result = await retry_credit_op(
                 self._complete_job_and_settle_credits_with_retry_fault_injection,
                 user_id,
@@ -823,6 +856,7 @@ class Orchestrator:
                 duration_seconds,
                 output_path=output_path,
                 audio_url=response.get("audio_url"),
+                lossless_output_path=lossless_output_path,
                 max_attempts=self._settings.credit_retry_max_attempts,
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
@@ -5804,6 +5838,11 @@ def _job_storage_output_path(
     """Build the storage path for job output audio."""
     extension = "mp3" if audio_format.lower() == "mp3" else "wav"
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/output.{extension}"
+
+
+def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str) -> str:
+    """Build the storage path for a lossless job output used by mixdown."""
+    return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
 
 
 def _job_progress_url(session_id: str, job_id: str) -> str:

@@ -129,10 +129,10 @@ class TestMcpServer(unittest.TestCase):
         self.assertIn("Tool not available in mode", response["result"]["error"]["message"])
 
     def test_save_audio(self):
-        output_rel = "tests/output/mcp_audio.wav"
+        output_rel = "tests/output/mcp_audio.mp3"
         output_abs = (self.root_dir / output_rel).resolve()
         output_abs.parent.mkdir(parents=True, exist_ok=True)
-        audio_bytes = b"RIFFTEST"
+        audio_bytes = b"ID3TEST"
         output_abs.write_bytes(audio_bytes)
 
         with mock.patch("src.mcp.handlers.save_audio") as mock_save:
@@ -152,6 +152,7 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(result["sample_rate"], 44100)
             args, kwargs = mock_save.call_args
             self.assertTrue(isinstance(args[1], Path))
+            self.assertEqual(kwargs["format"], "mp3")
 
     def test_synthesize(self):
         if not self.voicebank_path.exists():

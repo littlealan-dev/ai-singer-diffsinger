@@ -1720,15 +1720,12 @@ TOOLS: List[Tool] = [
                 },
                 "format": {
                     "type": "string",
-                    "description": "Requested output audio format such as wav or mp3.",
+                    "enum": ["mp3"],
+                    "description": "Requested playback artifact format. Lossless WAV artifacts are backend-owned and not exposed through this tool.",
                 },
                 "mp3_bitrate": {
                     "type": "string",
                     "description": "Optional MP3 bitrate string such as 192k.",
-                },
-                "keep_wav": {
-                    "type": "boolean",
-                    "description": "Whether to keep an intermediate WAV when writing compressed output formats.",
                 },
             },
             "required": ["waveform", "output_path"],

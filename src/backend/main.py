@@ -20,6 +20,7 @@ from pydantic import BaseModel, EmailStr
 import logging
 
 from src.backend.config import Settings
+from src.backend.credit_retry import retry_credit_op
 from src.backend.llm_factory import create_llm_client
 from src.backend.mcp_client import (
     McpRouter,
@@ -29,8 +30,9 @@ from src.backend.mcp_client import (
     McpToolError,
 )
 from src.backend.orchestrator import Orchestrator
-from src.backend.audio_mix import MixTrackSource, render_mix_to_wav
+from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
+from src.backend.message_catalog import backend_message
 from src.backend.session import SessionStore, FirestoreSessionStore
 from src.backend.firebase_app import (
     get_firestore_client,
@@ -125,6 +127,7 @@ class ExportMixTrackRequest(BaseModel):
 
 class ExportMixRequest(BaseModel):
     tracks: list[ExportMixTrackRequest]
+    billing_reference_job_id: str
     format: Literal["wav"] = "wav"
 
 
@@ -657,31 +660,96 @@ def create_app() -> FastAPI:
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         job_store: JobStore = request.app.state.job_store
-        user_id, _user_email = await _get_user_context_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
         selected_tracks = _select_export_mix_tracks(payload.tracks)
         job_id = uuid.uuid4().hex
-        await asyncio.to_thread(
-            job_store.create_job,
-            job_id=job_id,
-            user_id=user_id,
+        billing_context = await _build_export_mix_billing_context(
+            settings=settings,
+            sessions=sessions,
+            job_store=job_store,
             session_id=session_id,
-            status="queued",
-            render_type="export_mix",
+            user_id=user_id,
+            all_tracks=payload.tracks,
+            selected_tracks=selected_tracks,
+            billing_reference_job_id=payload.billing_reference_job_id,
         )
-        await asyncio.to_thread(
-            job_store.update_job,
+        from src.backend.credits import get_or_create_credits, reserve_credits
+
+        user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
+        reserve_result = await retry_credit_op(
+            reserve_credits,
+            user_id,
             job_id,
-            status="queued",
-            step="export_mix",
-            progress=0.0,
-            jobKind="export_mix",
-            mix={
-                "format": payload.format,
-                "trackCount": len(selected_tracks),
-                "tracks": [_export_mix_track_metadata(track) for track in selected_tracks],
-            },
+            billing_context["required_credits"],
+            settings.session_ttl_seconds,
+            session_id=session_id,
+            job_kind="export_mix",
+            pricing="export_mix_v1",
+            pricing_unit_seconds=60,
+            billable_duration_seconds=billing_context["billable_duration_seconds"],
+            billing_reference_job_id=billing_context["billing_reference_job_id"],
+            max_attempts=settings.credit_retry_max_attempts,
+            base_delay=settings.credit_retry_base_delay_seconds,
         )
+        if reserve_result.status in {"insufficient_balance", "overdrafted"}:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "type": "insufficient_credits",
+                    "job_kind": "export_mix",
+                    "message": backend_message(
+                        "account.insufficient_credits",
+                        estimated_credits=billing_context["required_credits"],
+                        available_credits=user_credits.available_balance,
+                    ),
+                    "required_credits": billing_context["required_credits"],
+                    "available_credits": user_credits.available_balance,
+                },
+            )
+        if reserve_result.status == "expired":
+            raise HTTPException(status_code=403, detail=backend_message("account.free_trial_expired"))
+        if reserve_result.status not in {"reserved", "reservation_exists"}:
+            raise HTTPException(status_code=503, detail=backend_message("billing.setup_failed_retry"))
+        try:
+            await asyncio.to_thread(
+                job_store.create_job,
+                job_id=job_id,
+                user_id=user_id,
+                session_id=session_id,
+                status="queued",
+                render_type="export_mix",
+            )
+            await asyncio.to_thread(
+                job_store.update_job,
+                job_id,
+                status="queued",
+                step="export_mix",
+                progress=0.0,
+                jobKind="export_mix",
+                billing={
+                    "pricing": "export_mix_v1",
+                    "pricingUnitSeconds": 60,
+                    "billingReferenceJobId": billing_context["billing_reference_job_id"],
+                    "billableDurationSeconds": billing_context["billable_duration_seconds"],
+                    "requiredCredits": billing_context["required_credits"],
+                    "reservationStatus": "pending",
+                },
+                mix={
+                    "format": payload.format,
+                    "trackCount": len(selected_tracks),
+                    "tracks": [_export_mix_track_metadata(track) for track in selected_tracks],
+                },
+            )
+        except Exception as exc:
+            await _release_export_mix_reservation(
+                settings=settings,
+                job_store=job_store,
+                user_id=user_id,
+                job_id=job_id,
+                error_message=f"Export mix job startup failed: {exc}",
+            )
+            raise
         task = asyncio.create_task(
             _run_export_mix_job(
                 settings=settings,
@@ -691,6 +759,7 @@ def create_app() -> FastAPI:
                 user_id=user_id,
                 job_id=job_id,
                 tracks=selected_tracks,
+                billable_duration_seconds=billing_context["billable_duration_seconds"],
             )
         )
         request.app.state.export_mix_tasks[job_id] = task
@@ -710,6 +779,8 @@ def create_app() -> FastAPI:
             "status": "queued",
             "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
             "job_id": job_id,
+            "required_credits": billing_context["required_credits"],
+            "billable_duration_seconds": billing_context["billable_duration_seconds"],
         }
 
     @app.post("/feedback/prompted")
@@ -1006,6 +1077,189 @@ def _export_mix_track_metadata(track: ExportMixTrackRequest) -> dict[str, Any]:
     }
 
 
+async def _build_export_mix_billing_context(
+    *,
+    settings: Settings,
+    sessions: SessionStore,
+    job_store: JobStore,
+    session_id: str,
+    user_id: str,
+    all_tracks: list[ExportMixTrackRequest],
+    selected_tracks: list[ExportMixTrackRequest],
+    billing_reference_job_id: str,
+) -> dict[str, Any]:
+    from src.backend.credits import estimate_export_mix_credits
+
+    reference_job_id = billing_reference_job_id.strip()
+    if not reference_job_id:
+        raise HTTPException(status_code=400, detail="billing_reference_job_id is required.")
+    reference_track = next(
+        (track for track in all_tracks if track.job_id.strip() == reference_job_id),
+        None,
+    )
+    if reference_track is None:
+        raise HTTPException(
+            status_code=400,
+            detail="billing_reference_job_id must match one of the submitted tracks.",
+        )
+    work_dir = Path(tempfile.mkdtemp(prefix=f"export-billing-{session_id}-", dir=settings.data_dir))
+    try:
+        reference_job = await asyncio.to_thread(
+            job_store.get_job_by_id,
+            job_id=reference_job_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if reference_job is None:
+            raise HTTPException(status_code=400, detail="Billing reference job was not found.")
+        _ref_id, reference_data = reference_job
+        _validate_export_mix_source_job(
+            source_job_id=reference_job_id,
+            source_data=reference_data,
+            requested_part_id=reference_track.part_id.strip(),
+        )
+        reference_duration = await _export_mix_job_duration_seconds(
+            settings=settings,
+            sessions=sessions,
+            session_id=session_id,
+            user_id=user_id,
+            source_job_id=reference_job_id,
+            source_data=reference_data,
+            work_dir=work_dir,
+            requested_part_id=reference_track.part_id.strip(),
+        )
+        selected_durations: dict[str, float] = {}
+        for track in selected_tracks:
+            source_job_id = track.job_id.strip()
+            source_job = await asyncio.to_thread(
+                job_store.get_job_by_id,
+                job_id=source_job_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if source_job is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Source synthesis job not found: {source_job_id}",
+                )
+            _source_id, source_data = source_job
+            selected_durations[source_job_id] = await _export_mix_job_duration_seconds(
+                settings=settings,
+                sessions=sessions,
+                session_id=session_id,
+                user_id=user_id,
+                source_job_id=source_job_id,
+                source_data=source_data,
+                work_dir=work_dir,
+                requested_part_id=track.part_id.strip(),
+            )
+        tolerance_seconds = 1.0
+        longer_duration = max(selected_durations.values(), default=reference_duration)
+        if longer_duration > reference_duration + tolerance_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot use the billing reference track because another exported "
+                    "track is longer."
+                ),
+            )
+        required_credits = estimate_export_mix_credits(reference_duration)
+        return {
+            "billing_reference_job_id": reference_job_id,
+            "billable_duration_seconds": reference_duration,
+            "required_credits": required_credits,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def _export_mix_job_duration_seconds(
+    *,
+    settings: Settings,
+    sessions: SessionStore,
+    session_id: str,
+    user_id: str,
+    source_job_id: str,
+    source_data: dict[str, Any],
+    work_dir: Path,
+    requested_part_id: str,
+) -> float:
+    _validate_export_mix_source_job(
+        source_job_id=source_job_id,
+        source_data=source_data,
+        requested_part_id=requested_part_id,
+    )
+    duration = source_data.get("actualDurationSeconds")
+    if isinstance(duration, (int, float)) and duration > 0:
+        return float(duration)
+    source_path = await _resolve_export_mix_source_path(
+        settings=settings,
+        sessions=sessions,
+        session_id=session_id,
+        user_id=user_id,
+        source_job_id=source_job_id,
+        source_data=source_data,
+        work_dir=work_dir,
+        requested_part_id=requested_part_id,
+    )
+    return await asyncio.to_thread(get_audio_duration_seconds, source_path)
+
+
+async def _release_export_mix_reservation(
+    *,
+    settings: Settings,
+    job_store: JobStore,
+    user_id: str,
+    job_id: str,
+    error_message: str,
+):
+    from src.backend.credits import mark_reservation_reconciliation_required, release_credits
+
+    release_result = await retry_credit_op(
+        release_credits,
+        user_id,
+        job_id,
+        max_attempts=settings.credit_retry_max_attempts,
+        base_delay=settings.credit_retry_base_delay_seconds,
+    )
+    if release_result.status in {"released", "already_released", "reservation_missing"}:
+        await asyncio.to_thread(
+            job_store.update_job,
+            job_id,
+            status="failed",
+            step="error",
+            progress=1.0,
+            errorMessage=error_message,
+            jobKind="export_mix",
+            billing={"reservationStatus": "released"},
+        )
+        return release_result
+    await asyncio.to_thread(
+        mark_reservation_reconciliation_required,
+        user_id,
+        job_id,
+        last_error="export_mix_release_failed",
+        last_error_message=(
+            f"{error_message} | billing_rollback_status={release_result.status}"
+        ),
+    )
+    await asyncio.to_thread(
+        job_store.update_job,
+        job_id,
+        status="credit_reconciliation_required",
+        step="error",
+        progress=1.0,
+        errorMessage=(
+            f"{error_message} | billing_rollback_status={release_result.status}"
+        ),
+        jobKind="export_mix",
+        billing={"reservationStatus": "reconciliation_required"},
+    )
+    return release_result
+
+
 async def _run_export_mix_job(
     *,
     settings: Settings,
@@ -1015,6 +1269,7 @@ async def _run_export_mix_job(
     user_id: str,
     job_id: str,
     tracks: list[ExportMixTrackRequest],
+    billable_duration_seconds: float,
 ) -> None:
     log = get_logger("backend.api")
     set_log_context(session_id=session_id, user_id=user_id, job_id=job_id)
@@ -1113,23 +1368,44 @@ async def _run_export_mix_job(
                 output_storage_path,
                 "audio/wav",
             )
-        await asyncio.to_thread(
-            job_store.update_job,
+        final_mix_metadata = {
+            **mix_metadata,
+            "format": "wav",
+            "trackCount": len(sources),
+            "tracks": [_export_mix_track_metadata(track) for track in tracks],
+        }
+        from src.backend.credits import settle_export_mix_credits_and_complete_job
+
+        settle_result = await retry_credit_op(
+            settle_export_mix_credits_and_complete_job,
+            user_id,
             job_id,
-            status="completed",
-            step="done",
-            progress=1.0,
-            audioUrl=f"/sessions/{session_id}/audio?file={output_path.name}",
-            outputPath=output_storage_path
+            session_id,
+            billable_duration_seconds,
+            actual_duration_seconds=mix_metadata.get("duration_seconds")
+            if isinstance(mix_metadata.get("duration_seconds"), (int, float))
+            else None,
+            output_path=output_storage_path
             or str(output_path.relative_to(settings.project_root)),
-            jobKind="export_mix",
-            mix={
-                **mix_metadata,
-                "format": "wav",
-                "trackCount": len(sources),
-                "tracks": [_export_mix_track_metadata(track) for track in tracks],
-            },
+            audio_url=f"/sessions/{session_id}/audio?file={output_path.name}",
+            mix_metadata=final_mix_metadata,
+            max_attempts=settings.credit_retry_max_attempts,
+            base_delay=settings.credit_retry_base_delay_seconds,
         )
+        if settle_result.status not in {
+            "completed_and_settled",
+            "already_completed_and_settled",
+        }:
+            release_result = await _release_export_mix_reservation(
+                settings=settings,
+                job_store=job_store,
+                user_id=user_id,
+                job_id=job_id,
+                error_message=f"Export mix settlement failed: {settle_result.status}",
+            )
+            if release_result.status in {"released", "already_released"}:
+                return
+            return
         log.info(
             "mix_export_job_completed session_id=%s user_id=%s job_id=%s output_path=%s "
             "duration_seconds=%s",
@@ -1146,14 +1422,12 @@ async def _run_export_mix_job(
             user_id,
             job_id,
         )
-        await asyncio.to_thread(
-            job_store.update_job,
-            job_id,
-            status="failed",
-            step="error",
-            progress=1.0,
-            errorMessage=str(exc) or "Export mix failed.",
-            jobKind="export_mix",
+        await _release_export_mix_reservation(
+            settings=settings,
+            job_store=job_store,
+            user_id=user_id,
+            job_id=job_id,
+            error_message=str(exc) or "Export mix failed.",
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -1171,24 +1445,14 @@ async def _resolve_export_mix_source_path(
     work_dir: Path,
     requested_part_id: str,
 ) -> Path:
-    status = str(source_data.get("status") or "").strip()
-    if status != "completed":
-        raise ValueError(f"Source job is not completed: {source_job_id}")
-    job_kind = str(source_data.get("jobKind") or "").strip()
-    if job_kind in {"preprocess", "export_mix"}:
-        raise ValueError(f"Source job is not a synthesis job: {source_job_id}")
-    audio_track = source_data.get("audioTrack")
-    if not isinstance(audio_track, dict):
-        raise ValueError(f"Source job is missing audio track metadata: {source_job_id}")
-    job_part_id = str(audio_track.get("part_id") or "").strip()
-    if not job_part_id or job_part_id != requested_part_id:
-        raise ValueError(
-            f"Source job part_id mismatch for {source_job_id}: "
-            f"{job_part_id or '<missing>'} != {requested_part_id}"
-        )
-    output_path = source_data.get("outputPath")
+    _validate_export_mix_source_job(
+        source_job_id=source_job_id,
+        source_data=source_data,
+        requested_part_id=requested_part_id,
+    )
+    output_path = source_data.get("losslessOutputPath") or source_data.get("outputPath")
     if not isinstance(output_path, str) or not output_path.strip():
-        raise ValueError(f"Source job is missing outputPath: {source_job_id}")
+        raise ValueError(f"Source job is missing losslessOutputPath/outputPath: {source_job_id}")
     output_path = output_path.strip()
     if settings.backend_use_storage:
         expected_prefix = f"sessions/{user_id}/{session_id}/jobs/{source_job_id}/"
@@ -1209,6 +1473,29 @@ async def _resolve_export_mix_source_path(
     if not local_path.exists():
         raise ValueError(f"Source audio file is missing: {source_job_id}")
     return local_path
+
+
+def _validate_export_mix_source_job(
+    *,
+    source_job_id: str,
+    source_data: dict[str, Any],
+    requested_part_id: str,
+) -> None:
+    status = str(source_data.get("status") or "").strip()
+    if status != "completed":
+        raise ValueError(f"Source job is not completed: {source_job_id}")
+    job_kind = str(source_data.get("jobKind") or "").strip()
+    if job_kind in {"preprocess", "export_mix"}:
+        raise ValueError(f"Source job is not a synthesis job: {source_job_id}")
+    audio_track = source_data.get("audioTrack")
+    if not isinstance(audio_track, dict):
+        raise ValueError(f"Source job is missing audio track metadata: {source_job_id}")
+    job_part_id = str(audio_track.get("part_id") or "").strip()
+    if not job_part_id or job_part_id != requested_part_id:
+        raise ValueError(
+            f"Source job part_id mismatch for {source_job_id}: "
+            f"{job_part_id or '<missing>'} != {requested_part_id}"
+        )
 
 
 async def _get_session_or_404(

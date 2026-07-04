@@ -12,8 +12,8 @@ class TestMcpEndToEnd(unittest.TestCase):
         self.voicebank_id = "Raine_Rena_2.01"
         self.voicebank_path = self.root_dir / "assets/voicebanks" / self.voicebank_id
         self.score_path = "assets/test_data/amazing-grace-satb-verse1.xml"
-        self.output_path = "tests/output/mcp_e2e.wav"
-        self.output_path_base64 = "tests/output/mcp_e2e_base64.wav"
+        self.output_path = "tests/output/mcp_e2e.mp3"
+        self.output_path_base64 = "tests/output/mcp_e2e_base64.mp3"
         self._next_id = 1
         self.proc = None
 
@@ -159,7 +159,8 @@ class TestMcpEndToEnd(unittest.TestCase):
         )
         self.assertIn("audio_base64", save_result)
         audio_bytes = base64.b64decode(save_result["audio_base64"])
-        self.assertTrue(audio_bytes.startswith(b"RIFF"))
+        self.assertGreater(len(audio_bytes), 0)
+        self.assertFalse(audio_bytes.startswith(b"RIFF"))
         output_path = self.root_dir / self.output_path_base64
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(audio_bytes)

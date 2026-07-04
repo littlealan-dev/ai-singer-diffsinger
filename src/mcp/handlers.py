@@ -150,9 +150,8 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         params["waveform"],
         output_path,
         sample_rate=params.get("sample_rate", 44100),
-        format=params.get("format", "wav"),
+        format=params.get("format", "mp3"),
         mp3_bitrate=params.get("mp3_bitrate", "256k"),
-        keep_wav=bool(params.get("keep_wav", False)),
     )
     # Read the saved audio and return it inline as base64.
     audio_bytes = Path(result["path"]).read_bytes()

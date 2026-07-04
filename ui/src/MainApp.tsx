@@ -106,6 +106,7 @@ type MultiTrackAudioTrack = {
   partId?: string | null;
   partIndex?: number | null;
   verseNumber?: string | number | null;
+  durationSeconds?: number | null;
   jobId?: string;
   muted: boolean;
   solo: boolean;
@@ -143,6 +144,13 @@ const synthesisAudioAnalyticsParams = (message: Message) => ({
   has_feedback_prompt_candidate: Boolean(message.feedback?.promptCandidate),
 });
 
+const estimateExportMixCredits = (durationSeconds: number | null | undefined): number | null => {
+  if (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return null;
+  }
+  return Math.max(1, Math.ceil(durationSeconds / 60));
+};
+
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
@@ -168,6 +176,7 @@ type MultiTrackWaveformLaneProps = {
   onSoloChange: (trackKey: string, solo: boolean) => void;
   onVolumeChange: (trackKey: string, volume: number) => void;
   onDownloadTrack: (track: MultiTrackAudioTrack) => void;
+  onDurationChange: (trackKey: string, durationSeconds: number) => void;
 };
 
 const MultiTrackWaveformLane = ({
@@ -181,6 +190,7 @@ const MultiTrackWaveformLane = ({
   onSoloChange,
   onVolumeChange,
   onDownloadTrack,
+  onDurationChange,
 }: MultiTrackWaveformLaneProps) => {
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveSurferRef = useRef<WaveSurfer | null>(null);
@@ -210,8 +220,15 @@ const MultiTrackWaveformLane = ({
     const unsubscribeInteraction = waveSurfer.on("interaction", (time) => {
       onTrackSeek(track.key, time);
     });
+    const unsubscribeReady = waveSurfer.on("ready", () => {
+      const duration = waveSurfer.getDuration();
+      if (Number.isFinite(duration) && duration > 0) {
+        onDurationChange(track.key, duration);
+      }
+    });
 
     return () => {
+      unsubscribeReady();
       unsubscribeInteraction();
       unsubscribeFinish();
       onWaveSurferUnmount(track.key);
@@ -221,6 +238,7 @@ const MultiTrackWaveformLane = ({
   }, [
     onTrackFinished,
     onTrackSeek,
+    onDurationChange,
     onWaveSurferMount,
     onWaveSurferUnmount,
     track.audioUrl,
@@ -756,6 +774,11 @@ export default function MainApp() {
   const billingNeedsAttention =
     Boolean(billingWarningStatus) && dismissedBillingWarningStatus !== billingWarningStatus;
 
+  const openPaywall = useCallback((trigger: PaywallTrigger, detail?: string | null) => {
+    setPaywallTrigger(trigger);
+    setPaywallDetail(detail ?? null);
+  }, []);
+
   const {
       showAnnouncement,
       currentAnnouncement,
@@ -786,6 +809,9 @@ export default function MainApp() {
     multiTrackExportProgress !== null
       ? `${Math.round(Math.max(0, Math.min(1, multiTrackExportProgress)) * 100)}%`
       : null;
+  const exportMixRequiredCredits = estimateExportMixCredits(
+    multiTrackAudioTracks[0]?.durationSeconds
+  );
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
@@ -793,7 +819,10 @@ export default function MainApp() {
   const resolveMultiTrackIdentity = useCallback(
     (
       audioTrack?: AudioTrackMetadata
-    ): Omit<MultiTrackAudioTrack, "audioUrl" | "jobId" | "muted" | "solo" | "volume"> => {
+    ): Omit<
+      MultiTrackAudioTrack,
+      "audioUrl" | "durationSeconds" | "jobId" | "muted" | "solo" | "volume"
+    > => {
       const partIndex =
         typeof audioTrack?.part_index === "number" && Number.isFinite(audioTrack.part_index)
           ? audioTrack.part_index
@@ -819,15 +848,29 @@ export default function MainApp() {
   );
 
   const addOrReplaceMultiTrackAudio = useCallback(
-    (audioUrl: string, audioTrack?: AudioTrackMetadata, jobId?: string) => {
+    (
+      audioUrl: string,
+      audioTrack?: AudioTrackMetadata,
+      jobId?: string,
+      durationSeconds?: number | null
+    ) => {
       if (!audioUrl) return;
       const identity = resolveMultiTrackIdentity(audioTrack);
       setMultiTrackAudioTracks((current) => {
         const existing = current.find((track) => track.key === identity.key);
+        const hasBackendDuration =
+          typeof durationSeconds === "number" &&
+          Number.isFinite(durationSeconds) &&
+          durationSeconds > 0;
         const nextTrack: MultiTrackAudioTrack = {
           ...identity,
           audioUrl,
           jobId,
+          durationSeconds: hasBackendDuration
+            ? durationSeconds
+            : existing?.audioUrl === audioUrl
+              ? existing?.durationSeconds
+              : null,
           muted: existing?.muted ?? false,
           solo: existing?.solo ?? false,
           volume: existing?.volume ?? 1,
@@ -924,9 +967,28 @@ export default function MainApp() {
     multiTrackWaveSurferRefs.current[trackKey]?.setVolume(normalized);
   }, []);
 
+  const updateMultiTrackDuration = useCallback((trackKey: string, durationSeconds: number) => {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
+    setMultiTrackAudioTracks((current) =>
+      current.map((track) =>
+        track.key === trackKey ? { ...track, durationSeconds } : track
+      )
+    );
+  }, []);
+
   const handleMultiTrackExport = useCallback(async () => {
     if (!sessionId || multiTrackExportProgress !== null) return;
+    if (creditsLocked) {
+      openPaywall("insufficient_credits");
+      return;
+    }
     setMultiTrackExportError(null);
+    setError(null);
+    const billingReferenceTrack = multiTrackAudioTracks[0];
+    if (!billingReferenceTrack?.jobId || exportMixRequiredCredits === null) {
+      setMultiTrackExportError("Export credits are still being calculated.");
+      return;
+    }
     const hasSolo = multiTrackAudioTracks.some((track) => track.solo);
     const audibleTracks = hasSolo
       ? multiTrackAudioTracks.filter((track) => track.solo)
@@ -956,7 +1018,8 @@ export default function MainApp() {
           muted: track.muted,
           solo: track.solo,
           volume: track.volume,
-        }))
+        })),
+        billingReferenceTrack.jobId
       );
       let latestProgress = 0;
       for (;;) {
@@ -977,11 +1040,16 @@ export default function MainApp() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Export failed.";
+      if (isInsufficientCreditError(message)) {
+        openPaywall("insufficient_credits", message);
+        setError(message);
+        return;
+      }
       setMultiTrackExportError(message);
     } finally {
       setMultiTrackExportProgress(null);
     }
-  }, [multiTrackAudioTracks, multiTrackExportProgress, sessionId]);
+  }, [creditsLocked, exportMixRequiredCredits, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
   const handleMultiTrackTrackDownload = useCallback(
     async (track: MultiTrackAudioTrack) => {
@@ -1233,11 +1301,6 @@ export default function MainApp() {
       // Error is stored in component state and retried on the next session-dependent action.
     });
   }, [ensureSession, isAuthenticated, sessionId, user]);
-
-  const openPaywall = (trigger: PaywallTrigger, detail?: string | null) => {
-    setPaywallTrigger(trigger);
-    setPaywallDetail(detail ?? null);
-  };
 
   useEffect(() => {
     if (!isAuthenticated || billing.loading || !billing.stripeCustomerId) return;
@@ -1509,7 +1572,12 @@ export default function MainApp() {
       if (nextAudioUrl) {
         setAudioUrl(nextAudioUrl);
         if (payload.job_kind !== "preprocess") {
-          addOrReplaceMultiTrackAudio(nextAudioUrl, payload.audio_track, payload.job_id);
+          addOrReplaceMultiTrackAudio(
+            nextAudioUrl,
+            payload.audio_track,
+            payload.job_id,
+            payload.actual_duration_seconds
+          );
         }
       }
     };
@@ -1748,7 +1816,12 @@ export default function MainApp() {
       );
       setAudioUrl((current) => (current ? nextAudioUrl : current));
       if (payload.job_kind !== "preprocess") {
-        addOrReplaceMultiTrackAudio(nextAudioUrl, payload.audio_track, payload.job_id);
+        addOrReplaceMultiTrackAudio(
+          nextAudioUrl,
+          payload.audio_track,
+          payload.job_id,
+          payload.actual_duration_seconds
+        );
       }
       return nextAudioUrl;
     })();
@@ -2245,7 +2318,19 @@ export default function MainApp() {
           </div>
         </div>
       )}
-      {error && <div className="error-banner">{error}</div>}
+      {error && (
+        <div className="message-box error" role="alert">
+          <span className="message-box-content">{error}</span>
+          <button
+            type="button"
+            className="message-box-close"
+            onClick={() => setError(null)}
+            aria-label="Dismiss message"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <WaitlistModal
         isOpen={showWaitlistModal}
         onClose={() => setShowWaitlistModal(false)}
@@ -2845,6 +2930,11 @@ export default function MainApp() {
                   {multiTrackAudioTracks.length
                     ? "Generated parts are added here as separate synchronized tracks."
                     : "Generated vocal parts will appear here after synthesis."}
+                  {multiTrackAudioTracks.length > 0 && (
+                    <span className="multitrack-export-credit-estimate">
+                      Export: {exportMixRequiredCredits ?? "--"} credits
+                    </span>
+                  )}
                 </p>
               </div>
               <div className="multitrack-transport">
@@ -2854,7 +2944,12 @@ export default function MainApp() {
                     exporting: multiTrackExportProgress !== null,
                   })}
                   onClick={handleMultiTrackExport}
-                  disabled={!multiTrackAudioTracks.length || multiTrackExportProgress !== null}
+                  disabled={
+                    !multiTrackAudioTracks.length ||
+                    creditsLocked ||
+                    exportMixRequiredCredits === null ||
+                    multiTrackExportProgress !== null
+                  }
                   aria-label="Export mix"
                   title="Export mix"
                 >
@@ -2902,6 +2997,7 @@ export default function MainApp() {
                     onSoloChange={updateMultiTrackSolo}
                     onVolumeChange={updateMultiTrackVolume}
                     onDownloadTrack={handleMultiTrackTrackDownload}
+                    onDurationChange={updateMultiTrackDuration}
                   />
                 ))
               ) : (

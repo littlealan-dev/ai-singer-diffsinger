@@ -111,6 +111,7 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         status = "done"
     elif raw_status in {"failed", "cancelled", "credit_reconciliation_required"}:
         status = "error"
+    billing = data.get("billing") if isinstance(data.get("billing"), dict) else {}
     payload: Dict[str, Any] = {
         "status": status,
         "step": data.get("step"),
@@ -126,6 +127,11 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "details": data.get("details"),
         "audio_track": data.get("audioTrack"),
         "feedback": data.get("feedback"),
+        "actual_duration_seconds": data.get("actualDurationSeconds"),
+        "consumed_credits": data.get("consumedCredits"),
+        "required_credits": billing.get("requiredCredits"),
+        "billable_duration_seconds": billing.get("billableDurationSeconds"),
+        "billing": billing or None,
         "updated_at": data.get("updatedAt"),
     }
     if raw_status == "credit_reconciliation_required":

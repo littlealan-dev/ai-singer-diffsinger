@@ -22,7 +22,6 @@ def save_audio(
     sample_rate: int = 44100,
     format: str = "wav",
     mp3_bitrate: str = "256k",
-    keep_wav: bool = False,
 ) -> Dict[str, Any]:
     """
     Write audio to a file.
@@ -33,7 +32,6 @@ def save_audio(
         sample_rate: Sample rate (default: 44100)
         format: Audio format - "wav" or "mp3" (default: "wav")
         mp3_bitrate: MP3 bitrate (e.g. "256k")
-        keep_wav: When writing mp3, also keep a wav copy
         
     Returns:
         Dict with:
@@ -51,7 +49,6 @@ def save_audio(
                     "sample_rate": sample_rate,
                     "format": format,
                     "mp3_bitrate": mp3_bitrate,
-                    "keep_wav": keep_wav,
                 }
             ),
         )
@@ -75,9 +72,6 @@ def save_audio(
     format = (format or "wav").lower()
     if format == "mp3":
         mp3_path = output_path.with_suffix(".mp3")
-        wav_path = output_path.with_suffix(".wav")
-        if keep_wav:
-            sf.write(str(wav_path), waveform, sample_rate)
         _encode_mp3(waveform, sample_rate, mp3_path, mp3_bitrate)
         output_path = mp3_path
     else:

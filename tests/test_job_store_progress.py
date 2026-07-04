@@ -58,6 +58,29 @@ def test_build_progress_payload_includes_export_mix_job_kind():
     assert payload["progress"] == 0.42
 
 
+def test_build_progress_payload_includes_export_mix_billing_fields():
+    payload = build_progress_payload(
+        "job-mix-billing",
+        {
+            "status": "completed",
+            "jobKind": "export_mix",
+            "actualDurationSeconds": 121.2,
+            "consumedCredits": 3,
+            "billing": {
+                "requiredCredits": 3,
+                "billableDurationSeconds": 121.2,
+                "pricing": "export_mix_v1",
+            },
+        },
+    )
+    assert payload["status"] == "done"
+    assert payload["actual_duration_seconds"] == 121.2
+    assert payload["consumed_credits"] == 3
+    assert payload["required_credits"] == 3
+    assert payload["billable_duration_seconds"] == 121.2
+    assert payload["billing"]["pricing"] == "export_mix_v1"
+
+
 def test_build_progress_payload_maps_error_status():
     payload = build_progress_payload(
         "job-err",

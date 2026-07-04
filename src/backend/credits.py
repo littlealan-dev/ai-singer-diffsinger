@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 
 # Constants
 CREDIT_DURATION_SECONDS = 30
+EXPORT_MIX_CREDIT_DURATION_SECONDS = 60
 _CREDIT_DURATION_PRECISION_SECONDS = 0.001
 FREE_TIER_CREDIT_AMOUNT = FREE_TIER_MONTHLY_ALLOWANCE
 TRIAL_CREDIT_AMOUNT = FREE_TIER_CREDIT_AMOUNT
@@ -208,6 +209,42 @@ def estimate_credits(duration_seconds: float) -> int:
     ) * _CREDIT_DURATION_PRECISION_SECONDS
     return math.ceil(normalized_duration / CREDIT_DURATION_SECONDS)
 
+
+def estimate_export_mix_credits(duration_seconds: float) -> int:
+    """Calculate export-mix credits: 1 credit per started minute, minimum 1."""
+    if duration_seconds <= 0:
+        raise ValueError("Export mix duration must be positive.")
+    normalized_duration = round(
+        float(duration_seconds) / _CREDIT_DURATION_PRECISION_SECONDS
+    ) * _CREDIT_DURATION_PRECISION_SECONDS
+    return max(1, math.ceil(normalized_duration / EXPORT_MIX_CREDIT_DURATION_SECONDS))
+
+
+def _billing_metadata_fields(
+    *,
+    session_id: Optional[str] = None,
+    job_kind: Optional[str] = None,
+    pricing: Optional[str] = None,
+    pricing_unit_seconds: Optional[int] = None,
+    billable_duration_seconds: Optional[float] = None,
+    billing_reference_job_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    if session_id:
+        fields["sessionId"] = session_id
+    if job_kind:
+        fields["jobKind"] = job_kind
+    if pricing:
+        fields["pricing"] = pricing
+    if pricing_unit_seconds is not None:
+        fields["pricingUnitSeconds"] = int(pricing_unit_seconds)
+    if billable_duration_seconds is not None:
+        fields["billableDurationSeconds"] = float(billable_duration_seconds)
+    if billing_reference_job_id:
+        fields["billingReferenceJobId"] = billing_reference_job_id
+    return fields
+
+
 def reserve_credits(
     uid: str,
     job_id: str,
@@ -215,6 +252,11 @@ def reserve_credits(
     reservation_ttl_seconds: Optional[int] = None,
     *,
     session_id: Optional[str] = None,
+    job_kind: Optional[str] = None,
+    pricing: Optional[str] = None,
+    pricing_unit_seconds: Optional[int] = None,
+    billable_duration_seconds: Optional[float] = None,
+    billing_reference_job_id: Optional[str] = None,
 ) -> ReserveCreditsResult:
     """
     Atomically reserve credits for a job.
@@ -298,18 +340,26 @@ def reserve_credits(
         # Create reservation record
         now = datetime.now(timezone.utc)
         ttl_seconds = reservation_ttl_seconds or DEFAULT_RESERVATION_TTL_SECONDS
+        metadata_fields = _billing_metadata_fields(
+            session_id=session_id,
+            job_kind=job_kind,
+            pricing=pricing,
+            pricing_unit_seconds=pricing_unit_seconds,
+            billable_duration_seconds=billable_duration_seconds,
+            billing_reference_job_id=billing_reference_job_id,
+        )
         transaction.set(res_ref, {
             "jobId": job_id,
-            "sessionId": session_id,
             "userId": uid,
             "estimatedCredits": estimated_credits,
             "createdAt": now,
             "expiresAt": now + timedelta(seconds=ttl_seconds),
-            "status": "pending"
+            "status": "pending",
+            **metadata_fields,
         })
 
         # Log to ledger for audit trail.
-        ledger_ref = db.collection("credit_ledger").document()
+        ledger_ref = db.collection("credit_ledger").document(f"reserve_{job_id}")
         transaction.set(ledger_ref, {
             "userId": uid,
             "type": "reserve",
@@ -318,7 +368,8 @@ def reserve_credits(
             "reservedDelta": estimated_credits,
             "reservedAfter": reserved + estimated_credits,
             "balanceAfter": balance,
-            "createdAt": now
+            "createdAt": now,
+            **metadata_fields,
         })
         
         return ReserveCreditsResult(
@@ -424,7 +475,7 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Set
         })
         
         # Log to ledger (optional but recommended in spec)
-        ledger_ref = db.collection("credit_ledger").document()
+        ledger_ref = db.collection("credit_ledger").document(f"settle_{job_id}")
         transaction.set(ledger_ref, {
             "userId": uid,
             "type": "settle",
@@ -462,6 +513,7 @@ def settle_credits_and_complete_job(
     *,
     output_path: Optional[str],
     audio_url: Optional[str],
+    lossless_output_path: Optional[str] = None,
     message: str = backend_message("job.take_ready"),
 ) -> CompleteJobAndSettleCreditsResult:
     """
@@ -606,6 +658,9 @@ def settle_credits_and_complete_job(
         }
         if output_path:
             job_payload["outputPath"] = output_path
+        if lossless_output_path:
+            job_payload["losslessOutputPath"] = lossless_output_path
+            job_payload["losslessAudioFormat"] = "wav"
         if audio_url:
             job_payload["audioUrl"] = audio_url
         if feedback_prompt_candidate:
@@ -636,6 +691,195 @@ def settle_credits_and_complete_job(
             actual_credits=actual_credits,
             overdrafted=False,
         )
+
+
+def settle_export_mix_credits_and_complete_job(
+    uid: str,
+    job_id: str,
+    session_id: str,
+    billable_duration_seconds: float,
+    *,
+    actual_duration_seconds: Optional[float] = None,
+    output_path: Optional[str],
+    audio_url: Optional[str],
+    mix_metadata: Optional[Dict[str, Any]] = None,
+) -> CompleteJobAndSettleCreditsResult:
+    """Atomically settle export-mix credits and publish the completed mix job."""
+    db = get_firestore_client()
+    user_ref = db.collection("users").document(uid)
+    res_ref = db.collection("credit_reservations").document(job_id)
+    job_ref = db.collection("jobs").document(job_id)
+    actual_credits = estimate_export_mix_credits(billable_duration_seconds)
+
+    @firestore.transactional
+    def _transactional_complete_and_settle_export_mix(transaction):
+        res_snapshot = res_ref.get(transaction=transaction)
+        if not res_snapshot.exists:
+            logger.error("Export-mix complete-and-settle failed: reservation %s not found", job_id)
+            return CompleteJobAndSettleCreditsResult(
+                status="reservation_missing",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+
+        res_data = res_snapshot.to_dict() or {}
+        reservation_status = str(res_data.get("status") or "")
+        if reservation_status == "settled":
+            job_snapshot = job_ref.get(transaction=transaction)
+            job_data = job_snapshot.to_dict() if job_snapshot.exists else {}
+            if (
+                isinstance(job_data, dict)
+                and job_data.get("status") == "completed"
+                and job_data.get("audioUrl") == audio_url
+            ):
+                return CompleteJobAndSettleCreditsResult(
+                    status="already_completed_and_settled",
+                    actual_credits=int(res_data.get("actualCredits", actual_credits) or actual_credits),
+                    overdrafted=False,
+                )
+            return CompleteJobAndSettleCreditsResult(
+                status="reconciliation_required",
+                actual_credits=int(res_data.get("actualCredits", actual_credits) or actual_credits),
+                overdrafted=False,
+            )
+        if reservation_status == "released":
+            return CompleteJobAndSettleCreditsResult(
+                status="already_released",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+        if reservation_status == "reconciliation_required":
+            return CompleteJobAndSettleCreditsResult(
+                status="reconciliation_required",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+        if reservation_status != "pending":
+            return CompleteJobAndSettleCreditsResult(
+                status="reconciliation_required",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+
+        estimated_credits = int(res_data.get("estimatedCredits", 0) or 0)
+        user_snapshot = user_ref.get(transaction=transaction)
+        if not user_snapshot.exists:
+            return CompleteJobAndSettleCreditsResult(
+                status="infra_error",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+
+        user_data = user_snapshot.to_dict() or {}
+        credits = user_data.get("credits", {})
+        balance = int(credits.get("balance", 0) or 0)
+        reserved = int(credits.get("reserved", 0) or 0)
+        new_balance = balance - actual_credits
+        new_reserved = max(0, reserved - estimated_credits)
+        overdrafted = new_balance < 0
+        now = datetime.now(timezone.utc)
+        pricing = str(res_data.get("pricing") or "export_mix_v1")
+        pricing_unit_seconds = int(
+            res_data.get("pricingUnitSeconds") or EXPORT_MIX_CREDIT_DURATION_SECONDS
+        )
+        billing_reference_job_id = res_data.get("billingReferenceJobId")
+        billable_duration = float(
+            res_data.get("billableDurationSeconds") or billable_duration_seconds
+        )
+        metadata_fields = _billing_metadata_fields(
+            session_id=session_id,
+            job_kind="export_mix",
+            pricing=pricing,
+            pricing_unit_seconds=pricing_unit_seconds,
+            billable_duration_seconds=billable_duration,
+            billing_reference_job_id=billing_reference_job_id
+            if isinstance(billing_reference_job_id, str)
+            else None,
+        )
+
+        transaction.update(
+            user_ref,
+            {
+                "credits.balance": new_balance,
+                "credits.reserved": new_reserved,
+                "credits.overdrafted": overdrafted,
+            },
+        )
+        transaction.update(
+            res_ref,
+            {
+                "status": "settled",
+                "actualCredits": actual_credits,
+                "settledAt": now,
+            },
+        )
+        ledger_ref = db.collection("credit_ledger").document(f"settle_{job_id}")
+        transaction.set(
+            ledger_ref,
+            {
+                "userId": uid,
+                "type": "settle",
+                "jobId": job_id,
+                "amount": -actual_credits,
+                "reservedDelta": -estimated_credits,
+                "reservedAfter": new_reserved,
+                "balanceAfter": new_balance,
+                "createdAt": now,
+                **metadata_fields,
+            },
+        )
+        billing_payload = {
+            "pricing": pricing,
+            "pricingUnitSeconds": pricing_unit_seconds,
+            "billingReferenceJobId": billing_reference_job_id,
+            "billableDurationSeconds": billable_duration,
+            "requiredCredits": estimated_credits,
+            "consumedCredits": actual_credits,
+            "reservationStatus": "settled",
+        }
+        job_payload: Dict[str, Any] = {
+            "status": "completed",
+            "step": "done",
+            "progress": 1.0,
+            "jobKind": "export_mix",
+            "actualDurationSeconds": float(
+                actual_duration_seconds
+                if actual_duration_seconds is not None
+                else billable_duration_seconds
+            ),
+            "consumedCredits": actual_credits,
+            "billing": billing_payload,
+            "updatedAt": now,
+        }
+        if output_path:
+            job_payload["outputPath"] = output_path
+        if audio_url:
+            job_payload["audioUrl"] = audio_url
+        if mix_metadata:
+            job_payload["mix"] = dict(mix_metadata)
+        transaction.set(job_ref, job_payload, merge=True)
+
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled",
+            actual_credits=actual_credits,
+            overdrafted=overdrafted,
+        )
+
+    transaction = db.transaction()
+    try:
+        return _transactional_complete_and_settle_export_mix(transaction)
+    except Exception:
+        logger.exception(
+            "Error settling export-mix credits and completing job for user %s, job %s",
+            uid,
+            job_id,
+        )
+        return CompleteJobAndSettleCreditsResult(
+            status="infra_error",
+            actual_credits=actual_credits,
+            overdrafted=False,
+        )
+
 
 def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
     """
@@ -684,7 +928,15 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
         })
 
         # Log to ledger for audit trail.
-        ledger_ref = db.collection("credit_ledger").document()
+        ledger_ref = db.collection("credit_ledger").document(f"release_{job_id}")
+        metadata_fields = _billing_metadata_fields(
+            session_id=res_data.get("sessionId"),
+            job_kind=res_data.get("jobKind"),
+            pricing=res_data.get("pricing"),
+            pricing_unit_seconds=res_data.get("pricingUnitSeconds"),
+            billable_duration_seconds=res_data.get("billableDurationSeconds"),
+            billing_reference_job_id=res_data.get("billingReferenceJobId"),
+        )
         transaction.set(ledger_ref, {
             "userId": uid,
             "type": "release",
@@ -693,7 +945,8 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
             "reservedDelta": -estimated_credits,
             "reservedAfter": max(0, reserved - estimated_credits),
             "balanceAfter": credits.get("balance", 0),
-            "createdAt": datetime.now(timezone.utc)
+            "createdAt": datetime.now(timezone.utc),
+            **metadata_fields,
         })
         
         return ReleaseCreditsResult(status="released")

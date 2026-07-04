@@ -5,14 +5,17 @@ import pytest
 
 from src.backend.credits import (
     CREDIT_DURATION_SECONDS,
+    EXPORT_MIX_CREDIT_DURATION_SECONDS,
     TRIAL_CREDIT_AMOUNT,
     estimate_credits,
+    estimate_export_mix_credits,
     get_or_create_credits,
     mark_reservation_reconciliation_required,
     release_credits,
     reserve_credits,
     settle_credits,
     settle_credits_and_complete_job,
+    settle_export_mix_credits_and_complete_job,
 )
 from src.backend.feedback import (
     FeedbackError,
@@ -113,6 +116,16 @@ def test_estimate_credits():
     assert CREDIT_DURATION_SECONDS == 30
 
 
+def test_estimate_export_mix_credits():
+    with pytest.raises(ValueError):
+        estimate_export_mix_credits(0)
+    assert estimate_export_mix_credits(0.1) == 1
+    assert estimate_export_mix_credits(60.0) == 1
+    assert estimate_export_mix_credits(60.1) == 2
+    assert estimate_export_mix_credits(600.0) == 10
+    assert EXPORT_MIX_CREDIT_DURATION_SECONDS == 60
+
+
 def test_reserve_credits_success():
     uid = "test-user-2"
     get_or_create_credits(uid, "test2@example.com")
@@ -126,6 +139,35 @@ def test_reserve_credits_success():
     reservation = get_firestore_client().collection("credit_reservations").document("job-1").get().to_dict()
     assert reservation["jobId"] == "job-1"
     assert reservation["sessionId"] == "session-1"
+
+
+def test_reserve_credits_stores_export_mix_metadata():
+    uid = "test-export-reserve"
+    get_or_create_credits(uid, "export-reserve@example.com")
+
+    result = reserve_credits(
+        uid,
+        "export-job-1",
+        3,
+        session_id="session-export",
+        job_kind="export_mix",
+        pricing="export_mix_v1",
+        pricing_unit_seconds=60,
+        billable_duration_seconds=121.2,
+        billing_reference_job_id="source-job-1",
+    )
+
+    assert result.status == "reserved"
+    db = get_firestore_client()
+    reservation = db.collection("credit_reservations").document("export-job-1").get().to_dict()
+    assert reservation["jobKind"] == "export_mix"
+    assert reservation["pricing"] == "export_mix_v1"
+    assert reservation["pricingUnitSeconds"] == 60
+    assert reservation["billableDurationSeconds"] == 121.2
+    assert reservation["billingReferenceJobId"] == "source-job-1"
+    ledger = db.collection("credit_ledger").document("reserve_export-job-1").get().to_dict()
+    assert ledger["jobKind"] == "export_mix"
+    assert ledger["pricingUnitSeconds"] == 60
 
 
 def test_reserve_credits_insufficient():
@@ -177,6 +219,36 @@ def test_release_credits():
     credits = get_or_create_credits(uid, "test6@example.com")
     assert credits.reserved == 0
     assert credits.balance == TRIAL_CREDIT_AMOUNT
+
+
+def test_release_credits_preserves_export_mix_ledger_metadata():
+    uid = "test-export-release"
+    get_or_create_credits(uid, "export-release@example.com")
+    reserve_credits(
+        uid,
+        "export-job-release",
+        2,
+        session_id="session-export",
+        job_kind="export_mix",
+        pricing="export_mix_v1",
+        pricing_unit_seconds=60,
+        billable_duration_seconds=90.0,
+        billing_reference_job_id="source-job-release",
+    )
+
+    result = release_credits(uid, "export-job-release")
+
+    assert result.status == "released"
+    release_ledger = (
+        get_firestore_client()
+        .collection("credit_ledger")
+        .document("release_export-job-release")
+        .get()
+        .to_dict()
+    )
+    assert release_ledger["jobKind"] == "export_mix"
+    assert release_ledger["pricing"] == "export_mix_v1"
+    assert release_ledger["billableDurationSeconds"] == 90.0
 
 
 def test_reserve_credits_duplicate_is_idempotent():
@@ -246,6 +318,7 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
         61.0,
         output_path="sessions/test/audio.mp3",
         audio_url="/sessions/session-11/audio?file=audio.mp3",
+        lossless_output_path="sessions/test/source.wav",
     )
 
     assert result.status == "completed_and_settled"
@@ -258,6 +331,8 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     job = db.collection("jobs").document(job_id).get().to_dict()
     assert job["status"] == "completed"
     assert job["audioUrl"] == "/sessions/session-11/audio?file=audio.mp3"
+    assert job["losslessOutputPath"] == "sessions/test/source.wav"
+    assert job["losslessAudioFormat"] == "wav"
     assert job["actualDurationSeconds"] == 61.0
     assert job["consumedCredits"] == 3
 
@@ -279,6 +354,62 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     )
 
     assert retry_result.status == "already_completed_and_settled"
+
+
+def test_settle_export_mix_credits_and_complete_job_uses_minute_rate():
+    uid = "export-settle-user"
+    email = "export-settle@example.com"
+    session_id = "session-export-settle"
+    job_id = "export-settle-job"
+    db = get_firestore_client()
+
+    get_or_create_credits(uid, email)
+    reserve_credits(
+        uid,
+        job_id,
+        2,
+        session_id=session_id,
+        job_kind="export_mix",
+        pricing="export_mix_v1",
+        pricing_unit_seconds=60,
+        billable_duration_seconds=61.0,
+        billing_reference_job_id="source-export-settle",
+    )
+    db.collection("jobs").document(job_id).set(
+        {
+            "userId": uid,
+            "sessionId": session_id,
+            "status": "queued",
+            "jobKind": "export_mix",
+        }
+    )
+
+    result = settle_export_mix_credits_and_complete_job(
+        uid,
+        job_id,
+        session_id,
+        61.0,
+        actual_duration_seconds=58.5,
+        output_path="sessions/test/mix.wav",
+        audio_url=f"/sessions/{session_id}/audio?file=mix.wav",
+        mix_metadata={"format": "wav", "trackCount": 2},
+    )
+
+    assert result.status == "completed_and_settled"
+    assert result.actual_credits == 2
+    credits = get_or_create_credits(uid, email)
+    assert credits.balance == TRIAL_CREDIT_AMOUNT - 2
+    assert credits.reserved == 0
+    job = db.collection("jobs").document(job_id).get().to_dict()
+    assert job["status"] == "completed"
+    assert job["actualDurationSeconds"] == 58.5
+    assert job["consumedCredits"] == 2
+    assert job["billing"]["pricing"] == "export_mix_v1"
+    assert job["billing"]["billingReferenceJobId"] == "source-export-settle"
+    assert job["mix"]["trackCount"] == 2
+    settle_ledger = db.collection("credit_ledger").document(f"settle_{job_id}").get().to_dict()
+    assert settle_ledger["jobKind"] == "export_mix"
+    assert settle_ledger["amount"] == -2
 
 
 def test_first_completed_job_marks_feedback_candidate(monkeypatch):

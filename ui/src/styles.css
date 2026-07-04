@@ -765,8 +765,31 @@ body.legal-active #root {
   gap: 10px;
 }
 
+.message-box-content {
+  flex: 1;
+}
+
 .message-box svg {
   flex-shrink: 0;
+}
+
+.message-box-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.message-box-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .message-box.info {
@@ -2351,6 +2374,13 @@ img.voice-picker-option-avatar {
   margin: 4px 0 0;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.multitrack-export-credit-estimate {
+  display: inline-flex;
+  margin-left: 10px;
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
 .multitrack-transport {
