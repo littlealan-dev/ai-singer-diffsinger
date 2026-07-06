@@ -1,9 +1,13 @@
 import {
+  cancelTopupCheckoutSession as cancelTopupCheckoutSessionRequest,
   createCheckoutSession as createCheckoutSessionRequest,
+  createEmbeddedCheckoutSession,
   createPortalSession,
   createTopupCheckoutSession,
   syncBillingSubscription as syncBillingSubscriptionRequest,
   syncCheckoutSession as syncCheckoutSessionRequest,
+  syncTopupCheckoutSession as syncTopupCheckoutSessionRequest,
+  type EmbeddedCheckoutResponse,
 } from "../api";
 import type { BillingPlanKey } from "./plans";
 
@@ -19,6 +23,14 @@ export async function startTopupCheckout(): Promise<string> {
   return url;
 }
 
+export async function startEmbeddedPlanCheckout(planKey: BillingPlanKey): Promise<EmbeddedCheckoutResponse> {
+  return createEmbeddedCheckoutSession({ checkoutType: "subscription", planKey });
+}
+
+export async function startEmbeddedTopupCheckout(): Promise<EmbeddedCheckoutResponse> {
+  return createEmbeddedCheckoutSession({ checkoutType: "topup", packKey: "topup_15" });
+}
+
 export async function startBillingPortal(): Promise<string> {
   const { url } = await createPortalSession();
   storePendingBillingPortalSync();
@@ -27,6 +39,14 @@ export async function startBillingPortal(): Promise<string> {
 
 export async function syncCheckoutSession(sessionId: string): Promise<void> {
   await syncCheckoutSessionRequest(sessionId);
+}
+
+export async function syncTopupCheckoutSession(sessionId: string): Promise<void> {
+  await syncTopupCheckoutSessionRequest(sessionId);
+}
+
+export async function cancelTopupCheckoutSession(sessionId: string): Promise<void> {
+  await cancelTopupCheckoutSessionRequest(sessionId);
 }
 
 export async function syncBillingSubscription(): Promise<void> {

@@ -205,6 +205,23 @@ export type TopupCheckoutResponse = {
   maxQuantity: number;
 };
 
+export type EmbeddedCheckoutRequest =
+  | {
+      checkoutType: "topup";
+      packKey: "topup_15";
+    }
+  | {
+      checkoutType: "subscription";
+      planKey: string;
+    };
+
+export type EmbeddedCheckoutResponse = {
+  checkoutSessionId: string;
+  clientSecret: string;
+  checkoutType: "topup" | "subscription";
+  maxQuantity?: number;
+};
+
 export type BillingPortalResponse = {
   url: string;
 };
@@ -219,6 +236,23 @@ export type BillingSubscriptionSyncResponse = {
   synced: boolean;
   status: string;
   activePlanKey?: string | null;
+};
+
+export type TopupCheckoutSyncResponse = {
+  synced: boolean;
+  status: string;
+  topupCredits?: {
+    totalRemaining: number;
+    totalReserved: number;
+    totalAvailable: number;
+    activePackCount: number;
+  };
+};
+
+export type TopupCheckoutCancelResponse = {
+  cancelled: boolean;
+  status: string;
+  stripeExpired?: boolean;
 };
 
 export type VoicebankListResponse = {
@@ -461,8 +495,34 @@ export async function createTopupCheckoutSession(packKey = "topup_15"): Promise<
   });
 }
 
+export async function createEmbeddedCheckoutSession(
+  body: EmbeddedCheckoutRequest
+): Promise<EmbeddedCheckoutResponse> {
+  return request("/billing/embedded-checkout-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function syncCheckoutSession(sessionId: string): Promise<BillingCheckoutSyncResponse> {
   return request("/billing/checkout-session/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+}
+
+export async function syncTopupCheckoutSession(sessionId: string): Promise<TopupCheckoutSyncResponse> {
+  return request("/billing/topup-checkout-session/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+}
+
+export async function cancelTopupCheckoutSession(sessionId: string): Promise<TopupCheckoutCancelResponse> {
+  return request("/billing/topup-checkout-session/cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionId }),

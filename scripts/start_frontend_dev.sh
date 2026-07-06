@@ -6,6 +6,21 @@ UI_DIR="${ROOT_DIR}/ui"
 LOG_DIR="${ROOT_DIR}/logs"
 PID_FILE="${LOG_DIR}/frontend_dev.pid"
 LOG_FILE="${LOG_DIR}/frontend_dev.log"
+ENV_FILE="${ROOT_DIR}/env/dev.env"
+LOCAL_ENV_FILE="${ROOT_DIR}/env/local.env"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  set +a
+fi
+if [[ -f "${LOCAL_ENV_FILE}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "${LOCAL_ENV_FILE}"
+  set +a
+fi
 
 : "${FRONTEND_HOST:=0.0.0.0}"
 : "${FRONTEND_PORT:=5173}"

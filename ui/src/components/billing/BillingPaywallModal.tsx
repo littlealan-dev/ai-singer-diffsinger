@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import clsx from "clsx";
 import { Check, Loader2, Zap, X } from "lucide-react";
 import {
+  cancelTopupCheckoutSession,
   startBillingPortal,
-  startCheckout,
-  startTopupCheckout,
+  startEmbeddedPlanCheckout,
+  startEmbeddedTopupCheckout,
+  syncCheckoutSession,
+  syncTopupCheckoutSession,
 } from "../../billing/api";
+import type { EmbeddedCheckoutResponse } from "../../api";
+import { initEmbeddedStripeCheckout } from "../../billing/embeddedStripe";
 import {
   getDisplayPlans,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
@@ -15,6 +20,7 @@ import {
   type BillingPlanKey,
   type DisplayPlan,
 } from "../../billing/plans";
+import { logAnalyticsEvent } from "../../firebase";
 import type { BillingState } from "../../hooks/useBillingState";
 import "./BillingPaywallModal.css";
 
@@ -37,9 +43,23 @@ type BillingPaywallModalProps = {
   billing: BillingState;
   detail?: string | null;
   onClose: () => void;
+  onConfirmed?: (message: string) => void;
 };
 
 const paidStatuses = new Set(["active", "trialing", "past_due"]);
+const STRIPE_PUBLISHABLE_KEY = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim() || "";
+const PAYWALL_LAYOUT_VARIANT_STORAGE_KEY = "sightsingerBillingPaywallLayoutVariant";
+
+type CheckoutViewState = "plans" | "creating_checkout" | "embedded_checkout" | "confirming" | "failed";
+type PaywallLayoutVariant = "stacked_topup" | "inline_topup";
+
+type ActiveEmbeddedCheckout = EmbeddedCheckoutResponse & {
+  planKey?: BillingPlanKey;
+  packKey?: "topup_15";
+  previousAvailableCredits: number;
+  previousTopupActivePackCount: number;
+  previousActivePlanKey: BillingPlanKey;
+};
 
 export function BillingPaywallModal({
   isOpen,
@@ -47,19 +67,216 @@ export function BillingPaywallModal({
   billing,
   detail,
   onClose,
+  onConfirmed,
 }: BillingPaywallModalProps) {
   const [interval, setInterval] = useState<BillingInterval>("annual");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checkoutView, setCheckoutView] = useState<CheckoutViewState>("plans");
+  const [activeEmbeddedCheckout, setActiveEmbeddedCheckout] = useState<ActiveEmbeddedCheckout | null>(null);
+  const embeddedCheckoutContainerRef = useRef<HTMLDivElement>(null);
+  const activeEmbeddedCheckoutRef = useRef<ActiveEmbeddedCheckout | null>(null);
+  const embeddedCheckoutRef = useRef<{ destroy: () => void } | null>(null);
   const plans = useMemo(() => getDisplayPlans(interval), [interval]);
+  const paywallLayoutVariant = useMemo(() => getBillingPaywallLayoutVariant(), []);
   const activePaid = billing.activePlanKey !== "free" && paidStatuses.has(billing.stripeSubscriptionStatus || "active");
   const copy = getTriggerCopy(trigger, billing);
   const hardBlock = isHardBlockTrigger(trigger);
 
+  const destroyEmbeddedCheckout = useCallback(() => {
+    embeddedCheckoutRef.current?.destroy();
+    embeddedCheckoutRef.current = null;
+  }, []);
+
+  const confirmCheckout = useCallback(
+    (checkout: ActiveEmbeddedCheckout) => {
+      destroyEmbeddedCheckout();
+      setActiveEmbeddedCheckout(null);
+      setCheckoutView("plans");
+      setBusyAction(null);
+      setError(null);
+      const message =
+        checkout.checkoutType === "topup"
+          ? "Credits added. You can continue rendering."
+          : "Plan updated. You can continue rendering.";
+      logAnalyticsEvent("billing_checkout_confirmed", {
+        checkout_type: checkout.checkoutType,
+        plan_key: checkout.planKey,
+        pack_key: checkout.packKey,
+        ui_mode: "embedded",
+      });
+      onConfirmed?.(message);
+      onClose();
+    },
+    [destroyEmbeddedCheckout, onClose, onConfirmed]
+  );
+
+  const retrySync = useCallback(async (checkout: ActiveEmbeddedCheckout, surfaceError = true) => {
+    try {
+      if (checkout.checkoutType === "topup") {
+        await syncTopupCheckoutSession(checkout.checkoutSessionId);
+      } else {
+        await syncCheckoutSession(checkout.checkoutSessionId);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not confirm checkout yet.";
+      if (surfaceError && activeEmbeddedCheckoutRef.current?.checkoutSessionId === checkout.checkoutSessionId) {
+        setError(message);
+      }
+    }
+  }, []);
+
+  const cancelPendingTopupCheckout = useCallback(async (checkout: ActiveEmbeddedCheckout | null) => {
+    if (!checkout || checkout.checkoutType !== "topup") return;
+    try {
+      await cancelTopupCheckoutSession(checkout.checkoutSessionId);
+      logAnalyticsEvent("billing_checkout_cancelled", {
+        checkout_type: "topup",
+        pack_key: checkout.packKey,
+        ui_mode: "embedded",
+      });
+    } catch (err) {
+      logAnalyticsEvent("billing_checkout_cancel_failed", {
+        checkout_type: "topup",
+        pack_key: checkout.packKey,
+        ui_mode: "embedded",
+        reason: err instanceof Error ? err.message : "unknown",
+      });
+    }
+  }, []);
+
+  const handleEmbeddedCheckoutComplete = useCallback(
+    (checkout: ActiveEmbeddedCheckout) => {
+      setCheckoutView("confirming");
+      setError(null);
+      logAnalyticsEvent("billing_checkout_complete_client", {
+        checkout_type: checkout.checkoutType,
+        plan_key: checkout.planKey,
+        pack_key: checkout.packKey,
+        ui_mode: "embedded",
+      });
+      void retrySync(checkout, false);
+    },
+    [retrySync]
+  );
+
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
-  }, [isOpen, trigger]);
+    setCheckoutView("plans");
+    setActiveEmbeddedCheckout(null);
+    setBusyAction(null);
+    destroyEmbeddedCheckout();
+  }, [destroyEmbeddedCheckout, isOpen, trigger]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    logAnalyticsEvent("billing_paywall_view", {
+      trigger,
+      layout_variant: paywallLayoutVariant,
+    });
+  }, [isOpen, paywallLayoutVariant, trigger]);
+
+  useEffect(() => {
+    activeEmbeddedCheckoutRef.current = activeEmbeddedCheckout;
+  }, [activeEmbeddedCheckout]);
+
+  useEffect(() => {
+    return () => {
+      destroyEmbeddedCheckout();
+    };
+  }, [destroyEmbeddedCheckout]);
+
+  useEffect(() => {
+    if (checkoutView !== "embedded_checkout" || !activeEmbeddedCheckout) return;
+    const container = embeddedCheckoutContainerRef.current;
+    if (!container) return;
+    let cancelled = false;
+    destroyEmbeddedCheckout();
+    void initEmbeddedStripeCheckout(
+      STRIPE_PUBLISHABLE_KEY,
+      activeEmbeddedCheckout.clientSecret,
+      () => handleEmbeddedCheckoutComplete(activeEmbeddedCheckout)
+    )
+      .then((checkout) => {
+        if (cancelled) {
+          checkout.destroy();
+          return;
+        }
+        embeddedCheckoutRef.current = checkout;
+        checkout.mount(container);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Could not load Stripe checkout.");
+        setCheckoutView("failed");
+        setBusyAction(null);
+        void cancelPendingTopupCheckout(activeEmbeddedCheckout);
+        logAnalyticsEvent("billing_checkout_failed", {
+          checkout_type: activeEmbeddedCheckout.checkoutType,
+          plan_key: activeEmbeddedCheckout.planKey,
+          pack_key: activeEmbeddedCheckout.packKey,
+          reason: "stripe_mount_failed",
+          ui_mode: "embedded",
+        });
+      });
+    return () => {
+      cancelled = true;
+      destroyEmbeddedCheckout();
+    };
+  }, [activeEmbeddedCheckout, cancelPendingTopupCheckout, checkoutView, destroyEmbeddedCheckout, handleEmbeddedCheckoutComplete]);
+
+  useEffect(() => {
+    if (checkoutView !== "confirming" || !activeEmbeddedCheckout) return;
+    if (
+      activeEmbeddedCheckout.checkoutType === "topup" &&
+      (billing.availableCredits > activeEmbeddedCheckout.previousAvailableCredits ||
+        billing.topupActivePackCount > activeEmbeddedCheckout.previousTopupActivePackCount)
+    ) {
+      confirmCheckout(activeEmbeddedCheckout);
+      return;
+    }
+    if (
+      activeEmbeddedCheckout.checkoutType === "subscription" &&
+      (billing.activePlanKey === activeEmbeddedCheckout.planKey ||
+        (billing.activePlanKey !== activeEmbeddedCheckout.previousActivePlanKey &&
+          paidStatuses.has(billing.stripeSubscriptionStatus || "")))
+    ) {
+      confirmCheckout(activeEmbeddedCheckout);
+    }
+  }, [activeEmbeddedCheckout, billing, checkoutView, confirmCheckout]);
+
+  useEffect(() => {
+    if (checkoutView !== "confirming" || !activeEmbeddedCheckout) return;
+    const retryDelays = [1000, 2000, 4000, 8000, 15000];
+    let cancelled = false;
+    const runRetries = async () => {
+      for (const delay of retryDelays) {
+        await sleep(delay);
+        if (cancelled || activeEmbeddedCheckoutRef.current?.checkoutSessionId !== activeEmbeddedCheckout.checkoutSessionId) {
+          return;
+        }
+        await retrySync(activeEmbeddedCheckout, false);
+      }
+      if (!cancelled && activeEmbeddedCheckoutRef.current?.checkoutSessionId === activeEmbeddedCheckout.checkoutSessionId) {
+        setError(
+          activeEmbeddedCheckout.checkoutType === "topup"
+            ? "Payment received. We are still confirming your credits. Keep this window open or try again in a moment."
+            : "Payment received. We are still activating your plan. Keep this window open or try again in a moment."
+        );
+        logAnalyticsEvent("billing_checkout_timeout", {
+          checkout_type: activeEmbeddedCheckout.checkoutType,
+          plan_key: activeEmbeddedCheckout.planKey,
+          pack_key: activeEmbeddedCheckout.packKey,
+          ui_mode: "embedded",
+        });
+      }
+    };
+    void runRetries();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeEmbeddedCheckout, checkoutView, retrySync]);
 
   if (!isOpen) return null;
 
@@ -67,11 +284,32 @@ export function BillingPaywallModal({
     if (!isPaidPlanKey(planKey)) return;
     setBusyAction(planKey);
     setError(null);
+    setCheckoutView("creating_checkout");
     try {
-      const url = await startCheckout(planKey);
-      window.location.assign(url);
+      logAnalyticsEvent("billing_checkout_start", {
+        checkout_type: "subscription",
+        plan_key: planKey,
+        trigger,
+        ui_mode: "embedded",
+      });
+      const checkout = await startEmbeddedPlanCheckout(planKey);
+      setActiveEmbeddedCheckout({
+        ...checkout,
+        planKey,
+        previousAvailableCredits: billing.availableCredits,
+        previousTopupActivePackCount: billing.topupActivePackCount,
+        previousActivePlanKey: billing.activePlanKey,
+      });
+      setCheckoutView("embedded_checkout");
+      logAnalyticsEvent("billing_checkout_embedded_mount", {
+        checkout_type: "subscription",
+        plan_key: planKey,
+        trigger,
+        ui_mode: "embedded",
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start Checkout.");
+      setCheckoutView("failed");
       setBusyAction(null);
     }
   };
@@ -91,29 +329,67 @@ export function BillingPaywallModal({
   const handleTopupCheckout = async () => {
     setBusyAction("topup");
     setError(null);
+    setCheckoutView("creating_checkout");
     try {
-      const url = await startTopupCheckout();
-      window.location.assign(url);
+      logAnalyticsEvent("billing_checkout_start", {
+        checkout_type: "topup",
+        pack_key: "topup_15",
+        trigger,
+        ui_mode: "embedded",
+      });
+      const checkout = await startEmbeddedTopupCheckout();
+      setActiveEmbeddedCheckout({
+        ...checkout,
+        packKey: "topup_15",
+        previousAvailableCredits: billing.availableCredits,
+        previousTopupActivePackCount: billing.topupActivePackCount,
+        previousActivePlanKey: billing.activePlanKey,
+      });
+      setCheckoutView("embedded_checkout");
+      logAnalyticsEvent("billing_checkout_embedded_mount", {
+        checkout_type: "topup",
+        pack_key: "topup_15",
+        trigger,
+        ui_mode: "embedded",
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start credit pack checkout.");
+      setCheckoutView("failed");
       setBusyAction(null);
     }
   };
 
+  const releasePendingTopupIfNeeded = () => {
+    if (checkoutView === "confirming") return;
+    void cancelPendingTopupCheckout(activeEmbeddedCheckoutRef.current);
+  };
+
+  const handleClose = () => {
+    releasePendingTopupIfNeeded();
+    onClose();
+  };
+
   const handleBackdropClose = () => {
-    if (!hardBlock) onClose();
+    if (!hardBlock) handleClose();
   };
 
   return (
     <div className="billing-modal-overlay" role="presentation" onClick={handleBackdropClose}>
       <section
-        className="billing-modal"
+        className={clsx(
+          "billing-modal",
+          `layout-${paywallLayoutVariant}`,
+          (checkoutView === "creating_checkout" ||
+            checkoutView === "embedded_checkout" ||
+            checkoutView === "confirming") &&
+            "checkout-expanded"
+        )}
         role="dialog"
         aria-modal="true"
         aria-labelledby="billing-modal-title"
         onClick={(event) => event.stopPropagation()}
       >
-        <button className="billing-modal-close" type="button" onClick={onClose} aria-label="Close">
+        <button className="billing-modal-close" type="button" onClick={handleClose} aria-label="Close">
           <X size={18} />
         </button>
         <header className="billing-modal-header">
@@ -152,71 +428,103 @@ export function BillingPaywallModal({
           )}
         </header>
 
-        <div className="billing-interval-toggle" role="group" aria-label="Billing interval">
-          <button
-            type="button"
-            aria-pressed={interval === "annual"}
-            className={clsx(interval === "annual" && "active")}
-            onClick={() => setInterval("annual")}
-          >
-            Annual
-          </button>
-          <button
-            type="button"
-            aria-pressed={interval === "monthly"}
-            className={clsx(interval === "monthly" && "active")}
-            onClick={() => setInterval("monthly")}
-          >
-            Monthly
-          </button>
-        </div>
+        {checkoutView === "creating_checkout" || checkoutView === "embedded_checkout" || checkoutView === "confirming" ? (
+          <EmbeddedCheckoutPanel
+            view={checkoutView}
+            checkout={activeEmbeddedCheckout}
+            containerRef={embeddedCheckoutContainerRef}
+            onRetry={() => {
+              if (activeEmbeddedCheckout) void retrySync(activeEmbeddedCheckout, true);
+            }}
+            onBack={() => {
+              releasePendingTopupIfNeeded();
+              destroyEmbeddedCheckout();
+              setCheckoutView("plans");
+              setActiveEmbeddedCheckout(null);
+              setBusyAction(null);
+              setError(null);
+            }}
+          />
+        ) : (
+          <>
+            <div className="billing-interval-toggle" role="group" aria-label="Billing interval">
+              <button
+                type="button"
+                aria-pressed={interval === "annual"}
+                className={clsx(interval === "annual" && "active")}
+                onClick={() => setInterval("annual")}
+              >
+                Annual
+              </button>
+              <button
+                type="button"
+                aria-pressed={interval === "monthly"}
+                className={clsx(interval === "monthly" && "active")}
+                onClick={() => setInterval("monthly")}
+              >
+                Monthly
+              </button>
+            </div>
 
-        <div className="billing-plan-grid">
-          {plans.map((plan) => (
-            <PlanCard
-              key={plan.cardKey}
-              plan={plan}
-              billing={billing}
-              activePaid={activePaid}
-              busyAction={busyAction}
-              checkoutDisabled={billing.loading || Boolean(billing.error)}
-              onCheckout={handleCheckout}
-              onPortal={handlePortal}
-            />
-          ))}
-        </div>
-        <TopupCard
-          billing={billing}
-          busy={busyAction === "topup"}
-          emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
-          disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
-          onCheckout={handleTopupCheckout}
-        />
-        <div className="billing-shared-features" aria-label="Included in every plan">
-          <h3>Included in every plan</h3>
-          <ul>
-            {INCLUDED_IN_EVERY_PLAN_FEATURES.map((feature) => (
-              <li key={feature}>
-                <Check size={14} aria-hidden="true" />
-                <span>{feature}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+            <div className={clsx("billing-plan-grid", paywallLayoutVariant === "inline_topup" && "with-topup")}>
+              {plans.map((plan) => (
+                <PlanCard
+                  key={plan.cardKey}
+                  plan={plan}
+                  billing={billing}
+                  activePaid={activePaid}
+                  busyAction={busyAction}
+                  checkoutDisabled={billing.loading || Boolean(billing.error)}
+                  onCheckout={handleCheckout}
+                  onPortal={handlePortal}
+                />
+              ))}
+              {paywallLayoutVariant === "inline_topup" ? (
+                <TopupPlanCard
+                  billing={billing}
+                  busy={busyAction === "topup"}
+                  emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
+                  disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
+                  onCheckout={handleTopupCheckout}
+                />
+              ) : null}
+            </div>
+            {paywallLayoutVariant === "stacked_topup" ? (
+              <TopupCard
+                billing={billing}
+                busy={busyAction === "topup"}
+                emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
+                disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
+                onCheckout={handleTopupCheckout}
+              />
+            ) : null}
+            <div className="billing-shared-features" aria-label="Included in every plan">
+              <h3>Included in every plan</h3>
+              <ul>
+                {INCLUDED_IN_EVERY_PLAN_FEATURES.map((feature) => (
+                  <li key={feature}>
+                    <Check size={14} aria-hidden="true" />
+                    <span>{feature}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
 
-        <footer className="billing-modal-footer">
-          {billing.stripeCustomerId || activePaid ? (
-            <button type="button" onClick={handlePortal} disabled={busyAction === "portal"}>
-              {busyAction === "portal" ? "Opening Billing..." : "Manage Billing"}
-            </button>
-          ) : null}
-          <a href="/legal/terms" target="_blank" rel="noopener noreferrer">
-            Terms
-          </a>
-          <a href="/legal/privacy" target="_blank" rel="noopener noreferrer">
-            Privacy
-          </a>
-        </footer>
+            <footer className="billing-modal-footer">
+              {billing.stripeCustomerId || activePaid ? (
+                <button type="button" onClick={handlePortal} disabled={busyAction === "portal"}>
+                  {busyAction === "portal" ? "Opening Billing..." : "Manage Billing"}
+                </button>
+              ) : null}
+              <a href="/legal/terms" target="_blank" rel="noopener noreferrer">
+                Terms
+              </a>
+              <a href="/legal/privacy" target="_blank" rel="noopener noreferrer">
+                Privacy
+              </a>
+            </footer>
+          </>
+        )}
       </section>
     </div>
   );
@@ -295,7 +603,7 @@ function PlanCard({
             onClick={() => onCheckout(plan.planKey)}
             disabled={checkoutDisabled || busy}
           >
-            {busy ? "Redirecting to Checkout..." : `Upgrade to ${plan.name}`}
+            {busy ? "Opening secure checkout..." : `Upgrade to ${plan.name}`}
           </button>
         ) : activePaid ? null : (
           <span className="billing-current-plan">Current Plan</span>
@@ -321,12 +629,21 @@ function TopupCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCar
         <Zap size={18} />
       </div>
       <div className="billing-topup-copy">
-        <h3>Need more credits right now?</h3>
+        <h3>Credit Pack</h3>
+        <div className="billing-topup-price-line">
+          <span className="billing-topup-price">$5</span>
+          <span className="billing-topup-price-suffix">/ pack</span>
+          <span className="billing-topup-credit-amount">15 credits</span>
+        </div>
         <p>
-          Credit Pack - 15 credits for $5. Use alongside your plan. Expires in 180 days.
-          Non-refundable.
+          Add credits without a monthly commitment. Use alongside your monthly plan for one-off exports or extra renders.
         </p>
-        <span>{remainingSlots > 0 ? `You can buy up to ${remainingSlots} more active pack${remainingSlots === 1 ? "" : "s"}.` : "Maximum 3 active packs reached."}</span>
+        <span>
+          Expires in 180 days. Non-refundable.{" "}
+          {remainingSlots > 0
+            ? `You can buy up to ${remainingSlots} more active pack${remainingSlots === 1 ? "" : "s"}.`
+            : "Maximum 3 active packs reached."}
+        </span>
       </div>
       <button
         type="button"
@@ -337,6 +654,111 @@ function TopupCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCar
       >
         {busy ? "Opening Checkout..." : "Buy Credit Pack"}
       </button>
+    </section>
+  );
+}
+
+function TopupPlanCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
+  const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
+  return (
+    <article className={clsx("billing-plan-card", "topup", "billing-topup-plan-card", emphasized && "emphasized")}>
+      <div className="billing-plan-badge topup">One-off</div>
+      <div className="billing-plan-head">
+        <h3>Credit Pack</h3>
+        <p>Add credits without a monthly commitment.</p>
+      </div>
+      <div className="billing-plan-price">
+        <span className="billing-price-main">$5</span>
+        <span className="billing-price-suffix">/ pack</span>
+      </div>
+      <p className="billing-secondary-price">
+        <span>One-time purchase</span>
+      </p>
+      <div className="billing-credit-line">
+        <div>
+          <strong>15 credits</strong>
+          <span> per pack</span>
+        </div>
+        <span>Expires in 180 days. Non-refundable.</span>
+      </div>
+      <ul className="billing-feature-list">
+        <li>
+          <Check size={15} aria-hidden="true" />
+          <span>Use alongside your monthly plan</span>
+        </li>
+        <li>
+          <Check size={15} aria-hidden="true" />
+          <span>Good for one-off exports or extra renders</span>
+        </li>
+        <li>
+          <Check size={15} aria-hidden="true" />
+          <span>
+            {remainingSlots > 0
+              ? `You can buy up to ${remainingSlots} more active pack${remainingSlots === 1 ? "" : "s"}`
+              : "Maximum 3 active packs reached"}
+          </span>
+        </li>
+      </ul>
+      <div className="billing-plan-action">
+        <button
+          type="button"
+          className="billing-plan-button"
+          onClick={onCheckout}
+          disabled={disabled || busy}
+          title={billing.topupActivePackCount >= 3 ? "Maximum 3 active packs" : undefined}
+        >
+          {busy ? "Opening Checkout..." : "Buy Credit Pack"}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+type EmbeddedCheckoutPanelProps = {
+  view: Exclude<CheckoutViewState, "plans" | "failed">;
+  checkout: ActiveEmbeddedCheckout | null;
+  containerRef: RefObject<HTMLDivElement>;
+  onRetry: () => void;
+  onBack: () => void;
+};
+
+function EmbeddedCheckoutPanel({
+  view,
+  checkout,
+  containerRef,
+  onRetry,
+  onBack,
+}: EmbeddedCheckoutPanelProps) {
+  const isTopup = checkout?.checkoutType === "topup";
+  if (view === "creating_checkout") {
+    return (
+      <section className="billing-embedded-panel" aria-live="polite">
+        <Loader2 size={24} className="billing-spinner" />
+        <h3>Opening secure checkout...</h3>
+      </section>
+    );
+  }
+  if (view === "confirming") {
+    return (
+      <section className="billing-embedded-panel" aria-live="polite">
+        <Loader2 size={24} className="billing-spinner" />
+        <h3>{isTopup ? "Confirming your credits..." : "Activating your plan..."}</h3>
+        <p>Keep this window open while Stripe and SightSinger finish syncing.</p>
+        <div className="billing-embedded-actions">
+          <button type="button" onClick={onRetry}>
+            Retry sync
+          </button>
+          <button type="button" className="secondary" onClick={onBack}>
+            Back to plans
+          </button>
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section className="billing-embedded-panel embedded" aria-label="Secure Stripe checkout">
+      <h3>Complete checkout</h3>
+      <div className="billing-embedded-checkout" ref={containerRef} />
     </section>
   );
 }
@@ -410,6 +832,10 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function hasBillingPaymentIssue(billing: BillingState): boolean {
   if (["past_due", "unpaid", "paused"].includes(billing.stripeSubscriptionStatus || "")) {
     return true;
@@ -430,4 +856,31 @@ function isHardBlockTrigger(trigger: PaywallTrigger): boolean {
     trigger === "selection_blocked" ||
     trigger === "drag_blocked"
   );
+}
+
+function getBillingPaywallLayoutVariant(): PaywallLayoutVariant {
+  const fallback: PaywallLayoutVariant = "stacked_topup";
+  if (typeof window === "undefined") return fallback;
+  try {
+    const override = new URL(window.location.href).searchParams.get("billingPaywallVariant");
+    if (override === "inline" || override === "inline_topup") {
+      window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, "inline_topup");
+      return "inline_topup";
+    }
+    if (override === "stacked" || override === "stacked_topup") {
+      window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, "stacked_topup");
+      return "stacked_topup";
+    }
+
+    const existing = window.localStorage.getItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY);
+    if (existing === "inline_topup" || existing === "stacked_topup") {
+      return existing;
+    }
+
+    const assigned: PaywallLayoutVariant = Math.random() < 0.5 ? "stacked_topup" : "inline_topup";
+    window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, assigned);
+    return assigned;
+  } catch {
+    return fallback;
+  }
 }

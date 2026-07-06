@@ -37,6 +37,12 @@ class TopupCheckoutRequest(BaseModel):
     packKey: str = "topup_15"
 
 
+class EmbeddedCheckoutRequest(BaseModel):
+    checkoutType: str
+    planKey: str | None = None
+    packKey: str | None = None
+
+
 class BillingCheckoutSyncRequest(BaseModel):
     sessionId: str
 
@@ -144,6 +150,27 @@ def create_billing_app() -> FastAPI:
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
+    @app.post("/billing/embedded-checkout-session")
+    async def create_billing_embedded_checkout_session(
+        body: EmbeddedCheckoutRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id, user_email = await _get_user_context_or_401(request)
+        from src.backend.billing_embedded_checkout import create_embedded_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(
+                create_embedded_checkout_session,
+                user_id,
+                user_email,
+                body.checkoutType,
+                plan_key=body.planKey,
+                pack_key=body.packKey,
+            )
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     @app.post("/billing/checkout-session/sync")
     async def sync_billing_checkout_session(
         body: BillingCheckoutSyncRequest,
@@ -155,6 +182,34 @@ def create_billing_app() -> FastAPI:
 
         try:
             return await asyncio.to_thread(sync_checkout_session, user_id, body.sessionId)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    @app.post("/billing/topup-checkout-session/sync")
+    async def sync_billing_topup_checkout_session(
+        body: BillingCheckoutSyncRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_topup import sync_topup_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(sync_topup_checkout_session, user_id, body.sessionId)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    @app.post("/billing/topup-checkout-session/cancel")
+    async def cancel_billing_topup_checkout_session(
+        body: BillingCheckoutSyncRequest,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_topup import cancel_topup_checkout_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(cancel_topup_checkout_session, user_id, body.sessionId)
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 

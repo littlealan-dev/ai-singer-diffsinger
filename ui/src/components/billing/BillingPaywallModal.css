@@ -12,7 +12,7 @@
 
 .billing-modal {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
-  width: min(1120px, 100%);
+  width: min(1520px, calc(100vw - 40px));
   max-height: min(92vh, 980px);
   overflow: auto;
   position: relative;
@@ -24,6 +24,10 @@
     #111827;
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.58);
   color: var(--text-strong);
+}
+
+.billing-modal.checkout-expanded {
+  width: calc(100vw - 40px);
 }
 
 .billing-modal-close {
@@ -141,6 +145,10 @@
   align-items: stretch;
 }
 
+.billing-plan-grid.with-topup {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .billing-plan-card {
   position: relative;
   min-width: 0;
@@ -179,6 +187,18 @@
     rgba(255, 255, 255, 0.04);
 }
 
+.billing-plan-card.topup {
+  background:
+    radial-gradient(circle at 52% 0%, rgba(167, 139, 250, 0.3), transparent 50%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.025)),
+    rgba(124, 58, 237, 0.1);
+}
+
+.billing-plan-card.topup.emphasized {
+  border-color: rgba(196, 181, 253, 0.72);
+  box-shadow: 0 0 0 1px rgba(196, 181, 253, 0.2), 0 18px 48px rgba(88, 28, 135, 0.28);
+}
+
 .billing-plan-card.current {
   border-color: rgba(255, 255, 255, 0.52);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28), 0 18px 48px rgba(0, 0, 0, 0.32);
@@ -202,6 +222,13 @@
   background: linear-gradient(135deg, #0f0b05, #2a1d08 58%, #4a330d);
   color: #f8d982;
   box-shadow: 0 10px 30px rgba(245, 196, 94, 0.18);
+}
+
+.billing-plan-badge.topup {
+  border: 1px solid rgba(196, 181, 253, 0.55);
+  background: linear-gradient(135deg, #211238, #35205c 58%, #5b2fb1);
+  color: #ede9fe;
+  box-shadow: 0 10px 30px rgba(139, 92, 246, 0.18);
 }
 
 .billing-plan-head h3 {
@@ -460,6 +487,35 @@
   font-size: 1.05rem;
 }
 
+.billing-topup-price-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.billing-topup-price {
+  color: #fff;
+  font-size: 2.45rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.billing-topup-price-suffix {
+  color: #c4b5fd;
+  font-weight: 700;
+}
+
+.billing-topup-credit-amount {
+  margin-left: 4px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(196, 181, 253, 0.18);
+  color: #ede9fe;
+  font-size: 1.08rem;
+  font-weight: 800;
+}
+
 .billing-topup-copy p,
 .billing-topup-copy span {
   color: #cbd5e1;
@@ -484,6 +540,11 @@
   opacity: 0.62;
 }
 
+.billing-topup-plan-card .billing-plan-button {
+  background: #ede9fe;
+  color: #241337;
+}
+
 .billing-modal-footer {
   margin-top: 20px;
   display: flex;
@@ -505,8 +566,80 @@
   cursor: pointer;
 }
 
+.billing-embedded-panel {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 28px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.045);
+  text-align: center;
+}
+
+.billing-embedded-panel.embedded {
+  display: block;
+  text-align: left;
+}
+
+.billing-embedded-panel h3 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.billing-embedded-panel p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.billing-embedded-checkout {
+  min-height: 520px;
+  margin-top: 18px;
+  width: 100%;
+}
+
+.billing-embedded-checkout > div,
+.billing-embedded-checkout iframe {
+  width: 100% !important;
+}
+
+.billing-embedded-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.billing-embedded-actions button {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #f8fafc;
+  color: #111827;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.billing-embedded-actions button.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-strong);
+}
+
+@media (max-width: 1280px) {
+  .billing-plan-grid.with-topup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 980px) {
   .billing-plan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .billing-plan-grid.with-topup {
     grid-template-columns: 1fr;
   }
 
@@ -531,9 +664,14 @@
   }
 
   .billing-modal {
+    width: 100%;
     max-height: 100vh;
     border-radius: 0;
     padding: 24px 16px;
+  }
+
+  .billing-modal.checkout-expanded {
+    width: 100%;
   }
 
   .billing-modal-header h2 {

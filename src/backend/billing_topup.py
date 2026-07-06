@@ -48,6 +48,43 @@ def create_topup_checkout_session(
     config: BillingConfig | None = None,
     stripe_client: Any | None = None,
 ) -> dict[str, Any]:
+    return _create_topup_checkout_session(
+        uid,
+        email,
+        pack_key,
+        embedded=False,
+        config=config,
+        stripe_client=stripe_client,
+    )
+
+
+def create_embedded_topup_checkout_session(
+    uid: str,
+    email: str,
+    pack_key: str = TOPUP_PACK_KEY,
+    *,
+    config: BillingConfig | None = None,
+    stripe_client: Any | None = None,
+) -> dict[str, Any]:
+    return _create_topup_checkout_session(
+        uid,
+        email,
+        pack_key,
+        embedded=True,
+        config=config,
+        stripe_client=stripe_client,
+    )
+
+
+def _create_topup_checkout_session(
+    uid: str,
+    email: str,
+    pack_key: str,
+    *,
+    embedded: bool,
+    config: BillingConfig | None,
+    stripe_client: Any | None,
+) -> dict[str, Any]:
     billing_config = config or get_billing_config()
     if pack_key != TOPUP_PACK_KEY:
         raise BillingHttpError(400, "Invalid credit pack.")
@@ -72,36 +109,49 @@ def create_topup_checkout_session(
         stripe_customer_id = customer.id
         upsert_stripe_customer_id(uid, stripe_customer_id)
 
-    hold_id, remaining_slots = _create_checkout_hold(db, uid, billing_config)
-    try:
-        session = client.checkout.sessions.create(
-            params={
-                "mode": "payment",
-                "customer": stripe_customer_id,
-                "line_items": [
-                    {
-                        "price": billing_config.stripe_price_topup_15,
-                        "quantity": 1,
-                        "adjustable_quantity": {
-                            "enabled": True,
-                            "minimum": 1,
-                            "maximum": remaining_slots,
-                        },
-                    }
-                ],
+    hold_id, remaining_slots, hold_expires_at = _create_checkout_hold(db, uid, billing_config)
+    params: dict[str, Any] = {
+        "mode": "payment",
+        "customer": stripe_customer_id,
+        "expires_at": int(hold_expires_at.timestamp()),
+        "line_items": [
+            {
+                "price": billing_config.stripe_price_topup_15,
+                "quantity": 1,
+                "adjustable_quantity": {
+                    "enabled": True,
+                    "minimum": 1,
+                    "maximum": remaining_slots,
+                },
+            }
+        ],
+        "client_reference_id": uid,
+        "metadata": {
+            "firebaseUserId": uid,
+            "purchaseType": "topup",
+            "packKey": TOPUP_PACK_KEY,
+            "creditAmount": str(billing_config.topup_pack_credit_amount),
+            "checkoutHoldId": hold_id,
+            "maxQuantity": str(remaining_slots),
+            **({"checkoutUiMode": "embedded"} if embedded else {}),
+        },
+    }
+    if embedded:
+        params.update(
+            {
+                "ui_mode": "embedded_page",
+                "redirect_on_completion": "never",
+            }
+        )
+    else:
+        params.update(
+            {
                 "success_url": billing_config.topup_success_url,
                 "cancel_url": billing_config.topup_cancel_url,
-                "client_reference_id": uid,
-                "metadata": {
-                    "firebaseUserId": uid,
-                    "purchaseType": "topup",
-                    "packKey": TOPUP_PACK_KEY,
-                    "creditAmount": str(billing_config.topup_pack_credit_amount),
-                    "checkoutHoldId": hold_id,
-                    "maxQuantity": str(remaining_slots),
-                },
-            },
+            }
         )
+    try:
+        session = client.checkout.sessions.create(params=params)
     except Exception:
         _cancel_checkout_hold(db, hold_id)
         raise
@@ -110,8 +160,97 @@ def create_topup_checkout_session(
         {"stripeCheckoutSessionId": session.id},
         merge=True,
     )
-    logger.info("topup_checkout_created uid=%s hold_id=%s max_quantity=%d", uid, hold_id, remaining_slots)
+    logger.info(
+        "topup_checkout_created uid=%s hold_id=%s max_quantity=%d ui_mode=%s",
+        uid,
+        hold_id,
+        remaining_slots,
+        "embedded" if embedded else "hosted",
+    )
+    if embedded:
+        client_secret = _object_get(session, "client_secret")
+        if not client_secret:
+            _cancel_checkout_hold(db, hold_id)
+            raise BillingHttpError(503, "Embedded credit pack checkout is missing its client secret.")
+        return {
+            "checkoutSessionId": str(session.id),
+            "clientSecret": str(client_secret),
+            "checkoutType": "topup",
+            "maxQuantity": remaining_slots,
+        }
     return {"url": str(session.url), "maxQuantity": remaining_slots}
+
+
+def cancel_topup_checkout_session(
+    uid: str,
+    checkout_session_id: str,
+    *,
+    stripe_client: Any | None = None,
+) -> dict[str, Any]:
+    session_id = checkout_session_id.strip()
+    if not session_id:
+        raise BillingHttpError(400, "Missing Checkout session id.")
+
+    raw_client = stripe_client or get_stripe_v1_client()
+    client = getattr(raw_client, "v1", None) or raw_client
+    session = _to_plain_dict(client.checkout.sessions.retrieve(session_id))
+    _assert_topup_session_belongs_to_user(uid, session)
+    if session.get("mode") != "payment" or (session.get("metadata") or {}).get("purchaseType") != "topup":
+        raise BillingHttpError(409, "Checkout session is not a credit pack checkout.")
+    if session.get("status") == "complete" or session.get("payment_status") == "paid":
+        return {"cancelled": False, "status": str(session.get("status") or "complete")}
+
+    metadata = session.get("metadata") or {}
+    hold_id = str(metadata.get("checkoutHoldId") or "").strip()
+    if not hold_id:
+        raise BillingHttpError(409, "Top-up checkout session is missing its hold id.")
+
+    db = get_firestore_client()
+    hold_ref = db.collection("topup_checkout_holds").document(hold_id)
+    now = datetime.now(timezone.utc)
+
+    @firestore.transactional
+    def _transactional_cancel(transaction):
+        hold_snapshot = hold_ref.get(transaction=transaction)
+        if not hold_snapshot.exists:
+            raise BillingHttpError(409, "Top-up checkout hold is missing.")
+        hold = hold_snapshot.to_dict() or {}
+        if hold.get("userId") != uid:
+            raise BillingHttpError(409, "Top-up checkout hold user mismatch.")
+        status = str(hold.get("status") or "")
+        if status == "completed":
+            return False
+        if status in {"cancelled", "expired"}:
+            return True
+        if status != "pending":
+            raise BillingHttpError(409, "Top-up checkout hold is no longer pending.")
+        hold_session_id = str(hold.get("stripeCheckoutSessionId") or "")
+        if hold_session_id and hold_session_id != session_id:
+            raise BillingHttpError(409, "Top-up checkout hold session mismatch.")
+        transaction.update(
+            hold_ref,
+            {
+                "status": "cancelled",
+                "cancelledAt": now,
+                "cancelReason": "client_abandoned_checkout",
+            },
+        )
+        return True
+
+    cancelled = bool(_transactional_cancel(db.transaction()))
+    stripe_expired = _expire_checkout_session_if_open(client, session_id)
+    logger.info(
+        "topup_checkout_cancelled uid=%s session=%s cancelled=%s stripe_expired=%s",
+        uid,
+        session_id,
+        cancelled,
+        stripe_expired,
+    )
+    return {
+        "cancelled": cancelled,
+        "status": "cancelled" if cancelled else str(session.get("status") or ""),
+        "stripeExpired": stripe_expired,
+    }
 
 
 def apply_topup_checkout_completed(
@@ -276,6 +415,47 @@ def apply_topup_checkout_completed(
         )
 
     _transactional_apply(db.transaction())
+
+
+def sync_topup_checkout_session(
+    uid: str,
+    checkout_session_id: str,
+    *,
+    config: BillingConfig | None = None,
+    stripe_client: Any | None = None,
+) -> dict[str, Any]:
+    session_id = checkout_session_id.strip()
+    if not session_id:
+        raise BillingHttpError(400, "Missing Checkout session id.")
+
+    billing_config = config or get_billing_config()
+    raw_client = stripe_client or get_stripe_v1_client()
+    client = getattr(raw_client, "v1", None) or raw_client
+    session = _to_plain_dict(
+        client.checkout.sessions.retrieve(
+            session_id,
+            params={"expand": ["line_items"]},
+        )
+    )
+    _assert_topup_session_belongs_to_user(uid, session)
+    if session.get("mode") != "payment" or (session.get("metadata") or {}).get("purchaseType") != "topup":
+        raise BillingHttpError(409, "Checkout session is not a credit pack checkout.")
+    if session.get("status") != "complete" or session.get("payment_status") != "paid":
+        raise BillingHttpError(409, "Credit pack checkout is not complete yet.")
+
+    apply_topup_checkout_completed(session, config=billing_config, stripe_client=stripe_client)
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+    topup_credits = user.get("topupCredits") if isinstance(user.get("topupCredits"), dict) else {}
+    return {
+        "synced": True,
+        "status": str(session.get("status") or "complete"),
+        "topupCredits": {
+            "totalRemaining": int(topup_credits.get("totalRemaining", 0) or 0),
+            "totalReserved": int(topup_credits.get("totalReserved", 0) or 0),
+            "totalAvailable": int(topup_credits.get("totalAvailable", 0) or 0),
+            "activePackCount": int(topup_credits.get("activePackCount", 0) or 0),
+        },
+    }
 
 
 def refresh_topup_pack_state_in_transaction(
@@ -579,14 +759,15 @@ def _allocation_amounts_by_pack(allocations: list[dict[str, Any]]) -> dict[str, 
     return amounts
 
 
-def _create_checkout_hold(db: Any, uid: str, config: BillingConfig) -> tuple[str, int]:
+def _create_checkout_hold(db: Any, uid: str, config: BillingConfig) -> tuple[str, int, datetime]:
     hold_id = f"topup_hold_{uuid.uuid4().hex}"
     hold_ref = db.collection("topup_checkout_holds").document(hold_id)
     now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=config.topup_checkout_hold_ttl_minutes)
 
     @firestore.transactional
     def _transactional_create(transaction):
-        pending_slots = _pending_hold_slots(transaction, db, uid, now)
+        pending_slots, expired_hold_refs = _pending_hold_slots(transaction, db, uid, now)
         pack_state = refresh_topup_pack_state_in_transaction(
             transaction,
             db,
@@ -597,6 +778,14 @@ def _create_checkout_hold(db: Any, uid: str, config: BillingConfig) -> tuple[str
         remaining_slots = config.topup_max_active_packs - pack_state.active_pack_count - pending_slots
         if remaining_slots <= 0:
             raise BillingHttpError(409, "Maximum 3 active credit packs reached.")
+        for expired_hold_ref in expired_hold_refs:
+            transaction.update(
+                expired_hold_ref,
+                {
+                    "status": "expired",
+                    "expiredAt": now,
+                },
+            )
         transaction.set(
             hold_ref,
             {
@@ -606,32 +795,34 @@ def _create_checkout_hold(db: Any, uid: str, config: BillingConfig) -> tuple[str
                 "remainingSlots": remaining_slots,
                 "status": "pending",
                 "createdAt": now,
-                "expiresAt": now + timedelta(minutes=config.topup_checkout_hold_ttl_minutes),
+                "expiresAt": expires_at,
             },
         )
         user_ref = db.collection("users").document(uid)
         transaction.update(user_ref, topup_aggregate_fields(pack_state.active_packs))
         return remaining_slots
 
-    return hold_id, int(_transactional_create(db.transaction()))
+    return hold_id, int(_transactional_create(db.transaction())), expires_at
 
 
-def _pending_hold_slots(transaction: Any, db: Any, uid: str, now: datetime) -> int:
+def _pending_hold_slots(transaction: Any, db: Any, uid: str, now: datetime) -> tuple[int, list[Any]]:
     snapshots = list(
         db.collection("topup_checkout_holds")
         .where(filter=firestore.FieldFilter("userId", "==", uid))
         .stream(transaction=transaction)
     )
     pending_slots = 0
+    expired_hold_refs: list[Any] = []
     for snapshot in snapshots:
         data = snapshot.to_dict() or {}
         if data.get("status") != "pending":
             continue
         expires_at = _to_utc_datetime(data.get("expiresAt"))
         if expires_at and expires_at <= now:
+            expired_hold_refs.append(snapshot.reference)
             continue
         pending_slots += int(data.get("remainingSlots", 0) or 0)
-    return pending_slots
+    return pending_slots, expired_hold_refs
 
 
 def _cancel_checkout_hold(db: Any, hold_id: str) -> None:
@@ -642,6 +833,18 @@ def _cancel_checkout_hold(db: Any, hold_id: str) -> None:
         },
         merge=True,
     )
+
+
+def _expire_checkout_session_if_open(client: Any, session_id: str) -> bool:
+    sessions_api = getattr(getattr(client, "checkout", None), "sessions", None)
+    if sessions_api is None or not hasattr(sessions_api, "expire"):
+        return False
+    try:
+        session = sessions_api.expire(session_id)
+    except Exception:
+        logger.warning("topup_checkout_stripe_expire_failed session=%s", session_id, exc_info=True)
+        return False
+    return str(_object_get(session, "status") or "") == "expired"
 
 
 def _resolve_topup_quantity(
@@ -702,6 +905,39 @@ def _object_get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+def _assert_topup_session_belongs_to_user(uid: str, session: dict[str, Any]) -> None:
+    metadata = session.get("metadata") or {}
+    session_user_id = session.get("client_reference_id") or metadata.get("firebaseUserId")
+    if session_user_id != uid:
+        raise BillingHttpError(403, "Checkout session does not belong to the current user.")
+    billing = get_billing_state(uid)
+    stored_customer_id = billing.get("stripeCustomerId")
+    session_customer_id = session.get("customer")
+    if stored_customer_id and session_customer_id and stored_customer_id != session_customer_id:
+        raise BillingHttpError(403, "Checkout session does not belong to the current user.")
+
+
+def _to_plain_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        result = to_dict()
+        if isinstance(result, dict):
+            return result
+    to_dict_recursive = getattr(value, "to_dict_recursive", None)
+    if callable(to_dict_recursive):
+        result = to_dict_recursive()
+        if isinstance(result, dict):
+            return result
+    private_recursive = getattr(value, "_to_dict_recursive", None)
+    if callable(private_recursive):
+        result = private_recursive()
+        if isinstance(result, dict):
+            return result
+    return dict(value)
 
 
 def _resolve_checkout_uid(payload: dict[str, Any]) -> str | None:

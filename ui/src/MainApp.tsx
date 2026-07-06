@@ -691,6 +691,7 @@ export default function MainApp() {
   const [multiTrackExportError, setMultiTrackExportError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
@@ -2347,6 +2348,19 @@ export default function MainApp() {
           </button>
         </div>
       )}
+      {notice && (
+        <div className="message-box info" role="status">
+          <span className="message-box-content">{notice}</span>
+          <button
+            type="button"
+            className="message-box-close"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss message"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <WaitlistModal
         isOpen={showWaitlistModal}
         onClose={() => setShowWaitlistModal(false)}
@@ -2366,6 +2380,11 @@ export default function MainApp() {
         billing={billing}
         detail={paywallDetail}
         onClose={() => setPaywallTrigger(null)}
+        onConfirmed={(message) => {
+          setNotice(message);
+          setPaywallTrigger(null);
+          setPaywallDetail(null);
+        }}
       />
 
       <main
