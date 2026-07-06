@@ -67,6 +67,23 @@ const STARTING_CONVERSATIONS = [
 ] as const;
 
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
+const MULTITRACK_TUTORIAL_DISMISSED_KEY = "sightsinger.multitrack-tutorial-dismissed";
+const MULTITRACK_TUTORIAL_STEPS = [
+  {
+    target: "player",
+    message: "Generated audio will be added to this multitrack player as separate synchronized tracks.",
+  },
+  {
+    target: "play",
+    message: "Use Play to hear all generated tracks together.",
+  },
+  {
+    target: "export",
+    message: "Use Export to bounce the mix. Export consumes credits at 1 credit per minute.",
+  },
+] as const;
+
+type MultitrackTutorialTarget = (typeof MULTITRACK_TUTORIAL_STEPS)[number]["target"];
 
 type Role = "user" | "assistant";
 
@@ -713,6 +730,12 @@ export default function MainApp() {
       typeof window === "undefined" ||
       window.localStorage.getItem(SOLFEGE_GUIDE_DISMISSED_KEY) !== "true"
   );
+  const [showMultitrackTutorial, setShowMultitrackTutorial] = useState(
+    () =>
+      typeof window === "undefined" ||
+      window.localStorage.getItem(MULTITRACK_TUTORIAL_DISMISSED_KEY) !== "true"
+  );
+  const [multitrackTutorialStepIndex, setMultitrackTutorialStepIndex] = useState(0);
   const [solfegeSystem, setSolfegeSystem] = useState<SolfegeSystem>("movable_do");
   const [solfegeMode, setSolfegeMode] = useState<SolfegeMode>("major");
   const [draftSolfegeSystem, setDraftSolfegeSystem] = useState<SolfegeSystem>("movable_do");
@@ -813,6 +836,31 @@ export default function MainApp() {
   const exportMixRequiredCredits = estimateExportMixCredits(
     multiTrackAudioTracks[0]?.durationSeconds
   );
+  const currentMultitrackTutorialStep =
+    MULTITRACK_TUTORIAL_STEPS[
+      Math.min(multitrackTutorialStepIndex, MULTITRACK_TUTORIAL_STEPS.length - 1)
+    ];
+  const multitrackTutorialVisible =
+    showMultitrackTutorial && Boolean(currentMultitrackTutorialStep);
+  const isMultitrackTutorialTarget = (target: MultitrackTutorialTarget) =>
+    multitrackTutorialVisible && currentMultitrackTutorialStep.target === target;
+
+  const dismissMultitrackTutorial = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(MULTITRACK_TUTORIAL_DISMISSED_KEY, "true");
+    }
+    setShowMultitrackTutorial(false);
+  }, []);
+
+  const advanceMultitrackTutorial = useCallback(() => {
+    if (multitrackTutorialStepIndex >= MULTITRACK_TUTORIAL_STEPS.length - 1) {
+      dismissMultitrackTutorial();
+      return;
+    }
+    setMultitrackTutorialStepIndex((current) =>
+      Math.min(current + 1, MULTITRACK_TUTORIAL_STEPS.length - 1)
+    );
+  }, [dismissMultitrackTutorial, multitrackTutorialStepIndex]);
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
@@ -2277,7 +2325,11 @@ export default function MainApp() {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className={clsx("app-shell", {
+        "multitrack-tutorial-active": multitrackTutorialVisible,
+      })}
+    >
       <header className="app-header">
         <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
           <span className="brand-banner-crop" aria-label="SightSinger">
@@ -2957,7 +3009,45 @@ export default function MainApp() {
         />
 
         <div className="score-column">
-          <div className="multitrack-player" aria-label="Multitrack audio player">
+          <div
+            className={clsx("multitrack-player", {
+              "multitrack-tutorial-highlight": isMultitrackTutorialTarget("player"),
+            })}
+            aria-label="Multitrack audio player"
+          >
+            {multitrackTutorialVisible && currentMultitrackTutorialStep ? (
+              <div
+                className={clsx(
+                  "multitrack-tutorial-bubble",
+                  `target-${currentMultitrackTutorialStep.target}`
+                )}
+                role="dialog"
+                aria-label="Multitrack player tutorial"
+              >
+                <button
+                  type="button"
+                  className="multitrack-tutorial-close"
+                  aria-label="Close multitrack player tutorial"
+                  onClick={dismissMultitrackTutorial}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+                <span className="multitrack-tutorial-step">
+                  {multitrackTutorialStepIndex + 1} of {MULTITRACK_TUTORIAL_STEPS.length}
+                </span>
+                <p>{currentMultitrackTutorialStep.message}</p>
+                <div className="multitrack-tutorial-actions">
+                  <button type="button" onClick={dismissMultitrackTutorial}>
+                    Skip
+                  </button>
+                  <button type="button" onClick={advanceMultitrackTutorial}>
+                    {multitrackTutorialStepIndex >= MULTITRACK_TUTORIAL_STEPS.length - 1
+                      ? "Done"
+                      : "Next"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="multitrack-toolbar">
               <div>
                 <h3>Multitrack Player</h3>
@@ -2977,6 +3067,7 @@ export default function MainApp() {
                   type="button"
                   className={clsx("multitrack-transport-button", "multitrack-export-button", {
                     exporting: multiTrackExportProgress !== null,
+                    "multitrack-tutorial-target": isMultitrackTutorialTarget("export"),
                   })}
                   onClick={handleMultiTrackExport}
                   disabled={
@@ -2992,7 +3083,9 @@ export default function MainApp() {
                 </button>
                 <button
                   type="button"
-                  className="multitrack-transport-button"
+                  className={clsx("multitrack-transport-button", {
+                    "multitrack-tutorial-target": isMultitrackTutorialTarget("play"),
+                  })}
                   onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
                   disabled={!multiTrackAudioTracks.length}
                   aria-label={multiTrackPlaying ? "Pause all tracks" : "Play all tracks"}

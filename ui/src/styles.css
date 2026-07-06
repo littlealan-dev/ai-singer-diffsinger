@@ -231,6 +231,7 @@ body.legal-active #root {
 }
 
 .app-shell {
+  position: relative;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -251,6 +252,19 @@ body.legal-active #root {
   backdrop-filter: blur(18px);
   position: relative;
   z-index: 30;
+}
+
+.app-shell.multitrack-tutorial-active .app-header,
+.app-shell.multitrack-tutorial-active .chat-panel,
+.app-shell.multitrack-tutorial-active .score-panel,
+.app-shell.multitrack-tutorial-active .split-handle {
+  filter: brightness(0.45) blur(1px);
+  opacity: 0.62;
+}
+
+.app-shell.multitrack-tutorial-active .multitrack-player {
+  filter: none;
+  opacity: 1;
 }
 
 .header-actions {
@@ -2344,18 +2358,147 @@ img.voice-picker-option-avatar {
 }
 
 .multitrack-player {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
   flex: 0 1 auto;
   max-height: calc((100% - 12px) / 2);
   min-height: max-content;
-  overflow: hidden;
+  overflow: visible;
   padding: 20px;
   border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(160deg, rgba(28, 34, 43, 0.9), rgba(20, 25, 33, 0.9));
   box-shadow: var(--shadow-strong);
+}
+
+.multitrack-player.multitrack-tutorial-highlight {
+  border-color: rgba(183, 125, 255, 0.7);
+  box-shadow:
+    0 0 0 2px rgba(183, 125, 255, 0.24),
+    0 0 34px rgba(183, 125, 255, 0.28),
+    var(--shadow-strong);
+}
+
+.multitrack-tutorial-target {
+  position: relative;
+  border-color: rgba(224, 242, 254, 0.9) !important;
+  background: linear-gradient(135deg, rgba(183, 125, 255, 0.95), rgba(125, 211, 252, 0.85)) !important;
+  color: #08111d !important;
+  box-shadow:
+    0 0 0 3px rgba(183, 125, 255, 0.26),
+    0 0 28px rgba(125, 211, 252, 0.32);
+  opacity: 1 !important;
+}
+
+.multitrack-tutorial-bubble {
+  position: absolute;
+  z-index: 180;
+  width: min(320px, calc(100% - 40px));
+  padding: 16px 16px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(190, 207, 255, 0.26);
+  background: rgba(11, 17, 30, 0.96);
+  color: var(--text-strong);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(183, 125, 255, 0.12);
+}
+
+.multitrack-tutorial-bubble::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  transform: rotate(45deg);
+  border-left: 1px solid rgba(190, 207, 255, 0.26);
+  border-top: 1px solid rgba(190, 207, 255, 0.26);
+  background: rgba(11, 17, 30, 0.96);
+}
+
+.multitrack-tutorial-bubble.target-player {
+  top: 76px;
+  left: 24px;
+}
+
+.multitrack-tutorial-bubble.target-play {
+  top: 66px;
+  right: 70px;
+}
+
+.multitrack-tutorial-bubble.target-export {
+  top: 66px;
+  right: 116px;
+}
+
+.multitrack-tutorial-bubble.target-player::after {
+  top: -8px;
+  left: 34px;
+}
+
+.multitrack-tutorial-bubble.target-play::after {
+  top: -8px;
+  right: 48px;
+}
+
+.multitrack-tutorial-bubble.target-export::after {
+  top: -8px;
+  right: 42px;
+}
+
+.multitrack-tutorial-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.multitrack-tutorial-step {
+  display: block;
+  margin-right: 28px;
+  color: rgba(190, 207, 255, 0.78);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.multitrack-tutorial-bubble p {
+  margin: 8px 28px 14px 0;
+  color: rgba(245, 247, 255, 0.94);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.multitrack-tutorial-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.multitrack-tutorial-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.multitrack-tutorial-actions button:last-child {
+  border-color: rgba(224, 242, 254, 0.75);
+  background: linear-gradient(135deg, rgba(183, 125, 255, 0.95), rgba(125, 211, 252, 0.85));
+  color: #08111d;
 }
 
 .multitrack-toolbar {
@@ -2755,6 +2898,22 @@ img.voice-picker-option-avatar {
   .multitrack-toolbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .multitrack-tutorial-bubble,
+  .multitrack-tutorial-bubble.target-player,
+  .multitrack-tutorial-bubble.target-play,
+  .multitrack-tutorial-bubble.target-export {
+    position: relative;
+    top: auto;
+    right: auto;
+    left: auto;
+    width: 100%;
+    order: -1;
+  }
+
+  .multitrack-tutorial-bubble::after {
+    display: none;
   }
 
   .multitrack-lane {
