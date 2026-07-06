@@ -184,7 +184,7 @@ def sync_paid_subscription_state(
     }
     if billing_cycle_anchor is not None:
         billing_payload["creditRefreshAnchor"] = billing_cycle_anchor
-        billing_payload["nextCreditRefreshAt"] = current_period_end or compute_next_monthly_refresh(
+        billing_payload["nextCreditRefreshAt"] = compute_next_monthly_refresh(
             billing_cycle_anchor,
             datetime.now(timezone.utc),
         )

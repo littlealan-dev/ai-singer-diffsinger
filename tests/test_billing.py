@@ -804,10 +804,18 @@ def test_create_portal_session_requires_existing_customer():
         create_portal_session("user-2", config=get_billing_config(), stripe_client=_FakeStripeClient())
 
 
-def test_subscription_sync_updates_cancel_at_period_end_from_portal():
+def test_subscription_sync_updates_cancel_at_period_end_from_portal(monkeypatch):
     uid = "user-portal-cancel-later"
     get_or_create_credits(uid, "portal@example.com")
     db = get_firestore_client()
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
     db.collection("users").document(uid).set(
         {
             "billing": {
@@ -847,10 +855,67 @@ def test_subscription_sync_updates_cancel_at_period_end_from_portal():
     assert user["billing"]["stripeSubscriptionStatus"] == "active"
 
 
-def test_subscription_sync_treats_cancel_at_as_scheduled_cancel():
+def test_subscription_sync_annual_plan_keeps_monthly_credit_refresh(monkeypatch):
+    uid = "user-portal-annual-refresh"
+    get_or_create_credits(uid, "portal-annual-refresh@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 7, 6, 1, 25, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": "cus_portal_annual",
+                "stripeSubscriptionId": "sub_portal_annual",
+                "activePlanKey": "solo_annual",
+                "stripeSubscriptionStatus": "active",
+                "family": "solo",
+                "billingInterval": "year",
+            }
+        },
+        merge=True,
+    )
+    anchor = datetime(2026, 7, 5, 23, 34, 47, tzinfo=timezone.utc)
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.subscription_list_payload = [
+        {
+            "id": "sub_portal_annual",
+            "status": "active",
+            "billing_cycle_anchor": int(anchor.timestamp()),
+            "created": int(anchor.timestamp()),
+            "current_period_start": int(anchor.timestamp()),
+            "current_period_end": int(datetime(2027, 7, 5, 23, 34, 47, tzinfo=timezone.utc).timestamp()),
+            "cancel_at_period_end": False,
+            "items": {"data": [{"price": {"id": "price_solo_annual"}}]},
+        }
+    ]
+
+    result = sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert result["activePlanKey"] == "solo_annual"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["currentPeriodEnd"] == datetime(2027, 7, 5, 23, 34, 47, tzinfo=timezone.utc)
+    assert user["billing"]["nextCreditRefreshAt"] == compute_next_monthly_refresh(anchor, now)
+    assert user["billing"]["nextCreditRefreshAt"] < user["billing"]["currentPeriodEnd"]
+
+
+def test_subscription_sync_treats_cancel_at_as_scheduled_cancel(monkeypatch):
     uid = "user-portal-cancel-at"
     get_or_create_credits(uid, "portal-cancel-at@example.com")
     db = get_firestore_client()
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
     db.collection("users").document(uid).set(
         {
             "billing": {

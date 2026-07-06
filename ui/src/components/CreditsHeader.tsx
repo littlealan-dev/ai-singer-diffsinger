@@ -152,7 +152,7 @@ function formatPlanFamily(planFamily: PlanFamily): string {
 }
 
 function formatShortDate(date: Date): string {
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
 }
 
 export default CreditsHeader;

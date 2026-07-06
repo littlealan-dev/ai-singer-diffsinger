@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import clsx from "clsx";
-import { Check, Loader2, Zap, X } from "lucide-react";
+import { Check, Loader2, X } from "lucide-react";
 import {
   cancelTopupCheckoutSession,
   startBillingPortal,
@@ -48,10 +48,8 @@ type BillingPaywallModalProps = {
 
 const paidStatuses = new Set(["active", "trialing", "past_due"]);
 const STRIPE_PUBLISHABLE_KEY = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim() || "";
-const PAYWALL_LAYOUT_VARIANT_STORAGE_KEY = "sightsingerBillingPaywallLayoutVariant";
 
 type CheckoutViewState = "plans" | "creating_checkout" | "embedded_checkout" | "confirming" | "failed";
-type PaywallLayoutVariant = "stacked_topup" | "inline_topup";
 
 type ActiveEmbeddedCheckout = EmbeddedCheckoutResponse & {
   planKey?: BillingPlanKey;
@@ -78,7 +76,6 @@ export function BillingPaywallModal({
   const activeEmbeddedCheckoutRef = useRef<ActiveEmbeddedCheckout | null>(null);
   const embeddedCheckoutRef = useRef<{ destroy: () => void } | null>(null);
   const plans = useMemo(() => getDisplayPlans(interval), [interval]);
-  const paywallLayoutVariant = useMemo(() => getBillingPaywallLayoutVariant(), []);
   const activePaid = billing.activePlanKey !== "free" && paidStatuses.has(billing.stripeSubscriptionStatus || "active");
   const copy = getTriggerCopy(trigger, billing);
   const hardBlock = isHardBlockTrigger(trigger);
@@ -173,9 +170,9 @@ export function BillingPaywallModal({
     if (!isOpen) return;
     logAnalyticsEvent("billing_paywall_view", {
       trigger,
-      layout_variant: paywallLayoutVariant,
+      layout_variant: "inline_topup",
     });
-  }, [isOpen, paywallLayoutVariant, trigger]);
+  }, [isOpen, trigger]);
 
   useEffect(() => {
     activeEmbeddedCheckoutRef.current = activeEmbeddedCheckout;
@@ -378,7 +375,6 @@ export function BillingPaywallModal({
       <section
         className={clsx(
           "billing-modal",
-          `layout-${paywallLayoutVariant}`,
           (checkoutView === "creating_checkout" ||
             checkoutView === "embedded_checkout" ||
             checkoutView === "confirming") &&
@@ -466,7 +462,7 @@ export function BillingPaywallModal({
               </button>
             </div>
 
-            <div className={clsx("billing-plan-grid", paywallLayoutVariant === "inline_topup" && "with-topup")}>
+            <div className="billing-plan-grid with-topup">
               {plans.map((plan) => (
                 <PlanCard
                   key={plan.cardKey}
@@ -479,25 +475,14 @@ export function BillingPaywallModal({
                   onPortal={handlePortal}
                 />
               ))}
-              {paywallLayoutVariant === "inline_topup" ? (
-                <TopupPlanCard
-                  billing={billing}
-                  busy={busyAction === "topup"}
-                  emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
-                  disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
-                  onCheckout={handleTopupCheckout}
-                />
-              ) : null}
-            </div>
-            {paywallLayoutVariant === "stacked_topup" ? (
-              <TopupCard
+              <TopupPlanCard
                 billing={billing}
                 busy={busyAction === "topup"}
                 emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
                 disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
                 onCheckout={handleTopupCheckout}
               />
-            ) : null}
+            </div>
             <div className="billing-shared-features" aria-label="Included in every plan">
               <h3>Included in every plan</h3>
               <ul>
@@ -620,43 +605,6 @@ type TopupCardProps = {
   disabled: boolean;
   onCheckout: () => void;
 };
-
-function TopupCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
-  const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
-  return (
-    <section className={clsx("billing-topup-card", emphasized && "emphasized")} aria-label="Credit pack">
-      <div className="billing-topup-icon" aria-hidden="true">
-        <Zap size={18} />
-      </div>
-      <div className="billing-topup-copy">
-        <h3>Credit Pack</h3>
-        <div className="billing-topup-price-line">
-          <span className="billing-topup-price">$5</span>
-          <span className="billing-topup-price-suffix">/ pack</span>
-          <span className="billing-topup-credit-amount">15 credits</span>
-        </div>
-        <p>
-          Add credits without a monthly commitment. Use alongside your monthly plan for one-off exports or extra renders.
-        </p>
-        <span>
-          Expires in 180 days. Non-refundable.{" "}
-          {remainingSlots > 0
-            ? `You can buy up to ${remainingSlots} more active pack${remainingSlots === 1 ? "" : "s"}.`
-            : "Maximum 3 active packs reached."}
-        </span>
-      </div>
-      <button
-        type="button"
-        className="billing-topup-button"
-        onClick={onCheckout}
-        disabled={disabled || busy}
-        title={billing.topupActivePackCount >= 3 ? "Maximum 3 active packs" : undefined}
-      >
-        {busy ? "Opening Checkout..." : "Buy Credit Pack"}
-      </button>
-    </section>
-  );
-}
 
 function TopupPlanCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
   const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
@@ -856,31 +804,4 @@ function isHardBlockTrigger(trigger: PaywallTrigger): boolean {
     trigger === "selection_blocked" ||
     trigger === "drag_blocked"
   );
-}
-
-function getBillingPaywallLayoutVariant(): PaywallLayoutVariant {
-  const fallback: PaywallLayoutVariant = "stacked_topup";
-  if (typeof window === "undefined") return fallback;
-  try {
-    const override = new URL(window.location.href).searchParams.get("billingPaywallVariant");
-    if (override === "inline" || override === "inline_topup") {
-      window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, "inline_topup");
-      return "inline_topup";
-    }
-    if (override === "stacked" || override === "stacked_topup") {
-      window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, "stacked_topup");
-      return "stacked_topup";
-    }
-
-    const existing = window.localStorage.getItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY);
-    if (existing === "inline_topup" || existing === "stacked_topup") {
-      return existing;
-    }
-
-    const assigned: PaywallLayoutVariant = Math.random() < 0.5 ? "stacked_topup" : "inline_topup";
-    window.localStorage.setItem(PAYWALL_LAYOUT_VARIANT_STORAGE_KEY, assigned);
-    return assigned;
-  } catch {
-    return fallback;
-  }
 }
