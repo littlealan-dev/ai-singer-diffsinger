@@ -20,6 +20,7 @@ export const ANNOUNCEMENTS: Announcement[] = [
     effect: 'none',
     date: '2026-06-29',
     effectiveFrom: '2026-06-29',
+    effectiveTo: '2026-07-06',
   },
   {
     id: 'trial_reset_v1',

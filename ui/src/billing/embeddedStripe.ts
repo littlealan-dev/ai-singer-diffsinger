@@ -4,7 +4,11 @@ type StripeEmbeddedCheckout = {
 };
 
 type StripeInstance = {
-  initEmbeddedCheckout: (options: {
+  createEmbeddedCheckoutPage?: (options: {
+    fetchClientSecret: () => Promise<string>;
+    onComplete?: () => void;
+  }) => Promise<StripeEmbeddedCheckout>;
+  initEmbeddedCheckout?: (options: {
     clientSecret: string;
     onComplete?: () => void;
   }) => Promise<StripeEmbeddedCheckout>;
@@ -28,12 +32,24 @@ export async function initEmbeddedStripeCheckout(
   if (!publishableKey.trim()) {
     throw new Error("Stripe checkout is not configured.");
   }
+  if (!clientSecret.trim()) {
+    throw new Error("Stripe checkout session is not configured.");
+  }
   await loadStripeScript();
   const stripeFactory = window.Stripe;
   if (!stripeFactory) {
     throw new Error("Stripe checkout could not be loaded.");
   }
   const stripe = stripeFactory(publishableKey);
+  if (stripe.createEmbeddedCheckoutPage) {
+    return stripe.createEmbeddedCheckoutPage({
+      fetchClientSecret: async () => clientSecret,
+      onComplete,
+    });
+  }
+  if (!stripe.initEmbeddedCheckout) {
+    throw new Error("Stripe embedded checkout could not be initialized.");
+  }
   return stripe.initEmbeddedCheckout({
     clientSecret,
     onComplete,
@@ -68,4 +84,3 @@ function loadStripeScript(): Promise<void> {
   });
   return stripeScriptPromise;
 }
-
