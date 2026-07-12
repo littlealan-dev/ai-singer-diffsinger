@@ -1617,6 +1617,15 @@ TOOLS: List[Tool] = [
                             "type": ["string", "null"],
                             "description": "Voicebank id requested for later synthesis.",
                         },
+                        "language": {
+                            "type": ["string", "null"],
+                            "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$",
+                            "description": (
+                                "Explicit BCP-47-style lyric language code to preserve "
+                                "for later synthesis, such as en, ja, or zh. It must "
+                                "match the selected voicebank's non-empty languages list."
+                            ),
+                        },
                         "voice_color": {
                             "type": ["string", "null"],
                             "description": (
@@ -1747,6 +1756,17 @@ TOOLS: List[Tool] = [
                     "type": "string",
                     "description": "Voicebank id to render with.",
                 },
+                "language": {
+                    "type": "string",
+                    "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$",
+                    "default": "en",
+                    "description": (
+                        "Required explicit lyric language code selecting the voicebank "
+                        "dictionary, such as en, ja, or zh. It must match the selected "
+                        "voicebank's non-empty languages list. The en default exists only "
+                        "for backward compatibility; orchestration callers must send this field."
+                    ),
+                },
                 "part_id": {
                     "type": ["string", "null"],
                     "description": "Exact MusicXML/derived part id to synthesize. Use exactly one of part_id or part_index.",
@@ -1823,7 +1843,7 @@ TOOLS: List[Tool] = [
                     ),
                 },
             },
-            "required": ["score"],
+            "required": ["score", "language"],
             "oneOf": [
                 {"required": ["part_id"]},
                 {"required": ["part_index"]},

@@ -76,6 +76,15 @@ Rules:
 - Only when the repair-attempt budget is exhausted may you stop at the best structurally valid non-perfect candidate and ask the user to review it.
 - When you stop at a non-perfect but structurally valid candidate after exhausting the repair budget, explain the remaining issues concisely in `final_message` and ask the user to review/confirm or request revision.
 - For synthesize, omit score and voicebank to use defaults; include part_id (or part_index) for target selection.
+- Language selection for synthesis:
+  - Every `synthesize` tool call must include an explicit `language` code, including English (`en`). Do not rely on the schema default.
+  - An explicit language requested by the user takes precedence over language inference.
+  - Otherwise, infer the language only from lyric text visible in the score context, and only when the language is unambiguous.
+  - Do not infer lyric language from the song title, composer, singer/voicebank name, nationality, part name, or musical style.
+  - If the selected voicebank metadata has a non-empty `languages` list, the chosen language must be in that list.
+  - If the selected voicebank has an empty or missing `languages` list, treat only `en` as the backward-compatible safe default; do not request another language without user clarification.
+  - If lyric language is ambiguous, mixed, absent, or unsupported by the selected voicebank, ask the user to choose a language or voicebank and return no tool call.
+  - When calling `start_preprocess_voice_part_workflow`, preserve the same explicit `language` in its future synthesis request.
 - If the user asks to sing multiple parts or all parts, explain that you can render one singing part at a time and ask which part to sing first.
 - For synthesize target selection, provide exactly one selector: either `part_id` or `part_index`, never both.
 - For synthesize target selection after line preparation:

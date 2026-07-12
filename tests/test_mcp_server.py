@@ -157,13 +157,17 @@ class TestMcpServer(unittest.TestCase):
     def test_synthesize(self):
         if not self.voicebank_path.exists():
             self.skipTest(f"Voicebank not found at {self.voicebank_path}")
-        with mock.patch("src.mcp.handlers.synthesize") as mock_syn:
+        with mock.patch("src.mcp.handlers.synthesize") as mock_syn, mock.patch(
+            "src.mcp.handlers.resolve_voicebank_id",
+            return_value=self.voicebank_path,
+        ):
             mock_syn.return_value = {"waveform": [0.0], "sample_rate": 44100}
             result = self._call_tool(
                 "synthesize",
                 {
                     "score": {"parts": []},
                     "voicebank": self.voicebank_id,
+                    "language": "ja",
                     "articulation": 0.25,
                     "airiness": 0.9,
                     "intensity": 0.9,
@@ -173,6 +177,7 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(result, {"waveform": [0.0], "sample_rate": 44100})
             _, kwargs = mock_syn.call_args
             self.assertEqual(kwargs["device"], self.device)
+            self.assertEqual(kwargs["language"], "ja")
             self.assertEqual(kwargs["articulation"], 0.25)
             self.assertEqual(kwargs["airiness"], 0.9)
             self.assertEqual(kwargs["intensity"], 0.9)

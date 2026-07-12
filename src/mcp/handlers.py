@@ -217,6 +217,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         allow_lyric_propagation=bool(params.get("allow_lyric_propagation", False)),
         source_voice_part_id=params.get("source_voice_part_id"),
         source_part_index=params.get("source_part_index"),
+        language=params.get("language", "en"),
         voice_color=params.get("voice_color"),
         articulation=params.get("articulation", 0.0),
         airiness=params.get("airiness", 1.0),

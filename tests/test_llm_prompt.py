@@ -128,6 +128,25 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
     )
 
 
+def test_build_system_prompt_requires_explicit_supported_synthesis_language() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["Qixuan"],
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "Every `synthesize` tool call must include an explicit `language` code" in prompt
+    assert "infer the language only from lyric text visible in the score context" in prompt
+    assert "the chosen language must be in that list" in prompt
+    assert "ask the user to choose a language or voicebank" in prompt
+
+
 def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() -> None:
     prompt = build_system_prompt(
         tools=[],
@@ -250,6 +269,8 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
                 "name": "Katyusha v170",
                 "gender": "female",
                 "voice_type": "soprano",
+                "languages": ["en", "ja", "zh"],
+                "use_lang_id": True,
                 "voice_colors": [{"name": "01: standard", "suffix": "embeds/standard"}],
                 "default_voice_color": "01: standard",
             }
@@ -258,6 +279,9 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
     assert "Voicebank metadata (if available):" in bundle.dynamic_prompt_text
     assert '"gender": "female"' in bundle.dynamic_prompt_text
     assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text
+    assert '"languages": [' in bundle.dynamic_prompt_text
+    assert '"ja"' in bundle.dynamic_prompt_text
+    assert '"use_lang_id": true' in bundle.dynamic_prompt_text
 
 
 def test_build_prompt_bundle_preserves_unicode_voicebank_names() -> None:

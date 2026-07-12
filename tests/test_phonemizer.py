@@ -118,6 +118,81 @@ class PhonemizerClassTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             phonemizer.phonemize_tokens(["zzzzzz"])
 
+    def test_non_english_dictionary_preserves_unicode_and_language_ids(self) -> None:
+        """Dictionary-backed lyrics should work for non-English language codes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-ja.yaml"
+            languages_path = root / "languages.json"
+
+            phonemes_path.write_text(
+                '{"SP": 0, "AP": 1, "ja/k": 2, "ja/a": 3}',
+                encoding="utf8",
+            )
+            dictionary_path.write_text(
+                "entries:\n"
+                "  - grapheme: 歌\n"
+                "    phonemes: [ja/k, ja/a]\n",
+                encoding="utf8",
+            )
+            languages_path.write_text('{"en": 1, "ja": 2}', encoding="utf8")
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                languages_path=languages_path,
+                language="ja",
+            )
+
+            result = phonemizer.phonemize_tokens(["歌"])
+            self.assertEqual(result.phonemes, ["ja/k", "ja/a"])
+            self.assertEqual(result.ids, [2, 3])
+            self.assertEqual(result.language_ids, [2, 2])
+
+    def test_unicode_grapheme_normalization_keeps_accents(self) -> None:
+        self.assertEqual(Phonemizer._normalize_grapheme("  Canción! "), "canción")
+
+    def test_non_english_missing_entry_does_not_use_english_g2p(self) -> None:
+        """Unknown non-English words must not be pronounced by g2p_en."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-ja.yaml"
+            languages_path = root / "languages.json"
+            phonemes_path.write_text('{"SP": 0, "AP": 1}', encoding="utf8")
+            dictionary_path.write_text("entries: []\n", encoding="utf8")
+            languages_path.write_text('{"ja": 2}', encoding="utf8")
+
+            phonemizer = Phonemizer(
+                phonemes_path=phonemes_path,
+                dictionary_path=dictionary_path,
+                languages_path=languages_path,
+                language="ja",
+                allow_g2p=True,
+            )
+
+            with self.assertRaisesRegex(KeyError, "G2P fallback is not available"):
+                phonemizer.phonemize_tokens(["未知"])
+
+    def test_language_must_exist_in_voicebank_language_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            phonemes_path = root / "phonemes.json"
+            dictionary_path = root / "dsdict-ja.yaml"
+            languages_path = root / "languages.json"
+            phonemes_path.write_text('{"SP": 0, "AP": 1}', encoding="utf8")
+            dictionary_path.write_text("entries: []\n", encoding="utf8")
+            languages_path.write_text('{"en": 1}', encoding="utf8")
+
+            with self.assertRaisesRegex(ValueError, "Language 'ja'"):
+                Phonemizer(
+                    phonemes_path=phonemes_path,
+                    dictionary_path=dictionary_path,
+                    languages_path=languages_path,
+                    language="ja",
+                )
+
     def test_direct_phoneme_tokens(self) -> None:
         """Phoneme tokens should pass through unchanged."""
         phonemizer = Phonemizer(

@@ -3357,6 +3357,7 @@ class Orchestrator:
         target_keys = ("part_id", "part_index", "voice_id", "voice_part_id", "verse_number")
         synthesis_keys = (
             "voicebank",
+            "language",
             "voice_color",
             "articulation",
             "airiness",
@@ -4751,6 +4752,8 @@ class Orchestrator:
                         "name": info.get("name") or entry.get("name") or voicebank_id,
                         "gender": info.get("gender"),
                         "voice_type": info.get("voice_type"),
+                        "languages": info.get("languages", []),
+                        "use_lang_id": bool(info.get("use_lang_id", False)),
                         "voice_colors": info.get("voice_colors", []),
                         "default_voice_color": info.get("default_voice_color"),
                     }

@@ -149,11 +149,10 @@ class Phonemizer:
         needed_graphemes: Optional[set[str]] = None,
     ) -> None:
         """Initialize phoneme inventory, dictionary, and optional G2P."""
-        if language != "en":
-            raise NotImplementedError(
-                f"Only English is supported for now (language='{language}')."
-            )
-        self.language = language
+        normalized_language = str(language or "").strip().lower()
+        if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]+)*", normalized_language):
+            raise ValueError(f"Invalid language code '{language}'.")
+        self.language = normalized_language
         self.allow_g2p = allow_g2p
         self.phonemes_path = Path(phonemes_path)
         self.dictionary_path = Path(dictionary_path)
@@ -174,6 +173,12 @@ class Phonemizer:
         self._glide_symbols = dictionary_bundle.glides
         self._dictionary_load_strategy = dictionary_bundle.load_strategy
         self._language_map = self._load_language_map(self.languages_path) if self.languages_path else {}
+        if self._language_map and self.language not in self._language_map:
+            supported = ", ".join(sorted(self._language_map))
+            raise ValueError(
+                f"Language '{self.language}' is not present in {self.languages_path}. "
+                f"Available languages: {supported}."
+            )
         self._phoneme_meta = self._load_phoneme_metadata(
             self.phonemes_path.with_name("phoneme_metadata.json")
         )
@@ -237,6 +242,12 @@ class Phonemizer:
             raise KeyError(
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 "Update the voicebank dsdict.yaml to include this grapheme, or enable G2P."
+            )
+        if self.language != "en":
+            raise KeyError(
+                f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
+                f"G2P fallback is not available for language '{self.language}'; "
+                "the selected voicebank dictionary must include this grapheme."
             )
         unsupported = self._first_non_latin_letter(raw)
         if unsupported is not None:
@@ -302,8 +313,10 @@ class Phonemizer:
     @staticmethod
     def _normalize_grapheme(value: str) -> str:
         """Normalize a grapheme for dictionary lookup."""
-        cleaned = Phonemizer._normalize_word_for_g2p(value)
-        return cleaned or value.strip()
+        normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+        normalized = normalized.replace("’", "'")
+        cleaned = "".join(char for char in normalized if char.isalpha() or char == "'")
+        return cleaned or normalized
 
     @staticmethod
     def _normalize_word_for_g2p(value: str) -> str:
@@ -401,7 +414,7 @@ class Phonemizer:
         data = yaml.safe_load(path.read_text(encoding="utf8"))
         if not isinstance(data, dict):
             raise ValueError(f"Invalid languages.json format at {path}.")
-        return {str(k): int(v) for k, v in data.items()}
+        return {str(k).strip().lower(): int(v) for k, v in data.items()}
 
     def _load_dictionary(self, path: Path) -> Dict[str, List[str]]:
         """Load grapheme-to-phoneme entries from dsdict.yaml."""

@@ -1274,6 +1274,7 @@ def align_phonemes_to_notes(
     *,
     part_index: int = 0,
     voice_id: Optional[str] = None,
+    language: str = "en",
     include_phonemes: bool = False,
     solfege_pronunciation_patch: bool = False,
 ) -> Dict[str, Any]:
@@ -1285,6 +1286,7 @@ def align_phonemes_to_notes(
         voicebank: Voicebank path or ID
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
+        language: Voicebank dictionary language code (default: en)
         include_phonemes: Include phoneme strings in output
         solfege_pronunciation_patch: Apply deterministic English solfege spellings
         
@@ -1309,6 +1311,7 @@ def align_phonemes_to_notes(
                     "voicebank": str(voicebank),
                     "part_index": part_index,
                     "voice_id": voice_id,
+                    "language": language,
                     "include_phonemes": include_phonemes,
                     "solfege_pronunciation_patch": solfege_pronunciation_patch,
                 }
@@ -1374,6 +1377,7 @@ def align_phonemes_to_notes(
     needed_graphemes = _collect_needed_graphemes_from_groups(_group_notes(notes))
     phonemizer = _init_phonemizer(
         voicebank_path,
+        language=language,
         needed_graphemes=needed_graphemes,
     )
     if use_v2_aligner:
@@ -1404,6 +1408,7 @@ def align_phonemes_to_notes(
             phoneme_result = phonemize(
                 lyrics,
                 voicebank_path,
+                language=language,
                 solfege_pronunciation_patch=solfege_pronunciation_patch,
             )
             word_phonemes = _split_phonemize_result(phoneme_result)
@@ -1514,6 +1519,7 @@ def synthesize(
     allow_lyric_propagation: bool = False,
     source_voice_part_id: Optional[str] = None,
     source_part_index: Optional[int] = None,
+    language: str = "en",
     voice_color: Optional[str] = None,
     articulation: float = 0.0,
     airiness: float = 1.0,
@@ -1536,6 +1542,7 @@ def synthesize(
         voicebank: Voicebank path or ID
         part_index: Which part to synthesize (default: 0)
         voice_id: Which voice to synthesize within a part (default: soprano)
+        language: Voicebank dictionary language code (default: en)
         voice_color: Voice color name (subbank color ID)
         articulation: Global legato/staccato adjustment (-1.0 to +1.0)
         airiness: Global breathiness multiplier (0.0 to 1.0)
@@ -1583,6 +1590,7 @@ def synthesize(
                     "allow_lyric_propagation": allow_lyric_propagation,
                     "source_voice_part_id": source_voice_part_id,
                     "source_part_index": source_part_index,
+                    "language": language,
                     "voice_color": voice_color,
                     "articulation": articulation,
                     "airiness": airiness,
@@ -1655,6 +1663,7 @@ def synthesize(
                 "voicebank": str(voicebank_path),
                 "part_index": effective_part_index,
                 "voice_id": voice_id,
+                "language": language,
             }
         ),
     )
@@ -1664,6 +1673,7 @@ def synthesize(
             voicebank_path,
             part_index=effective_part_index,
             voice_id=voice_id,
+            language=language,
             include_phonemes=True,
             solfege_pronunciation_patch=solfege_pronunciation_patch,
         )

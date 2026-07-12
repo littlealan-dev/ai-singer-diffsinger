@@ -24,6 +24,9 @@ def test_synthesize_schema_requires_exactly_one_selector_and_describes_output() 
 
     assert input_schema["oneOf"] == [{"required": ["part_id"]}, {"required": ["part_index"]}]
     assert input_schema["properties"]["score"]["description"]
+    assert "language" in input_schema["required"]
+    assert input_schema["properties"]["language"]["default"] == "en"
+    assert "orchestration callers must send this field" in input_schema["properties"]["language"]["description"]
     assert output_schema["description"]
     assert len(output_schema["oneOf"]) == 2
     assert output_schema["oneOf"][0]["description"]
