@@ -10,57 +10,15 @@ import re
 import unicodedata
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from g2p_en import G2p
 import yaml
 
+from .language_g2p import (
+    G2pInputError,
+    first_non_latin_letter,
+    get_language_g2p_provider,
+    normalize_word_for_english_g2p,
+)
 from .phoneme_logic_handler import get_phoneme_logic_handler
-
-ARPABET_TO_VOICEBANK = {
-    "AA": "aa",
-    "AE": "ae",
-    "AH": "ah",
-    "AO": "ao",
-    "AW": "aw",
-    "AX": "ax",
-    "AXR": "er",
-    "AY": "ay",
-    "B": "b",
-    "CH": "ch",
-    "D": "d",
-    "DH": "dh",
-    "DX": "dx",
-    "EH": "eh",
-    "ER": "er",
-    "EY": "ey",
-    "F": "f",
-    "G": "g",
-    "HH": "hh",
-    "IH": "ih",
-    "IX": "ih",
-    "IY": "iy",
-    "JH": "jh",
-    "K": "k",
-    "L": "l",
-    "M": "m",
-    "N": "n",
-    "NG": "ng",
-    "OW": "ow",
-    "OY": "oy",
-    "P": "p",
-    "R": "r",
-    "S": "s",
-    "SH": "sh",
-    "T": "t",
-    "TH": "th",
-    "UH": "uh",
-    "UW": "uw",
-    "UX": "uw",
-    "V": "v",
-    "W": "w",
-    "Y": "y",
-    "Z": "z",
-    "ZH": "zh",
-}
 
 
 @dataclass(frozen=True)
@@ -77,6 +35,7 @@ class DictionaryBundle:
     dictionary: Dict[str, List[str]]
     vowels: set[str]
     glides: set[str]
+    replacements: Dict[str, str]
     load_strategy: str
 
 
@@ -171,6 +130,7 @@ class Phonemizer:
         self._dictionary = dictionary_bundle.dictionary
         self._vowel_symbols = dictionary_bundle.vowels
         self._glide_symbols = dictionary_bundle.glides
+        self._dictionary_replacements = dictionary_bundle.replacements
         self._dictionary_load_strategy = dictionary_bundle.load_strategy
         self._language_map = self._load_language_map(self.languages_path) if self.languages_path else {}
         if self._language_map and self.language not in self._language_map:
@@ -182,7 +142,7 @@ class Phonemizer:
         self._phoneme_meta = self._load_phoneme_metadata(
             self.phonemes_path.with_name("phoneme_metadata.json")
         )
-        self._g2p: Optional[G2p] = None
+        self._g2p_provider = get_language_g2p_provider(self.language)
         self._logic_handler = get_phoneme_logic_handler(language)
 
     def distribute_slur(self, phonemes: Sequence[str], note_count: int) -> Optional[List[List[str]]]:
@@ -243,38 +203,37 @@ class Phonemizer:
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 "Update the voicebank dsdict.yaml to include this grapheme, or enable G2P."
             )
-        if self.language != "en":
+        if self._g2p_provider is None:
             raise KeyError(
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 f"G2P fallback is not available for language '{self.language}'; "
                 "the selected voicebank dictionary must include this grapheme."
             )
-        unsupported = self._first_non_latin_letter(raw)
-        if unsupported is not None:
-            character, character_name, script = unsupported
+        try:
+            bare_phonemes = self._g2p_provider.phonemize(raw)
+        except G2pInputError as exc:
             raise UnsupportedLyricTokenError(
                 token=raw,
                 language=self.language,
-                reason="non_latin_lyrics_for_english_g2p",
-                unsupported_character=character,
-                unsupported_character_name=character_name,
-                unsupported_script=script,
-            )
-        cleaned = self._normalize_word_for_g2p(raw)
-        if not cleaned:
-            raise UnsupportedLyricTokenError(
-                token=raw,
-                language=self.language,
-                reason="invalid_lyric_token_for_g2p",
-                normalized_token=cleaned,
-            )
-        phones = [p for p in self._get_g2p()(cleaned) if self._is_arpabet(p)]
-        if not phones:
+                reason=exc.reason,
+                normalized_token=exc.normalized_token,
+                unsupported_character=exc.unsupported_character,
+                unsupported_character_name=exc.unsupported_character_name,
+                unsupported_script=exc.unsupported_script,
+            ) from exc
+        if not bare_phonemes:
             raise KeyError(
                 f"G2P produced no phonemes for token '{raw}'."
             )
-        mapped = [self._map_arpabet(p) for p in phones]
+        mapped = [self._map_g2p_phoneme(phoneme) for phoneme in bare_phonemes]
         return self._validate_phonemes(mapped, raw)
+
+    def _map_g2p_phoneme(self, phoneme: str) -> str:
+        """Map a provider's bare symbol through voicebank replacements and language IDs."""
+        replacement = self._dictionary_replacements.get(phoneme)
+        if replacement:
+            return replacement
+        return f"{self.language}/{phoneme}" if self._language_map else phoneme
 
     def _validate_phonemes(self, phonemes: Sequence[str], token: str) -> List[str]:
         """Ensure phonemes are present in the voicebank inventory."""
@@ -321,55 +280,12 @@ class Phonemizer:
     @staticmethod
     def _normalize_word_for_g2p(value: str) -> str:
         """Normalize a Latin word for English G2P processing."""
-        decomposed = unicodedata.normalize("NFKD", value)
-        without_marks = "".join(
-            character
-            for character in decomposed
-            if not unicodedata.combining(character)
-        )
-        cleaned = re.sub(r"[^A-Za-z']+", "", without_marks).lower()
-        return cleaned
+        return normalize_word_for_english_g2p(value)
 
     @staticmethod
     def _first_non_latin_letter(value: str) -> Optional[tuple[str, str, str]]:
         """Return the first alphabetic character outside the Latin script."""
-        for character in value:
-            if not character.isalpha():
-                continue
-            character_name = unicodedata.name(character, "")
-            if "LATIN" in character_name:
-                continue
-            script = character_name.split(" ", 1)[0].title() if character_name else "Unknown"
-            return character, character_name, script
-        return None
-
-    @staticmethod
-    def _is_arpabet(value: str) -> bool:
-        """Return True if the token looks like an ARPABET symbol."""
-        return bool(re.search(r"[A-Za-z]", value))
-
-    def _map_arpabet(self, phone: str) -> str:
-        """Map ARPABET symbol to the voicebank phoneme set."""
-        base = re.sub(r"[0-9]", "", phone).upper()
-        if base not in ARPABET_TO_VOICEBANK:
-            raise KeyError(
-                f"Unsupported ARPABET symbol '{phone}' in G2P output."
-            )
-        # Prefix with language code (e.g. en/hh).
-        # This aligns with OpenUtau's behavior when use_lang_id is true.
-        return f"{self.language}/{ARPABET_TO_VOICEBANK[base]}"
-
-    def _get_g2p(self) -> G2p:
-        """Lazily construct the G2P engine."""
-        if self._g2p is None:
-            try:
-                self._g2p = G2p()
-            except LookupError as exc:
-                raise RuntimeError(
-                    "g2p_en requires the NLTK cmudict corpus. "
-                    "Install it with: python -m nltk.downloader cmudict"
-                ) from exc
-        return self._g2p
+        return first_non_latin_letter(value)
 
     @staticmethod
     def _load_phoneme_inventory(path: Path) -> Dict[str, int]:
@@ -458,6 +374,14 @@ class Phonemizer:
             key = self._normalize_grapheme(grapheme)
             if key not in dictionary:
                 dictionary[key] = [str(p) for p in phonemes]
+        replacements: Dict[str, str] = {}
+        for replacement in data.get("replacements", []) if isinstance(data, dict) else []:
+            if not isinstance(replacement, dict):
+                continue
+            source = str(replacement.get("from", "")).strip()
+            target = str(replacement.get("to", "")).strip()
+            if source and target:
+                replacements[source] = target
         symbols = data.get("symbols", []) if isinstance(data, dict) else []
         vowels = {"SP", "AP"}
         glides = set()
@@ -476,6 +400,7 @@ class Phonemizer:
             dictionary=dictionary,
             vowels=vowels,
             glides=glides,
+            replacements=replacements,
             load_strategy="eager",
         )
 
@@ -489,8 +414,10 @@ class Phonemizer:
         dictionary: Dict[str, List[str]] = {}
         vowels = {"SP", "AP"}
         glides = set()
+        replacements: Dict[str, str] = {}
         in_symbols = False
         in_entries = False
+        in_replacements = False
         current_symbol: Optional[str] = None
         current_grapheme: Optional[str] = None
         current_key: Optional[str] = None
@@ -515,6 +442,7 @@ class Phonemizer:
                 if stripped == "symbols:":
                     in_symbols = True
                     in_entries = False
+                    in_replacements = False
                     current_symbol = None
                     continue
                 if stripped == "entries:":
@@ -522,6 +450,22 @@ class Phonemizer:
                         current_symbol = None
                     in_symbols = False
                     in_entries = True
+                    in_replacements = False
+                    continue
+                if stripped == "replacements:":
+                    finalize_entry()
+                    in_symbols = False
+                    in_entries = False
+                    in_replacements = True
+                    continue
+                if in_replacements:
+                    if stripped.startswith("- "):
+                        replacement = yaml.safe_load(stripped[2:])
+                        if isinstance(replacement, dict):
+                            source = str(replacement.get("from", "")).strip()
+                            target = str(replacement.get("to", "")).strip()
+                            if source and target:
+                                replacements[source] = target
                     continue
                 if in_symbols:
                     if stripped.startswith("- symbol:"):
@@ -539,8 +483,6 @@ class Phonemizer:
                     continue
                 if stripped.startswith("- grapheme:"):
                     finalize_entry()
-                    if not remaining:
-                        break
                     grapheme = stripped[len("- grapheme:"):].strip()
                     current_grapheme = grapheme
                     current_key = self._normalize_grapheme(grapheme)
@@ -556,6 +498,7 @@ class Phonemizer:
             dictionary=dictionary,
             vowels=vowels,
             glides=glides,
+            replacements=replacements,
             load_strategy="selective",
         )
 

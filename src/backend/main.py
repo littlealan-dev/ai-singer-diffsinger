@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 import logging
 
 from src.backend.config import Settings
@@ -76,6 +76,11 @@ class ChatRequest(BaseModel):
     # Values are treated as authoritative user selections and avoid fragile text parsing.
     selection: dict[str, Any] | None = None
     selected_voicebank_id: str | None = None
+    # Backend-ready structured override. UI controls will be added separately.
+    selected_language: str | None = Field(
+        default=None,
+        pattern=r"^[a-z]{2,3}(?:-[a-z0-9]+)*$",
+    )
 
 
 class SolfegeSettingsPayload(BaseModel):
@@ -499,6 +504,7 @@ def create_app() -> FastAPI:
                 user_email=user_email,
                 selection=payload.selection,
                 selected_voicebank_id=payload.selected_voicebank_id,
+                selected_language=payload.selected_language,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpStartupInProgressError as exc:

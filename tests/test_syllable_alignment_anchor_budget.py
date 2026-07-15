@@ -116,12 +116,14 @@ class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
             note_durations=[12],
             phonemizer=phonemizer,  # type: ignore[arg-type]
             voicebank_path=Path("."),
+            language="es",
             include_phonemes=True,
         )
         self.assertEqual(payload["phonemes"], ["k", "ey"])
         self.assertEqual(payload["word_boundaries"], [1, 1])
         self.assertEqual(payload["group_note_indices"], [0, 0])
         self.assertEqual(payload["word_durations"], [1, 11])
+        self.assertEqual(mock_phonemize.call_args.kwargs["language"], "es")
 
 
 if __name__ == "__main__":

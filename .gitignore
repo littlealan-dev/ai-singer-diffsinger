@@ -61,6 +61,10 @@ outputs/
 reports/
 tests/output/
 assets
+!src/phonemizer/assets/
+!src/phonemizer/assets/openutau/
+!src/phonemizer/assets/openutau/g2p-es.zip
+!src/phonemizer/assets/openutau/NOTICE
 logs/
 runs/
 checkpoints/

@@ -68,13 +68,20 @@ class GeminiRestClient:
             payload["cachedContent"] = cached_content_name
         else:
             payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
+        # Ask Gemini for JSON, but deliberately do not impose a response schema:
+        # our tool-call arguments are intentionally flexible and schema-constrained
+        # generation previously produced empty argument objects.
+        generation_config: Dict[str, Any] = {
+            "responseMimeType": "application/json",
+        }
         thinking_config: Dict[str, Any] = {}
         if thinking_level:
             thinking_config["thinkingLevel"] = thinking_level
         if self._include_thought_summary:
             thinking_config["includeThoughts"] = True
         if thinking_config:
-            payload["generationConfig"] = {"thinkingConfig": thinking_config}
+            generation_config["thinkingConfig"] = thinking_config
+        payload["generationConfig"] = generation_config
         self._logger.debug(
             "gemini_request_payload role=%s model=%s thinking_level=%s payload=%s",
             role.value,

@@ -491,6 +491,7 @@ def align(
     note_durations: List[int],
     phonemizer: Phonemizer,
     voicebank_path: Path,
+    language: str = "en",
     include_phonemes: bool = False,
     solfege_pronunciation_patch: bool = False,
 ) -> Dict[str, Any]:
@@ -513,6 +514,7 @@ def align(
             phonemize(
                 lyrics,
                 voicebank_path,
+                language=language,
                 solfege_pronunciation_patch=solfege_pronunciation_patch,
             )
         )

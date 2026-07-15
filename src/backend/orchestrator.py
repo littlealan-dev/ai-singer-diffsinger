@@ -27,6 +27,11 @@ from src.backend.llm_prompt import (
 from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import McpRouter
 from src.backend.job_store import JobStore
+from src.backend.language_selection import (
+    collect_score_lyrics,
+    normalize_language_code,
+    resolve_synthesis_language,
+)
 from src.backend.session import SessionStore
 from src.backend.storage_client import copy_blob, upload_file
 from src.api.audio import save_audio
@@ -143,6 +148,7 @@ class Orchestrator:
         user_email: str,
         selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
@@ -183,6 +189,12 @@ class Orchestrator:
                     "type": "chat_error",
                     "message": "Selected AI voice is not available. Please choose another voice.",
                 }
+            forced_language = normalize_language_code(selected_language)
+            if selected_language and forced_language is None:
+                return {
+                    "type": "chat_error",
+                    "message": "Selected language is invalid. Use a lowercase language code such as en, es, ja, or zh.",
+                }
             self._logger.debug("chat_user session=%s message=%s", session_id, message)
             await self._sessions.append_history(session_id, "user", message)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -216,12 +228,21 @@ class Orchestrator:
                 snapshot,
                 score_available=True,
                 selected_voicebank_id=forced_voicebank_id,
+                selected_language=forced_language,
             )
             if llm_error:
                 response_message = llm_error
                 await self._sessions.append_history(session_id, "assistant", response_message)
                 return {"type": "chat_error", "message": response_message}
             if llm_response is not None:
+                if forced_language:
+                    llm_response = replace(
+                        llm_response,
+                        tool_calls=self._apply_forced_language(
+                            llm_response.tool_calls,
+                            forced_language,
+                        ),
+                    )
                 response_message = self._merge_thought_summary(
                     llm_response.final_message or response_message,
                     llm_response.thought_summary,
@@ -269,6 +290,7 @@ class Orchestrator:
                         self._build_multiple_tool_calls_followup_prompt(llm_response.tool_calls),
                         current_score["score"],
                         selected_voicebank_id=forced_voicebank_id,
+                        selected_language=forced_language,
                         instructions=(
                             "This is a message-only correction for an invalid response "
                             "that contained multiple tool calls. No tools will be "
@@ -370,6 +392,7 @@ class Orchestrator:
                     user_id=user_id,
                     user_email=user_email,
                     forced_voicebank_id=forced_voicebank_id,
+                    forced_language=forced_language,
                     workflow_user_message=message,
                 )
                 await self._sessions.append_history(
@@ -1361,6 +1384,7 @@ class Orchestrator:
         user_id: str,
         user_email: str,
         forced_voicebank_id: Optional[str] = None,
+        forced_language: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1411,6 +1435,7 @@ class Orchestrator:
                 user_email=user_email,
                 explicit_verse_number=explicit_verse_number,
                 forced_voicebank_id=forced_voicebank_id,
+                forced_language=forced_language,
             )
             working_score = tool_result.score
             if tool_result.session_state_changed:
@@ -1625,6 +1650,7 @@ class Orchestrator:
                     ),
                     working_score,
                     selected_voicebank_id=forced_voicebank_id,
+                    selected_language=forced_language,
                     role=LlmRole.PREPROCESS,
                 )
                 if repair_error:
@@ -1728,6 +1754,7 @@ class Orchestrator:
                         followup_prompt,
                         working_score,
                         selected_voicebank_id=forced_voicebank_id,
+                        selected_language=forced_language,
                         instructions=(
                             "This is a message-only follow-up for a tool execution "
                             "blocker. No tools will be executed from this response. "
@@ -1742,6 +1769,7 @@ class Orchestrator:
                     followup_prompt,
                     working_score,
                     selected_voicebank_id=forced_voicebank_id,
+                    selected_language=forced_language,
                 )
             if followup_error:
                 best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -4124,6 +4152,7 @@ class Orchestrator:
         score_available: bool,
         *,
         selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Query the LLM to determine tool calls and response text."""
@@ -4173,6 +4202,7 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                selected_language=selected_language,
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -4250,6 +4280,7 @@ class Orchestrator:
         current_score: Optional[Dict[str, Any]] = None,
         *,
         selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM for prose only, with no executable follow-up tool affordance."""
@@ -4308,6 +4339,7 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                selected_language=selected_language,
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -4362,6 +4394,7 @@ class Orchestrator:
         current_score: Optional[Dict[str, Any]] = None,
         *,
         selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
@@ -4418,6 +4451,7 @@ class Orchestrator:
                 ),
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
+                selected_language=selected_language,
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -4607,6 +4641,69 @@ class Orchestrator:
             updated.pop("voice_color", None)
             updated.pop("voice_id", None)
         return updated
+
+    @staticmethod
+    def _apply_forced_language(
+        tool_calls: List[ToolCall],
+        language: str,
+    ) -> List[ToolCall]:
+        """Apply a structured user language override to executable tool calls."""
+        updated_calls: List[ToolCall] = []
+        for call in tool_calls:
+            arguments = copy.deepcopy(call.arguments)
+            if call.name == TOOL_SYNTHESIZE:
+                arguments["language"] = language
+            elif call.name == TOOL_START_PREPROCESS_WORKFLOW:
+                request = arguments.get("request")
+                if not isinstance(request, dict):
+                    request = {}
+                request["language"] = language
+                arguments["request"] = request
+            updated_calls.append(ToolCall(name=call.name, arguments=arguments))
+        return updated_calls
+
+    async def _resolve_synthesis_language(
+        self,
+        score: Dict[str, Any],
+        synth_args: Dict[str, Any],
+        *,
+        requested_language: Optional[str],
+    ):
+        """Resolve one language and validate it against voicebank product metadata."""
+        voicebank_id = str(synth_args.get("voicebank") or "").strip()
+        if not voicebank_id:
+            voicebank_id = await self._resolve_voicebank()
+        details_by_id = {
+            str(entry.get("id")): entry
+            for entry in await self._get_voicebank_details()
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        details = details_by_id.get(voicebank_id, {})
+        languages = details.get("languages") if isinstance(details, dict) else []
+        return resolve_synthesis_language(
+            requested_language=requested_language,
+            proposed_language=synth_args.get("language"),
+            lyric_text=collect_score_lyrics(score),
+            voicebank_id=voicebank_id,
+            voicebank_languages=languages if isinstance(languages, list) else (),
+        )
+
+    @staticmethod
+    def _build_unsupported_language_action(resolution: Any) -> Dict[str, Any]:
+        """Return a product-facing preflight result without reserving credits."""
+        available = list(resolution.available_languages)
+        available_text = ", ".join(available) if available else "English only (legacy default)"
+        return {
+            "status": "action_required",
+            "action": "unsupported_synthesis_language",
+            "code": "unsupported_synthesis_language",
+            "reason": resolution.unsupported_reason,
+            "message": (
+                f"{resolution.selected_language} is not supported by "
+                f"{resolution.voicebank_id}. Available languages: {available_text}."
+            ),
+            "diagnostics": resolution.diagnostics(),
+        }
 
     async def _build_synthesis_voicebank_metadata(
         self,
@@ -4811,6 +4908,7 @@ class Orchestrator:
         user_email: str,
         explicit_verse_number: Optional[str],
         forced_voicebank_id: Optional[str] = None,
+        forced_language: Optional[str] = None,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -5207,6 +5305,41 @@ class Orchestrator:
 
                 # Launch an async synthesis job.
                 synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
+                language_resolution = await self._resolve_synthesis_language(
+                    current_score,
+                    synth_args,
+                    requested_language=forced_language,
+                )
+                if not language_resolution.is_supported:
+                    action_required = self._build_unsupported_language_action(
+                        language_resolution,
+                    )
+                    self._logger.info(
+                        "language_unsupported session=%s selected=%s source=%s voicebank=%s available=%s reason=%s",
+                        session_id,
+                        language_resolution.selected_language,
+                        language_resolution.source,
+                        language_resolution.voicebank_id,
+                        list(language_resolution.available_languages),
+                        language_resolution.unsupported_reason,
+                    )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                synth_args["voicebank"] = language_resolution.voicebank_id
+                synth_args["language"] = language_resolution.selected_language
+                self._logger.info(
+                    "language_resolution session=%s selected=%s source=%s voicebank=%s available=%s",
+                    session_id,
+                    language_resolution.selected_language,
+                    language_resolution.source,
+                    language_resolution.voicebank_id,
+                    list(language_resolution.available_languages),
+                )
                 synth_args = await self._normalize_synthesize_voice_color(synth_args)
                 synth_args.pop("score", None)
                 requested_verse_number = self._normalize_verse_number(

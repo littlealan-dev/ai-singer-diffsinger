@@ -11,12 +11,18 @@ import tempfile
 
 from src.api import phonemize
 from src.phonemizer import Phonemizer, UnsupportedLyricTokenError
+from src.phonemizer.language_g2p import (
+    DiffSingerSpanishPhonemizer,
+    LanguagePhonemizerRegistry,
+    get_language_g2p_provider,
+)
 
 
 VOICEBANK_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Raine_Rena_2.01"
 PHONEMES_PATH = VOICEBANK_ROOT / "dsmain" / "phonemes.json"
 DICTIONARY_PATH = VOICEBANK_ROOT / "dsvariance" / "dsdict-en.yaml" 
 LANGUAGES_PATH = VOICEBANK_ROOT / "dsmain" / "languages.json"
+KEIRO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Keiro_Revenant_v170/configs"
 
 
 class PhonemizerClassTests(unittest.TestCase):
@@ -174,6 +180,20 @@ class PhonemizerClassTests(unittest.TestCase):
 
             with self.assertRaisesRegex(KeyError, "G2P fallback is not available"):
                 phonemizer.phonemize_tokens(["未知"])
+
+    def test_spanish_missing_dictionary_entry_uses_openutau_fallback(self) -> None:
+        """OpenUtau's Spanish G2P handles ordinary words absent from dsdict-es."""
+        result = phonemize(["Salve,"], KEIRO_ROOT, language="es")
+
+        self.assertEqual(result["phonemes"], ["es/s", "es/a", "es/l", "es/B", "es/e"])
+        self.assertEqual(result["language_ids"], [4, 4, 4, 4, 4])
+
+    def test_spanish_g2p_is_resolved_by_the_language_registry(self) -> None:
+        """Language fallback selection is declarative, not a Phonemizer conditional."""
+        provider = get_language_g2p_provider("es")
+
+        self.assertIsInstance(provider, DiffSingerSpanishPhonemizer)
+        self.assertEqual(LanguagePhonemizerRegistry.supported_languages(), ("en", "es"))
 
     def test_language_must_exist_in_voicebank_language_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -415,6 +435,8 @@ class PhonemizerClassTests(unittest.TestCase):
                 "      - en/er\n"
                 "      - en/l\n"
                 "      - en/d\n"
+                "replacements:\n"
+                "  - {from: aw, to: en/aw}\n"
                 + ("# filler to force selective path\n" * 100),
                 encoding="utf8",
             )
@@ -432,6 +454,7 @@ class PhonemizerClassTests(unittest.TestCase):
 
             self.assertEqual(phonemizer._dictionary_load_strategy, "selective")
             self.assertEqual(phonemizer._dictionary, {"how": ["en/hh", "en/aw"]})
+            self.assertEqual(phonemizer._dictionary_replacements, {"aw": "en/aw"})
             self.assertTrue(phonemizer.is_vowel("SP"))
             self.assertTrue(phonemizer.is_vowel("en/aw"))
             result = phonemizer.phonemize_tokens(["how"])

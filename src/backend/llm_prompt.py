@@ -67,6 +67,7 @@ def build_prompt_bundle(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    selected_language: Optional[str] = None,
     solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> PromptBundle:
@@ -139,6 +140,20 @@ def build_prompt_bundle(
             sort_keys=True,
             ensure_ascii=False,
         )
+    selected_language_text = "none"
+    if selected_language:
+        selected_language_text = json.dumps(
+            {
+                "language": selected_language,
+                "instruction": (
+                    "LANGUAGE OVERRIDE ACTIVE. The user explicitly selected this "
+                    "synthesis language. Every synthesize tool call must use this "
+                    "exact language code."
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
     solfege_settings_text = "none"
     if solfege_settings:
         solfege_settings_text = json.dumps(
@@ -177,6 +192,7 @@ def build_prompt_bundle(
         "Voicebank metadata (if available):\n"
         f"{voicebank_details_text}\n"
         f"User-selected voicebank override: {selected_voicebank_text}\n"
+        f"User-selected language override: {selected_language_text}\n"
         "Canonical current solfege settings (authoritative):\n"
         f"{solfege_settings_text}\n"
         "End Dynamic Context."
@@ -198,6 +214,7 @@ def build_system_prompt(
     last_preprocess_plan: Optional[Dict[str, Any]] = None,
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
+    selected_language: Optional[str] = None,
     solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> str:
@@ -213,6 +230,7 @@ def build_system_prompt(
         last_preprocess_plan=last_preprocess_plan,
         voicebank_details=voicebank_details,
         selected_voicebank_id=selected_voicebank_id,
+        selected_language=selected_language,
         solfege_settings=solfege_settings,
         role=role,
     )

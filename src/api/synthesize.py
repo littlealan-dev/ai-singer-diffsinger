@@ -1389,6 +1389,7 @@ def align_phonemes_to_notes(
             note_durations=note_frame_durations,
             phonemizer=phonemizer,
             voicebank_path=voicebank_path,
+            language=language,
             include_phonemes=include_phonemes,
             solfege_pronunciation_patch=solfege_pronunciation_patch,
         )
