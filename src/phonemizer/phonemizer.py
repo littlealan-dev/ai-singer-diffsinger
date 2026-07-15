@@ -15,8 +15,11 @@ import yaml
 from .language_g2p import (
     G2pInputError,
     first_non_latin_letter,
-    get_language_g2p_provider,
     normalize_word_for_english_g2p,
+)
+from .language_pronunciation import (
+    PreparedLyric,
+    get_language_pronunciation_pipeline,
 )
 from .phoneme_logic_handler import get_phoneme_logic_handler
 
@@ -27,6 +30,7 @@ class PhonemeResult:
     phonemes: Sequence[str]
     ids: Sequence[int]
     language_ids: Sequence[int]
+    word_boundaries: Sequence[int]
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,11 @@ class UnsupportedLyricTokenError(ValueError):
 
     @property
     def error_message(self) -> str:
+        if self.reason == "no_pronounceable_lyric_after_cleanup":
+            return (
+                f"Token '{self.token}' contains only numbers or display punctuation. "
+                "Replace it with the singable lyric text for this sounding note."
+            )
         if self.reason == "non_latin_lyrics_for_english_g2p":
             return (
                 f"Token '{self.token}' contains non-Latin text that cannot be "
@@ -105,7 +114,7 @@ class Phonemizer:
         languages_path: Optional[Path] = None,
         language: str = "en",
         allow_g2p: bool = True,
-        needed_graphemes: Optional[set[str]] = None,
+        needed_graphemes: Optional[Sequence[str]] = None,
     ) -> None:
         """Initialize phoneme inventory, dictionary, and optional G2P."""
         normalized_language = str(language or "").strip().lower()
@@ -116,11 +125,19 @@ class Phonemizer:
         self.phonemes_path = Path(phonemes_path)
         self.dictionary_path = Path(dictionary_path)
         self.languages_path = Path(languages_path) if languages_path else None
+        self._pronunciation_pipeline = get_language_pronunciation_pipeline(self.language)
+        prepared_needed_graphemes = self._prepare_lyrics(needed_graphemes or ())
         self._needed_graphemes = {
-            self._normalize_grapheme(value)
-            for value in (needed_graphemes or set())
-            if self._normalize_grapheme(value)
+            self._normalize_grapheme(lyric.lookup)
+            for lyric in prepared_needed_graphemes
+            if self._normalize_grapheme(lyric.lookup)
         }
+        self._needed_graphemes.update(
+            self._normalize_grapheme(lookup)
+            for lyric in prepared_needed_graphemes
+            for lookup in lyric.fallback_lookups
+            if self._normalize_grapheme(lookup)
+        )
         
         self._phoneme_to_id = self._load_phoneme_inventory(self.phonemes_path)
         dictionary_bundle = self._load_dictionary_bundle(
@@ -142,7 +159,6 @@ class Phonemizer:
         self._phoneme_meta = self._load_phoneme_metadata(
             self.phonemes_path.with_name("phoneme_metadata.json")
         )
-        self._g2p_provider = get_language_g2p_provider(self.language)
         self._logic_handler = get_phoneme_logic_handler(language)
 
     def distribute_slur(self, phonemes: Sequence[str], note_count: int) -> Optional[List[List[str]]]:
@@ -155,10 +171,13 @@ class Phonemizer:
         return self._logic_handler.distribute_slur(phonemes, note_count, self)
 
     def phonemize_tokens(self, tokens: Sequence[str]) -> PhonemeResult:
-        """Convert a list of tokens into phonemes and IDs."""
+        """Convert a lyric phrase into phonemes, IDs, and per-token boundaries."""
         phonemes: List[str] = []
-        for token in tokens:
-            phonemes.extend(self._phonemize_token(token))
+        word_boundaries: List[int] = []
+        for lyric in self._prepare_lyrics(tokens):
+            token_phonemes = self._phonemize_prepared_lyric(lyric)
+            phonemes.extend(token_phonemes)
+            word_boundaries.append(len(token_phonemes))
         ids = [self._phoneme_to_id[p] for p in phonemes]
 
         # Resolve language ID for each phoneme.
@@ -169,7 +188,12 @@ class Phonemizer:
             lang_id = self._language_map.get(lang_code, 0)
             lang_ids.append(lang_id)
             
-        return PhonemeResult(phonemes=phonemes, ids=ids, language_ids=lang_ids)
+        return PhonemeResult(
+            phonemes=phonemes,
+            ids=ids,
+            language_ids=lang_ids,
+            word_boundaries=word_boundaries,
+        )
 
     def is_vowel(self, phoneme: str) -> bool:
         """Return True if the phoneme is a vowel."""
@@ -186,31 +210,53 @@ class Phonemizer:
             return None
         return meta.get("vowel_strength")
 
-    def _phonemize_token(self, token: str) -> List[str]:
-        """Phonemize a single token using dictionary or G2P."""
-        raw = token.strip()
+    def _prepare_lyrics(self, tokens: Sequence[str]) -> Sequence[PreparedLyric]:
+        """Run the selected language's phrase-level romanization step."""
+        prepared = self._pronunciation_pipeline.prepare(tokens)
+        if len(prepared) != len(tokens):
+            raise ValueError(
+                f"Language preparation for '{self.language}' changed the lyric-token count."
+            )
+        return prepared
+
+    def _phonemize_prepared_lyric(self, lyric: PreparedLyric) -> List[str]:
+        """Phonemize one prepared lyric using dictionary lookup then optional G2P."""
+        raw = lyric.original.strip()
         if not raw:
             return []
+        if not lyric.lookup:
+            raise UnsupportedLyricTokenError(
+                token=raw,
+                language=self.language,
+                reason="no_pronounceable_lyric_after_cleanup",
+            )
         if raw in self._phoneme_to_id:
             return [raw]
         if raw.upper() in self._phoneme_to_id:
             return [raw.upper()]
-        normalized = self._normalize_grapheme(raw)
+        normalized = self._normalize_grapheme(lyric.lookup)
         if normalized and normalized in self._dictionary:
             return self._validate_phonemes(self._dictionary[normalized], raw)
+        fallback_phonemes = self._phonemize_dictionary_fallback(
+            lyric.fallback_lookups,
+            raw,
+        )
+        if fallback_phonemes is not None:
+            return fallback_phonemes
         if not self.allow_g2p:
             raise KeyError(
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 "Update the voicebank dsdict.yaml to include this grapheme, or enable G2P."
             )
-        if self._g2p_provider is None:
+        g2p_fallback = self._pronunciation_pipeline.g2p_fallback
+        if g2p_fallback is None:
             raise KeyError(
                 f"No dictionary entry for token '{raw}' in {self.dictionary_path}. "
                 f"G2P fallback is not available for language '{self.language}'; "
                 "the selected voicebank dictionary must include this grapheme."
             )
         try:
-            bare_phonemes = self._g2p_provider.phonemize(raw)
+            bare_phonemes = g2p_fallback.phonemize(normalized)
         except G2pInputError as exc:
             raise UnsupportedLyricTokenError(
                 token=raw,
@@ -227,6 +273,23 @@ class Phonemizer:
             )
         mapped = [self._map_g2p_phoneme(phoneme) for phoneme in bare_phonemes]
         return self._validate_phonemes(mapped, raw)
+
+    def _phonemize_dictionary_fallback(
+        self,
+        lookups: Sequence[str],
+        token: str,
+    ) -> Optional[List[str]]:
+        """Resolve a prepared multi-unit fallback through the voicebank dictionary."""
+        if not lookups:
+            return None
+        phonemes: List[str] = []
+        for lookup in lookups:
+            normalized = self._normalize_grapheme(lookup)
+            dictionary_phonemes = self._dictionary.get(normalized)
+            if not normalized or dictionary_phonemes is None:
+                return None
+            phonemes.extend(self._validate_phonemes(dictionary_phonemes, token))
+        return phonemes
 
     def _map_g2p_phoneme(self, phoneme: str) -> str:
         """Map a provider's bare symbol through voicebank replacements and language IDs."""
@@ -483,7 +546,9 @@ class Phonemizer:
                     continue
                 if stripped.startswith("- grapheme:"):
                     finalize_entry()
-                    grapheme = stripped[len("- grapheme:"):].strip()
+                    grapheme = self._decode_yaml_scalar(
+                        stripped[len("- grapheme:"):].strip()
+                    )
                     current_grapheme = grapheme
                     current_key = self._normalize_grapheme(grapheme)
                     current_phonemes = [] if current_key in needed_graphemes else None
@@ -501,6 +566,18 @@ class Phonemizer:
             replacements=replacements,
             load_strategy="selective",
         )
+
+    @staticmethod
+    def _decode_yaml_scalar(value: str) -> str:
+        """Decode the quoted scalar form used by OpenUtau dictionary keys."""
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            quote = value[0]
+            value = value[1:-1]
+            if quote == "'":
+                return value.replace("''", "'")
+            return value.replace(r'\\"', '"').replace(r"\\\\", "\\")
+        return value
 
     def _phonemes_match_language(self, phonemes: Iterable[str]) -> bool:
         """Return True if phonemes match the current language prefix."""

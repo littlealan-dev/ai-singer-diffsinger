@@ -43,15 +43,6 @@ def patch_solfege_pronunciations(lyrics: List[str]) -> List[str]:
     ]
 
 
-def _collect_needed_graphemes(lyrics: List[str]) -> set[str]:
-    """Collect normalized lyric graphemes required for one phonemize call."""
-    return {
-        Phonemizer._normalize_grapheme(lyric)
-        for lyric in lyrics
-        if Phonemizer._normalize_grapheme(lyric)
-    }
-
-
 def phonemize(
     lyrics: List[str],
     voicebank: Union[str, Path],
@@ -123,27 +114,16 @@ def phonemize(
         languages_path=languages_path,
         language=language,
         allow_g2p=True,
-        needed_graphemes=_collect_needed_graphemes(effective_lyrics),
+        # The phonemizer prepares this full sequence before deciding which
+        # dictionary entries it needs (important for Chinese phrase context).
+        needed_graphemes=effective_lyrics,
     )
-    
-    all_phonemes: List[str] = []
-    all_ids: List[int] = []
-    all_lang_ids: List[int] = []
-    word_boundaries: List[int] = []
-    
-    for lyric in effective_lyrics:
-        # Phonemize each lyric in isolation to preserve word boundaries.
-        result = phonemizer.phonemize_tokens([lyric])
-        all_phonemes.extend(result.phonemes)
-        all_ids.extend(result.ids)
-        all_lang_ids.extend(result.language_ids)
-        word_boundaries.append(len(result.phonemes))
-    
+    phoneme_result = phonemizer.phonemize_tokens(effective_lyrics)
     result = {
-        "phonemes": all_phonemes,
-        "phoneme_ids": all_ids,
-        "language_ids": all_lang_ids,
-        "word_boundaries": word_boundaries,
+        "phonemes": list(phoneme_result.phonemes),
+        "phoneme_ids": list(phoneme_result.ids),
+        "language_ids": list(phoneme_result.language_ids),
+        "word_boundaries": list(phoneme_result.word_boundaries),
     }
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("phonemize output=%s", summarize_payload(result))

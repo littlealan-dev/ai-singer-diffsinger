@@ -68,6 +68,25 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(part.notes[0].lyric, "1.A")
         self.assertTrue(all(event.lyric is not None for event in part.notes))
 
+    def test_strips_redundant_whitespace_separated_verse_label(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list>
+  <part id="P1"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type>
+      <lyric number="1"><text>1.&#160;每</text></lyric>
+    </note>
+  </measure></part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "numbered-chinese-lyric.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(score.parts[0].notes[0].lyric, "每")
+
     def test_slur_notes_use_plus_marker(self) -> None:
         score = parse_musicxml(TEST_XML, lyrics_only=True)
         part = score.parts[0]

@@ -11,10 +11,11 @@ import tempfile
 
 from src.api import phonemize
 from src.phonemizer import Phonemizer, UnsupportedLyricTokenError
-from src.phonemizer.language_g2p import (
-    DiffSingerSpanishPhonemizer,
-    LanguagePhonemizerRegistry,
-    get_language_g2p_provider,
+from src.phonemizer.language_g2p import DiffSingerSpanishPhonemizer
+from src.phonemizer.language_pronunciation import (
+    LanguagePronunciationRegistry,
+    get_language_pronunciation_pipeline,
+    prepare_lookup_lyric,
 )
 
 
@@ -23,6 +24,7 @@ PHONEMES_PATH = VOICEBANK_ROOT / "dsmain" / "phonemes.json"
 DICTIONARY_PATH = VOICEBANK_ROOT / "dsvariance" / "dsdict-en.yaml" 
 LANGUAGES_PATH = VOICEBANK_ROOT / "dsmain" / "languages.json"
 KEIRO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Keiro_Revenant_v170/configs"
+QIXUAN_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Qixuan_v2.7.0_DiffSinger_OpenUtau"
 
 
 class PhonemizerClassTests(unittest.TestCase):
@@ -189,11 +191,110 @@ class PhonemizerClassTests(unittest.TestCase):
         self.assertEqual(result["language_ids"], [4, 4, 4, 4, 4])
 
     def test_spanish_g2p_is_resolved_by_the_language_registry(self) -> None:
-        """Language fallback selection is declarative, not a Phonemizer conditional."""
-        provider = get_language_g2p_provider("es")
+        """Fallback and romanization selection is declarative, not conditional."""
+        pipeline = get_language_pronunciation_pipeline("es")
 
-        self.assertIsInstance(provider, DiffSingerSpanishPhonemizer)
-        self.assertEqual(LanguagePhonemizerRegistry.supported_languages(), ("en", "es"))
+        self.assertIsInstance(pipeline.g2p_fallback, DiffSingerSpanishPhonemizer)
+        self.assertEqual(
+            LanguagePronunciationRegistry.registered_languages(),
+            ("en", "es", "ja", "zh"),
+        )
+
+    def test_qixuan_japanese_kana_uses_romaji_dictionary_entries(self) -> None:
+        """Kana is romanized before Qixuan's dsdict-ja lookup, as in OpenUtau."""
+        result = phonemize(["か", "キャ", "っ", "ティ"], QIXUAN_ROOT, language="ja")
+
+        self.assertEqual(
+            result["phonemes"],
+            ["ja/k", "ja/a", "ja/ky", "ja/a", "ja/cl", "ja/t", "ja/i"],
+        )
+        self.assertEqual(result["language_ids"], [2, 2, 2, 2, 2, 2, 2])
+        self.assertEqual(result["word_boundaries"], [2, 2, 1, 2])
+
+    def test_qixuan_japanese_multimora_lyric_uses_dictionary_mora_fallback(self) -> None:
+        """A normal score may place several Japanese morae on one note."""
+        result = phonemize(["そう", "ああ", "きょう"], QIXUAN_ROOT, language="ja")
+
+        self.assertEqual(
+            result["phonemes"],
+            [
+                "ja/s", "ja/o", "ja/o",
+                "ja/a", "ja/a",
+                "ja/ky", "ja/o", "ja/o",
+            ],
+        )
+        self.assertEqual(result["word_boundaries"], [3, 2, 3])
+
+    def test_qixuan_chinese_hanzi_uses_phrase_pinyin_dictionary_entries(self) -> None:
+        """Hanzi is romanized to tone-less Pinyin before Qixuan's dsdict-zh lookup."""
+        result = phonemize(["你", "好"], QIXUAN_ROOT, language="zh")
+
+        self.assertEqual(result["phonemes"], ["zh/n", "zh/i", "zh/h", "zh/ao"])
+        self.assertEqual(result["language_ids"], [3, 3, 3, 3])
+        self.assertEqual(result["word_boundaries"], [2, 2])
+
+    def test_qixuan_chinese_strips_full_and_half_width_display_punctuation(self) -> None:
+        """Mixed display punctuation must not be passed to the Chinese dictionary."""
+        result = phonemize(["（巷，", "巷!）"], QIXUAN_ROOT, language="zh")
+
+        self.assertEqual(result["phonemes"], ["zh/x", "zh/iang", "zh/x", "zh/iang"])
+        self.assertEqual(result["word_boundaries"], [2, 2])
+
+        prepared = get_language_pronunciation_pipeline("zh").prepare(["（巷，"])
+        self.assertEqual(prepared[0].original, "（巷，")
+        self.assertEqual(prepared[0].lookup, "xiang")
+
+    def test_display_cleanup_removes_unicode_numbers_and_punctuation(self) -> None:
+        """Numeric notation is display-only; scores must use singable lyric text."""
+        chinese = get_language_pronunciation_pipeline("zh").prepare(["1.（巷，", "７！", "Ⅶ"])
+        japanese = get_language_pronunciation_pipeline("ja").prepare(["7あ、", "東京！"])
+
+        self.assertEqual([lyric.lookup for lyric in chinese], ["xiang", "", ""])
+        self.assertEqual([lyric.lookup for lyric in japanese], ["a", "東京"])
+        self.assertEqual(chinese[0].original, "1.（巷，")
+        self.assertEqual(prepare_lookup_lyric("7don’t!", language="en"), "don't")
+
+    def test_numeric_or_punctuation_only_lyric_requires_singable_text(self) -> None:
+        phonemizer = Phonemizer(
+            phonemes_path=PHONEMES_PATH,
+            dictionary_path=DICTIONARY_PATH,
+            languages_path=LANGUAGES_PATH,
+            language="en",
+        )
+
+        with self.assertRaisesRegex(UnsupportedLyricTokenError, "contains only numbers or display punctuation"):
+            phonemizer.phonemize_tokens(["７！"])
+
+    def test_qixuan_chinese_ignores_redundant_score_verse_label(self) -> None:
+        """Existing parsed scores may retain a display label in their first lyric."""
+        result = phonemize(["1.\u00a0每", "条"], QIXUAN_ROOT, language="zh")
+
+        self.assertEqual(result["phonemes"], ["zh/m", "zh/ei", "zh/t", "zh/iao"])
+        self.assertEqual(result["word_boundaries"], [2, 2])
+
+    def test_qixuan_chinese_selective_dictionary_load_uses_phrase_pinyin(self) -> None:
+        """Selective loading must prepare Hanzi before looking up dictionary entries."""
+        phonemizer = Phonemizer(
+            phonemes_path=QIXUAN_ROOT / "dsdur" / "0102_qixuan_newdict_dur.phonemes.json",
+            dictionary_path=QIXUAN_ROOT / "dsdur" / "dsdict-zh.yaml",
+            languages_path=QIXUAN_ROOT / "dsdur" / "0102_qixuan_newdict_dur.languages.json",
+            language="zh",
+            needed_graphemes=["重", "庆"],
+        )
+
+        result = phonemizer.phonemize_tokens(["重", "庆"])
+        self.assertEqual(result.phonemes, ["zh/ch", "zh/ong", "zh/q", "zh/ing"])
+
+    def test_japanese_kanji_is_not_silently_romanized(self) -> None:
+        """Match OpenUtau: Japanese DiffSinger romanizes Kana, not Kanji."""
+        prepared = get_language_pronunciation_pipeline("ja").prepare(["日", "に"])
+
+        self.assertEqual([lyric.lookup for lyric in prepared], ["日", "ni"])
+
+    def test_chinese_romanizer_preserves_phrase_token_alignment(self) -> None:
+        prepared = get_language_pronunciation_pipeline("zh").prepare(["重", "庆", "！", "你"])
+
+        self.assertEqual([lyric.lookup for lyric in prepared], ["chong", "qing", "", "ni"])
 
     def test_language_must_exist_in_voicebank_language_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -236,7 +337,7 @@ class PhonemizerClassTests(unittest.TestCase):
             phonemes_path.write_text('{"SP": 0, "AP": 1, "hh": 2, "en/aw": 3}', encoding="utf8")
             dictionary_path.write_text(
                 "entries:\n"
-                "  - grapheme: how\n"
+                "  - grapheme: 'how'\n"
                 "    phonemes: [en/hh, en/aw]\n",
                 encoding="utf8",
             )
@@ -425,7 +526,7 @@ class PhonemizerClassTests(unittest.TestCase):
                 "  - symbol: en/er\n"
                 "    type: vowel\n"
                 "entries:\n"
-                "  - grapheme: how\n"
+                "  - grapheme: 'how'\n"
                 "    phonemes:\n"
                 "      - en/hh\n"
                 "      - en/aw\n"

@@ -12,10 +12,11 @@ phonemize_api = import_module("src.api.phonemize")
 
 
 class _FakePhonemeResult:
-    def __init__(self, token: str) -> None:
-        self.phonemes = [token]
-        self.ids = [1]
-        self.language_ids = [0]
+    def __init__(self, tokens) -> None:
+        self.phonemes = list(tokens)
+        self.ids = [1] * len(tokens)
+        self.language_ids = [0] * len(tokens)
+        self.word_boundaries = [1] * len(tokens)
 
 
 class _CapturingPhonemizer:
@@ -31,7 +32,7 @@ class _CapturingPhonemizer:
 
     def phonemize_tokens(self, tokens):
         type(self).normalized_tokens.extend(tokens)
-        return _FakePhonemeResult(tokens[0])
+        return _FakePhonemeResult(tokens)
 
 
 def test_solfege_patch_maps_whole_tokens_without_mutating_input():

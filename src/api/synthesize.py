@@ -6,9 +6,10 @@ import logging
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import json
 import time
+import unicodedata
 import numpy as np
 
 from src.api.phonemize import _find_dictionary, phonemize
@@ -821,7 +822,7 @@ def _init_phonemizer(
     voicebank_path: Path,
     language: str = "en",
     *,
-    needed_graphemes: Optional[set[str]] = None,
+    needed_graphemes: Optional[Sequence[str]] = None,
 ) -> Phonemizer:
     """Create a phonemizer configured for a voicebank."""
     config = load_voicebank_config(voicebank_path)
@@ -845,16 +846,76 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return syllable_alignment._group_notes(notes)
 
 
-def _collect_needed_graphemes_from_groups(word_groups: List[Dict[str, Any]]) -> set[str]:
-    """Collect normalized lyric graphemes from grouped notes."""
-    needed: set[str] = set()
-    for group in word_groups:
-        if group.get("is_rest"):
+_JAPANESE_DASH_MARKS = frozenset({"ー", "ｰ", "−", "–", "—", "-"})
+
+
+def _is_japanese_dash_marker(lyric: object) -> bool:
+    """Return whether a lyric consists solely of a dash-like extension mark."""
+    normalized = unicodedata.normalize("NFKC", str(lyric or "")).strip()
+    return bool(normalized) and all(character in _JAPANESE_DASH_MARKS for character in normalized)
+
+
+def _normalize_japanese_dash_extensions(notes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Map contextual Japanese dash notes to the existing lyric-extension contract.
+
+    A literal dash is treated as a sustain only when it follows a contiguous,
+    lexical note in the same voice/staff/verse context. The input score remains
+    unmodified so an existing session can be retried safely.
+    """
+    normalized_notes = [dict(note) for note in notes]
+    previous_continuation_note: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+
+    for note in normalized_notes:
+        context = (
+            str(note.get("voice") or ""),
+            str(note.get("staff") or ""),
+            str(note.get("lyric_line_index") or ""),
+        )
+        if note.get("is_rest", False):
+            previous_continuation_note.pop(context, None)
             continue
-        normalized = Phonemizer._normalize_grapheme(_resolve_group_lyric(group))
-        if normalized:
-            needed.add(normalized)
-    return needed
+
+        lyric = str(note.get("lyric") or "").strip()
+        previous = previous_continuation_note.get(context)
+        is_contiguous = False
+        if previous is not None:
+            previous_end = float(previous.get("offset_beats") or 0.0) + float(
+                previous.get("duration_beats") or 0.0
+            )
+            is_contiguous = abs(previous_end - float(note.get("offset_beats") or 0.0)) <= 1e-6
+        is_existing_extension = (
+            bool(note.get("lyric_is_extended"))
+            or note.get("tie_type") in {"continue", "stop"}
+            or lyric.startswith("+")
+        )
+        if is_existing_extension:
+            if is_contiguous:
+                previous_continuation_note[context] = note
+            else:
+                previous_continuation_note.pop(context, None)
+            continue
+
+        if _is_japanese_dash_marker(lyric) and previous is not None and is_contiguous:
+            note["lyric"] = "+"
+            note["lyric_is_extended"] = True
+            previous_continuation_note[context] = note
+            continue
+
+        if lyric:
+            previous_continuation_note[context] = note
+        else:
+            previous_continuation_note.pop(context, None)
+
+    return normalized_notes
+
+
+def _collect_needed_lyrics_from_groups(word_groups: List[Dict[str, Any]]) -> List[str]:
+    """Collect ordered lyrics for phrase-aware dictionary loading."""
+    return [
+        _resolve_group_lyric(group)
+        for group in word_groups
+        if not group.get("is_rest")
+    ]
 
 
 def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1339,6 +1400,8 @@ def align_phonemes_to_notes(
     notes = _select_voice_notes(notes, voice_id)
     if not notes:
         raise ValueError("No notes left after applying voice selection")
+    if str(language).strip().lower().split("-", 1)[0] == "ja":
+        notes = _normalize_japanese_dash_extensions(notes)
 
     start_frames, end_frames, note_frame_durations, note_pitches, _ = _compute_note_timing(
         notes,
@@ -1374,7 +1437,7 @@ def align_phonemes_to_notes(
             pitch_end_frames,
         )
 
-    needed_graphemes = _collect_needed_graphemes_from_groups(_group_notes(notes))
+    needed_graphemes = _collect_needed_lyrics_from_groups(_group_notes(notes))
     phonemizer = _init_phonemizer(
         voicebank_path,
         language=language,

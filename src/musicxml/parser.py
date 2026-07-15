@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Sequence
 from xml.etree import ElementTree
 
@@ -557,12 +558,12 @@ def _extract_lyric_text(
                 break
     if lyric is None:
         return None, None, False, None, None
+    lyric_line_index = _normalize_verse_number(lyric.number) or "1"
     text = lyric.text if lyric.text is not None else ""
-    text = text.strip()
+    text = _strip_redundant_verse_label(text, lyric_line_index).strip()
     if not text:
         text = None
     syllabic = getattr(lyric, "syllabic", None)
-    lyric_line_index = _normalize_verse_number(lyric.number) or "1"
     lyric_name = _extract_lyric_name(lyric)
     is_extended = False
     if hasattr(lyric, "isExtended"):
@@ -570,6 +571,20 @@ def _extract_lyric_text(
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
     return text, syllabic, is_extended, lyric_line_index, lyric_name
+
+
+def _strip_redundant_verse_label(text: str, verse_number: str) -> str:
+    """Remove a score-editor verse label duplicated in the lyric text.
+
+    MusicXML already stores the verse in ``lyric.number``. Some editors also
+    write a display label such as ``1. 每`` into the first lyric token. Strip
+    only the matching, whitespace-separated label so ordinary lyrics such as
+    ``1.A`` remain intact.
+    """
+    label = re.compile(
+        rf"^\s*{re.escape(verse_number)}\s*[.．、:：)）]\s+"
+    )
+    return label.sub("", text, count=1)
 
 
 def _extract_lyric_name(lyric: Any) -> Optional[str]:

@@ -595,8 +595,36 @@ class Pipeline:
             }
         ]
         note_phonemes: Dict[int, List[str]] = {}
+        phonemized_groups: Dict[int, List[str]] = {}
+        pending_lyric_group_indices: List[int] = []
 
-        for group in word_groups:
+        def phonemize_phrase_group(group_indices: List[int]) -> None:
+            if not group_indices:
+                return
+            lyric_groups = [
+                str(word_groups[group_index]["notes"][0].lyric or "")
+                for group_index in group_indices
+            ]
+            phrase_result = self.phonemizer.phonemize_tokens(lyric_groups)
+            offset = 0
+            for group_index, boundary in zip(
+                group_indices,
+                phrase_result.word_boundaries,
+            ):
+                phonemized_groups[group_index] = list(
+                    phrase_result.phonemes[offset : offset + boundary]
+                )
+                offset += boundary
+
+        for group_index, group in enumerate(word_groups):
+            if group["is_rest"]:
+                phonemize_phrase_group(pending_lyric_group_indices)
+                pending_lyric_group_indices = []
+            else:
+                pending_lyric_group_indices.append(group_index)
+        phonemize_phrase_group(pending_lyric_group_indices)
+
+        for group_index, group in enumerate(word_groups):
             notes_in_group: List[NoteEvent] = group["notes"]
             note_indices: List[int] = group["note_indices"]
             if group["is_rest"]:
@@ -614,9 +642,7 @@ class Pipeline:
                 note_phonemes[note_idx] = ["SP"]
                 continue
 
-            lyric = notes_in_group[0].lyric or ""
-            ph_res = self.phonemizer.phonemize_tokens([lyric])
-            phonemes = list(ph_res.phonemes) or ["SP"]
+            phonemes = phonemized_groups.get(group_index, []) or ["SP"]
 
             is_vowel = [self.phonemizer.is_vowel(p) for p in phonemes]
             is_glide = [self.phonemizer.is_glide(p) for p in phonemes]

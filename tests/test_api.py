@@ -26,7 +26,11 @@ from src.api.phonemize import _find_dictionary
 from src.api.inference import _load_stage_language_map
 from src.api.voicebank import resolve_vocoder_model_path
 from src.api.voicebank_cache import get_enabled_manifest_voicebanks
-from src.api.synthesize import _apply_coda_tail_durations, _build_slur_velocity_envelope
+from src.api.synthesize import (
+    _apply_coda_tail_durations,
+    _build_slur_velocity_envelope,
+    _normalize_japanese_dash_extensions,
+)
 from src.api.voice_parts import preprocess_voice_parts
 from src.phonemizer import UnsupportedLyricTokenError
 
@@ -36,11 +40,32 @@ VOICEBANKS_DIR = ROOT_DIR / "assets/voicebanks"
 VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
 TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
 TEST_MULTI_VERSE_XML = ROOT_DIR / "assets/test_data/o-holy-night.xml"
+TEST_JAPANESE_MXL = (
+    ROOT_DIR
+    / "assets/test_data/shortened-weight-of-the-world-from-nier-automata-japanese-lyrics.mxl"
+)
 OUTPUT_DIR = ROOT_DIR / "tests/output"
 
 
 def _has_voicebank_fixtures() -> bool:
     return VOICEBANKS_DIR.is_dir() and any(VOICEBANKS_DIR.iterdir())
+
+
+def test_japanese_dash_extension_requires_contiguous_lexical_note():
+    notes = [
+        {"voice": "1", "lyric_line_index": "1", "lyric": "は", "offset_beats": 0, "duration_beats": 1},
+        {"voice": "1", "lyric_line_index": "1", "lyric": "−", "offset_beats": 1, "duration_beats": 1},
+        {"voice": "1", "lyric_line_index": "1", "lyric": "−", "offset_beats": 2, "duration_beats": 1},
+        {"voice": "1", "lyric_line_index": "1", "lyric": "−", "offset_beats": 4, "duration_beats": 1},
+    ]
+
+    normalized = _normalize_japanese_dash_extensions(notes)
+
+    assert normalized[1]["lyric"] == "+"
+    assert normalized[1]["lyric_is_extended"] is True
+    assert normalized[2]["lyric"] == "+"
+    assert normalized[3]["lyric"] == "−"
+    assert notes[1]["lyric"] == "−"
 
 
 class TestParseScore(unittest.TestCase):
@@ -90,6 +115,29 @@ class TestParseScore(unittest.TestCase):
         part = score["parts"][0]
         self.assertIn("notes", part)
         self.assertGreater(len(part["notes"]), 0)
+
+    def test_japanese_dash_lyrics_normalize_to_extensions(self):
+        if not TEST_JAPANESE_MXL.exists():
+            self.skipTest(f"Test score not found: {TEST_JAPANESE_MXL}")
+
+        score = parse_score(TEST_JAPANESE_MXL, verse_number="1")
+        notes = score["parts"][0]["notes"]
+        normalized = _normalize_japanese_dash_extensions(notes)
+        dash_pairs = [
+            (raw, prepared)
+            for raw, prepared in zip(notes, normalized)
+            if raw.get("lyric") == "−"
+        ]
+
+        self.assertTrue(dash_pairs)
+        self.assertTrue(
+            all(
+                prepared.get("lyric") == "+"
+                or raw.get("lyric_is_extended")
+                or raw.get("tie_type") in {"continue", "stop"}
+                for raw, prepared in dash_pairs
+            )
+        )
     
     def test_parse_note_has_required_fields(self):
         """Each note should have offset, duration, pitch, etc."""

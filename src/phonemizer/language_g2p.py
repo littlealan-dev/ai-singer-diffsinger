@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 import unicodedata
-from typing import Callable, Dict, Optional, Protocol, Sequence, Type
+from typing import Optional, Protocol, Sequence
 
 from g2p_en import G2p
 
@@ -52,29 +52,6 @@ class LanguageG2pProvider(Protocol):
         """Return bare phoneme symbols; the caller applies voicebank mappings."""
 
 
-class LanguagePhonemizerRegistry:
-    """Explicit registry of language fallback implementations."""
-
-    _providers: Dict[str, Type[LanguageG2pProvider]] = {}
-
-    @classmethod
-    def register(cls, provider: Type[LanguageG2pProvider]) -> Type[LanguageG2pProvider]:
-        language = str(provider.language).strip().lower()
-        if not language:
-            raise ValueError("A language G2P provider must declare its language.")
-        cls._providers[language] = provider
-        return provider
-
-    @classmethod
-    def resolve(cls, language: str) -> Optional[LanguageG2pProvider]:
-        provider = cls._providers.get(str(language).strip().lower())
-        return provider() if provider is not None else None
-
-    @classmethod
-    def supported_languages(cls) -> tuple[str, ...]:
-        return tuple(sorted(cls._providers))
-
-
 def normalize_word_for_english_g2p(value: str) -> str:
     """Normalize a Latin word for the English G2P implementation."""
     decomposed = unicodedata.normalize("NFKD", value)
@@ -97,7 +74,6 @@ def first_non_latin_letter(value: str) -> Optional[tuple[str, str, str]]:
     return None
 
 
-@LanguagePhonemizerRegistry.register
 class DiffSingerEnglishPhonemizer:
     """English fallback using g2p_en, expressed as bare voicebank symbols."""
 
@@ -142,7 +118,6 @@ class DiffSingerEnglishPhonemizer:
         return tuple(mapped)
 
 
-@LanguagePhonemizerRegistry.register
 class DiffSingerSpanishPhonemizer:
     """Spanish fallback using OpenUtau's bundled ``g2p-es`` pack."""
 
@@ -153,8 +128,3 @@ class DiffSingerSpanishPhonemizer:
 
     def phonemize(self, token: str) -> Sequence[str]:
         return self._g2p.phonemize(token)
-
-
-def get_language_g2p_provider(language: str) -> Optional[LanguageG2pProvider]:
-    """Resolve the registered fallback provider for a normalized language code."""
-    return LanguagePhonemizerRegistry.resolve(language)
