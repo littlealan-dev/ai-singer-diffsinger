@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.phonemizer.phonemizer import Phonemizer
 from src.api.voicebank import load_voicebank_config
+from src.api.voicebank_cache import resolve_manifest_japanese_dictionary_form
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -117,6 +118,7 @@ def phonemize(
         # The phonemizer prepares this full sequence before deciding which
         # dictionary entries it needs (important for Chinese phrase context).
         needed_graphemes=effective_lyrics,
+        japanese_dictionary_form=resolve_manifest_japanese_dictionary_form(voicebank_path),
     )
     phoneme_result = phonemizer.phonemize_tokens(effective_lyrics)
     result = {

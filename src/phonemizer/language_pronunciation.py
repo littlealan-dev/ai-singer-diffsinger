@@ -104,6 +104,12 @@ class OpenUtauJapaneseRomanizer:
         "ァィゥェォャュョヮヵヶ"
     )
     _long_vowel_marks = frozenset({"ー", "ｰ"})
+    _vowel_kana = {"a": "あ", "i": "い", "u": "う", "e": "え", "o": "お"}
+
+    def __init__(self, dictionary_form: str = "romaji") -> None:
+        if dictionary_form not in {"kana", "romaji"}:
+            raise ValueError("Japanese dictionary form must be 'kana' or 'romaji'.")
+        self.dictionary_form = dictionary_form
 
     @staticmethod
     @lru_cache(maxsize=1)
@@ -136,8 +142,15 @@ class OpenUtauJapaneseRomanizer:
                 return character
         return ""
 
-    @classmethod
-    def _fallback_mora_lookups(cls, lyric: str) -> tuple[str, ...]:
+    @staticmethod
+    def _to_hiragana(value: str) -> str:
+        """Normalize Katakana dictionary keys to their Hiragana equivalent."""
+        return "".join(
+            chr(ord(character) - 0x60) if "ァ" <= character <= "ヶ" else character
+            for character in value
+        )
+
+    def _fallback_mora_lookups(self, lyric: str) -> tuple[str, ...]:
         """Return phonetic mora keys for a multi-mora Kana lyric.
 
         DiffSinger dictionaries are commonly keyed by one Japanese mora. A
@@ -146,24 +159,32 @@ class OpenUtauJapaneseRomanizer:
         deterministic dictionary fallback.
         """
         lookups: list[str] = []
-        for unit in cls._mora_units(lyric):
-            if unit in cls._long_vowel_marks:
-                vowel = cls._last_vowel(lookups[-1]) if lookups else ""
+        phonetic_morae: list[str] = []
+        for unit in self._mora_units(lyric):
+            raw_romanization = ""
+            if unit in self._long_vowel_marks:
+                vowel = self._last_vowel(phonetic_morae[-1]) if phonetic_morae else ""
                 if not vowel:
                     return ()
-                lookups.append(vowel)
-                continue
-
-            lookup = cls._kana_to_romaji(unit)
-            previous_vowel = cls._last_vowel(lookups[-1]) if lookups else ""
-            # Orthographic う / い often lengthens the preceding o / e vowel.
-            if lookup == "u" and previous_vowel == "o":
-                lookup = "o"
-            elif lookup == "i" and previous_vowel == "e":
-                lookup = "e"
-            if not lookup:
+                phonetic_mora = vowel
+            else:
+                raw_romanization = self._kana_to_romaji(unit)
+                previous_vowel = self._last_vowel(phonetic_morae[-1]) if phonetic_morae else ""
+                phonetic_mora = raw_romanization
+                # Orthographic う / い often lengthens the preceding o / e vowel.
+                if phonetic_mora == "u" and previous_vowel == "o":
+                    phonetic_mora = "o"
+                elif phonetic_mora == "i" and previous_vowel == "e":
+                    phonetic_mora = "e"
+            if not phonetic_mora:
                 return ()
-            lookups.append(lookup)
+            phonetic_morae.append(phonetic_mora)
+            if self.dictionary_form == "romaji":
+                lookups.append(phonetic_mora)
+            elif phonetic_mora != raw_romanization:
+                lookups.append(self._vowel_kana[phonetic_mora])
+            else:
+                lookups.append(self._to_hiragana(unit))
         return tuple(lookups)
 
     def prepare(self, lyrics: Sequence[PreparedLyric]) -> Sequence[PreparedLyric]:
@@ -285,6 +306,16 @@ LanguagePronunciationRegistry.register(
 )
 
 
-def get_language_pronunciation_pipeline(language: str) -> LanguagePronunciationPipeline:
+def get_language_pronunciation_pipeline(
+    language: str,
+    *,
+    japanese_dictionary_form: Optional[str] = None,
+) -> LanguagePronunciationPipeline:
     """Resolve phrase preparation and optional G2P behavior for a language."""
-    return LanguagePronunciationRegistry.resolve(language)
+    normalized = str(language).strip().lower()
+    if normalized == "ja" and japanese_dictionary_form is not None:
+        return LanguagePronunciationPipeline(
+            language="ja",
+            romanizer=OpenUtauJapaneseRomanizer(japanese_dictionary_form),
+        )
+    return LanguagePronunciationRegistry.resolve(normalized)

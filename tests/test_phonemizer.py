@@ -25,6 +25,7 @@ DICTIONARY_PATH = VOICEBANK_ROOT / "dsvariance" / "dsdict-en.yaml"
 LANGUAGES_PATH = VOICEBANK_ROOT / "dsmain" / "languages.json"
 KEIRO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Keiro_Revenant_v170/configs"
 QIXUAN_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Qixuan_v2.7.0_DiffSinger_OpenUtau"
+PM_INDIGO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/PM-31_Commercial_Indigo"
 
 
 class PhonemizerClassTests(unittest.TestCase):
@@ -200,6 +201,38 @@ class PhonemizerClassTests(unittest.TestCase):
             ("en", "es", "ja", "zh"),
         )
 
+    def test_qixuan_spanish_uses_native_phone_approximation_dictionary(self) -> None:
+        """Qixuan's dsdict-es maps Spanish through its EN/JA/ZH inventory."""
+        result = phonemize(["hola", "niño", "cena", "perro"], QIXUAN_ROOT, language="es")
+
+        self.assertEqual(
+            result["phonemes"],
+            [
+                "ja/o", "en/l", "ja/a",
+                "ja/n", "ja/i", "ja/ny", "ja/o",
+                "ja/s", "ja/e", "ja/n", "ja/a",
+                "ja/p", "ja/e", "ja/r", "ja/a", "ja/r", "ja/a", "ja/r", "ja/o",
+            ],
+        )
+        self.assertEqual(result["language_ids"], [2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
+        self.assertEqual(result["word_boundaries"], [3, 4, 4, 8])
+
+    def test_qixuan_spanish_expands_glides_and_rolled_r_replacements(self) -> None:
+        """Qixuan maps Spanish G2P glides and ``rr`` into native phone sequences."""
+        result = phonemize(["aire", "caudal", "pero", "rosa"], QIXUAN_ROOT, language="es")
+
+        self.assertEqual(
+            result["phonemes"],
+            [
+                "ja/a", "ja/y", "ja/r", "ja/e",
+                "en/k", "ja/a", "ja/w", "en/dh", "ja/a", "en/l",
+                "ja/p", "ja/e", "ja/r", "ja/o",
+                "ja/r", "ja/a", "ja/r", "ja/a", "ja/r", "ja/o", "ja/s", "ja/a",
+            ],
+        )
+        self.assertEqual(result["language_ids"], [2, 2, 2, 2, 1, 2, 2, 1, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
+        self.assertEqual(result["word_boundaries"], [4, 6, 4, 8])
+
     def test_qixuan_japanese_kana_uses_romaji_dictionary_entries(self) -> None:
         """Kana is romanized before Qixuan's dsdict-ja lookup, as in OpenUtau."""
         result = phonemize(["か", "キャ", "っ", "ティ"], QIXUAN_ROOT, language="ja")
@@ -224,6 +257,29 @@ class PhonemizerClassTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["word_boundaries"], [3, 2, 3])
+
+    def test_manifest_declared_kana_dictionary_form_handles_multimora_lyrics(self) -> None:
+        """PM-31 uses Kana keys while Qixuan's Japanese dictionary uses Romaji keys."""
+        result = phonemize(["そう", "きょう"], PM_INDIGO_ROOT, language="ja")
+
+        self.assertEqual(
+            result["phonemes"],
+            ["s", "o", "cl", "o", "k", "y", "o", "cl", "o"],
+        )
+        self.assertEqual(result["word_boundaries"], [4, 5])
+
+    def test_japanese_dictionary_form_controls_mora_key_shape(self) -> None:
+        romaji = get_language_pronunciation_pipeline(
+            "ja",
+            japanese_dictionary_form="romaji",
+        ).prepare(["そう"])
+        kana = get_language_pronunciation_pipeline(
+            "ja",
+            japanese_dictionary_form="kana",
+        ).prepare(["そう"])
+
+        self.assertEqual(romaji[0].fallback_lookups, ("so", "o"))
+        self.assertEqual(kana[0].fallback_lookups, ("そ", "お"))
 
     def test_qixuan_chinese_hanzi_uses_phrase_pinyin_dictionary_entries(self) -> None:
         """Hanzi is romanized to tone-less Pinyin before Qixuan's dsdict-zh lookup."""
@@ -555,7 +611,7 @@ class PhonemizerClassTests(unittest.TestCase):
 
             self.assertEqual(phonemizer._dictionary_load_strategy, "selective")
             self.assertEqual(phonemizer._dictionary, {"how": ["en/hh", "en/aw"]})
-            self.assertEqual(phonemizer._dictionary_replacements, {"aw": "en/aw"})
+            self.assertEqual(phonemizer._dictionary_replacements, {"aw": ["en/aw"]})
             self.assertTrue(phonemizer.is_vowel("SP"))
             self.assertTrue(phonemizer.is_vowel("en/aw"))
             result = phonemizer.phonemize_tokens(["how"])

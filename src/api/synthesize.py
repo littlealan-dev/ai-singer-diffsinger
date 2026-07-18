@@ -28,7 +28,10 @@ from src.api.voicebank import (
 )
 from src.api.voice_parts import build_infeasible_anchor_action_required
 from src.api.voice_parts import synthesize_preflight_action_required
-from src.api.voicebank_cache import resolve_manifest_pitch_expression
+from src.api.voicebank_cache import (
+    resolve_manifest_japanese_dictionary_form,
+    resolve_manifest_pitch_expression,
+)
 from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer, UnsupportedLyricTokenError
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -838,6 +841,7 @@ def _init_phonemizer(
         language=language,
         allow_g2p=True,
         needed_graphemes=needed_graphemes,
+        japanese_dictionary_form=resolve_manifest_japanese_dictionary_form(voicebank_path),
     )
 
 

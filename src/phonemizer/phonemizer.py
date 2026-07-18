@@ -39,7 +39,7 @@ class DictionaryBundle:
     dictionary: Dict[str, List[str]]
     vowels: set[str]
     glides: set[str]
-    replacements: Dict[str, str]
+    replacements: Dict[str, List[str]]
     load_strategy: str
 
 
@@ -115,6 +115,7 @@ class Phonemizer:
         language: str = "en",
         allow_g2p: bool = True,
         needed_graphemes: Optional[Sequence[str]] = None,
+        japanese_dictionary_form: Optional[str] = None,
     ) -> None:
         """Initialize phoneme inventory, dictionary, and optional G2P."""
         normalized_language = str(language or "").strip().lower()
@@ -125,7 +126,10 @@ class Phonemizer:
         self.phonemes_path = Path(phonemes_path)
         self.dictionary_path = Path(dictionary_path)
         self.languages_path = Path(languages_path) if languages_path else None
-        self._pronunciation_pipeline = get_language_pronunciation_pipeline(self.language)
+        self._pronunciation_pipeline = get_language_pronunciation_pipeline(
+            self.language,
+            japanese_dictionary_form=japanese_dictionary_form,
+        )
         prepared_needed_graphemes = self._prepare_lyrics(needed_graphemes or ())
         self._needed_graphemes = {
             self._normalize_grapheme(lyric.lookup)
@@ -271,7 +275,11 @@ class Phonemizer:
             raise KeyError(
                 f"G2P produced no phonemes for token '{raw}'."
             )
-        mapped = [self._map_g2p_phoneme(phoneme) for phoneme in bare_phonemes]
+        mapped = [
+            mapped_phoneme
+            for phoneme in bare_phonemes
+            for mapped_phoneme in self._map_g2p_phoneme(phoneme)
+        ]
         return self._validate_phonemes(mapped, raw)
 
     def _phonemize_dictionary_fallback(
@@ -291,12 +299,12 @@ class Phonemizer:
             phonemes.extend(self._validate_phonemes(dictionary_phonemes, token))
         return phonemes
 
-    def _map_g2p_phoneme(self, phoneme: str) -> str:
-        """Map a provider's bare symbol through voicebank replacements and language IDs."""
+    def _map_g2p_phoneme(self, phoneme: str) -> List[str]:
+        """Map one bare G2P symbol to one or more voicebank phonemes."""
         replacement = self._dictionary_replacements.get(phoneme)
         if replacement:
-            return replacement
-        return f"{self.language}/{phoneme}" if self._language_map else phoneme
+            return list(replacement)
+        return [f"{self.language}/{phoneme}" if self._language_map else phoneme]
 
     def _validate_phonemes(self, phonemes: Sequence[str], token: str) -> List[str]:
         """Ensure phonemes are present in the voicebank inventory."""
@@ -437,14 +445,18 @@ class Phonemizer:
             key = self._normalize_grapheme(grapheme)
             if key not in dictionary:
                 dictionary[key] = [str(p) for p in phonemes]
-        replacements: Dict[str, str] = {}
+        replacements: Dict[str, List[str]] = {}
         for replacement in data.get("replacements", []) if isinstance(data, dict) else []:
             if not isinstance(replacement, dict):
                 continue
             source = str(replacement.get("from", "")).strip()
-            target = str(replacement.get("to", "")).strip()
-            if source and target:
-                replacements[source] = target
+            target = replacement.get("to", "")
+            if isinstance(target, (list, tuple)):
+                targets = [str(item).strip() for item in target if str(item).strip()]
+            else:
+                targets = [str(target).strip()] if str(target).strip() else []
+            if source and targets:
+                replacements[source] = targets
         symbols = data.get("symbols", []) if isinstance(data, dict) else []
         vowels = {"SP", "AP"}
         glides = set()
@@ -477,7 +489,7 @@ class Phonemizer:
         dictionary: Dict[str, List[str]] = {}
         vowels = {"SP", "AP"}
         glides = set()
-        replacements: Dict[str, str] = {}
+        replacements: Dict[str, List[str]] = {}
         in_symbols = False
         in_entries = False
         in_replacements = False
@@ -526,9 +538,13 @@ class Phonemizer:
                         replacement = yaml.safe_load(stripped[2:])
                         if isinstance(replacement, dict):
                             source = str(replacement.get("from", "")).strip()
-                            target = str(replacement.get("to", "")).strip()
-                            if source and target:
-                                replacements[source] = target
+                            target = replacement.get("to", "")
+                            if isinstance(target, (list, tuple)):
+                                targets = [str(item).strip() for item in target if str(item).strip()]
+                            else:
+                                targets = [str(target).strip()] if str(target).strip() else []
+                            if source and targets:
+                                replacements[source] = targets
                     continue
                 if in_symbols:
                     if stripped.startswith("- symbol:"):
@@ -580,11 +596,15 @@ class Phonemizer:
         return value
 
     def _phonemes_match_language(self, phonemes: Iterable[str]) -> bool:
-        """Return True if phonemes match the current language prefix."""
-        for phoneme in phonemes:
-            if "/" not in str(phoneme):
-                continue
-            # If phoneme has a language prefix (e.g. en/hh), check if it matches current language
-            if not str(phoneme).startswith(f"{self.language}/"):
-                return False
-        return True
+        """Return whether dictionary phonemes exist in this voicebank inventory.
+
+        A language-specific dictionary can intentionally realize a language
+        through another native language's symbols. For example, Qixuan's
+        ``dsdict-es.yaml`` approximates Spanish with its built-in EN, JA, and
+        ZH symbols. Inventory validation is therefore the correct boundary;
+        the dictionary file itself selects the pronunciation policy.
+        """
+        return all(
+            self._resolve_inventory_phoneme(str(phoneme)) is not None
+            for phoneme in phonemes
+        )

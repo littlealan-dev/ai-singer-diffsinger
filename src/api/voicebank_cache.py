@@ -85,6 +85,12 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
             raise ValueError(
                 f"Voicebank manifest entry {voicebank_id} pitch_expression must be between 0.0 and 1.0"
             )
+        japanese_dictionary_form = entry.get("japanese_dictionary_form")
+        if japanese_dictionary_form is not None and japanese_dictionary_form not in {"kana", "romaji"}:
+            raise ValueError(
+                f"Voicebank manifest entry {voicebank_id} japanese_dictionary_form "
+                "must be 'kana' or 'romaji' when present"
+            )
         if voicebank_id in seen:
             raise ValueError(f"Duplicate voicebank id in manifest: {voicebank_id}")
         seen.add(voicebank_id)
@@ -154,6 +160,15 @@ def resolve_manifest_pitch_expression(voicebank: str | Path) -> float:
         return 1.0
     metadata = get_manifest_voicebank_metadata(voicebank_id)
     return float(metadata.get("pitch_expression", 1.0))
+
+
+def resolve_manifest_japanese_dictionary_form(voicebank: str | Path) -> Optional[str]:
+    """Return a voicebank's manifest-declared Japanese dictionary key form."""
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    if voicebank_id is None:
+        return None
+    form = get_manifest_voicebank_metadata(voicebank_id).get("japanese_dictionary_form")
+    return form if form in {"kana", "romaji"} else None
 
 
 def discover_voicebank_root(base_dir: Path) -> Optional[Path]:
