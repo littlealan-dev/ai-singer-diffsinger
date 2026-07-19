@@ -3391,6 +3391,7 @@ class Orchestrator:
             "airiness",
             "intensity",
             "clarity",
+            "gender",
             "solfege_pronunciation_patch",
             "allow_lyric_propagation",
         )
@@ -4853,6 +4854,7 @@ class Orchestrator:
                         "use_lang_id": bool(info.get("use_lang_id", False)),
                         "voice_colors": info.get("voice_colors", []),
                         "default_voice_color": info.get("default_voice_color"),
+                        "synthesis_control_defaults": info.get("synthesis_control_defaults"),
                     }
                 )
         self._cached_voicebank_details = details

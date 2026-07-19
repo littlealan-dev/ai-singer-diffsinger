@@ -339,6 +339,10 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
                 "speakers": manifest_entry.get("speakers", []),
                 "voice_colors": manifest_entry.get("voice_colors", []),
                 "default_voice_color": manifest_entry.get("default_voice_color"),
+                "synthesis_control_defaults": manifest_entry.get(
+                    "synthesis_control_defaults",
+                    {"airiness": 0.0, "clarity": 100.0, "gender": 0.0},
+                ),
                 "sample_rate": manifest_entry.get("sample_rate", 44100),
                 "hop_size": manifest_entry.get("hop_size", 512),
                 "use_lang_id": manifest_entry.get("use_lang_id", False),
@@ -397,6 +401,10 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "speakers": speakers,
         "voice_colors": voice_colors,
         "default_voice_color": default_voice_color,
+        "synthesis_control_defaults": manifest_metadata.get(
+            "synthesis_control_defaults",
+            {"airiness": 0.0, "clarity": 100.0, "gender": 0.0},
+        ),
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),

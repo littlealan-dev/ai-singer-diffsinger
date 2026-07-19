@@ -171,7 +171,8 @@ class TestMcpServer(unittest.TestCase):
                     "articulation": 0.25,
                     "airiness": 0.9,
                     "intensity": 0.9,
-                    "clarity": 0.95,
+                    "clarity": 70.0,
+                    "gender": -20.833333333333332,
                 },
             )
             self.assertEqual(result, {"waveform": [0.0], "sample_rate": 44100})
@@ -181,7 +182,8 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(kwargs["articulation"], 0.25)
             self.assertEqual(kwargs["airiness"], 0.9)
             self.assertEqual(kwargs["intensity"], 0.9)
-            self.assertEqual(kwargs["clarity"], 0.95)
+            self.assertEqual(kwargs["clarity"], 70.0)
+            self.assertEqual(kwargs["gender"], -20.833333333333332)
 
     def test_list_voicebanks(self):
         with mock.patch("src.mcp.handlers.list_voicebanks") as mock_list:

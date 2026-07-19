@@ -858,6 +858,35 @@ def predict_variance(
     return result
 
 
+def _openutau_gender_to_model_value(genc: float, config: Dict[str, Any]) -> float:
+    """Convert an OpenUtau GENC value into DiffSinger's key-shift embedding.
+
+    OpenUtau defines GENC as -100..100 where positive values shift formants
+    down.  DiffSinger models instead receive the training key-shift value.  The
+    scale is derived from the model's ``random_pitch_shifting.range`` exactly as
+    OpenUtau's DiffSinger renderer does, including asymmetric training ranges.
+    """
+    if not bool(config.get("use_key_shift_embed", False)):
+        return 0.0
+
+    try:
+        pitch_shifting = config["augmentation_args"]["random_pitch_shifting"]
+        lower, upper = pitch_shifting["range"]
+        lower = float(lower)
+        upper = float(upper)
+    except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "gender_control_unavailable reason=missing_or_invalid_pitch_shift_range"
+        )
+        return 0.0
+
+    if genc < 0.0:
+        positive_scale = 0.0 if upper == 0.0 else 12.0 / upper / 100.0
+        return -genc * positive_scale
+    negative_scale = 0.0 if lower == 0.0 else -12.0 / lower / 100.0
+    return -genc * negative_scale
+
+
 def synthesize_mel(
     phoneme_ids: List[int],
     durations: List[int],
@@ -868,6 +897,7 @@ def synthesize_mel(
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
+    gender: float = 0.0,
     velocity: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
     speaker_name: Optional[str] = None,
@@ -882,6 +912,7 @@ def synthesize_mel(
         f0: Pitch curve in Hz
         voicebank: Voicebank path
         energy, breathiness, tension, voicing: Variance curves (optional)
+        gender: OpenUtau GENC control (-100 to 100; 0 is neutral)
         language_ids: Language ID per phoneme (optional)
         speaker_name: Optional speaker embedding name/suffix
         device: Device for inference
@@ -905,6 +936,7 @@ def synthesize_mel(
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
+                    "gender": gender,
                     "velocity": velocity,
                     "language_ids": language_ids,
                     "speaker_name": speaker_name,
@@ -957,6 +989,7 @@ def synthesize_mel(
         else None
     )
     depth = float(config.get("max_depth", 1.0)) if config.get("use_variable_depth") else 1.0
+    gender_value = _openutau_gender_to_model_value(gender, config)
 
     # Assemble acoustic model inputs.
     acoustic_inputs = {
@@ -967,7 +1000,7 @@ def synthesize_mel(
         "breathiness": np.array(breathiness, dtype=np.float32)[None, :],
         "voicing": np.array(voicing, dtype=np.float32)[None, :],
         "tension": np.array(tension, dtype=np.float32)[None, :],
-        "gender": np.zeros((1, n_frames), dtype=np.float32),
+        "gender": np.full((1, n_frames), gender_value, dtype=np.float32),
         "velocity": np.array(velocity, dtype=np.float32)[None, :],
         "depth": np.array(depth, dtype=np.float32),
         "steps": np.array(config.get("steps", 10), dtype=np.int64),
@@ -1026,6 +1059,7 @@ def synthesize_audio(
     breathiness: Optional[List[float]] = None,
     tension: Optional[List[float]] = None,
     voicing: Optional[List[float]] = None,
+    gender: float = 0.0,
     velocity: Optional[List[float]] = None,
     language_ids: Optional[List[int]] = None,
     vocoder_path: Optional[Union[str, Path]] = None,
@@ -1041,6 +1075,7 @@ def synthesize_audio(
         f0: Pitch curve in Hz
         voicebank: Voicebank path or ID
         energy, breathiness, tension, voicing: Variance curves (optional)
+        gender: OpenUtau GENC control (-100 to 100; 0 is neutral)
         language_ids: Language ID per phoneme (optional)
         vocoder_path: Optional explicit vocoder path
         speaker_name: Optional speaker embedding name/suffix
@@ -1065,6 +1100,7 @@ def synthesize_audio(
                     "breathiness": breathiness,
                     "tension": tension,
                     "voicing": voicing,
+                    "gender": gender,
                     "velocity": velocity,
                     "language_ids": language_ids,
                     "vocoder_path": str(vocoder_path) if vocoder_path else None,
@@ -1093,6 +1129,7 @@ def synthesize_audio(
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,
+        gender=gender,
         velocity=velocity,
         language_ids=language_ids,
         speaker_name=speaker_name,

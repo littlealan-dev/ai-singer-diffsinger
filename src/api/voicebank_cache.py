@@ -18,6 +18,12 @@ from src.mcp.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+_SYSTEM_SYNTHESIS_CONTROL_DEFAULTS = {
+    "airiness": 0.0,
+    "clarity": 100.0,
+    "gender": 0.0,
+}
+
 
 def _app_env() -> str:
     """Return the current environment name for prod/dev branching."""
@@ -91,6 +97,34 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                 f"Voicebank manifest entry {voicebank_id} japanese_dictionary_form "
                 "must be 'kana' or 'romaji' when present"
             )
+        control_defaults = entry.get("synthesis_control_defaults")
+        if control_defaults is not None:
+            if not isinstance(control_defaults, dict):
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} synthesis_control_defaults must be an object"
+                )
+            unknown_controls = set(control_defaults) - set(_SYSTEM_SYNTHESIS_CONTROL_DEFAULTS)
+            if unknown_controls:
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} synthesis_control_defaults has unsupported controls: "
+                    f"{', '.join(sorted(unknown_controls))}"
+                )
+            for control, minimum, maximum in (
+                ("airiness", -100.0, 100.0),
+                ("clarity", 0.0, 200.0),
+                ("gender", -100.0, 100.0),
+            ):
+                value = control_defaults.get(control, _SYSTEM_SYNTHESIS_CONTROL_DEFAULTS[control])
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not minimum <= float(value) <= maximum
+                ):
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} synthesis_control_defaults.{control} "
+                        f"must be between {minimum} and {maximum}"
+                    )
         if voicebank_id in seen:
             raise ValueError(f"Duplicate voicebank id in manifest: {voicebank_id}")
         seen.add(voicebank_id)
@@ -160,6 +194,23 @@ def resolve_manifest_pitch_expression(voicebank: str | Path) -> float:
         return 1.0
     metadata = get_manifest_voicebank_metadata(voicebank_id)
     return float(metadata.get("pitch_expression", 1.0))
+
+
+def resolve_manifest_synthesis_control_defaults(voicebank: str | Path) -> Dict[str, float]:
+    """Return safe, voicebank-specific baseline controls for synthesis."""
+    defaults = dict(_SYSTEM_SYNTHESIS_CONTROL_DEFAULTS)
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    if voicebank_id is None:
+        return defaults
+    configured = get_manifest_voicebank_metadata(voicebank_id).get(
+        "synthesis_control_defaults"
+    )
+    if not isinstance(configured, dict):
+        return defaults
+    for control in defaults:
+        if control in configured:
+            defaults[control] = float(configured[control])
+    return defaults
 
 
 def resolve_manifest_japanese_dictionary_form(voicebank: str | Path) -> Optional[str]:

@@ -56,6 +56,27 @@ def test_manifest_pitch_expression_defaults_to_one(tmp_path, monkeypatch):
     assert voicebank_cache.resolve_manifest_pitch_expression("TestBank") == 1.0
 
 
+def test_manifest_synthesis_control_defaults_resolve_from_nested_path(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data["voicebanks"][0]["synthesis_control_defaults"] = {
+        "airiness": 0.0,
+        "clarity": 170.0,
+        "gender": 20.83,
+    }
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    voicebank_path = tmp_path / "TestBank" / "configs"
+    voicebank_path.mkdir(parents=True)
+    monkeypatch.setenv("VOICEBANK_MANIFEST_PATH", str(manifest_path))
+
+    assert voicebank_cache.resolve_manifest_synthesis_control_defaults(voicebank_path) == {
+        "airiness": 0.0,
+        "clarity": 170.0,
+        "gender": 20.83,
+    }
+
+
 @pytest.mark.parametrize("value", [-0.1, 1.1, "0.5", True])
 def test_manifest_rejects_invalid_pitch_expression(tmp_path, value):
     manifest_path = tmp_path / "manifest.json"
@@ -166,3 +187,31 @@ def test_mcp_handler_passes_manifest_expression_to_synthesis(tmp_path):
         )
 
     assert synthesize_mock.call_args.kwargs["pitch_expression"] == 0.5
+
+
+def test_mcp_handler_uses_manifest_controls_when_omitted(tmp_path):
+    with mock.patch.object(
+        handlers,
+        "get_manifest_voicebank_metadata",
+        return_value={"pitch_expression": 1.0},
+    ), mock.patch.object(
+        handlers,
+        "resolve_manifest_synthesis_control_defaults",
+        return_value={"airiness": 0.0, "clarity": 170.0, "gender": 20.83},
+    ), mock.patch.object(
+        handlers,
+        "resolve_voicebank_id",
+        return_value=tmp_path,
+    ), mock.patch.object(
+        handlers,
+        "synthesize",
+        return_value={"waveform": [0.0], "sample_rate": 44100},
+    ) as synthesize_mock:
+        handlers.handle_synthesize(
+            {"score": {"parts": []}, "voicebank": "TestBank"},
+            device="cpu",
+        )
+
+    assert synthesize_mock.call_args.kwargs["clarity"] == 170.0
+    assert synthesize_mock.call_args.kwargs["gender"] == 20.83
+    assert synthesize_mock.call_args.kwargs["airiness"] == 0.0

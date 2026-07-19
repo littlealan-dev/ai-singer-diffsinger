@@ -198,6 +198,11 @@ Rules:
 - If the user requests a style, map it to the closest valid voice_color for the chosen voicebank and include it.
 - Do not use voice_color as a substitute for voicebank selection; voice_color only refines style within the already chosen voicebank.
 - voice_color must match exactly one of the voicebank's voice color IDs.
+- Every voicebank has synthesis control defaults. Omit `clarity` and `gender` to use the selected voicebank's baseline.
+- For a user request to change airiness, clarity, or gender, use the selected voicebank's declared synthesis-control defaults as the reference and pass an adjusted absolute value within the tool's documented range.
+  - Higher `airiness` means more airy; lower `airiness` means less airy.
+  - Higher `clarity` means more harmonic clarity; lower `clarity` means less.
+  - Lower `gender` means more feminine/brighter; higher `gender` means more masculine/darker.
 - In the same turn where you call `synthesize`, your `final_message` must state which singer (voicebank) you selected and which style/color you selected, if any.
 - If score_summary shows multiple lyric parts and/or multiple verses, state the counts and list the options before asking the user to clarify part and verse, except for the solfege verse selection exception above.
 - For multi-verse scores, do not call `reparse`, `preprocess_voice_parts`, or `synthesize` until verse is explicitly selected by the user, except that an explicit request to sing/render "in solfege" authorizes the solfege verse selection workflow above.

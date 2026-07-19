@@ -20,7 +20,10 @@ from src.api import (
 from src.backend.progress import write_progress
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import initialize_firebase_app
-from src.api.voicebank_cache import get_manifest_voicebank_metadata
+from src.api.voicebank_cache import (
+    get_manifest_voicebank_metadata,
+    resolve_manifest_synthesis_control_defaults,
+)
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
@@ -167,6 +170,10 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     voicebank_id = params["voicebank"]
     voicebank_metadata = get_manifest_voicebank_metadata(voicebank_id)
     pitch_expression = float(voicebank_metadata.get("pitch_expression", 1.0))
+    control_defaults = resolve_manifest_synthesis_control_defaults(voicebank_id)
+    airiness = params.get("airiness", control_defaults["airiness"])
+    clarity = params.get("clarity", control_defaults["clarity"])
+    gender = params.get("gender", control_defaults["gender"])
     voicebank_path = resolve_voicebank_id(voicebank_id)
     part_index = _resolve_part_index(
         params.get("score", {}),
@@ -220,9 +227,10 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         language=params.get("language", "en"),
         voice_color=params.get("voice_color"),
         articulation=params.get("articulation", 0.0),
-        airiness=params.get("airiness", 1.0),
+        airiness=airiness,
         intensity=params.get("intensity", 0.5),
-        clarity=params.get("clarity", 1.0),
+        clarity=clarity,
+        gender=gender,
         pitch_expression=pitch_expression,
         solfege_pronunciation_patch=params.get(
             "solfege_pronunciation_patch", False

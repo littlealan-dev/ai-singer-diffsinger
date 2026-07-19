@@ -1297,6 +1297,17 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Default voice color/style when no explicit color is chosen.",
         },
+        "synthesis_control_defaults": {
+            "type": "object",
+            "properties": {
+                "airiness": {"type": "number"},
+                "clarity": {"type": "number"},
+                "gender": {"type": "number"},
+            },
+            "required": ["airiness", "clarity", "gender"],
+            "additionalProperties": False,
+            "description": "Manifest-declared baseline VOIC and GENC controls for this voicebank.",
+        },
         "gender": {
             "type": ["string", "null"],
             "description": "Curated singer gender metadata from the active voicebank manifest, if available.",
@@ -1318,6 +1329,7 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
         "speakers",
         "voice_colors",
         "default_voice_color",
+        "synthesis_control_defaults",
         "gender",
         "voice_type",
         "sample_rate",
@@ -1641,9 +1653,9 @@ TOOLS: List[Tool] = [
                         },
                         "airiness": {
                             "type": ["number", "null"],
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "description": "Airiness value to preserve for later synthesis.",
+                            "minimum": -100.0,
+                            "maximum": 100.0,
+                            "description": "Absolute OpenUtau BREC value to preserve for later synthesis.",
                         },
                         "intensity": {
                             "type": ["number", "null"],
@@ -1654,8 +1666,14 @@ TOOLS: List[Tool] = [
                         "clarity": {
                             "type": ["number", "null"],
                             "minimum": 0.0,
-                            "maximum": 1.0,
-                            "description": "Clarity value to preserve for later synthesis.",
+                            "maximum": 200.0,
+                            "description": "Extended OpenUtau VOIC value to preserve for later synthesis.",
+                        },
+                        "gender": {
+                            "type": ["number", "null"],
+                            "minimum": -100.0,
+                            "maximum": 100.0,
+                            "description": "OpenUtau GENC value to preserve for later synthesis.",
                         },
                         "solfege_pronunciation_patch": {
                             "type": ["boolean", "null"],
@@ -1817,9 +1835,13 @@ TOOLS: List[Tool] = [
                 },
                 "airiness": {
                     "type": "number",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "description": "Airiness control value for the synthesis backend.",
+                    "minimum": -100.0,
+                    "maximum": 100.0,
+                    "description": (
+                        "Absolute OpenUtau BREC control (-100..100). 0 is neutral; "
+                        "negative values reduce breathiness and positive values add it, "
+                        "up to 12 dB. Omit to use the selected voicebank's manifest default."
+                    ),
                 },
                 "intensity": {
                     "type": "number",
@@ -1831,8 +1853,23 @@ TOOLS: List[Tool] = [
                 "clarity": {
                     "type": "number",
                     "minimum": 0.0,
-                    "maximum": 1.0,
-                    "description": "Clarity control value for the synthesis backend.",
+                    "maximum": 200.0,
+                    "description": (
+                        "Absolute extended OpenUtau VOIC control (0..200). 100 is "
+                        "neutral, 0 is -12 dB, and 200 is +12 dB relative to predicted "
+                        "harmonic voicing. Omit to use the selected voicebank's manifest default."
+                    ),
+                },
+                "gender": {
+                    "type": "number",
+                    "minimum": -100.0,
+                    "maximum": 100.0,
+                    "description": (
+                        "Absolute OpenUtau GENC control (-100..100). 0 is neutral; "
+                        "negative values shift formants up (more feminine/brighter) and "
+                        "positive values shift them down (more masculine/darker). Omit to "
+                        "use the selected voicebank's manifest default."
+                    ),
                 },
                 "solfege_pronunciation_patch": {
                     "type": "boolean",

@@ -31,6 +31,7 @@ from src.api.voice_parts import synthesize_preflight_action_required
 from src.api.voicebank_cache import (
     resolve_manifest_japanese_dictionary_form,
     resolve_manifest_pitch_expression,
+    resolve_manifest_synthesis_control_defaults,
 )
 from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer, UnsupportedLyricTokenError
@@ -217,6 +218,34 @@ def _scale_curve(values: List[float], factor: float) -> List[float]:
     for val in values:
         scaled.append(val * factor)
     return scaled
+
+
+def _apply_openutau_voicing(values: Optional[List[float]], voicing: float) -> Optional[List[float]]:
+    """Apply OpenUtau's ``VOIC`` expression to a predicted voicing curve.
+
+    OpenUtau defines VOIC as a 0..100 control with a neutral value of 100.
+    It is a dB offset, rather than a multiplier: ``predicted + (VOIC - 100)
+    * 12 / 100``.  Keeping that conversion here makes the acoustic-model input
+    identical to the renderer's variance contract.
+    """
+    if values is None:
+        return values
+    delta = (voicing - 100.0) * 12.0 / 100.0
+    if delta == 0.0:
+        return values
+    return [value + delta for value in values]
+
+
+def _apply_openutau_breathiness(
+    values: Optional[List[float]], breathiness: float
+) -> Optional[List[float]]:
+    """Apply OpenUtau's ``BREC`` expression to a predicted breathiness curve."""
+    if values is None:
+        return values
+    delta = breathiness * 12.0 / 100.0
+    if delta == 0.0:
+        return values
+    return [value + delta for value in values]
 
 
 def _pad_curve_to_length(values: List[float], target_len: int) -> List[float]:
@@ -1590,9 +1619,10 @@ def synthesize(
     language: str = "en",
     voice_color: Optional[str] = None,
     articulation: float = 0.0,
-    airiness: float = 1.0,
+    airiness: Optional[float] = None,
     intensity: float = 0.5,
-    clarity: float = 1.0,
+    clarity: Optional[float] = None,
+    gender: Optional[float] = None,
     pitch_expression: Optional[float] = None,
     solfege_pronunciation_patch: bool = False,
     skip_voice_part_preprocess: bool = False,
@@ -1613,9 +1643,13 @@ def synthesize(
         language: Voicebank dictionary language code (default: en)
         voice_color: Voice color name (subbank color ID)
         articulation: Global legato/staccato adjustment (-1.0 to +1.0)
-        airiness: Global breathiness multiplier (0.0 to 1.0)
+        airiness: Absolute OpenUtau BREC control. When omitted, use the selected
+            voicebank's manifest default (system fallback: 0).
         intensity: Global tension multiplier (0.0 to 1.0)
-        clarity: Global voicing multiplier (0.0 to 1.0)
+        clarity: Absolute extended OpenUtau VOIC control. When omitted, use the
+            selected voicebank's manifest default (system fallback: 100).
+        gender: Absolute OpenUtau GENC control. When omitted, use the selected
+            voicebank's manifest default (system fallback: 0).
         pitch_expression: Optional pitch expression override (0.0 to 1.0)
         solfege_pronunciation_patch: Apply deterministic English solfege spellings
         device: Device for inference
@@ -1664,6 +1698,7 @@ def synthesize(
                     "airiness": airiness,
                     "intensity": intensity,
                     "clarity": clarity,
+                    "gender": gender,
                     "pitch_expression": pitch_expression,
                     "solfege_pronunciation_patch": solfege_pronunciation_patch,
                     "device": device,
@@ -1695,6 +1730,10 @@ def synthesize(
 
     voicebank_path = Path(voicebank)
     config = load_voicebank_config(voicebank_path)
+    control_defaults = resolve_manifest_synthesis_control_defaults(voicebank_path)
+    resolved_airiness = control_defaults["airiness"] if airiness is None else airiness
+    resolved_clarity = control_defaults["clarity"] if clarity is None else clarity
+    resolved_gender = control_defaults["gender"] if gender is None else gender
     resolved_pitch_expression = (
         resolve_manifest_pitch_expression(voicebank_path)
         if pitch_expression is None
@@ -1710,12 +1749,14 @@ def synthesize(
     if speaker_name is None and voice_color is not None:
         speaker_name = resolve_voice_color_speaker(voicebank_path, default_voice_color)
 
-    if airiness < 0.0 or airiness > 1.0:
-        raise ValueError("airiness must be between 0.0 and 1.0.")
+    if resolved_airiness < -100.0 or resolved_airiness > 100.0:
+        raise ValueError("airiness must be between -100.0 and 100.0 (OpenUtau BREC).")
     if intensity < 0.0 or intensity > 1.0:
         raise ValueError("intensity must be between 0.0 and 1.0.")
-    if clarity < 0.0 or clarity > 1.0:
-        raise ValueError("clarity must be between 0.0 and 1.0.")
+    if resolved_clarity < 0.0 or resolved_clarity > 200.0:
+        raise ValueError("clarity must be between 0.0 and 200.0 (extended OpenUtau VOIC).")
+    if resolved_gender < -100.0 or resolved_gender > 100.0:
+        raise ValueError("gender must be between -100.0 and 100.0 (OpenUtau GENC).")
 
     if articulation < -1.0 or articulation > 1.0:
         raise ValueError("articulation must be between -1.0 and 1.0.")
@@ -1931,9 +1972,11 @@ def synthesize(
     )
     _log_step("variance", start)
     energy = var_result["energy"]
-    breathiness = _scale_curve(var_result["breathiness"], airiness)
+    breathiness = _apply_openutau_breathiness(
+        var_result["breathiness"], resolved_airiness
+    )
     tension = _scale_curve(var_result["tension"], intensity)
-    voicing = _scale_curve(var_result["voicing"], clarity)
+    voicing = _apply_openutau_voicing(var_result["voicing"], resolved_clarity)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "frame_lengths_variance expected=%s energy=%s breathiness=%s tension=%s voicing=%s",
@@ -1977,6 +2020,7 @@ def synthesize(
         breathiness=breathiness,
         tension=tension,
         voicing=voicing,
+        gender=resolved_gender,
         velocity=velocity,
         language_ids=language_ids,
         speaker_name=speaker_name,
