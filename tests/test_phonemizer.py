@@ -233,6 +233,23 @@ class PhonemizerClassTests(unittest.TestCase):
         self.assertEqual(result["language_ids"], [2, 2, 2, 2, 1, 2, 2, 1, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2])
         self.assertEqual(result["word_boundaries"], [4, 6, 4, 8])
 
+    def test_qixuan_spanish_rolled_r_can_remain_logical_until_alignment(self) -> None:
+        """The model-only rr workaround is one logical alignment unit before expansion."""
+        result = phonemize(
+            ["rosa"],
+            QIXUAN_ROOT,
+            language="es",
+            logical_pronunciation=True,
+        )
+
+        self.assertEqual(
+            result["phonemes"],
+            ["@qixuan_es_rr_roll", "ja/o", "ja/s", "ja/a"],
+        )
+        self.assertEqual(result["phoneme_ids"][0], -1)
+        self.assertTrue(all(phone_id >= 0 for phone_id in result["phoneme_ids"][1:]))
+        self.assertEqual(result["word_boundaries"], [4])
+
     def test_qixuan_japanese_kana_uses_romaji_dictionary_entries(self) -> None:
         """Kana is romanized before Qixuan's dsdict-ja lookup, as in OpenUtau."""
         result = phonemize(["か", "キャ", "っ", "ティ"], QIXUAN_ROOT, language="ja")

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from src.api.syllable_alignment import (
     _build_group_anchor_frames,
     _compress_group_to_anchor_budget,
+    _match_initial_onset_anchor_adapter,
     align,
 )
 from src.api.timing_errors import InfeasibleAnchorError
@@ -124,6 +125,142 @@ class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
         self.assertEqual(payload["group_note_indices"], [0, 0])
         self.assertEqual(payload["word_durations"], [1, 11])
         self.assertEqual(mock_phonemize.call_args.kwargs["language"], "es")
+
+    @patch("src.api.syllable_alignment.resolve_manifest_onset_anchor_adapters")
+    @patch("src.api.syllable_alignment.phonemize")
+    def test_routes_declared_gw_onset_to_its_carrier(
+        self,
+        mock_phonemize,
+        mock_resolve_onset_adapters,
+    ) -> None:
+        """Only the manifest-declared /g w/ prefix keeps its glide on the carrier."""
+        mock_resolve_onset_adapters.return_value = [
+            {
+                "id": "qixuan_es_gw_onset",
+                "prefix_phonemes": ["en/g", "ja/w"],
+                "preserve_following_syllable_onsets": True,
+            }
+        ]
+        mock_phonemize.return_value = {
+            "phonemes": ["en/g", "ja/w", "ja/a", "ja/n", "ja/t", "ja/a"],
+            "phoneme_ids": [1, 2, 3, 4, 5, 3],
+            "language_ids": [1, 2, 2, 2, 2, 2],
+            "word_boundaries": [6],
+        }
+        phonemizer = _StubPhonemizer({"ja/a"})
+        phonemizer._phoneme_to_id.update(
+            {"en/g": 1, "ja/w": 2, "ja/a": 3, "ja/n": 4, "ja/t": 5}
+        )
+        phonemizer._language_map = {"en": 1, "ja": 2}
+        phonemizer._glides = {"ja/w"}
+        phonemizer.is_glide = lambda phoneme: phoneme in phonemizer._glides
+        notes = [
+            {
+                "is_rest": False,
+                "lyric": "guan",
+                "syllabic": "begin",
+                "offset_beats": 0.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 60,
+            },
+            {
+                "is_rest": False,
+                "lyric": "ta",
+                "syllabic": "end",
+                "offset_beats": 1.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 62,
+            },
+        ]
+
+        payload = align(
+            notes=notes,
+            start_frames=[0, 12],
+            end_frames=[12, 24],
+            timing_midi=[60.0, 62.0],
+            note_durations=[12, 12],
+            phonemizer=phonemizer,  # type: ignore[arg-type]
+            voicebank_path=Path("."),
+            language="es",
+            include_phonemes=True,
+        )
+
+        self.assertEqual(payload["phonemes"], ["en/g", "ja/w", "ja/a", "ja/n", "ja/t", "ja/a"])
+        self.assertEqual(payload["word_boundaries"], [4, 2])
+        self.assertEqual(
+            payload["phoneme_timing_rules"],
+            [None, None],
+        )
+
+    def test_onset_anchor_adapter_does_not_match_other_glide_sequences(self) -> None:
+        """A broad consonant+glide rule would wrongly capture Spanish `cie`."""
+        adapters = [
+            {
+                "id": "qixuan_es_gw_onset",
+                "prefix_phonemes": ["en/g", "ja/w"],
+                "preserve_following_syllable_onsets": True,
+            }
+        ]
+        self.assertIsNone(
+            _match_initial_onset_anchor_adapter(["ja/s", "ja/y", "ja/e"], adapters)
+        )
+
+    @patch("src.api.syllable_alignment.phonemize")
+    def test_english_multinote_initial_onset_keeps_legacy_prefix_carry(self, mock_phonemize) -> None:
+        """An English multi-note word retains the established prefix-carry behavior."""
+        mock_phonemize.return_value = {
+            "phonemes": ["ja/a", "ja/m", "ja/e", "ja/r", "ja/a"],
+            "phoneme_ids": [2, 3, 4, 5, 2],
+            "language_ids": [2, 2, 2, 2, 2],
+            "word_boundaries": [1, 4],
+        }
+        phonemizer = _StubPhonemizer({"ja/a", "ja/e"})
+        phonemizer._phoneme_to_id.update(
+            {"ja/a": 2, "ja/m": 3, "ja/e": 4, "ja/r": 5}
+        )
+        phonemizer._language_map = {"ja": 2}
+        notes = [
+            {
+                "is_rest": False,
+                "lyric": "a",
+                "syllabic": "single",
+                "offset_beats": 0.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 60,
+            },
+            {
+                "is_rest": False,
+                "lyric": "me",
+                "syllabic": "begin",
+                "offset_beats": 1.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 62,
+            },
+            {
+                "is_rest": False,
+                "lyric": "ra",
+                "syllabic": "end",
+                "offset_beats": 2.0,
+                "duration_beats": 1.0,
+                "pitch_midi": 64,
+            },
+        ]
+
+        payload = align(
+            notes=notes,
+            start_frames=[0, 12, 24],
+            end_frames=[12, 24, 36],
+            timing_midi=[60.0, 62.0, 64.0],
+            note_durations=[12, 12, 12],
+            phonemizer=phonemizer,  # type: ignore[arg-type]
+            voicebank_path=Path("."),
+            language="en",
+            include_phonemes=True,
+        )
+
+        self.assertEqual(payload["phonemes"], ["ja/a", "ja/m", "ja/e", "ja/r", "ja/a"])
+        self.assertEqual(payload["word_boundaries"], [2, 2, 1])
+        self.assertEqual(payload["group_note_indices"], [0, 1, 2])
 
 
 if __name__ == "__main__":

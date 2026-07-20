@@ -609,12 +609,15 @@ def _apply_anchor_constrained_timing(
     word_boundaries: List[int],
     group_anchor_frames: List[Dict[str, int]],
     vowel_flags: Optional[List[bool]] = None,
+    phoneme_timing_rules: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> List[int]:
     """Apply note/group anchor-constrained timing to phoneme durations."""
     if not durations or not word_boundaries:
         return durations
     if len(group_anchor_frames) != len(word_boundaries):
         raise ValueError("group_anchor_frames/word_boundaries length mismatch")
+    if phoneme_timing_rules is not None and len(phoneme_timing_rules) != len(word_boundaries):
+        raise ValueError("phoneme_timing_rules/word_boundaries length mismatch")
 
     out: List[int] = []
     offset = 0
@@ -647,19 +650,94 @@ def _apply_anchor_constrained_timing(
             parsed_note_index = int(note_index) if note_index is not None else None
         except (TypeError, ValueError):
             parsed_note_index = None
+        default_durations = _rescale_group_durations(
+            group,
+            anchor_total,
+            vowel_flags=group_vowel_flags,
+            group_index=idx,
+            note_index=parsed_note_index,
+        )
+        rule = phoneme_timing_rules[idx] if phoneme_timing_rules is not None else None
         out.extend(
-            _rescale_group_durations(
-                group,
-                anchor_total,
+            _apply_pronunciation_timing_rule(
+                default_durations,
+                anchor_total=anchor_total,
+                rule=rule,
                 vowel_flags=group_vowel_flags,
-                group_index=idx,
-                note_index=parsed_note_index,
             )
         )
 
     if offset != len(durations):
         raise ValueError("word_boundaries does not consume all durations")
     return out
+
+
+def _apply_pronunciation_timing_rule(
+    default_durations: List[int],
+    *,
+    anchor_total: int,
+    rule: Optional[Dict[str, Any]],
+    vowel_flags: Optional[List[bool]] = None,
+) -> List[int]:
+    """Apply a manifest-declared timing policy to a logical pronunciation span."""
+    if not rule:
+        return default_durations
+    adaptive_prefix_count = rule.get("adaptive_onset_prefix_count")
+    adaptive_ratio = rule.get("adaptive_onset_frame_ratio")
+    adaptive_minimum = rule.get("adaptive_onset_min_frames")
+    adaptive_maximum = rule.get("adaptive_onset_max_frames")
+    if (
+        isinstance(adaptive_prefix_count, int)
+        and not isinstance(adaptive_prefix_count, bool)
+        and adaptive_prefix_count >= 1
+        and isinstance(adaptive_ratio, (int, float))
+        and not isinstance(adaptive_ratio, bool)
+        and 0.0 < float(adaptive_ratio) < 0.5
+        and isinstance(adaptive_minimum, int)
+        and not isinstance(adaptive_minimum, bool)
+        and adaptive_minimum >= 1
+        and isinstance(adaptive_maximum, int)
+        and not isinstance(adaptive_maximum, bool)
+        and adaptive_maximum >= adaptive_minimum
+        and len(default_durations) > adaptive_prefix_count
+    ):
+        per_phone = max(
+            adaptive_minimum,
+            min(
+                adaptive_maximum,
+                int(round(anchor_total * float(adaptive_ratio))),
+            ),
+        )
+        remaining = anchor_total - (adaptive_prefix_count * per_phone)
+        suffix_count = len(default_durations) - adaptive_prefix_count
+        if remaining >= suffix_count:
+            return [
+                *([per_phone] * adaptive_prefix_count),
+                *_rescale_group_durations(
+                    default_durations[adaptive_prefix_count:],
+                    remaining,
+                    vowel_flags=(vowel_flags or [])[adaptive_prefix_count:] or None,
+                ),
+            ]
+    prefix_frames = rule.get("prefix_frames")
+    main_onset_frames = rule.get("main_onset_frames")
+    if (
+        not isinstance(prefix_frames, list)
+        or not prefix_frames
+        or not all(isinstance(value, int) and value > 0 for value in prefix_frames)
+        or not isinstance(main_onset_frames, int)
+        or main_onset_frames < 1
+    ):
+        return default_durations
+    # The selected Qixuan Spanish-roll profile has four virtual phones, then
+    # the real onset and exactly one following vowel. Do not force a rule on a
+    # group whose physical shape no longer matches that contract.
+    if len(default_durations) != len(prefix_frames) + 2:
+        return default_durations
+    remaining_vowel_frames = anchor_total - sum(prefix_frames) - main_onset_frames
+    if remaining_vowel_frames < 1:
+        return default_durations
+    return [*prefix_frames, main_onset_frames, remaining_vowel_frames]
 
 
 def _build_slur_velocity_envelope(
@@ -1588,6 +1666,16 @@ def align_phonemes_to_notes(
         "slur_groups": slur_groups,
         "coda_tails": ph_result.get("coda_tails", []),
     }
+    if "duration_model_word_boundaries" in ph_result:
+        result["duration_model_word_boundaries"] = ph_result[
+            "duration_model_word_boundaries"
+        ]
+        result["duration_model_word_durations"] = ph_result[
+            "duration_model_word_durations"
+        ]
+        result["duration_model_word_pitches"] = ph_result[
+            "duration_model_word_pitches"
+        ]
     # Debug contract fields from V2 aligner.
     if "durations" in ph_result:
         result["durations"] = ph_result["durations"]
@@ -1599,6 +1687,8 @@ def align_phonemes_to_notes(
         result["positions_debug"] = ph_result["positions_debug"]
     if "note_slur" in ph_result:
         result["note_slur"] = ph_result["note_slur"]
+    if "phoneme_timing_rules" in ph_result:
+        result["phoneme_timing_rules"] = ph_result["phoneme_timing_rules"]
     if include_phonemes:
         result["phonemes"] = ph_result.get("phonemes", [])
     if logger.isEnabledFor(logging.DEBUG):
@@ -1806,22 +1896,31 @@ def synthesize(
     
     # Step 3: Predict durations.
     start = time.monotonic()
+    duration_model_boundaries = alignment.get(
+        "duration_model_word_boundaries", alignment["word_boundaries"]
+    )
+    duration_model_durations = alignment.get(
+        "duration_model_word_durations", alignment["word_durations"]
+    )
+    duration_model_pitches = alignment.get(
+        "duration_model_word_pitches", alignment["word_pitches"]
+    )
     logger.info(
         "synthesize_stage_start %s",
         summarize_payload(
             {
                 "step": "durations",
                 "phoneme_count": len(alignment["phoneme_ids"]),
-                "word_count": len(alignment["word_boundaries"]),
+                "word_count": len(duration_model_boundaries),
             }
         ),
     )
     use_timing_v2 = _env_flag_enabled("SYLLABLE_TIMING_V2")
     dur_result = predict_durations(
         phoneme_ids=initial_stage_tokens.dur_ids,
-        word_boundaries=alignment["word_boundaries"],
-        word_durations=alignment["word_durations"],
-        word_pitches=alignment["word_pitches"],
+        word_boundaries=duration_model_boundaries,
+        word_durations=duration_model_durations,
+        word_pitches=duration_model_pitches,
         voicebank=voicebank_path,
         language_ids=alignment["language_ids"],
         speaker_name=speaker_name,
@@ -1844,6 +1943,7 @@ def synthesize(
                     word_boundaries=alignment["word_boundaries"],
                     group_anchor_frames=anchor_frames,
                     vowel_flags=alignment.get("vowel_flags") or None,
+                    phoneme_timing_rules=alignment.get("phoneme_timing_rules") or None,
                 )
             except InfeasibleAnchorError as exc:
                 return build_infeasible_anchor_action_required(

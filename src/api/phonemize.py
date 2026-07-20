@@ -8,7 +8,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.phonemizer.phonemizer import Phonemizer
 from src.api.voicebank import load_voicebank_config
-from src.api.voicebank_cache import resolve_manifest_japanese_dictionary_form
+from src.api.voicebank_cache import (
+    resolve_manifest_japanese_dictionary_form,
+    resolve_manifest_pronunciation_adapters,
+)
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -50,6 +53,7 @@ def phonemize(
     *,
     language: str = "en",
     solfege_pronunciation_patch: bool = False,
+    logical_pronunciation: bool = False,
 ) -> Dict[str, Any]:
     """
     Convert lyrics to phoneme sequences.
@@ -59,6 +63,9 @@ def phonemize(
         voicebank: Voicebank path or ID
         language: Language code (default: "en")
         solfege_pronunciation_patch: Apply deterministic English solfege spellings
+        logical_pronunciation: Keep manifest-declared multi-phone workarounds as
+            logical markers for the alignment layer. Markers are never valid
+            model tokens and must be expanded before model inputs are built.
         
     Returns:
         Dict with:
@@ -85,11 +92,14 @@ def phonemize(
                     "voicebank": str(voicebank),
                     "language": language,
                     "solfege_pronunciation_patch": solfege_pronunciation_patch,
+                    "logical_pronunciation": logical_pronunciation,
                 }
             ),
         )
     if not isinstance(solfege_pronunciation_patch, bool):
         raise ValueError("solfege_pronunciation_patch must be a boolean.")
+    if not isinstance(logical_pronunciation, bool):
+        raise ValueError("logical_pronunciation must be a boolean.")
 
     effective_lyrics = list(lyrics)
     if solfege_pronunciation_patch and language.strip().lower() == "en":
@@ -127,9 +137,75 @@ def phonemize(
         "language_ids": list(phoneme_result.language_ids),
         "word_boundaries": list(phoneme_result.word_boundaries),
     }
+    if logical_pronunciation:
+        adapters = resolve_manifest_pronunciation_adapters(voicebank_path, language)
+        if adapters:
+            result = _collapse_logical_pronunciation(result, adapters)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("phonemize output=%s", summarize_payload(result))
     return result
+
+
+def _collapse_logical_pronunciation(
+    result: Dict[str, Any],
+    adapters: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Collapse configured runtime-phone spans into alignment-only markers."""
+    phonemes = list(result.get("phonemes") or [])
+    ids = list(result.get("phoneme_ids") or [])
+    language_ids = list(result.get("language_ids") or [])
+    boundaries = list(result.get("word_boundaries") or [])
+    if not phonemes or not boundaries:
+        return result
+
+    collapsed_phonemes: List[str] = []
+    collapsed_ids: List[int] = []
+    collapsed_language_ids: List[int] = []
+    collapsed_boundaries: List[int] = []
+    offset = 0
+    for count in boundaries:
+        end = offset + int(count)
+        word_phonemes = phonemes[offset:end]
+        word_ids = ids[offset:end]
+        word_language_ids = language_ids[offset:end]
+        offset = end
+        idx = 0
+        collapsed_count = 0
+        while idx < len(word_phonemes):
+            adapter = next(
+                (
+                    candidate
+                    for candidate in adapters
+                    if word_phonemes[idx : idx + len(candidate["collapse_phonemes"])]
+                    == candidate["collapse_phonemes"]
+                ),
+                None,
+            )
+            if adapter is None:
+                collapsed_phonemes.append(word_phonemes[idx])
+                collapsed_ids.append(word_ids[idx])
+                collapsed_language_ids.append(word_language_ids[idx])
+                idx += 1
+                collapsed_count += 1
+                continue
+            collapsed_phonemes.append(str(adapter["logical_symbol"]))
+            # Alignment expands this marker before any model stage. The sentinel
+            # prevents accidental use as a model token if that contract is broken.
+            collapsed_ids.append(-1)
+            collapsed_language_ids.append(0)
+            idx += len(adapter["collapse_phonemes"])
+            collapsed_count += 1
+        collapsed_boundaries.append(collapsed_count)
+
+    if offset != len(phonemes):
+        raise ValueError("word_boundaries do not consume phonemize output")
+    return {
+        **result,
+        "phonemes": collapsed_phonemes,
+        "phoneme_ids": collapsed_ids,
+        "language_ids": collapsed_language_ids,
+        "word_boundaries": collapsed_boundaries,
+    }
 
 
 def _dictionary_candidates(voicebank_path: Path, language: str = "en") -> List[Path]:

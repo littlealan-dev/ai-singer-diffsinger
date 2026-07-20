@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Optional
 
 from src.api.phonemize import phonemize
 from src.api.timing_errors import InfeasibleAnchorError
+from src.api.voicebank_cache import (
+    resolve_manifest_onset_anchor_adapters,
+    resolve_manifest_pronunciation_adapters,
+)
 from src.phonemizer.phonemizer import Phonemizer
 
 
@@ -114,12 +118,18 @@ def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, An
     return out
 
 
-def _syllable_start_indices(phonemes: List[str], phonemizer: Phonemizer) -> List[int]:
+def _syllable_start_indices(
+    phonemes: List[str],
+    phonemizer: Phonemizer,
+    logical_spans: Optional[List[Dict[str, Any]]] = None,
+    forced_following_onsets: int = 0,
+) -> List[int]:
     """Return phoneme start indices for syllable/note anchor mapping."""
     if not phonemes:
         return []
     is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
     is_glide = [phonemizer.is_glide(p) for p in phonemes]
+    remaining_forced_onsets = max(0, int(forced_following_onsets))
     starts = [False] * len(phonemes)
     if not any(is_vowel):
         starts[0] = True
@@ -127,8 +137,32 @@ def _syllable_start_indices(phonemes: List[str], phonemizer: Phonemizer) -> List
         if is_vowel[i]:
             if i >= 2 and is_glide[i - 1] and not is_vowel[i - 2]:
                 starts[i - 1] = True
+            elif (
+                remaining_forced_onsets > 0
+                and i >= 1
+                and not is_vowel[i - 1]
+                and any(is_vowel[: i - 1])
+            ):
+                starts[i - 1] = True
+                remaining_forced_onsets -= 1
             else:
                 starts[i] = True
+    for span in logical_spans or []:
+        start = int(span.get("start", -1))
+        end = int(span.get("end", -1))
+        if start < 0 or start >= len(starts):
+            continue
+        # A rolled-r span is one logical syllable. Its virtual vowels and the
+        # following real vowel must not create extra note anchors.
+        starts[start] = True
+        for index in range(start + 1, min(len(starts), end + 1)):
+            starts[index] = False
+        # The real vowel is immediately after the expanded prefix. If another
+        # syllable follows, its onset belongs with its own carrier note instead
+        # of being absorbed by the rolled-r syllable's vowel-led chunk.
+        next_syllable = end + 1
+        if next_syllable < len(starts):
+            starts[next_syllable] = True
     out = [idx for idx, flag in enumerate(starts) if flag]
     return sorted(set(out)) if out else [0]
 
@@ -141,12 +175,19 @@ def _split_phonemes_into_syllable_chunks(
     phonemizer: Phonemizer,
     expected_chunks: int,
     attach_lead_to_first: bool = True,
-) -> List[Dict[str, List[Any]]]:
+    logical_spans: Optional[List[Dict[str, Any]]] = None,
+    forced_following_onsets: int = 0,
+) -> List[Dict[str, Any]]:
     """Split phoneme sequence into syllable chunks for note-level assignment."""
     if expected_chunks <= 1 or len(phonemes) <= 1:
         return [{"phonemes": phonemes, "ids": ids, "lang_ids": lang_ids}]
 
-    start_indices = _syllable_start_indices(phonemes, phonemizer)
+    start_indices = _syllable_start_indices(
+        phonemes,
+        phonemizer,
+        logical_spans,
+        forced_following_onsets,
+    )
 
     chunks: List[Dict[str, List[Any]]] = []
     first_start = start_indices[0]
@@ -179,6 +220,146 @@ def _split_phonemes_into_syllable_chunks(
     while len(chunks) < expected_chunks:
         chunks.append({"phonemes": [], "ids": [], "lang_ids": []})
     return chunks
+
+
+def _materialize_logical_pronunciation(
+    data: Dict[str, Any],
+    phonemizer: Phonemizer,
+    adapters: List[Dict[str, Any]],
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Expand alignment-only markers into voicebank-supported runtime phones."""
+    markers = {str(adapter["logical_symbol"]): adapter for adapter in adapters}
+    phonemes = list(data.get("phonemes") or [])
+    ids = list(data.get("ids") or [])
+    lang_ids = list(data.get("lang_ids") or [])
+    runtime_phonemes: List[str] = []
+    runtime_ids: List[int] = []
+    runtime_language_ids: List[int] = []
+    spans: List[Dict[str, Any]] = []
+
+    for index, phoneme in enumerate(phonemes):
+        adapter = markers.get(phoneme)
+        if adapter is None:
+            runtime_phonemes.append(phoneme)
+            runtime_ids.append(ids[index])
+            runtime_language_ids.append(lang_ids[index])
+            continue
+        expansion = [str(value) for value in adapter["expand_phonemes"]]
+        start = len(runtime_phonemes)
+        for runtime_phone in expansion:
+            runtime_phonemes.append(runtime_phone)
+            runtime_ids.append(phonemizer._phoneme_to_id[runtime_phone])
+            language_code = runtime_phone.split("/", 1)[0] if "/" in runtime_phone else ""
+            runtime_language_ids.append(phonemizer._language_map.get(language_code, 0))
+        spans.append(
+            {
+                "start": start,
+                "end": start + len(expansion),
+                "prefix_frames": list(adapter["prefix_frames"]),
+                "main_onset_frames": int(adapter["main_onset_frames"]),
+                "adapter_id": str(adapter["id"]),
+            }
+        )
+    return (
+        {
+            **data,
+            "phonemes": runtime_phonemes,
+            "ids": runtime_ids,
+            "lang_ids": runtime_language_ids,
+        },
+        spans,
+    )
+
+
+def _match_initial_onset_anchor_adapter(
+    phonemes: List[str],
+    adapters: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return the exact manifest onset rule matching this phonemized word."""
+    for adapter in adapters:
+        prefix = adapter.get("prefix_phonemes")
+        if isinstance(prefix, list) and phonemes[: len(prefix)] == prefix:
+            return adapter
+    return None
+
+
+def _build_onset_anchor_duration_model_groups(
+    *,
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+    phonemizer: Phonemizer,
+    carrier_indices: List[int],
+    timing_midi: List[float],
+    start_frames: List[int],
+    logical_spans: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Recreate legacy duration-model context while retaining an exact onset prefix.
+
+    The rendered stream attaches ``g+w`` to the first scored syllable.  The
+    duration model instead receives its historic prefix/carry partition, with
+    the otherwise-lost glide retained beside the leading consonant.  Both
+    streams therefore contain the same phones in the same order.
+    """
+    if not carrier_indices:
+        return []
+    start_indices = _syllable_start_indices(phonemes, phonemizer, logical_spans)
+    first_start = start_indices[0] if start_indices else 0
+    outer_lead_ph = phonemes[:first_start]
+    outer_lead_ids = ids[:first_start]
+    outer_lead_lang = lang_ids[:first_start]
+    core_ph = phonemes[first_start:]
+    core_ids = ids[first_start:]
+    core_lang = lang_ids[first_start:]
+    core_spans = [
+        {
+            **span,
+            "start": int(span["start"]) - first_start,
+            "end": int(span["end"]) - first_start,
+        }
+        for span in logical_spans
+        if int(span["start"]) >= first_start
+    ]
+    core_starts = _syllable_start_indices(core_ph, phonemizer, core_spans)
+    core_first_start = core_starts[0] if core_starts else 0
+    hidden_prefix_ph = core_ph[:core_first_start]
+    hidden_prefix_ids = core_ids[:core_first_start]
+    hidden_prefix_lang = core_lang[:core_first_start]
+    chunks = _split_phonemes_into_syllable_chunks(
+        phonemes=core_ph,
+        ids=core_ids,
+        lang_ids=core_lang,
+        phonemizer=phonemizer,
+        expected_chunks=max(1, len(carrier_indices)),
+        attach_lead_to_first=False,
+        logical_spans=core_spans,
+    )
+    first_note = int(carrier_indices[0])
+    groups: List[Dict[str, Any]] = [
+        {
+            "position": start_frames[first_note],
+            "phonemes": outer_lead_ph + hidden_prefix_ph,
+            "ids": outer_lead_ids + hidden_prefix_ids,
+            "lang_ids": outer_lead_lang + hidden_prefix_lang,
+            "tone": float(timing_midi[first_note]),
+            "note_idx": first_note,
+        }
+    ]
+    for idx, chunk in enumerate(chunks):
+        if not chunk["phonemes"]:
+            continue
+        note_idx = int(carrier_indices[min(idx, len(carrier_indices) - 1)])
+        groups.append(
+            {
+                "position": start_frames[note_idx],
+                "phonemes": list(chunk["phonemes"]),
+                "ids": list(chunk["ids"]),
+                "lang_ids": list(chunk["lang_ids"]),
+                "tone": float(timing_midi[note_idx]),
+                "note_idx": note_idx,
+            }
+        )
+    return [group for group in groups if group["phonemes"]]
 
 
 def _phoneme_stress(phoneme: str) -> int:
@@ -509,6 +690,14 @@ def align(
         lyrics.append(lyric if lyric else "SP")
 
     word_phonemes: List[Dict[str, Any]] = []
+    pronunciation_adapters = resolve_manifest_pronunciation_adapters(
+        voicebank_path,
+        language,
+    )
+    onset_anchor_adapters = resolve_manifest_onset_anchor_adapters(
+        voicebank_path,
+        language,
+    )
     if lyrics:
         word_phonemes = _split_phonemize_result(
             phonemize(
@@ -516,6 +705,7 @@ def align(
                 voicebank_path,
                 language=language,
                 solfege_pronunciation_patch=solfege_pronunciation_patch,
+                logical_pronunciation=bool(pronunciation_adapters),
             )
         )
         if len(word_phonemes) != len(lyrics):
@@ -550,15 +740,23 @@ def align(
             raise ValueError("Phoneme list does not match grouped note count.")
         data = word_phonemes[word_idx]
         word_idx += 1
+        data, logical_spans = _materialize_logical_pronunciation(
+            data,
+            phonemizer,
+            pronunciation_adapters,
+        )
         phonemes = list(data.get("phonemes", [])) or ["SP"]
         ids = list(data.get("ids", [])) if data.get("phonemes") else [sp_id]
         lang_ids = list(data.get("lang_ids", [])) if data.get("phonemes") else [0]
+        onset_adapter = _match_initial_onset_anchor_adapter(
+            phonemes,
+            onset_anchor_adapters,
+        )
 
         carrier_indices = group.get("carrier_indices") or []
         if not carrier_indices:
             non_sustain = [n for n in note_indices if n not in set(group.get("sustain_indices", []))]
             carrier_indices = non_sustain[:1] if non_sustain else [note_indices[0]]
-
         # V1-compatible fallback: trim multi-syllable words if only one carrier note.
         if (
             len(carrier_indices) == 1
@@ -572,7 +770,11 @@ def align(
                 phonemizer=phonemizer,
             )
 
-        start_indices = _syllable_start_indices(phonemes, phonemizer)
+        start_indices = _syllable_start_indices(
+            phonemes,
+            phonemizer,
+            logical_spans,
+        )
         first_start = start_indices[0] if start_indices else 0
         lead_ph = phonemes[:first_start] if first_start > 0 else []
         lead_ids = ids[:first_start] if first_start > 0 else []
@@ -580,15 +782,92 @@ def align(
         core_ph = phonemes[first_start:] if first_start > 0 else phonemes
         core_ids = ids[first_start:] if first_start > 0 else ids
         core_lang = lang_ids[first_start:] if first_start > 0 else lang_ids
+        core_spans = [
+            {
+                **span,
+                "start": int(span["start"]) - first_start,
+                "end": int(span["end"]) - first_start,
+            }
+            for span in logical_spans
+            if int(span["start"]) >= first_start
+        ]
 
+        forced_following_onsets = (
+            max(0, len(carrier_indices) - 1)
+            if onset_adapter is not None
+            and onset_adapter.get("preserve_following_syllable_onsets", False)
+            else 0
+        )
         chunks = _split_phonemes_into_syllable_chunks(
             phonemes=core_ph,
             ids=core_ids,
             lang_ids=core_lang,
             phonemizer=phonemizer,
             expected_chunks=max(1, len(carrier_indices)),
-            attach_lead_to_first=False,
+            attach_lead_to_first=onset_adapter is not None,
+            logical_spans=core_spans,
+            forced_following_onsets=forced_following_onsets,
         )
+
+        # The manifest rule is an exact phone-sequence match. It routes just
+        # that leading prefix to the first carrier; ordinary C+glide words
+        # retain the legacy prefix behavior and duration-model grouping.
+        if onset_adapter is not None and lead_ph and chunks:
+            chunks[0]["phonemes"] = lead_ph + chunks[0]["phonemes"]
+            chunks[0]["ids"] = lead_ids + chunks[0]["ids"]
+            chunks[0]["lang_ids"] = lead_lang + chunks[0]["lang_ids"]
+            lead_ph, lead_ids, lead_lang = [], [], []
+
+        duration_model_override: List[Dict[str, Any]] = []
+        if onset_adapter is not None and len(carrier_indices) > 1:
+            duration_model_override = _build_onset_anchor_duration_model_groups(
+                phonemes=phonemes,
+                ids=ids,
+                lang_ids=lang_ids,
+                phonemizer=phonemizer,
+                carrier_indices=carrier_indices,
+                timing_midi=timing_midi,
+                start_frames=start_frames,
+                logical_spans=logical_spans,
+            )
+            rendered_phones = [phone for chunk in chunks for phone in chunk["phonemes"]]
+            model_phones = [
+                phone
+                for model_group in duration_model_override
+                for phone in model_group["phonemes"]
+            ]
+            if rendered_phones != model_phones:
+                raise ValueError(
+                    "Onset anchor adapter must preserve the duration-model phoneme stream"
+                )
+
+        chunk_offset = 0
+        for chunk in chunks:
+            chunk_end = chunk_offset + len(chunk["phonemes"])
+            rule = next(
+                (
+                    span
+                    for span in core_spans
+                    if chunk_offset <= int(span["start"]) < chunk_end
+                ),
+                None,
+            )
+            if rule is not None:
+                chunk["timing_rule"] = rule
+            chunk_offset = chunk_end
+
+        onset_timing = onset_adapter.get("onset_timing") if onset_adapter else None
+        if isinstance(onset_timing, dict) and chunks and chunks[0]["phonemes"]:
+            timing_rule = dict(chunks[0].get("timing_rule") or {})
+            timing_rule.update(
+                {
+                    "adaptive_onset_prefix_count": len(onset_adapter["prefix_phonemes"]),
+                    "adaptive_onset_frame_ratio": float(onset_timing["frame_ratio"]),
+                    "adaptive_onset_min_frames": int(onset_timing["min_frames"]),
+                    "adaptive_onset_max_frames": int(onset_timing["max_frames"]),
+                }
+            )
+            chunks[0]["timing_rule"] = timing_rule
 
         # OpenUtau parity: carry pre-vowel prefix to previous anchor group when possible.
         if lead_ph:
@@ -617,16 +896,20 @@ def align(
             chunk = chunks[idx] if idx < len(chunks) else {"phonemes": [], "ids": [], "lang_ids": []}
             if not chunk["phonemes"]:
                 continue
-            phrase_groups.append(
-                {
+            phrase_group = {
                     "position": start_frames[note_idx],
                     "phonemes": chunk["phonemes"],
                     "ids": chunk["ids"],
                     "lang_ids": chunk["lang_ids"],
+                    "timing_rule": chunk.get("timing_rule"),
                     "tone": float(timing_midi[note_idx]),
                     "note_idx": note_idx,
                 }
-            )
+            if idx == 0 and duration_model_override:
+                phrase_group["duration_model_override"] = duration_model_override
+            elif idx > 0 and duration_model_override:
+                phrase_group["duration_model_override_skip"] = True
+            phrase_groups.append(phrase_group)
             note_phonemes.setdefault(note_idx, []).extend(chunk["phonemes"])
 
         sustain_indices = group.get("sustain_indices", [])
@@ -714,8 +997,47 @@ def align(
     phoneme_ids = [pid for group in phrase_groups for pid in group["ids"]]
     language_ids = [lid for group in phrase_groups for lid in group["lang_ids"]]
     tones = [float(group["tone"]) for group in phrase_groups]
+    phoneme_timing_rules = [group.get("timing_rule") for group in phrase_groups]
     phonemes_flat = [ph for group in phrase_groups for ph in group["phonemes"]]
     vowel_flags = [bool(phonemizer.is_vowel(ph)) for ph in phonemes_flat]
+
+    has_duration_model_override = any(
+        group.get("duration_model_override") for group in phrase_groups
+    )
+    duration_model_boundaries: List[int] = []
+    duration_model_durations: List[int] = []
+    duration_model_pitches: List[float] = []
+    if has_duration_model_override:
+        duration_model_groups: List[Dict[str, Any]] = []
+        for phrase_group in phrase_groups:
+            override = phrase_group.get("duration_model_override")
+            if override:
+                duration_model_groups.extend(override)
+            elif not phrase_group.get("duration_model_override_skip"):
+                duration_model_groups.append(phrase_group)
+        duration_model_groups.sort(
+            key=lambda value: (int(value.get("note_idx", 0)), int(value["position"]))
+        )
+        duration_model_phones = [
+            phone
+            for model_group in duration_model_groups
+            for phone in model_group["phonemes"]
+        ]
+        if duration_model_phones != phonemes_flat:
+            raise ValueError(
+                "Duration-model groups must preserve rendered phoneme ordering"
+            )
+        _, duration_model_durations, _ = _build_group_anchor_frames(
+            phrase_groups=duration_model_groups,
+            note_durations=note_durations,
+            phonemizer=phonemizer,
+        )
+        duration_model_boundaries = [
+            len(model_group["ids"]) for model_group in duration_model_groups
+        ]
+        duration_model_pitches = [
+            float(model_group["tone"]) for model_group in duration_model_groups
+        ]
 
     # Expand per-group positions/durations to per-phoneme axis.
     ph_positions: List[int] = []
@@ -752,6 +1074,7 @@ def align(
         "group_anchor_frames": group_anchor_frames,
         "tones": ph_tones,
         "vowel_flags": vowel_flags,
+        "phoneme_timing_rules": phoneme_timing_rules,
         "note_phonemes": note_phonemes,
         "note_slur": note_slur,
         "note_durations": note_durations,
@@ -762,6 +1085,10 @@ def align(
     }
     if include_phonemes:
         payload["phonemes"] = phonemes_flat
+    if has_duration_model_override:
+        payload["duration_model_word_boundaries"] = duration_model_boundaries
+        payload["duration_model_word_durations"] = duration_model_durations
+        payload["duration_model_word_pitches"] = duration_model_pitches
 
     errors = validate_ds_contract(payload)
     if errors:

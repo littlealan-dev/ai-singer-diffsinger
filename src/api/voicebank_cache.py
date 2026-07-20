@@ -24,6 +24,22 @@ _SYSTEM_SYNTHESIS_CONTROL_DEFAULTS = {
     "gender": 0.0,
 }
 
+_PRONUNCIATION_ADAPTER_KEYS = {
+    "id",
+    "logical_symbol",
+    "collapse_phonemes",
+    "expand_phonemes",
+    "prefix_frames",
+    "main_onset_frames",
+}
+
+_ONSET_ANCHOR_ADAPTER_KEYS = {
+    "id",
+    "prefix_phonemes",
+    "preserve_following_syllable_onsets",
+    "onset_timing",
+}
+
 
 def _app_env() -> str:
     """Return the current environment name for prod/dev branching."""
@@ -125,6 +141,146 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                         f"Voicebank manifest entry {voicebank_id} synthesis_control_defaults.{control} "
                         f"must be between {minimum} and {maximum}"
                     )
+        pronunciation_adapters = entry.get("pronunciation_adapters")
+        if pronunciation_adapters is not None:
+            if not isinstance(pronunciation_adapters, dict):
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} pronunciation_adapters must be an object"
+                )
+            for language, adapters in pronunciation_adapters.items():
+                if not isinstance(language, str) or not language.strip():
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} pronunciation adapter language must be a string"
+                    )
+                if not isinstance(adapters, list):
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} pronunciation_adapters.{language} must be a list"
+                    )
+                for adapter in adapters:
+                    if not isinstance(adapter, dict):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter must be an object"
+                        )
+                    unknown = set(adapter) - _PRONUNCIATION_ADAPTER_KEYS
+                    if unknown:
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter has unsupported keys: "
+                            f"{', '.join(sorted(unknown))}"
+                        )
+                    required_strings = ("id", "logical_symbol")
+                    if any(not isinstance(adapter.get(key), str) or not adapter[key].strip() for key in required_strings):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter requires id and logical_symbol"
+                        )
+                    for key in ("collapse_phonemes", "expand_phonemes", "prefix_frames"):
+                        value = adapter.get(key)
+                        if not isinstance(value, list) or not value:
+                            raise ValueError(
+                                f"Voicebank manifest entry {voicebank_id} pronunciation adapter.{key} must be a non-empty list"
+                            )
+                    if not all(isinstance(value, str) and value for value in adapter["collapse_phonemes"]):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter.collapse_phonemes must contain strings"
+                        )
+                    if not all(isinstance(value, str) and value for value in adapter["expand_phonemes"]):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter.expand_phonemes must contain strings"
+                        )
+                    if adapter["collapse_phonemes"] != adapter["expand_phonemes"]:
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter collapse_phonemes must equal expand_phonemes"
+                        )
+                    prefix_frames = adapter["prefix_frames"]
+                    if (
+                        len(prefix_frames) != len(adapter["expand_phonemes"]) - 1
+                        or not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in prefix_frames)
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter.prefix_frames must cover every virtual prefix phone"
+                        )
+                    main_onset_frames = adapter.get("main_onset_frames")
+                    if (
+                        not isinstance(main_onset_frames, int)
+                        or isinstance(main_onset_frames, bool)
+                        or main_onset_frames < 1
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter.main_onset_frames must be a positive integer"
+                        )
+        onset_anchor_adapters = entry.get("onset_anchor_adapters")
+        if onset_anchor_adapters is not None:
+            if not isinstance(onset_anchor_adapters, dict):
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} onset_anchor_adapters must be an object"
+                )
+            for language, adapters in onset_anchor_adapters.items():
+                if not isinstance(language, str) or not language.strip() or not isinstance(adapters, list):
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} onset_anchor_adapters.{language} must be a list"
+                    )
+                for adapter in adapters:
+                    if not isinstance(adapter, dict):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter must be an object"
+                        )
+                    unknown = set(adapter) - _ONSET_ANCHOR_ADAPTER_KEYS
+                    if unknown:
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter has unsupported keys: "
+                            f"{', '.join(sorted(unknown))}"
+                        )
+                    if not isinstance(adapter.get("id"), str) or not adapter["id"].strip():
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter requires id"
+                        )
+                    prefix = adapter.get("prefix_phonemes")
+                    if (
+                        not isinstance(prefix, list)
+                        or len(prefix) < 2
+                        or not all(isinstance(value, str) and value for value in prefix)
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter.prefix_phonemes "
+                            "must contain at least two phoneme strings"
+                        )
+                    preserve_following = adapter.get(
+                        "preserve_following_syllable_onsets", False
+                    )
+                    if not isinstance(preserve_following, bool):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter."
+                            "preserve_following_syllable_onsets must be a boolean"
+                        )
+                    onset_timing = adapter.get("onset_timing")
+                    if onset_timing is not None:
+                        if not isinstance(onset_timing, dict) or set(onset_timing) != {
+                            "frame_ratio",
+                            "min_frames",
+                            "max_frames",
+                        }:
+                            raise ValueError(
+                                f"Voicebank manifest entry {voicebank_id} onset anchor adapter.onset_timing "
+                                "must define frame_ratio, min_frames, and max_frames"
+                            )
+                        ratio = onset_timing["frame_ratio"]
+                        minimum = onset_timing["min_frames"]
+                        maximum = onset_timing["max_frames"]
+                        if (
+                            isinstance(ratio, bool)
+                            or not isinstance(ratio, (int, float))
+                            or not math.isfinite(float(ratio))
+                            or not 0.0 < float(ratio) < 0.5
+                            or isinstance(minimum, bool)
+                            or not isinstance(minimum, int)
+                            or minimum < 1
+                            or isinstance(maximum, bool)
+                            or not isinstance(maximum, int)
+                            or maximum < minimum
+                        ):
+                            raise ValueError(
+                                f"Voicebank manifest entry {voicebank_id} onset anchor adapter.onset_timing "
+                                "has an invalid adaptive frame clamp"
+                            )
         if voicebank_id in seen:
             raise ValueError(f"Duplicate voicebank id in manifest: {voicebank_id}")
         seen.add(voicebank_id)
@@ -211,6 +367,44 @@ def resolve_manifest_synthesis_control_defaults(voicebank: str | Path) -> Dict[s
         if control in configured:
             defaults[control] = float(configured[control])
     return defaults
+
+
+def resolve_manifest_pronunciation_adapters(
+    voicebank: str | Path,
+    language: str,
+) -> List[Dict[str, Any]]:
+    """Return manifest-declared logical-to-runtime pronunciation adapters."""
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    normalized_language = str(language or "").strip().lower()
+    if voicebank_id is None or not normalized_language:
+        return []
+    configured = get_manifest_voicebank_metadata(voicebank_id).get(
+        "pronunciation_adapters"
+    )
+    if not isinstance(configured, dict):
+        return []
+    adapters = configured.get(normalized_language)
+    if not isinstance(adapters, list):
+        return []
+    return [dict(adapter) for adapter in adapters if isinstance(adapter, dict)]
+
+
+def resolve_manifest_onset_anchor_adapters(
+    voicebank: str | Path,
+    language: str,
+) -> List[Dict[str, Any]]:
+    """Return manifest rules that route an exact initial onset to its carrier note."""
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    normalized_language = str(language or "").strip().lower()
+    if voicebank_id is None or not normalized_language:
+        return []
+    configured = get_manifest_voicebank_metadata(voicebank_id).get("onset_anchor_adapters")
+    if not isinstance(configured, dict):
+        return []
+    adapters = configured.get(normalized_language)
+    if not isinstance(adapters, list):
+        return []
+    return [dict(adapter) for adapter in adapters if isinstance(adapter, dict)]
 
 
 def resolve_manifest_japanese_dictionary_form(voicebank: str | Path) -> Optional[str]:
