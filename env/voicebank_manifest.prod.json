@@ -10,7 +10,8 @@
       "profile_image": "printto_magicbeat_indigo.png",
       "selector_image": "printto_magicbeat_headshot.png",
       "path_hint": "PM-31_Commercial_Indigo",
-      "languages": [],
+      "languages": ["en", "es", "ja", "th"],
+      "language_notes": {"es": "Best-effort Spanish approximation using PM-31's shared native phoneme inventory."},
       "has_duration_model": true,
       "has_pitch_model": true,
       "has_variance_model": false,
@@ -34,6 +35,35 @@
       ],
       "default_voice_color": "01: Default",
       "pitch_expression": 1.0,
+      "pronunciation_adapters": {
+        "es": [
+          {
+            "id": "pm31_indigo_es_rolled_r",
+            "logical_symbol": "@pm31_indigo_es_rr_roll",
+            "collapse_phonemes": ["r", "a", "r", "a", "r"],
+            "expand_phonemes": ["r", "a", "r", "a", "r"],
+            "prefix_frames": [3, 3, 3, 3],
+            "main_onset_frames": 2
+          }
+        ]
+      },
+      "onset_anchor_adapters": {
+        "es": [
+          {
+            "id": "pm31_indigo_es_gw_onset",
+            "prefix_phonemes": ["g", "w"],
+            "preserve_following_syllable_onsets": true,
+            "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}
+          },
+          {
+            "id": "pm31_indigo_es_rolled_r_onset",
+            "logical_adapter_id": "pm31_indigo_es_rolled_r",
+            "prefix_phonemes": ["r", "a", "r", "a", "r"],
+            "preserve_following_syllable_onsets": false,
+            "onset_timing": {"frame_ratio": 0.02, "min_frames": 1, "max_frames": 2}
+          }
+        ]
+      },
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
@@ -48,7 +78,8 @@
       "profile_image": "printto_magicbeat_scarlet.png",
       "selector_image": "printto_magicbeat_headshot.png",
       "path_hint": "PM-31_Commercial_Scarlet",
-      "languages": [],
+      "languages": ["en", "es", "ja", "th"],
+      "language_notes": {"es": "Best-effort Spanish approximation using PM-31's shared native phoneme inventory."},
       "has_duration_model": true,
       "has_pitch_model": true,
       "has_variance_model": false,
@@ -72,6 +103,35 @@
       ],
       "default_voice_color": "A1: Solid",
       "pitch_expression": 1.0,
+      "pronunciation_adapters": {
+        "es": [
+          {
+            "id": "pm31_scarlet_es_rolled_r",
+            "logical_symbol": "@pm31_scarlet_es_rr_roll",
+            "collapse_phonemes": ["r", "a", "r", "a", "r"],
+            "expand_phonemes": ["r", "a", "r", "a", "r"],
+            "prefix_frames": [3, 3, 3, 3],
+            "main_onset_frames": 2
+          }
+        ]
+      },
+      "onset_anchor_adapters": {
+        "es": [
+          {
+            "id": "pm31_scarlet_es_gw_onset",
+            "prefix_phonemes": ["g", "w"],
+            "preserve_following_syllable_onsets": true,
+            "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}
+          },
+          {
+            "id": "pm31_scarlet_es_rolled_r_onset",
+            "logical_adapter_id": "pm31_scarlet_es_rolled_r",
+            "prefix_phonemes": ["r", "a", "r", "a", "r"],
+            "preserve_following_syllable_onsets": false,
+            "onset_timing": {"frame_ratio": 0.02, "min_frames": 1, "max_frames": 2}
+          }
+        ]
+      },
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
@@ -103,7 +163,7 @@
             "logical_symbol": "@qixuan_es_rr_roll",
             "collapse_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
             "expand_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
-            "prefix_frames": [3, 3, 3, 3],
+            "prefix_frames": [2, 2, 3, 3],
             "main_onset_frames": 2
           }
         ]

@@ -26,6 +26,7 @@ LANGUAGES_PATH = VOICEBANK_ROOT / "dsmain" / "languages.json"
 KEIRO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Keiro_Revenant_v170/configs"
 QIXUAN_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Qixuan_v2.7.0_DiffSinger_OpenUtau"
 PM_INDIGO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/PM-31_Commercial_Indigo"
+PM_SCARLET_ROOT = Path(__file__).parent.parent / "assets/voicebanks/PM-31_Commercial_Scarlet"
 
 
 class PhonemizerClassTests(unittest.TestCase):
@@ -249,6 +250,31 @@ class PhonemizerClassTests(unittest.TestCase):
         self.assertEqual(result["phoneme_ids"][0], -1)
         self.assertTrue(all(phone_id >= 0 for phone_id in result["phoneme_ids"][1:]))
         self.assertEqual(result["word_boundaries"], [4])
+
+    def test_pm31_spanish_uses_shared_native_phone_approximations(self) -> None:
+        """Both PM-31 banks use their shared unprefixed inventory for Spanish."""
+        expected_markers = {
+            PM_INDIGO_ROOT: "@pm31_indigo_es_rr_roll",
+            PM_SCARLET_ROOT: "@pm31_scarlet_es_rr_roll",
+        }
+        for root, marker in expected_markers.items():
+            with self.subTest(voicebank=root.name):
+                result = phonemize(
+                    ["rosa", "Guantanamera", "guajira"],
+                    root,
+                    language="es",
+                    logical_pronunciation=True,
+                )
+                self.assertEqual(
+                    result["phonemes"],
+                    [
+                        marker, "o", "s", "a",
+                        "g", "w", "a", "n", "t", "a", "n", "a", "m", "e", "l", "a",
+                        "g", "w", "a", "h", "i", "l", "a",
+                    ],
+                )
+                self.assertTrue(all(language_id == 0 for language_id in result["language_ids"]))
+                self.assertEqual(result["word_boundaries"], [4, 12, 7])
 
     def test_qixuan_japanese_kana_uses_romaji_dictionary_entries(self) -> None:
         """Kana is romanized before Qixuan's dsdict-ja lookup, as in OpenUtau."""

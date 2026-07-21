@@ -283,6 +283,33 @@ def _match_initial_onset_anchor_adapter(
     return None
 
 
+def _match_logical_onset_timing_adapter(
+    phonemes: List[str],
+    timing_rule: Optional[Dict[str, Any]],
+    adapters: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Match a timing-only onset adapter to one materialized logical span.
+
+    A logical pronunciation may begin after a scored syllable's lead phones
+    (for example ``pe-rro``).  It must keep those original syllable anchors,
+    but its virtual onset still needs an adaptive duration clamp.  Matching by
+    logical adapter id prevents an ordinary identical phone sequence from
+    receiving the special timing policy.
+    """
+    if not isinstance(timing_rule, dict):
+        return None
+    logical_adapter_id = timing_rule.get("adapter_id")
+    if not isinstance(logical_adapter_id, str) or not logical_adapter_id:
+        return None
+    for adapter in adapters:
+        if adapter.get("logical_adapter_id") != logical_adapter_id:
+            continue
+        prefix = adapter.get("prefix_phonemes")
+        if isinstance(prefix, list) and phonemes[: len(prefix)] == prefix:
+            return adapter
+    return None
+
+
 def _build_onset_anchor_duration_model_groups(
     *,
     phonemes: List[str],
@@ -868,6 +895,42 @@ def align(
                 }
             )
             chunks[0]["timing_rule"] = timing_rule
+
+        # A materialized logical pronunciation can have a virtual onset inside
+        # a word rather than at its first phoneme (for example ``pe-rro``).
+        # Apply its adaptive onset budget to that exact logical span without
+        # changing the word's existing syllable or duration-model grouping.
+        for chunk in chunks:
+            timing_rule = chunk.get("timing_rule")
+            logical_timing_adapter = _match_logical_onset_timing_adapter(
+                chunk["phonemes"],
+                timing_rule,
+                onset_anchor_adapters,
+            )
+            logical_onset_timing = (
+                logical_timing_adapter.get("onset_timing")
+                if logical_timing_adapter
+                else None
+            )
+            if isinstance(logical_onset_timing, dict):
+                updated_rule = dict(timing_rule or {})
+                updated_rule.update(
+                    {
+                        "adaptive_onset_prefix_count": len(
+                            logical_timing_adapter["prefix_phonemes"]
+                        ),
+                        "adaptive_onset_frame_ratio": float(
+                            logical_onset_timing["frame_ratio"]
+                        ),
+                        "adaptive_onset_min_frames": int(
+                            logical_onset_timing["min_frames"]
+                        ),
+                        "adaptive_onset_max_frames": int(
+                            logical_onset_timing["max_frames"]
+                        ),
+                    }
+                )
+                chunk["timing_rule"] = updated_rule
 
         # OpenUtau parity: carry pre-vowel prefix to previous anchor group when possible.
         if lead_ph:

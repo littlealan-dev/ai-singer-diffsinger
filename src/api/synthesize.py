@@ -729,15 +729,26 @@ def _apply_pronunciation_timing_rule(
         or main_onset_frames < 1
     ):
         return default_durations
-    # The selected Qixuan Spanish-roll profile has four virtual phones, then
-    # the real onset and exactly one following vowel. Do not force a rule on a
-    # group whose physical shape no longer matches that contract.
-    if len(default_durations) != len(prefix_frames) + 2:
+    # The virtual onset is followed by the real onset and at least one vowel.
+    # A coda (for example the final ``l`` in ``barril``) remains in the same
+    # anchor and must share the remaining time rather than disabling the
+    # rolled-R profile altogether.
+    suffix_start = len(prefix_frames) + 1
+    if len(default_durations) < suffix_start + 1:
         return default_durations
-    remaining_vowel_frames = anchor_total - sum(prefix_frames) - main_onset_frames
-    if remaining_vowel_frames < 1:
+    remaining_suffix_frames = anchor_total - sum(prefix_frames) - main_onset_frames
+    suffix_durations = default_durations[suffix_start:]
+    if remaining_suffix_frames < len(suffix_durations):
         return default_durations
-    return [*prefix_frames, main_onset_frames, remaining_vowel_frames]
+    return [
+        *prefix_frames,
+        main_onset_frames,
+        *_rescale_group_durations(
+            suffix_durations,
+            remaining_suffix_frames,
+            vowel_flags=(vowel_flags or [])[suffix_start:] or None,
+        ),
+    ]
 
 
 def _build_slur_velocity_envelope(

@@ -38,6 +38,7 @@ _ONSET_ANCHOR_ADAPTER_KEYS = {
     "prefix_phonemes",
     "preserve_following_syllable_onsets",
     "onset_timing",
+    "logical_adapter_id",
 }
 
 
@@ -232,6 +233,15 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                     if not isinstance(adapter.get("id"), str) or not adapter["id"].strip():
                         raise ValueError(
                             f"Voicebank manifest entry {voicebank_id} onset anchor adapter requires id"
+                        )
+                    logical_adapter_id = adapter.get("logical_adapter_id")
+                    if logical_adapter_id is not None and (
+                        not isinstance(logical_adapter_id, str)
+                        or not logical_adapter_id.strip()
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter."
+                            "logical_adapter_id must be a non-empty string when present"
                         )
                     prefix = adapter.get("prefix_phonemes")
                     if (

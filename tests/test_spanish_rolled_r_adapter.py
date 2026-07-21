@@ -19,7 +19,7 @@ _ROLLED_R_ADAPTER = {
     "logical_symbol": "@qixuan_es_rr_roll",
     "collapse_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
     "expand_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
-    "prefix_frames": [3, 3, 3, 3],
+    "prefix_frames": [2, 2, 3, 3],
     "main_onset_frames": 2,
 }
 
@@ -92,7 +92,7 @@ def test_qixuan_spanish_roll_expands_after_logical_alignment() -> None:
         {
             "start": 0,
             "end": 5,
-            "prefix_frames": [3, 3, 3, 3],
+            "prefix_frames": [2, 2, 3, 3],
             "main_onset_frames": 2,
             "adapter_id": "qixuan_es_jp_rolled_r",
         },
@@ -112,14 +112,14 @@ def test_qixuan_spanish_roll_reserves_139ms_and_keeps_the_real_vowel() -> None:
         vowel_flags=[False, True, False, True, False, True, False, True],
         phoneme_timing_rules=[
             {
-                "prefix_frames": [3, 3, 3, 3],
+                "prefix_frames": [2, 2, 3, 3],
                 "main_onset_frames": 2,
             },
             None,
         ],
     )
 
-    assert durations[:6] == [3, 3, 3, 3, 2, 42]
+    assert durations[:6] == [2, 2, 3, 3, 2, 44]
     assert sum(durations[:6]) == 56
     assert sum(durations[6:]) == 56
 
@@ -159,6 +159,59 @@ def test_qixuan_gw_onset_scales_with_note_budget_within_clamp() -> None:
         (slow, 66),
         (very_slow, 120),
     ))
+
+
+def test_pm31_spanish_roll_uses_a_compact_adaptive_virtual_onset() -> None:
+    """PM-31 keeps its five-phone approximation inside a brief rolled-R onset."""
+    rule = {
+        "adaptive_onset_prefix_count": 5,
+        "adaptive_onset_frame_ratio": 0.02,
+        "adaptive_onset_min_frames": 1,
+        "adaptive_onset_max_frames": 2,
+    }
+
+    def apply(anchor_frames: int) -> list[int]:
+        return _apply_anchor_constrained_timing(
+            durations=[5.0, 31.0, 5.0, 31.0, 5.0, 40.0],
+            word_boundaries=[6],
+            group_anchor_frames=[
+                {"start_frame": 0, "end_frame": anchor_frames, "note_index": 0}
+            ],
+            vowel_flags=[False, True, False, True, False, True],
+            phoneme_timing_rules=[rule],
+        )
+
+    standard_tempo = apply(56)
+    slow_tempo = apply(120)
+
+    # At 120 BPM / quarter note (56 frames), the five virtual phones take only
+    # 58 ms and leave the real Spanish vowel as the note's sustained body.
+    assert standard_tempo == [1, 1, 1, 1, 1, 51]
+    # The clamp scales only on very long anchors and still conserves the note.
+    assert slow_tempo == [2, 2, 2, 2, 2, 110]
+    assert sum(standard_tempo) == 56
+    assert sum(slow_tempo) == 120
+
+
+def test_qixuan_spanish_roll_uses_a_139ms_profile_even_with_a_coda() -> None:
+    """Qixuan's audible 12-frame roll works for both open and coda-final syllables."""
+    rule = {
+        "prefix_frames": [2, 2, 3, 3],
+        "main_onset_frames": 2,
+    }
+    durations = _apply_anchor_constrained_timing(
+        durations=[5.0, 31.0, 5.0, 31.0, 5.0, 30.0, 10.0],
+        word_boundaries=[7],
+        group_anchor_frames=[{"start_frame": 0, "end_frame": 56, "note_index": 0}],
+        vowel_flags=[False, True, False, True, False, True, False],
+        phoneme_timing_rules=[rule],
+    )
+
+    # The virtual roll is 12 frames (about 139 ms) at normal tempo; the
+    # remaining budget stays with the real vowel and its final consonant.
+    assert durations[:5] == [2, 2, 3, 3, 2]
+    assert all(value >= 1 for value in durations[5:])
+    assert sum(durations) == 56
 
 
 def test_qixuan_spanish_syllable_anchors_match_duration_model_context(
