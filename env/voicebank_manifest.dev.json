@@ -86,9 +86,9 @@
             "id": "pm31_indigo_es_rolled_r",
             "logical_symbol": "@pm31_indigo_es_rr_roll",
             "collapse_phonemes": ["r", "a", "r", "a", "r"],
-            "expand_phonemes": ["r", "a", "r", "a", "r"],
-            "prefix_frames": [3, 3, 3, 3],
-            "main_onset_frames": 2
+            "expand_phonemes": ["r", "r"],
+            "prefix_frames": [1],
+            "main_onset_frames": 1
           }
         ]
       },
@@ -100,12 +100,21 @@
             "preserve_following_syllable_onsets": true,
             "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}
           },
+          {"id": "pm31_indigo_es_kw_onset", "prefix_phonemes": ["k", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_bw_onset", "prefix_phonemes": ["b", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_pw_onset", "prefix_phonemes": ["p", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_by_onset", "prefix_phonemes": ["b", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_ty_onset", "prefix_phonemes": ["t", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_my_onset", "prefix_phonemes": ["m", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_indigo_es_ky_onset", "prefix_phonemes": ["k", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
           {
             "id": "pm31_indigo_es_rolled_r_onset",
             "logical_adapter_id": "pm31_indigo_es_rolled_r",
-            "prefix_phonemes": ["r", "a", "r", "a", "r"],
-            "preserve_following_syllable_onsets": false,
-            "onset_timing": {"frame_ratio": 0.02, "min_frames": 1, "max_frames": 2}
+            "prefix_phonemes": ["r", "r"],
+            "preserve_following_syllable_onsets": true,
+            "max_forced_following_onsets": 1,
+            "following_syllable_vowel_frame_ratio": 0.5,
+            "onset_timing": {"frame_ratio": 0.06, "min_frames": 1, "max_frames": 3}
           }
         ]
       },
@@ -155,9 +164,9 @@
             "id": "pm31_scarlet_es_rolled_r",
             "logical_symbol": "@pm31_scarlet_es_rr_roll",
             "collapse_phonemes": ["r", "a", "r", "a", "r"],
-            "expand_phonemes": ["r", "a", "r", "a", "r"],
-            "prefix_frames": [3, 3, 3, 3],
-            "main_onset_frames": 2
+            "expand_phonemes": ["r", "r"],
+            "prefix_frames": [1],
+            "main_onset_frames": 1
           }
         ]
       },
@@ -169,12 +178,21 @@
             "preserve_following_syllable_onsets": true,
             "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}
           },
+          {"id": "pm31_scarlet_es_kw_onset", "prefix_phonemes": ["k", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_bw_onset", "prefix_phonemes": ["b", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_pw_onset", "prefix_phonemes": ["p", "w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_by_onset", "prefix_phonemes": ["b", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_ty_onset", "prefix_phonemes": ["t", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_my_onset", "prefix_phonemes": ["m", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "pm31_scarlet_es_ky_onset", "prefix_phonemes": ["k", "y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
           {
             "id": "pm31_scarlet_es_rolled_r_onset",
             "logical_adapter_id": "pm31_scarlet_es_rolled_r",
-            "prefix_phonemes": ["r", "a", "r", "a", "r"],
-            "preserve_following_syllable_onsets": false,
-            "onset_timing": {"frame_ratio": 0.02, "min_frames": 1, "max_frames": 2}
+            "prefix_phonemes": ["r", "r"],
+            "preserve_following_syllable_onsets": true,
+            "max_forced_following_onsets": 1,
+            "following_syllable_vowel_frame_ratio": 0.5,
+            "onset_timing": {"frame_ratio": 0.06, "min_frames": 1, "max_frames": 3}
           }
         ]
       },
@@ -209,9 +227,9 @@
             "id": "qixuan_es_jp_rolled_r",
             "logical_symbol": "@qixuan_es_rr_roll",
             "collapse_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
-            "expand_phonemes": ["ja/r", "ja/a", "ja/r", "ja/a", "ja/r"],
-            "prefix_frames": [2, 2, 3, 3],
-            "main_onset_frames": 2
+            "expand_phonemes": ["ja/r", "ja/a", "ja/r"],
+            "prefix_frames": [1, 1],
+            "main_onset_frames": 1
           }
         ]
       },
@@ -227,6 +245,14 @@
               "max_frames": 5
             }
           }
+          ,{"id": "qixuan_es_kw_onset", "prefix_phonemes": ["en/k", "ja/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_bw_onset", "prefix_phonemes": ["en/b", "ja/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_pw_onset", "prefix_phonemes": ["ja/p", "ja/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_by_onset", "prefix_phonemes": ["en/b", "ja/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_ty_onset", "prefix_phonemes": ["ja/t", "ja/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_my_onset", "prefix_phonemes": ["ja/m", "ja/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_ky_onset", "prefix_phonemes": ["en/k", "ja/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+          ,{"id": "qixuan_es_rolled_r_onset", "logical_adapter_id": "qixuan_es_jp_rolled_r", "prefix_phonemes": ["ja/r", "ja/a", "ja/r"], "preserve_following_syllable_onsets": true, "max_forced_following_onsets": 1, "following_syllable_vowel_frame_ratio": 0.5, "onset_timing": {"frame_ratio": 0.10, "min_frames": 1, "max_frames": 4}}
         ]
       },
       "sample_rate": 44100,
@@ -261,6 +287,17 @@
       ],
       "default_voice_color": "01 Rainbow",
       "pitch_expression": 1.0,
+      "onset_anchor_adapters": {
+        "es": [
+          {"id": "umidaji_es_kw_onset", "prefix_phonemes": ["es/k", "es/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_bw_onset", "prefix_phonemes": ["es/b", "es/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_pw_onset", "prefix_phonemes": ["es/p", "es/w"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_by_onset", "prefix_phonemes": ["es/b", "es/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_ty_onset", "prefix_phonemes": ["es/t", "es/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_my_onset", "prefix_phonemes": ["es/m", "es/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}},
+          {"id": "umidaji_es_ky_onset", "prefix_phonemes": ["es/k", "es/y"], "preserve_following_syllable_onsets": true, "onset_timing": {"frame_ratio": 0.06, "min_frames": 2, "max_frames": 5}}
+        ]
+      },
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": true,

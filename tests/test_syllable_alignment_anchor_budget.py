@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.api.syllable_alignment import (
+    _append_carried_prefix_to_duration_model_override,
+    _resolve_duration_model_groups,
     _build_group_anchor_frames,
     _compress_group_to_anchor_budget,
     _match_initial_onset_anchor_adapter,
@@ -26,6 +28,75 @@ class _StubPhonemizer:
 
 
 class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
+    def test_stale_duration_override_falls_back_to_finalized_rendered_groups(self) -> None:
+        """A carried onset must not leave duration groups in a stale phone order."""
+        phrase_groups = [
+            {
+                "position": 0,
+                "note_idx": 0,
+                "phonemes": ["r", "a", "r", "o"],
+                "duration_model_override": [
+                    {"position": 0, "note_idx": 0, "phonemes": ["r", "a", "r", "o"]},
+                    {"position": 10, "note_idx": 1, "phonemes": ["s", "a", "k", "g"]},
+                ],
+            },
+            {
+                "position": 10,
+                "note_idx": 1,
+                "phonemes": ["s", "a", "k"],
+                "duration_model_override_skip": True,
+            },
+            {
+                "position": 20,
+                "note_idx": 2,
+                "phonemes": ["y", "e", "g"],
+                "duration_model_override_skip": True,
+            },
+        ]
+        rendered = ["r", "a", "r", "o", "s", "a", "k", "y", "e", "g"]
+
+        groups = _resolve_duration_model_groups(phrase_groups, rendered)
+
+        self.assertEqual([phone for group in groups for phone in group["phonemes"]], rendered)
+
+    def test_prefix_carry_updates_the_matching_duration_model_override_group(self) -> None:
+        """A following onset carried into an overridden syllable remains in both streams."""
+        phrase_groups = [
+            {
+                "note_idx": 47,
+                "duration_model_override": [
+                    {"note_idx": 47, "phonemes": ["r", "o"], "ids": [1, 2], "lang_ids": [0, 0]},
+                    {"note_idx": 48, "phonemes": ["g"], "ids": [3], "lang_ids": [0]},
+                    {"note_idx": 49, "phonemes": ["a", "m", "o", "s"], "ids": [4, 5, 2, 6], "lang_ids": [0, 0, 0, 0]},
+                ],
+            },
+            {
+                "note_idx": 49,
+                "duration_model_override_skip": True,
+                "phonemes": ["a", "m", "o", "s"],
+                "ids": [4, 5, 2, 6],
+                "lang_ids": [0, 0, 0, 0],
+            },
+        ]
+
+        updated = _append_carried_prefix_to_duration_model_override(
+            phrase_groups,
+            note_idx=49,
+            phonemes=["k"],
+            ids=[7],
+            lang_ids=[0],
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(
+            phrase_groups[0]["duration_model_override"][-1]["phonemes"],
+            ["a", "m", "o", "s", "k"],
+        )
+        self.assertEqual(
+            phrase_groups[0]["duration_model_override"][-1]["ids"],
+            [4, 5, 2, 6, 7],
+        )
+
     def test_compress_prefers_adjacent_and_nearest_vowel(self) -> None:
         phonemizer = _StubPhonemizer({"ao"})
         phonemes = ["g", "l", "ao", "r"]

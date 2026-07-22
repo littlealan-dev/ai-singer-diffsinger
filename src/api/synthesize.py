@@ -658,17 +658,72 @@ def _apply_anchor_constrained_timing(
             note_index=parsed_note_index,
         )
         rule = phoneme_timing_rules[idx] if phoneme_timing_rules is not None else None
+        timed_durations = _apply_pronunciation_timing_rule(
+            default_durations,
+            anchor_total=anchor_total,
+            rule=rule,
+            vowel_flags=group_vowel_flags,
+        )
         out.extend(
-            _apply_pronunciation_timing_rule(
-                default_durations,
-                anchor_total=anchor_total,
-                rule=rule,
+            _enforce_minimum_vowel_frames(
+                timed_durations,
                 vowel_flags=group_vowel_flags,
+                minimum_frames=(rule or {}).get("min_vowel_frames"),
+                minimum_frame_ratio=(rule or {}).get("min_vowel_frame_ratio"),
+                anchor_total=anchor_total,
             )
         )
 
     if offset != len(durations):
         raise ValueError("word_boundaries does not consume all durations")
+    return out
+
+
+def _enforce_minimum_vowel_frames(
+    durations: List[int],
+    *,
+    vowel_flags: Optional[List[bool]],
+    minimum_frames: Any,
+    minimum_frame_ratio: Any,
+    anchor_total: int,
+) -> List[int]:
+    """Reserve a manifest-requested absolute or proportional vowel minimum."""
+    requested_minimum = (
+        minimum_frames
+        if isinstance(minimum_frames, int) and not isinstance(minimum_frames, bool)
+        else 0
+    )
+    if (
+        isinstance(minimum_frame_ratio, (int, float))
+        and not isinstance(minimum_frame_ratio, bool)
+        and 0.0 < float(minimum_frame_ratio) < 1.0
+    ):
+        requested_minimum = max(
+            requested_minimum,
+            int(np.ceil(anchor_total * float(minimum_frame_ratio))),
+        )
+    if requested_minimum < 1 or not vowel_flags or len(vowel_flags) != len(durations):
+        return durations
+    out = list(durations)
+    for vowel_index, is_vowel in enumerate(vowel_flags):
+        if not is_vowel or out[vowel_index] >= requested_minimum:
+            continue
+        required = requested_minimum - out[vowel_index]
+        donors = sorted(
+            (
+                index
+                for index in range(len(out))
+                if index != vowel_index and not vowel_flags[index] and out[index] > 1
+            ),
+            key=lambda index: (-out[index], index),
+        )
+        for donor_index in donors:
+            transferred = min(required, out[donor_index] - 1)
+            out[donor_index] -= transferred
+            out[vowel_index] += transferred
+            required -= transferred
+            if required == 0:
+                break
     return out
 
 

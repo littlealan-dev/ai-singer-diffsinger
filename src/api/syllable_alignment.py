@@ -11,7 +11,11 @@ from src.api.voicebank_cache import (
     resolve_manifest_onset_anchor_adapters,
     resolve_manifest_pronunciation_adapters,
 )
+from src.mcp.logging_utils import get_logger
 from src.phonemizer.phonemizer import Phonemizer
+
+
+logger = get_logger(__name__)
 
 
 def _resolve_group_lyric(group: Dict[str, Any]) -> str:
@@ -118,6 +122,41 @@ def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, An
     return out
 
 
+def _resolve_duration_model_groups(
+    phrase_groups: List[Dict[str, Any]],
+    phonemes_flat: List[str],
+) -> List[Dict[str, Any]]:
+    """Return duration-model groups without ever reordering rendered phones.
+
+    An onset adapter builds a preferred duration-model grouping before a later
+    word can carry an onset into the finalized rendered stream.  When that
+    carry changes the phone order, the finalized phrase groups are the only
+    safe duration-model grouping.
+    """
+    duration_model_groups: List[Dict[str, Any]] = []
+    for phrase_group in phrase_groups:
+        override = phrase_group.get("duration_model_override")
+        if override:
+            duration_model_groups.extend(override)
+        elif not phrase_group.get("duration_model_override_skip"):
+            duration_model_groups.append(phrase_group)
+    duration_model_groups.sort(
+        key=lambda value: (int(value.get("note_idx", 0)), int(value["position"]))
+    )
+    duration_model_phones = [
+        phone
+        for model_group in duration_model_groups
+        for phone in model_group["phonemes"]
+    ]
+    if duration_model_phones == phonemes_flat:
+        return duration_model_groups
+
+    logger.warning(
+        "duration_model_override_stale; using finalized rendered groups"
+    )
+    return list(phrase_groups)
+
+
 def _syllable_start_indices(
     phonemes: List[str],
     phonemizer: Phonemizer,
@@ -129,12 +168,24 @@ def _syllable_start_indices(
         return []
     is_vowel = [phonemizer.is_vowel(p) for p in phonemes]
     is_glide = [phonemizer.is_glide(p) for p in phonemes]
+    logical_vowel_indices = {
+        index
+        for span in logical_spans or []
+        for index in range(
+            int(span.get("start", -1)) + 1,
+            min(len(phonemes), int(span.get("end", -1)) + 1),
+        )
+        if index >= 0
+    }
     remaining_forced_onsets = max(0, int(forced_following_onsets))
     starts = [False] * len(phonemes)
     if not any(is_vowel):
         starts[0] = True
     for i in range(len(phonemes)):
-        if is_vowel[i]:
+        # A logical rolled-R expansion contains virtual vowels plus its real
+        # vowel.  It owns one scored syllable, so those placeholder vowels
+        # must not consume anchors reserved for the following real syllables.
+        if is_vowel[i] and i not in logical_vowel_indices:
             if i >= 2 and is_glide[i - 1] and not is_vowel[i - 2]:
                 starts[i - 1] = True
             elif (
@@ -308,6 +359,40 @@ def _match_logical_onset_timing_adapter(
         if isinstance(prefix, list) and phonemes[: len(prefix)] == prefix:
             return adapter
     return None
+
+
+def _append_carried_prefix_to_duration_model_override(
+    phrase_groups: List[Dict[str, Any]],
+    *,
+    note_idx: int,
+    phonemes: List[str],
+    ids: List[int],
+    lang_ids: List[int],
+) -> bool:
+    """Keep a duration-model override in sync with a later prefix carry.
+
+    A vowel-led word can carry its consonant prefix onto the preceding scored
+    group.  If that group belongs to an onset-adapter override, the override
+    was assembled before the carry and must receive the same phones to retain
+    the rendered stream exactly.
+    """
+    for phrase_group in reversed(phrase_groups):
+        override = phrase_group.get("duration_model_override")
+        if not override:
+            continue
+        targets = [
+            group
+            for group in override
+            if int(group.get("note_idx", -1)) == int(note_idx)
+        ]
+        if not targets:
+            return False
+        target = targets[-1]
+        target["phonemes"].extend(phonemes)
+        target["ids"].extend(ids)
+        target["lang_ids"].extend(lang_ids)
+        return True
+    return False
 
 
 def _build_onset_anchor_duration_model_groups(
@@ -819,12 +904,17 @@ def align(
             if int(span["start"]) >= first_start
         ]
 
-        forced_following_onsets = (
-            max(0, len(carrier_indices) - 1)
-            if onset_adapter is not None
-            and onset_adapter.get("preserve_following_syllable_onsets", False)
-            else 0
-        )
+        forced_following_onsets = 0
+        if onset_adapter is not None and onset_adapter.get(
+            "preserve_following_syllable_onsets", False
+        ):
+            forced_following_onsets = max(0, len(carrier_indices) - 1)
+            configured_limit = onset_adapter.get("max_forced_following_onsets")
+            if configured_limit is not None:
+                forced_following_onsets = min(
+                    forced_following_onsets,
+                    int(configured_limit),
+                )
         chunks = _split_phonemes_into_syllable_chunks(
             phonemes=core_ph,
             ids=core_ids,
@@ -839,7 +929,12 @@ def align(
         # The manifest rule is an exact phone-sequence match. It routes just
         # that leading prefix to the first carrier; ordinary C+glide words
         # retain the legacy prefix behavior and duration-model grouping.
+        attached_lead_count = 0
         if onset_adapter is not None and lead_ph and chunks:
+            # ``core_spans`` remains indexed against ``core_ph``.  Keep track
+            # of this presentation-only prepend so span matching below does
+            # not shift a following logical pronunciation onto this carrier.
+            attached_lead_count = len(lead_ph)
             chunks[0]["phonemes"] = lead_ph + chunks[0]["phonemes"]
             chunks[0]["ids"] = lead_ids + chunks[0]["ids"]
             chunks[0]["lang_ids"] = lead_lang + chunks[0]["lang_ids"]
@@ -868,7 +963,12 @@ def align(
                     "Onset anchor adapter must preserve the duration-model phoneme stream"
                 )
 
-        chunk_offset = 0
+        # ``core_spans`` is indexed before a declared onset adapter prepends
+        # its lead phones to the first rendered chunk.  Start the rendered
+        # cursor before zero to retain that coordinate system.  Otherwise a
+        # logical /rr/ immediately after e.g. /t j e/ is assigned to ``tie``
+        # instead of its intended ``rra`` carrier.
+        chunk_offset = -attached_lead_count
         for chunk in chunks:
             chunk_end = chunk_offset + len(chunk["phonemes"])
             rule = next(
@@ -932,13 +1032,39 @@ def align(
                 )
                 chunk["timing_rule"] = updated_rule
 
+        # A compact rolled-R prefix can leave a later, very short syllable
+        # (for example ``mos`` in ``ro-ga-mos``) sharing its note with two
+        # consonants. Reserve enough of that note for the vowel so the
+        # duration model cannot turn it into a consonant-only transition.
+        following_vowel_ratio = (
+            onset_adapter.get("following_syllable_vowel_frame_ratio")
+            if onset_adapter
+            else None
+        )
+        if isinstance(following_vowel_ratio, (int, float)) and not isinstance(
+            following_vowel_ratio, bool
+        ):
+            for chunk in chunks[1:]:
+                timing_rule = dict(chunk.get("timing_rule") or {})
+                timing_rule["min_vowel_frame_ratio"] = float(following_vowel_ratio)
+                chunk["timing_rule"] = timing_rule
+
         # OpenUtau parity: carry pre-vowel prefix to previous anchor group when possible.
         if lead_ph:
             if phrase_groups:
-                prev_note_idx = int(phrase_groups[-1].get("note_idx", -1))
-                phrase_groups[-1].setdefault("phonemes", []).extend(lead_ph)
-                phrase_groups[-1].setdefault("ids", []).extend(lead_ids)
-                phrase_groups[-1].setdefault("lang_ids", []).extend(lead_lang)
+                previous_group = phrase_groups[-1]
+                prev_note_idx = int(previous_group.get("note_idx", -1))
+                previous_group.setdefault("phonemes", []).extend(lead_ph)
+                previous_group.setdefault("ids", []).extend(lead_ids)
+                previous_group.setdefault("lang_ids", []).extend(lead_lang)
+                if previous_group.get("duration_model_override_skip"):
+                    _append_carried_prefix_to_duration_model_override(
+                        phrase_groups,
+                        note_idx=prev_note_idx,
+                        phonemes=lead_ph,
+                        ids=lead_ids,
+                        lang_ids=lead_lang,
+                    )
                 if prev_note_idx >= 0:
                     note_phonemes.setdefault(prev_note_idx, []).extend(lead_ph)
             else:
@@ -1071,25 +1197,10 @@ def align(
     duration_model_durations: List[int] = []
     duration_model_pitches: List[float] = []
     if has_duration_model_override:
-        duration_model_groups: List[Dict[str, Any]] = []
-        for phrase_group in phrase_groups:
-            override = phrase_group.get("duration_model_override")
-            if override:
-                duration_model_groups.extend(override)
-            elif not phrase_group.get("duration_model_override_skip"):
-                duration_model_groups.append(phrase_group)
-        duration_model_groups.sort(
-            key=lambda value: (int(value.get("note_idx", 0)), int(value["position"]))
+        duration_model_groups = _resolve_duration_model_groups(
+            phrase_groups,
+            phonemes_flat,
         )
-        duration_model_phones = [
-            phone
-            for model_group in duration_model_groups
-            for phone in model_group["phonemes"]
-        ]
-        if duration_model_phones != phonemes_flat:
-            raise ValueError(
-                "Duration-model groups must preserve rendered phoneme ordering"
-            )
         _, duration_model_durations, _ = _build_group_anchor_frames(
             phrase_groups=duration_model_groups,
             note_durations=note_durations,

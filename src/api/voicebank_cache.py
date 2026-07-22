@@ -37,6 +37,8 @@ _ONSET_ANCHOR_ADAPTER_KEYS = {
     "id",
     "prefix_phonemes",
     "preserve_following_syllable_onsets",
+    "max_forced_following_onsets",
+    "following_syllable_vowel_frame_ratio",
     "onset_timing",
     "logical_adapter_id",
 }
@@ -187,10 +189,9 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                         raise ValueError(
                             f"Voicebank manifest entry {voicebank_id} pronunciation adapter.expand_phonemes must contain strings"
                         )
-                    if adapter["collapse_phonemes"] != adapter["expand_phonemes"]:
-                        raise ValueError(
-                            f"Voicebank manifest entry {voicebank_id} pronunciation adapter collapse_phonemes must equal expand_phonemes"
-                        )
+                    # Collapse and runtime expansion may intentionally differ:
+                    # a logical marker can replace a known source-inventory
+                    # workaround with a shorter voicebank-native sequence.
                     prefix_frames = adapter["prefix_frames"]
                     if (
                         len(prefix_frames) != len(adapter["expand_phonemes"]) - 1
@@ -260,6 +261,29 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                         raise ValueError(
                             f"Voicebank manifest entry {voicebank_id} onset anchor adapter."
                             "preserve_following_syllable_onsets must be a boolean"
+                        )
+                    max_forced_onsets = adapter.get("max_forced_following_onsets")
+                    if max_forced_onsets is not None and (
+                        isinstance(max_forced_onsets, bool)
+                        or not isinstance(max_forced_onsets, int)
+                        or max_forced_onsets < 0
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter."
+                            "max_forced_following_onsets must be a non-negative integer when present"
+                        )
+                    following_vowel_ratio = adapter.get(
+                        "following_syllable_vowel_frame_ratio"
+                    )
+                    if following_vowel_ratio is not None and (
+                        isinstance(following_vowel_ratio, bool)
+                        or not isinstance(following_vowel_ratio, (int, float))
+                        or not math.isfinite(float(following_vowel_ratio))
+                        or not 0.0 < float(following_vowel_ratio) < 1.0
+                    ):
+                        raise ValueError(
+                            f"Voicebank manifest entry {voicebank_id} onset anchor adapter."
+                            "following_syllable_vowel_frame_ratio must be between zero and one when present"
                         )
                     onset_timing = adapter.get("onset_timing")
                     if onset_timing is not None:
