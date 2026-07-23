@@ -64,6 +64,14 @@ SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS = (
     "the current pronunciation engine. You may say the user can ask to add a "
     "generated solfege verse as a next step."
 )
+INSUFFICIENT_CREDITS_MESSAGE_ONLY_INSTRUCTIONS = (
+    "This is a terminal insufficient-credit result before synthesis begins. "
+    "Render only a concise user-facing message based on the error and "
+    "allowed_next_actions in the payload. No tools will be executed from this "
+    "response, so return tool_calls as []. Offer exactly the listed actions; "
+    "do not suggest excerpts, ranges, retries, score changes, or any other "
+    "recovery action."
+)
 REVIEW_PENDING_KEY = "_preprocess_review_pending"
 EXPLICIT_VERSE_METADATA_KEY = "explicit_verse_number"
 MISSING_ORIGINAL_SCORE_MESSAGE = (
@@ -1748,6 +1756,18 @@ class Orchestrator:
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             if tool_result.followup_message_only:
+                message_only_instructions = (
+                    INSUFFICIENT_CREDITS_MESSAGE_ONLY_INSTRUCTIONS
+                    if tool_result.action_required_payload
+                    and tool_result.action_required_payload.get("action")
+                    == "insufficient_credits"
+                    else (
+                        "This is a message-only follow-up for a tool execution "
+                        "blocker. No tools will be executed from this response. "
+                        "Explain the blocker concisely and ask the user to choose "
+                        "or confirm the single next action."
+                    )
+                )
                 followup_response, followup_error = (
                     await self._decide_message_only_followup_with_llm(
                         latest_snapshot,
@@ -1755,12 +1775,7 @@ class Orchestrator:
                         working_score,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
-                        instructions=(
-                            "This is a message-only follow-up for a tool execution "
-                            "blocker. No tools will be executed from this response. "
-                            "Explain the blocker concisely and ask the user to choose "
-                            "or confirm the single next action."
-                        ),
+                        instructions=message_only_instructions,
                     )
                 )
             else:
@@ -5447,28 +5462,34 @@ class Orchestrator:
                     base_delay=self._settings.credit_retry_base_delay_seconds,
                 )
                 if reserve_result.status in {"insufficient_balance", "overdrafted"}:
-                    followup_prompt = json.dumps(
-                        {
-                            "error": {
-                                "type": "insufficient_credits",
-                                "message": backend_message(
-                                    "account.insufficient_credits",
-                                    estimated_credits=est_credits,
-                                    available_credits=user_credits.available_balance,
-                                ),
-                                "estimated_credits": est_credits,
-                                "available_credits": user_credits.available_balance,
-                            }
-                        },
-                        sort_keys=True,
+                    credit_message = backend_message(
+                        "account.insufficient_credits",
+                        estimated_credits=est_credits,
+                        available_credits=user_credits.available_balance,
                     )
+                    action_required = {
+                        "status": "action_required",
+                        "action": "insufficient_credits",
+                        "error": {
+                            "type": "insufficient_credits",
+                            "message": credit_message,
+                        },
+                        "estimated_credits": est_credits,
+                        "available_credits": user_credits.available_balance,
+                        "allowed_next_actions": [
+                            "add_more_credits",
+                            "upload_another_shorter_song",
+                        ],
+                    }
                     return ToolExecutionResult(
-                        score=current_score, 
+                        score=current_score,
                         audio_response={
                             "type": "chat_text",
                             "message": "",
                         },
-                        followup_prompt=followup_prompt,
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        followup_message_only=True,
+                        action_required_payload=action_required,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 if reserve_result.status == "expired":

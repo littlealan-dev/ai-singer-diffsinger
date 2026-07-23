@@ -5596,6 +5596,80 @@ def test_chat_releases_reserved_credits_when_synthesis_job_start_fails(client, m
     assert len(release_calls) == 1
 
 
+def test_chat_insufficient_credits_exposes_only_supported_recovery_actions(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+
+    monkeypatch.setattr(
+        "src.backend.credits.reserve_credits",
+        lambda *_, **__: ReserveCreditsResult(status="insufficient_balance", estimated_credits=2),
+    )
+
+    class InsufficientCreditsClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                payload = json.loads(last.split("Message-only payload:\n", 1)[1])
+                assert payload["allowed_next_actions"] == [
+                    "add_more_credits",
+                    "upload_another_shorter_song",
+                ]
+                assert payload["error"]["type"] == "insufficient_credits"
+                assert "message" not in payload
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": (
+                            "Please add more credits or upload another shorter song."
+                        ),
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    import src.backend.orchestrator as orchestrator_module
+
+    original_precheck = orchestrator_module.synthesize_preflight_action_required
+    orchestrator_module.synthesize_preflight_action_required = lambda score, part_index: None
+    app.state.llm_client = InsufficientCreditsClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+    try:
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "please sing this song"},
+        )
+    finally:
+        orchestrator_module.synthesize_preflight_action_required = original_precheck
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "chat_text"
+    assert body["message"] == "Please add more credits or upload another shorter song."
+    assert body["action_required"] == {
+        "status": "action_required",
+        "action": "insufficient_credits",
+        "error": {
+            "type": "insufficient_credits",
+            "message": (
+                "Insufficient credits. This render requires ~0 "
+                "credits, but you only have 9999 available."
+            ),
+        },
+        "estimated_credits": 0,
+        "available_credits": 9999,
+        "allowed_next_actions": ["add_more_credits", "upload_another_shorter_song"],
+    }
+
+
 def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkeypatch):
     test_client, app = client
     session_id = _create_session(test_client)

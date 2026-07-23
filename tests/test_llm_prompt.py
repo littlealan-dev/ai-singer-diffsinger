@@ -128,6 +128,24 @@ def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> 
     )
 
 
+def test_build_system_prompt_declares_full_score_credit_capability_contract() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "Capability contract:" in prompt
+    assert "Excerpt, measure-range, and other partial-song rendering are not available" in prompt
+    assert "offer exactly these two next actions: add more credits, or upload another shorter song" in prompt
+
+
 def test_build_system_prompt_requires_explicit_supported_synthesis_language() -> None:
     prompt = build_system_prompt(
         tools=[],
