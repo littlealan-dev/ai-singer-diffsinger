@@ -8,6 +8,7 @@ import json
 import hashlib
 import tempfile
 import threading
+import unicodedata
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -57,6 +58,12 @@ _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
 _TRANSFORM_ARTIFACT_INDEX: Dict[str, Dict[str, Any]] = {}
 _DERIVED_STEM_SUFFIX_RE = re.compile(r"\.derived_[0-9a-f]{10}$")
+_SOLFEGE_TOKENS = frozenset(
+    {
+        "do", "di", "ra", "re", "ri", "me", "mi", "fa", "fi", "se",
+        "so", "sol", "si", "le", "la", "li", "te", "ti",
+    }
+)
 
 
 def _lint_finding(
@@ -6660,6 +6667,7 @@ def synthesize_preflight_action_required(
     score: Dict[str, Any],
     *,
     part_index: int,
+    require_solfege_lyrics: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Return action_required when a complex raw part is synthesized without preprocessing."""
     parts = score.get("parts") or []
@@ -6684,6 +6692,18 @@ def synthesize_preflight_action_required(
     derived_by_marker = part_id.startswith("P_DERIVED_") or "(Derived)" in part_name
     diagnostics["part_id"] = part_id
     diagnostics["part_name"] = part_name
+    if require_solfege_lyrics:
+        solfege_diagnostics = _selected_part_solfege_diagnostics(part)
+        diagnostics["solfege"] = solfege_diagnostics
+        if not solfege_diagnostics["is_solfege"]:
+            return _action_required(
+                "solfege_lyrics_required",
+                "The requested solfege verse is not active for this part.",
+                code="solfege_lyrics_required",
+                part_index=int(part_index),
+                reason="selected_verse_is_not_solfege",
+                diagnostics=diagnostics,
+            )
     diagnostics["derived_by_marker"] = bool(derived_by_marker)
     if derived_by_marker:
         return None
@@ -6813,6 +6833,68 @@ def synthesize_preflight_action_required(
         diagnostics=diagnostics,
         message=message,
     )
+
+
+def _selected_part_solfege_diagnostics(part: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify the active lyric verse for one target part without sampling."""
+    eligible_tokens: List[str] = []
+    generated_marker_count = 0
+    for note in part.get("notes") or []:
+        if not isinstance(note, dict) or bool(note.get("is_rest")):
+            continue
+        if bool(note.get("lyric_is_extended")):
+            continue
+        if str(note.get("tie_type") or "").strip() in {"stop", "continue"}:
+            continue
+        raw_lyric = note.get("lyric")
+        if not isinstance(raw_lyric, str) or raw_lyric.lstrip().startswith("+"):
+            continue
+        if str(note.get("lyric_name") or "").strip() == GENERATED_LYRIC_NAME:
+            generated_marker_count += 1
+        token = _normalize_solfege_token(raw_lyric)
+        if token:
+            eligible_tokens.append(token)
+
+    recognized_count = sum(token in _SOLFEGE_TOKENS for token in eligible_tokens)
+    eligible_count = len(eligible_tokens)
+    coverage = recognized_count / eligible_count if eligible_count else 0.0
+    if generated_marker_count:
+        # A generated marker proves provenance only for the lyric events the
+        # parser actually selected. It must still cover every eligible onset.
+        is_solfege = (
+            eligible_count > 0
+            and generated_marker_count == eligible_count
+            and recognized_count == eligible_count
+        )
+        lyric_mode = "generated_solfege" if is_solfege else "not_solfege"
+    elif eligible_count <= 4:
+        lyric_mode = (
+            "user_solfege" if eligible_count and recognized_count == eligible_count else "not_solfege"
+        )
+        is_solfege = lyric_mode == "user_solfege"
+    else:
+        is_solfege = recognized_count >= 4 and coverage >= 0.8
+        lyric_mode = "user_solfege" if is_solfege else "not_solfege"
+    return {
+        "is_solfege": is_solfege,
+        "lyric_mode": lyric_mode,
+        "generated_marker_count": generated_marker_count,
+        "eligible_token_count": eligible_count,
+        "recognized_solfege_token_count": recognized_count,
+        "coverage": coverage,
+    }
+
+
+def _normalize_solfege_token(value: str) -> str:
+    """Normalize a lyric onset for exact, whole-token solfege matching."""
+    normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+    start = 0
+    end = len(normalized)
+    while start < end and unicodedata.category(normalized[start]).startswith("P"):
+        start += 1
+    while end > start and unicodedata.category(normalized[end - 1]).startswith("P"):
+        end -= 1
+    return normalized[start:end].strip()
 
 
 def _normalize_voice_part_id(

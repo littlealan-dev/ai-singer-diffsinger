@@ -67,6 +67,7 @@ def _parse_musicxml(file_path: Path, params: Dict[str, Any]) -> Dict[str, Any]:
             part_id=params.get("part_id"),
             part_index=params.get("part_index"),
             verse_number=params.get("verse_number"),
+            lyric_selection=params.get("lyric_selection"),
             expand_repeats=params.get("expand_repeats", False),
         )
     except Exception as exc:
@@ -106,6 +107,7 @@ def handle_modify_solfege_settings(params: Dict[str, Any], device: str) -> Dict[
         output_path,
         settings=settings,
         selected_verse_number=params.get("selected_verse_number"),
+        selected_lyric_selection=params.get("selected_lyric_selection"),
     )
 
 
@@ -167,6 +169,18 @@ def handle_save_audio(params: Dict[str, Any], device: str) -> Dict[str, Any]:
 
 def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     """Handle synthesize tool calls and wire optional progress updates."""
+    score = params.get("score")
+    lyric_selection = params.get("lyric_selection")
+    if not isinstance(score, dict):
+        raise ValueError("score is required and must be an object.")
+    if not isinstance(lyric_selection, dict) or not all(
+        isinstance(lyric_selection.get(key), str) for key in ("id", "number", "name")
+    ):
+        raise ValueError("synthesize requires lyric_selection with string id, number, and name.")
+    if score.get("selected_lyric_selection") != lyric_selection:
+        raise ValueError(
+            "score does not match the requested lyric_selection; reparse the exact lyric line first."
+        )
     voicebank_id = params["voicebank"]
     voicebank_metadata = get_manifest_voicebank_metadata(voicebank_id)
     pitch_expression = float(voicebank_metadata.get("pitch_expression", 1.0))
@@ -235,6 +249,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         solfege_pronunciation_patch=params.get(
             "solfege_pronunciation_patch", False
         ),
+        require_solfege_lyrics=params.get("require_solfege_lyrics", False),
         device=device,
         progress_callback=progress_callback,
     )

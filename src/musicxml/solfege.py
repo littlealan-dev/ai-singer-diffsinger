@@ -11,6 +11,7 @@ from src.musicxml.io import read_musicxml_content
 
 
 GENERATED_LYRIC_NAME = "SightSinger Solfege"
+GENERATED_LYRIC_NUMBER = "SSSolfege"
 DEFAULT_SOLFEGE_SETTINGS: Dict[str, str] = {
     "system": "movable_do",
     "mode": "major",
@@ -111,7 +112,9 @@ def add_solfege_lyric_verse(
             {"part_id": resolved_part_id, "verse_numbers": sorted(existing_generated, key=_verse_sort_key)},
         )
 
-    verse_number = _next_verse_number(target)
+    # Keep this system-owned raw identifier independent of exporter-specific
+    # lyric-number conventions. The parser selects the exact number/name pair.
+    verse_number = GENERATED_LYRIC_NUMBER
     normalized_settings = SolfegeSettings.from_mapping(settings)
     notes_annotated, notes_extended = _append_generated_lyrics(
         target,

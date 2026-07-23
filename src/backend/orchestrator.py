@@ -1400,7 +1400,13 @@ class Orchestrator:
         include_score = initial_include_score
         response_message = initial_response_message
         thought_block_for_response = initial_thought_block
-        pending_calls = list(tool_calls)
+        require_solfege_lyrics = self._message_requests_sung_solfege(
+            workflow_user_message or ""
+        )
+        pending_calls = self._enforce_solfege_synthesis_requirement(
+            tool_calls,
+            require_solfege_lyrics=require_solfege_lyrics,
+        )
         working_score = current_score
         score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
         review_required_pending = False
@@ -1906,7 +1912,10 @@ class Orchestrator:
                         response["review_required"] = True
                 break
 
-            pending_calls = list(followup_response.tool_calls)
+            pending_calls = self._enforce_solfege_synthesis_requirement(
+                followup_response.tool_calls,
+                require_solfege_lyrics=require_solfege_lyrics,
+            )
 
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
@@ -1999,6 +2008,13 @@ class Orchestrator:
                 ((snapshot.get("current_score") or {}).get("score") or {})
                 if isinstance(snapshot.get("current_score"), dict)
                 else {}
+            ),
+            "selected_lyric_selection": (
+                ((snapshot.get("current_score") or {}).get("score") or {}).get(
+                    "selected_lyric_selection"
+                )
+                if isinstance(snapshot.get("current_score"), dict)
+                else None
             ),
         }
         result = await asyncio.to_thread(
@@ -3397,6 +3413,9 @@ class Orchestrator:
                 request = copy.deepcopy(call.arguments)
             break
 
+        if self._message_requests_sung_solfege(user_message):
+            request["require_solfege_lyrics"] = True
+
         target_keys = ("part_id", "part_index", "voice_id", "voice_part_id", "verse_number")
         synthesis_keys = (
             "voicebank",
@@ -3408,6 +3427,7 @@ class Orchestrator:
             "clarity",
             "gender",
             "solfege_pronunciation_patch",
+            "require_solfege_lyrics",
             "allow_lyric_propagation",
         )
         target = {key: request.get(key) for key in target_keys if request.get(key) is not None}
@@ -3590,6 +3610,61 @@ class Orchestrator:
         selected = score.get("selected_verse_number")
         return self._normalize_verse_number(selected)
 
+    @staticmethod
+    def _is_complete_lyric_selection(value: Any) -> bool:
+        """Require the exact lyric-line triplet returned by the score parser."""
+        return (
+            isinstance(value, dict)
+            and all(isinstance(value.get(key), str) for key in ("id", "number", "name"))
+        )
+
+    def _build_lyric_selection_required_action(
+        self,
+        score: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
+        synth_args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return exact parser-provided lyric choices in the normal follow-up shape."""
+        part_index = self._resolve_synthesize_part_index(
+            score,
+            part_id=synth_args.get("part_id"),
+            part_index=synth_args.get("part_index"),
+        )
+        parts = score_summary.get("parts") if isinstance(score_summary, dict) else []
+        part_summary = (
+            parts[part_index]
+            if isinstance(parts, list) and 0 <= part_index < len(parts)
+            else {}
+        )
+        return {
+            "status": "action_required",
+            "action": "lyric_selection_required",
+            "code": "lyric_selection_required",
+            "reason": "exact_lyric_selection_required_before_render",
+            "part_index": part_index,
+            "available_lyric_selections": (
+                part_summary.get("lyric_selections", [])
+                if isinstance(part_summary, dict)
+                else []
+            ),
+        }
+
+    @staticmethod
+    def _lyric_selection_belongs_to_part(
+        score_summary: Optional[Dict[str, Any]],
+        part_index: int,
+        selection: Dict[str, str],
+    ) -> bool:
+        parts = score_summary.get("parts") if isinstance(score_summary, dict) else []
+        if not isinstance(parts, list) or not (0 <= part_index < len(parts)):
+            return False
+        part = parts[part_index]
+        return isinstance(part, dict) and any(
+            isinstance(candidate, dict)
+            and all(candidate.get(key) == selection.get(key) for key in ("id", "number", "name"))
+            for candidate in part.get("lyric_selections", [])
+        )
+
     def _is_reparse_noop(
         self,
         score: Dict[str, Any],
@@ -3670,6 +3745,7 @@ class Orchestrator:
         part_id: Optional[str],
         part_index: Optional[int],
         verse_number: Optional[object],
+        lyric_selection: Optional[Dict[str, str]] = None,
         expand_repeats: bool = False,
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
@@ -3686,6 +3762,8 @@ class Orchestrator:
             parse_args["part_index"] = part_index
         if verse_number is not None:
             parse_args["verse_number"] = verse_number
+        if lyric_selection is not None:
+            parse_args["lyric_selection"] = lyric_selection
         result = await asyncio.to_thread(self._router.call_tool, "parse_score", parse_args)
         if not isinstance(result, dict):
             return None
@@ -3913,6 +3991,35 @@ class Orchestrator:
                 "voice this",
             )
         )
+
+    def _message_requests_sung_solfege(self, message: str) -> bool:
+        """Return True when the user explicitly requests sung solfege/solfa."""
+        lowered = message.casefold()
+        return self._message_requests_render(message) and (
+            "solfege" in lowered or "solfa" in lowered
+        )
+
+    def _enforce_solfege_synthesis_requirement(
+        self,
+        tool_calls: List[ToolCall],
+        *,
+        require_solfege_lyrics: bool,
+    ) -> List[ToolCall]:
+        """Carry an explicit sung-solfege request into every synthesis handoff."""
+        if not require_solfege_lyrics:
+            return list(tool_calls)
+        updated_calls: List[ToolCall] = []
+        for call in tool_calls:
+            arguments = dict(call.arguments)
+            if call.name == TOOL_SYNTHESIZE:
+                arguments["require_solfege_lyrics"] = True
+            elif call.name == TOOL_START_PREPROCESS_WORKFLOW:
+                request = arguments.get("request")
+                normalized_request = dict(request) if isinstance(request, dict) else {}
+                normalized_request["require_solfege_lyrics"] = True
+                arguments["request"] = normalized_request
+            updated_calls.append(replace(call, arguments=arguments))
+        return updated_calls
 
     def _resolve_selection_part_index(
         self,
@@ -5016,6 +5123,7 @@ class Orchestrator:
                             "operation_scope": "exactly_one_part",
                             "completed_target": result.get("target"),
                             "selected_verse_number": selected_explicit_verse_number,
+                            "lyric_selection": result.get("lyric_selection"),
                             "message": (
                                 "A generated solfege verse was added only to completed_target. "
                                 "If the original user request names any additional parts, call "
@@ -5359,46 +5467,75 @@ class Orchestrator:
                 )
                 synth_args = await self._normalize_synthesize_voice_color(synth_args)
                 synth_args.pop("score", None)
-                requested_verse_number = self._normalize_verse_number(
-                    synth_args.get("verse_number")
-                )
-                synth_args.pop("verse_number", None)
-                selected_verse_number = self._score_selected_verse_number(current_score)
-                if (
-                    requested_verse_number is not None
-                    and requested_verse_number != selected_verse_number
-                ):
-                    action_required = self._build_verse_change_requires_repreprocess_action(
-                        score=current_score,
-                        requested_verse_number=requested_verse_number,
-                        selected_verse_number=selected_verse_number,
-                        part_index=self._resolve_synthesize_part_index(
-                            current_score,
-                            part_id=synth_args.get("part_id"),
-                            part_index=synth_args.get("part_index"),
-                        ),
-                        reparse_applied=False,
-                        reparsed_selected_verse_number=selected_verse_number,
-                    )
-                    self._logger.info(
-                        "synthesize_action_required_verse_change session=%s reason=%s diagnostics=%s",
-                        session_id,
-                        action_required.get("reason"),
-                        summarize_payload(action_required.get("diagnostics")),
+                lyric_selection = synth_args.get("lyric_selection")
+                if not self._is_complete_lyric_selection(lyric_selection):
+                    action_required = self._build_lyric_selection_required_action(
+                        current_score,
+                        score_summary,
+                        synth_args,
                     )
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
-                if requested_verse_number is not None:
-                    selected_explicit_verse_number = requested_verse_number
-                    await self._sessions.set_metadata(
-                        session_id,
-                        EXPLICIT_VERSE_METADATA_KEY,
-                        requested_verse_number,
+                selection_part_index = self._resolve_synthesize_part_index(
+                    current_score,
+                    part_id=synth_args.get("part_id"),
+                    part_index=synth_args.get("part_index"),
+                )
+                # A preceding add-solfege tool call persists a new summary while
+                # the current follow-up workflow may still hold its old snapshot.
+                # Resolve against the authoritative session summary before asking
+                # the LLM to choose again.
+                if not self._lyric_selection_belongs_to_part(
+                    score_summary, selection_part_index, lyric_selection
+                ):
+                    refreshed = await self._sessions.get_snapshot(session_id, user_id)
+                    refreshed_summary = refreshed.get("score_summary")
+                    if isinstance(refreshed_summary, dict):
+                        score_summary = refreshed_summary
+                if not self._lyric_selection_belongs_to_part(
+                    score_summary, selection_part_index, lyric_selection
+                ):
+                    action_required = self._build_lyric_selection_required_action(
+                        current_score,
+                        score_summary,
+                        synth_args,
                     )
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(action_required, sort_keys=True),
+                        action_required_payload=action_required,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                synth_args.pop("verse_number", None)
+                if current_score.get("selected_lyric_selection") != lyric_selection:
+                    reparsed_score = await self._reparse_score(
+                        session_id,
+                        part_id=None,
+                        part_index=None,
+                        verse_number=None,
+                        lyric_selection=lyric_selection,
+                        user_id=user_id,
+                    )
+                    if not isinstance(reparsed_score, dict):
+                        raise ValueError("Unable to select the requested lyric line.")
+                    current_score = reparsed_score
+                    refreshed = await self._sessions.get_snapshot(session_id, user_id)
+                    refreshed_summary = refreshed.get("score_summary")
+                    score_summary = (
+                        refreshed_summary if isinstance(refreshed_summary, dict) else score_summary
+                    )
+                selected_explicit_verse_number = str(lyric_selection["number"])
+                require_solfege_lyrics = synth_args.get("require_solfege_lyrics", False)
+                if not isinstance(require_solfege_lyrics, bool):
+                    raise ValueError("require_solfege_lyrics must be a boolean.")
+                if require_solfege_lyrics:
+                    synth_args["solfege_pronunciation_patch"] = True
                 synth_args = self._auto_enable_generated_solfege_pronunciation(
                     synth_args,
                     current_score=current_score,
@@ -5420,10 +5557,10 @@ class Orchestrator:
                     part_id=synth_args.get("part_id"),
                     part_index=synth_args.get("part_index"),
                 )
-                precheck = synthesize_preflight_action_required(
-                    current_score,
-                    part_index=precheck_part_index,
-                )
+                precheck_kwargs: Dict[str, Any] = {"part_index": precheck_part_index}
+                if require_solfege_lyrics:
+                    precheck_kwargs["require_solfege_lyrics"] = True
+                precheck = synthesize_preflight_action_required(current_score, **precheck_kwargs)
                 if precheck is not None:
                     self._logger.info(
                         "synthesize_precheck_action_required session=%s part_index=%s reason=%s failed_rules=%s diagnostics=%s",

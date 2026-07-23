@@ -161,8 +161,16 @@ def test_mcp_handler_forwards_solfege_patch(tmp_path):
     ) as synthesize_mock:
         handlers.handle_synthesize(
             {
-                "score": {"parts": []},
-                "voicebank": "TestBank",
+                    "score": {
+                        "parts": [],
+                        "selected_lyric_selection": {
+                            "id": "lyr_test",
+                            "number": "1",
+                            "name": "",
+                        },
+                    },
+                    "voicebank": "TestBank",
+                    "lyric_selection": {"id": "lyr_test", "number": "1", "name": ""},
                 "solfege_pronunciation_patch": True,
             },
             device="cpu",

@@ -583,6 +583,9 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
   headers = await withAuthHeaders(headers);
   const response = await fetchWithTimeout(`${API_BASE}/sessions/${sessionId}/score`, {
     headers,
+    // This URL remains stable while score transforms replace its contents.  Do
+    // not let a prior upload response hide a newly generated lyric verse.
+    cache: "no-store",
   });
   if (!response.ok) {
     throw await errorFromResponse(response, "Failed to load score.");

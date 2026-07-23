@@ -1008,6 +1008,7 @@ def test_get_score_returns_derived_musicxml_after_preprocess_review(client):
 
     score_response = test_client.get(f"/sessions/{session_id}/score")
     assert score_response.status_code == 200
+    assert score_response.headers["cache-control"] == "no-store"
     assert score_response.text == derived_xml
 
 
@@ -2103,6 +2104,7 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
         f"/sessions/{session_id}/score", headers=_auth_headers()
     )
     assert score_response.status_code == 200
+    assert score_response.headers["cache-control"] == "no-store"
     assert 'name="SightSinger Solfege"' in score_response.text
 
     settings_response = test_client.patch(
@@ -2290,6 +2292,86 @@ def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
     assert response.status_code == 200
     assert response.json()["type"] == "chat_text"
     assert "solfege_pronunciation_patch" not in started["arguments"]
+
+
+def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    current_score = {
+        "title": "Original Lyrics",
+        "selected_verse_number": "1",
+        "parts": [
+            {
+                "part_id": "Alto",
+                "part_name": "Alto",
+                "notes": [
+                    {
+                        "offset_beats": 0.0,
+                        "duration_beats": 1.0,
+                        "pitch_midi": 60.0,
+                        "lyric": "words",
+                        "is_rest": False,
+                    }
+                ],
+            }
+        ],
+    }
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Original Lyrics",
+                "available_verses": ["1"],
+                "selected_verse_number": "1",
+                "duration_seconds": 4,
+                "parts": [{"part_index": 0, "part_id": "Alto", "part_name": "Alto"}],
+            },
+        )
+    )
+
+    class SolfegeFollowupClient:
+        def generate(self, system_prompt, history):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                payload = json.loads(last[len(TOOL_RESULT_PREFIX) :])
+                assert payload["action"] == "solfege_lyrics_required"
+                assert payload["diagnostics"]["solfege"]["lyric_mode"] == "not_solfege"
+                return json.dumps(
+                    {
+                        "tool_calls": [],
+                        "final_message": "I need to prepare solfege lyrics first.",
+                        "include_score": False,
+                    }
+                )
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                    ],
+                    "final_message": "Starting synthesis.",
+                    "include_score": False,
+                }
+            )
+
+    app.state.llm_client = SolfegeFollowupClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+    started = {"value": False}
+
+    async def fake_start_synthesis_job(*args, **kwargs):
+        started["value"] = True
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the alto part in solfege"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "I need to prepare solfege lyrics first."
+    assert started["value"] is False
 
 
 def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
@@ -2671,6 +2753,7 @@ def test_followup_preprocess_handoff_starts_background_job(client):
     assert started["planning_context"]["future_synthesis_request"] == {
         "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
         "solfege_pronunciation_patch": True,
+        "require_solfege_lyrics": True,
     }
     assert started["planning_context"]["user_request"] == "sing women in solfege"
 

@@ -1366,6 +1366,17 @@ TOOLS: List[Tool] = [
                         "via reparse before line preparation/synthesis."
                     ),
                 },
+                "lyric_selection": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "number": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["id", "number", "name"],
+                    "additionalProperties": False,
+                    "description": "Exact lyric line copied from score_summary.parts[].lyric_selections.",
+                },
                 "expand_repeats": {
                     "type": "boolean",
                     "description": "Whether repeat structures should be expanded during parsing.",
@@ -1508,6 +1519,16 @@ TOOLS: List[Tool] = [
                 "output_musicxml_path": {"type": "string"},
                 "settings": {"type": "object"},
                 "selected_verse_number": {"type": ["string", "integer", "null"]},
+                "selected_lyric_selection": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "number": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["id", "number", "name"],
+                    "additionalProperties": False,
+                },
                 "system": {
                     "type": ["string", "null"],
                     "enum": ["movable_do", "fixed_do", None],
@@ -1682,6 +1703,13 @@ TOOLS: List[Tool] = [
                                 "solfege pronunciations."
                             ),
                         },
+                        "require_solfege_lyrics": {
+                            "type": ["boolean", "null"],
+                            "description": (
+                                "Require the selected target to have generated or clearly "
+                                "user-authored solfege lyrics before later synthesis."
+                            ),
+                        },
                         "reason": {
                             "type": "string",
                             "description": (
@@ -1813,6 +1841,20 @@ TOOLS: List[Tool] = [
                     "type": ["integer", "null"],
                     "description": "Optional source part index hint for lyric propagation or derived-target reuse.",
                 },
+                "lyric_selection": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "number": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["id", "number", "name"],
+                    "additionalProperties": False,
+                    "description": (
+                        "Exact lyric line copied unchanged from "
+                        "score_summary.parts[].lyric_selections for the selected part."
+                    ),
+                },
                 "verse_number": {
                     "type": ["integer", "string", "null"],
                     "description": (
@@ -1879,8 +1921,16 @@ TOOLS: List[Tool] = [
                         "solfege lyrics during phonemization."
                     ),
                 },
+                "require_solfege_lyrics": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Fail before synthesis unless the selected target's active lyrics "
+                        "are generated or clearly user-authored solfege."
+                    ),
+                },
             },
-            "required": ["score", "language"],
+            "required": ["score", "language", "lyric_selection"],
             "oneOf": [
                 {"required": ["part_id"]},
                 {"required": ["part_index"]},

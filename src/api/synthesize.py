@@ -1781,6 +1781,7 @@ def synthesize(
     gender: Optional[float] = None,
     pitch_expression: Optional[float] = None,
     solfege_pronunciation_patch: bool = False,
+    require_solfege_lyrics: bool = False,
     skip_voice_part_preprocess: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
@@ -1808,6 +1809,8 @@ def synthesize(
             voicebank's manifest default (system fallback: 0).
         pitch_expression: Optional pitch expression override (0.0 to 1.0)
         solfege_pronunciation_patch: Apply deterministic English solfege spellings
+        require_solfege_lyrics: Require the selected target's active lyrics to be
+            generated or user-authored solfege before synthesis can begin.
         device: Device for inference
         progress_callback: Optional callback for step updates
         
@@ -1857,6 +1860,7 @@ def synthesize(
                     "gender": gender,
                     "pitch_expression": pitch_expression,
                     "solfege_pronunciation_patch": solfege_pronunciation_patch,
+                    "require_solfege_lyrics": require_solfege_lyrics,
                     "device": device,
                 }
             ),
@@ -1870,12 +1874,15 @@ def synthesize(
         raise ValueError("pitch_expression must be between 0.0 and 1.0.")
     if not isinstance(solfege_pronunciation_patch, bool):
         raise ValueError("solfege_pronunciation_patch must be a boolean.")
+    if not isinstance(require_solfege_lyrics, bool):
+        raise ValueError("require_solfege_lyrics must be a boolean.")
 
     working_score = score
     effective_part_index = int(part_index)
     preflight = synthesize_preflight_action_required(
         working_score,
         part_index=effective_part_index,
+        require_solfege_lyrics=require_solfege_lyrics,
     )
     if preflight is not None:
         return preflight

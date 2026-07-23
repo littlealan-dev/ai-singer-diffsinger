@@ -1111,7 +1111,14 @@ def create_app() -> FastAPI:
             score_path,
             max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
         )
-        return Response(content=content, media_type="application/xml")
+        # A session keeps one stable score URL while transforms replace the
+        # underlying MusicXML.  Prevent browsers and intermediaries from
+        # serving the score that was current before the latest transform.
+        return Response(
+            content=content,
+            media_type="application/xml",
+            headers={"Cache-Control": "no-store"},
+        )
 
     return app
 

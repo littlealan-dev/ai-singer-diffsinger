@@ -34,6 +34,7 @@ def parse_score(
     part_id: Optional[str] = None,
     part_index: Optional[int] = None,
     verse_number: Optional[str | int] = None,
+    lyric_selection: Optional[Dict[str, str]] = None,
     expand_repeats: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -65,6 +66,7 @@ def parse_score(
                     "part_id": part_id,
                     "part_index": part_index,
                     "verse_number": verse_number,
+                    "lyric_selection": lyric_selection,
                     "expand_repeats": expand_repeats,
                 }
             ),
@@ -75,13 +77,19 @@ def parse_score(
         part_id=None,
         part_index=None,
         verse_number=verse_number,
+        lyric_selection=lyric_selection,
         lyrics_only=False,
         keep_rests=True,
     )
     
-    selected_verse_number = _resolve_selected_verse_number(
-        requested_verse_number=verse_number,
-        score_summary=score_summary,
+    selected_verse_number = (
+        lyric_selection.get("number")
+        if isinstance(lyric_selection, dict)
+        and isinstance(lyric_selection.get("number"), str)
+        else _resolve_selected_verse_number(
+            requested_verse_number=verse_number,
+            score_summary=score_summary,
+        )
     )
 
     # Convert dataclass to dict for JSON serialization.
@@ -96,6 +104,7 @@ def parse_score(
     }
     score_dict["score_summary"] = score_summary
     score_dict["selected_verse_number"] = selected_verse_number
+    score_dict["selected_lyric_selection"] = lyric_selection
     score_dict["source_musicxml_path"] = str(Path(file_path).resolve())
     if part_id is not None or part_index is not None:
         score_dict["requested_part_id"] = part_id

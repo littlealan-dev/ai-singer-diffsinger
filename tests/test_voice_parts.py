@@ -31,6 +31,7 @@ from src.api.voice_parts import (
     parse_voice_part_plan,
     prepare_score_for_voice_part,
     preprocess_voice_parts,
+    synthesize_preflight_action_required,
     validate_voice_part_status,
 )
 from src.musicxml.parser import parse_musicxml_with_summary
@@ -41,6 +42,57 @@ TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
 
 
 class VoicePartFlowTests(unittest.TestCase):
+    def test_solfege_requirement_checks_all_eligible_lyric_onsets(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Alto",
+                    "notes": [
+                        {"lyric": lyric, "is_rest": False}
+                        for lyric in ["do", "re", "mi", "fa", *(["lyrics"] * 16)]
+                    ],
+                }
+            ]
+        }
+
+        result = synthesize_preflight_action_required(
+            score,
+            part_index=0,
+            require_solfege_lyrics=True,
+        )
+
+        assert result is not None
+        assert result["action"] == "solfege_lyrics_required"
+        diagnostics = result["diagnostics"]["solfege"]
+        assert diagnostics["eligible_token_count"] == 20
+        assert diagnostics["recognized_solfege_token_count"] == 4
+        assert diagnostics["lyric_mode"] == "not_solfege"
+
+    def test_solfege_requirement_accepts_user_authored_whole_tokens(self) -> None:
+        score = {
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "part_name": "Alto",
+                    "notes": [
+                        {"lyric": lyric, "is_rest": False}
+                        for lyric in ["Do,", "re", "mi", "fa", "sol", "la"]
+                    ],
+                }
+            ]
+        }
+
+        result = synthesize_preflight_action_required(
+            score,
+            part_index=0,
+            require_solfege_lyrics=True,
+        )
+
+        assert result is not None
+        assert result["action"] == "preprocessing_required"
+        assert result["diagnostics"]["solfege"]["lyric_mode"] == "user_solfege"
+
     def test_synthesize_returns_action_required_for_complex_raw_part(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
         result = synthesize(

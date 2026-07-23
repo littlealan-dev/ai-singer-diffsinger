@@ -3,6 +3,7 @@ from __future__ import annotations
 """MusicXML parsing utilities for extracting notes, tempos, and lyrics."""
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Sequence
@@ -67,6 +68,7 @@ def parse_musicxml(
     part_id: Optional[str] = None,
     part_index: Optional[int] = None,
     verse_number: Optional[str | int] = None,
+    lyric_selection: Optional[Dict[str, str]] = None,
     lyrics_only: bool = True,
     keep_rests: bool = False,
 ) -> ScoreData:
@@ -80,12 +82,22 @@ def parse_musicxml(
     """
     source_path = Path(path)
     score = _load_musicxml_score(source_path)
+    selected_raw_part_ids = _validate_lyric_selection(
+        _raw_lyric_selections(source_path), lyric_selection
+    )
+    raw_part_ids = list(_raw_lyric_selections(source_path))
+    selected_part_indices = {
+        index for index, raw_part_id in enumerate(raw_part_ids)
+        if selected_raw_part_ids is not None and raw_part_id in selected_raw_part_ids
+    }
     raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
     return _parse_score(
         score,
         part_id=part_id,
         part_index=part_index,
         verse_number=verse_number,
+        lyric_selection=lyric_selection,
+        lyric_selection_part_indices=selected_part_indices if lyric_selection is not None else None,
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
         raw_single_voice_fallback=raw_single_voice_fallback,
@@ -98,13 +110,23 @@ def parse_musicxml_with_summary(
     part_id: Optional[str] = None,
     part_index: Optional[int] = None,
     verse_number: Optional[str | int] = None,
+    lyric_selection: Optional[Dict[str, str]] = None,
     lyrics_only: bool = True,
     keep_rests: bool = False,
 ) -> tuple[ScoreData, Dict[str, Any]]:
     """Parse MusicXML and return both score data and a summary dict."""
     source_path = Path(path)
     score = _load_musicxml_score(source_path)
-    summary = _summarize_score(score)
+    raw_lyric_selections = _raw_lyric_selections(source_path)
+    summary = _summarize_score(score, raw_lyric_selections=raw_lyric_selections)
+    selected_raw_part_ids = _validate_lyric_selection(
+        raw_lyric_selections, lyric_selection
+    )
+    raw_part_ids = list(raw_lyric_selections)
+    selected_part_indices = {
+        index for index, raw_part_id in enumerate(raw_part_ids)
+        if selected_raw_part_ids is not None and raw_part_id in selected_raw_part_ids
+    }
     raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
     normalized_verse = _normalize_verse_number(verse_number)
     if normalized_verse is None:
@@ -116,6 +138,8 @@ def parse_musicxml_with_summary(
         part_id=part_id,
         part_index=part_index,
         verse_number=normalized_verse,
+        lyric_selection=lyric_selection,
+        lyric_selection_part_indices=selected_part_indices if lyric_selection is not None else None,
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
         raw_single_voice_fallback=raw_single_voice_fallback,
@@ -132,6 +156,8 @@ def _parse_score(
     lyrics_only: bool,
     keep_rests: bool,
     raw_single_voice_fallback: Optional[Dict[str, Dict[str, str]]] = None,
+    lyric_selection: Optional[Dict[str, str]] = None,
+    lyric_selection_part_indices: Optional[set[int]] = None,
 ) -> ScoreData:
     """Transform a music21 score into the internal ScoreData structure."""
     # Select the part(s) to parse based on user inputs and lyric availability.
@@ -144,6 +170,7 @@ def _parse_score(
     normalized_verse = _normalize_verse_number(verse_number)
     tempos = _extract_tempos(score)
     parts: List[PartData] = []
+    original_part_indices = {id(part): index for index, part in enumerate(score.parts)}
     for part in selected_parts:
         part_id_value = str(part.id) if part.id is not None else ""
         part_name_value = str(part.partName or "").strip()
@@ -158,6 +185,12 @@ def _parse_score(
         part_events = _collect_part_events(
             part,
             verse_number=normalized_verse,
+            lyric_selection=(
+                lyric_selection
+                if lyric_selection_part_indices is not None
+                and original_part_indices.get(id(part)) in lyric_selection_part_indices
+                else None
+            ),
             lyrics_only=lyrics_only,
             keep_rests=keep_rests,
             fallback_voice=fallback_voice,
@@ -244,7 +277,11 @@ def _part_has_lyrics(part: stream.Part, *, verse_number: Optional[str | int]) ->
     return False
 
 
-def _summarize_score(score: stream.Score) -> Dict[str, Any]:
+def _summarize_score(
+    score: stream.Score,
+    *,
+    raw_lyric_selections: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
     """Summarize metadata, parts, and lyric verses for a score."""
     metadata = score.metadata
     summary: Dict[str, Any] = {
@@ -303,6 +340,11 @@ def _summarize_score(score: stream.Score) -> Dict[str, Any]:
                     }
                     for verse_number in sorted(lyric_numbers, key=_lyric_sort_key)
                 ],
+                "lyric_selections": list(
+                    list((raw_lyric_selections or {}).values())[index]
+                    if index < len(raw_lyric_selections or {})
+                    else []
+                ),
             }
         )
 
@@ -392,6 +434,7 @@ def _collect_part_events(
     part: stream.Part,
     *,
     verse_number: Optional[str],
+    lyric_selection: Optional[Dict[str, str]],
     lyrics_only: bool,
     keep_rests: bool,
     fallback_voice: Optional[str] = None,
@@ -411,7 +454,12 @@ def _collect_part_events(
         )
     )
     has_lyric_text = any(
-        _extract_lyric_text(element, verse_number=verse_number)[0] is not None
+        _extract_lyric_text(
+            element,
+            verse_number=verse_number,
+            lyric_selection=lyric_selection,
+        )[0]
+        is not None
         for element in elements
         if not element.isRest
     )
@@ -462,7 +510,9 @@ def _collect_part_events(
             state["end_offset"] = end_offset
             continue
         lyric_text, syllabic, is_extended, lyric_line_index, lyric_name = _extract_lyric_text(
-            element, verse_number=verse_number
+            element,
+            verse_number=verse_number,
+            lyric_selection=lyric_selection,
         )
         tie_type = element.tie.type if element.tie is not None else None
         include = True
@@ -543,11 +593,17 @@ def _extract_lyric_text(
     element: note.NotRest,
     *,
     verse_number: Optional[str | int],
+    lyric_selection: Optional[Dict[str, str]] = None,
 ) -> tuple[Optional[str], Optional[str], bool, Optional[str], Optional[str]]:
     if not element.lyrics:
         return None, None, False, None, None
     lyric = None
-    if verse_number is None:
+    if lyric_selection is not None:
+        for candidate in element.lyrics:
+            if _lyric_matches_selection(candidate, lyric_selection):
+                lyric = candidate
+                break
+    elif verse_number is None:
         lyric = element.lyrics[0]
     else:
         normalized = _normalize_verse_number(verse_number)
@@ -571,6 +627,93 @@ def _extract_lyric_text(
     elif hasattr(lyric, "extend"):
         is_extended = bool(lyric.extend)
     return text, syllabic, is_extended, lyric_line_index, lyric_name
+
+
+def lyric_selection_id(part_id: str, number: str, name: str) -> str:
+    """Return a stable opaque selector for one raw MusicXML lyric line."""
+    raw = "\x1f".join((part_id, number, name)).encode("utf-8")
+    return "lyr_" + hashlib.sha256(raw).hexdigest()[:20]
+
+
+def _raw_lyric_selections(path: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """Index raw lyric line identities without interpreting exporter formats."""
+    root = ElementTree.fromstring(read_musicxml_content(path))
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for part in (element for element in root if _xml_local_name(element.tag) == "part"):
+        part_id = str(part.attrib.get("id") or "")
+        lines: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for lyric in (element for element in part.iter() if _xml_local_name(element.tag) == "lyric"):
+            number = str(lyric.attrib.get("number") or "1").strip() or "1"
+            name = str(lyric.attrib.get("name") or "").strip()
+            key = (number, name)
+            entry = lines.setdefault(
+                key,
+                {
+                    "id": lyric_selection_id(part_id, number, name),
+                    "number": number,
+                    "name": name,
+                    "sample": [],
+                    "is_generated_solfege": name == GENERATED_LYRIC_NAME,
+                },
+            )
+            text = next(
+                (
+                    (child.text or "").strip()
+                    for child in lyric
+                    if _xml_local_name(child.tag) == "text"
+                ),
+                "",
+            )
+            if text and not text.startswith("+") and len(entry["sample"]) < 20:
+                entry["sample"].append(text)
+        result[part_id] = sorted(
+            lines.values(), key=lambda entry: (entry["number"], entry["name"])
+        )
+    return result
+
+
+def _validate_lyric_selection(
+    selections_by_part: Dict[str, List[Dict[str, Any]]],
+    lyric_selection: Optional[Dict[str, str]],
+) -> Optional[set[str]]:
+    if lyric_selection is None:
+        return None
+    if not isinstance(lyric_selection, dict):
+        raise ValueError("lyric_selection must be an object.")
+    identifier = lyric_selection.get("id")
+    number = lyric_selection.get("number")
+    name = lyric_selection.get("name")
+    if not all(isinstance(value, str) for value in (identifier, number, name)):
+        raise ValueError("lyric_selection requires string id, number, and name.")
+    matched = {
+        part_id
+        for part_id, selections in selections_by_part.items()
+        if any(
+            entry.get("id") == identifier
+            and entry.get("number") == number
+            and entry.get("name") == name
+            for entry in selections
+        )
+    }
+    if not matched:
+        raise ValueError("lyric_selection does not match a lyric line in this score.")
+    return matched
+
+
+def _lyric_matches_selection(lyric: Any, selection: Dict[str, str]) -> bool:
+    """Match the parser's lyric object to an already raw-validated selection."""
+    expected_name = str(selection["name"])
+    expected_number = str(selection["number"])
+    identifier = str(getattr(lyric, "identifier", "") or "").strip()
+    if expected_name:
+        return identifier == expected_name
+    if identifier:
+        return identifier == expected_number
+    return (str(getattr(lyric, "number", "") or "1").strip() or "1") == expected_number
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
 
 def _strip_redundant_verse_label(text: str, verse_number: str) -> str:

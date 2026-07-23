@@ -371,18 +371,19 @@ def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> Non
         last_preprocess_plan=None,
         voicebank_details=None,
     )
-    assert "Solfege verse selection exception" in prompt
-    assert "most solfege-like existing verse" in prompt
+    assert "Solfege lyric selection" in prompt
+    assert "existing clearly solfege selection" in prompt
     assert "copy the exact `score_summary.parts[].part_id` value" in prompt
     assert "Never put `part_name`" in prompt
     assert "One `add_solfege_lyric_verse` invocation modifies exactly one part" in prompt
     assert "successful tool result explicitly identifies that part" in prompt
-    assert "`score_summary.parts[].lyric_verses[]`" in prompt
-    assert "do not call `reparse` merely to discover or compare verse contents" in prompt
-    assert "call `reparse` exactly once" in prompt
+    assert "`score_summary.parts[].lyric_selections[]`" in prompt
+    assert "`id`, `number`, and `name`" in prompt
     assert "solfege_pronunciation_patch=true" in prompt
-    assert "whole-token solfege syllables" in prompt
-    assert "does not convert ordinary lyrics into solfege" in prompt
+    assert "require_solfege_lyrics=true" in prompt
+    assert "action=solfege_lyrics_required" in prompt
+    assert "`number` may be numeric or alphanumeric" in prompt
+    assert "exact chosen `lyric_selection`" in prompt
     assert "call `add_solfege_lyric_verse`" in prompt
     assert "call `modify_solfege_settings`" in prompt
     assert "override conflicting statements in conversation history" in prompt
