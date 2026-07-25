@@ -50,6 +50,7 @@ fi
 : "${BACKEND_PORT:=8000}"
 : "${BACKEND_LOG_LEVEL:=debug}"
 : "${BACKEND_BUILD_ID:=dev-$(date +%s)}"
+: "${BACKEND_STARTUP_TIMEOUT_SECONDS:=30}"
 
 # Find python from .venv310 in current or parent/sibling project
 if [[ -f "${ROOT_DIR}/.venv310/bin/python" ]] && "${ROOT_DIR}/.venv310/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
@@ -63,6 +64,24 @@ PYTHON_BIN="${PYTHON_BIN:-${DEFAULT_PYTHON}}"
 
 mkdir -p "${LOG_DIR}"
 
+port_is_listening() {
+  lsof -nP -iTCP:"${BACKEND_PORT}" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+wait_for_ready() {
+  local deadline=$((SECONDS + BACKEND_STARTUP_TIMEOUT_SECONDS))
+  local response
+
+  while (( SECONDS < deadline )); do
+    response="$(curl --silent --show-error --max-time 1 "http://127.0.0.1:${BACKEND_PORT}/readyz" 2>/dev/null || true)"
+    if [[ "${response}" =~ \"ready\"[[:space:]]*:[[:space:]]*true ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
 if [[ -f "${PID_FILE}" ]]; then
   existing_pid="$(cat "${PID_FILE}")"
   if kill -0 "${existing_pid}" >/dev/null 2>&1; then
@@ -70,6 +89,11 @@ if [[ -f "${PID_FILE}" ]]; then
     exit 0
   fi
   rm -f "${PID_FILE}"
+fi
+
+if port_is_listening; then
+  echo "Port ${BACKEND_PORT} is already in use; refusing to start another backend." >&2
+  exit 1
 fi
 
 export FIRESTORE_EMULATOR_HOST
@@ -94,4 +118,11 @@ nohup "${PYTHON_BIN}" -m uvicorn src.backend.main:app \
   > "${LOG_FILE}" 2>&1 &
 
 echo $! > "${PID_FILE}"
-echo "Backend started (pid $(cat "${PID_FILE}")). Logs: ${LOG_FILE}"
+pid="$(cat "${PID_FILE}")"
+echo "Waiting for backend and MCP workers to become ready (pid ${pid})."
+if ! wait_for_ready; then
+  echo "Backend did not become ready within ${BACKEND_STARTUP_TIMEOUT_SECONDS}s. Logs: ${LOG_FILE}" >&2
+  exit 1
+fi
+
+echo "Backend started and MCP workers are ready (pid ${pid}). Logs: ${LOG_FILE}"

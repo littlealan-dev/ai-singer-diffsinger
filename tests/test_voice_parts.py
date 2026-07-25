@@ -3941,6 +3941,49 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertEqual(measure_2_note.findtext("type"), "half")
         self.assertIsNotNone(measure_2_note.find("dot"))
 
+    def test_materialize_uses_raw_source_part_after_staff_expansion(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+    <score-part id="P2"><part-name>Other</part-name></score-part>
+  </part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><staff>1</staff></note><backup><duration>1</duration></backup><note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type><staff>2</staff><lyric><text>low</text></lyric></note></measure></part>
+  <part id="P2"><measure number="1"><attributes><divisions>7</divisions><time><beats>3</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>7</duration><type>quarter</type></note></measure></part>
+</score-partwise>"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "staff-expanded-reference.xml"
+            source_path.write_text(xml, encoding="utf-8")
+            score = parse_score(source_path, verse_number=1)
+            self.assertEqual(score["parts"][1]["part_id"], "P1-Staff2")
+            transformed_part = {
+                **score["parts"][1],
+                "_source_part_index": 1,
+                "_source_part_id": "P1-Staff2",
+                "_source_part_name": "Piano",
+            }
+            result = _finalize_transform_result(
+                score,
+                part_index=1,
+                target_voice_part_id="voice part 1",
+                source_voice_part_id="voice part 1",
+                source_part_index=1,
+                transformed_part=transformed_part,
+                propagated=False,
+                status="ready",
+                validation={},
+                source_musicxml_path=str(source_path),
+                target_source_voice_id="1",
+                allow_reuse=False,
+            )
+            root = ET.parse(result["modified_musicxml_path"]).getroot()
+
+        derived_id = result["appended_part_ref"]["part_id"]
+        attributes = root.find(f"./part[@id='{derived_id}']/measure/attributes")
+        self.assertIsNotNone(attributes)
+        self.assertEqual(attributes.findtext("divisions"), "1")
+        self.assertEqual(attributes.findtext("time/beats"), "4")
+
     def test_golden_musicxml_deterministic_appended_id(self) -> None:
         first = self._run_alto_preprocess()
         second = self._run_alto_preprocess()

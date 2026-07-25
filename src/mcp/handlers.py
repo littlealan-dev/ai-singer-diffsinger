@@ -87,8 +87,7 @@ def handle_add_solfege_lyric_verse(params: Dict[str, Any], device: str) -> Dict[
     return add_solfege_lyric_verse(
         source_path,
         output_path,
-        part_id=params.get("part_id"),
-        part_index=params.get("part_index"),
+        part_id=str(params["part_id"]),
         settings=params.get("settings"),
     )
 
@@ -132,7 +131,7 @@ def handle_preprocess_voice_parts(params: Dict[str, Any], device: str) -> Dict[s
             "code": "deprecated_voice_id_input",
             "message": (
                 "Deprecated voice_id is not accepted for preprocess_voice_parts. "
-                "Use request.plan.targets[].target.voice_part_id."
+                "Use request.plan.targets[].source.voice_part_id."
             ),
         }
 
@@ -267,14 +266,15 @@ def _resolve_part_index(
     part_index: Optional[int],
 ) -> int:
     """Resolve the target part index from score metadata."""
-    if part_id is not None and part_index is not None:
-        raise ValueError("Provide part_id or part_index, not both.")
     parts = score.get("parts") or []
     if part_id is not None:
         for idx, part in enumerate(parts):
             if part.get("part_id") == part_id:
                 return idx
-        raise ValueError(f"part_id not found in score: {part_id}")
+        # Orchestration resolves parser-visible IDs to the active score's
+        # execution index when the active score retains raw MusicXML IDs.
+        if part_index is None:
+            raise ValueError(f"part_id not found in score: {part_id}")
     if part_index is not None:
         return part_index
     for idx, part in enumerate(parts):

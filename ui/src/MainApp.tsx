@@ -2521,9 +2521,7 @@ export default function MainApp() {
                         ) : null}
                         {followupAttempts.map((attempt) => {
                           const attemptKey = `${msg.id}:attempt:${attempt.attempt_number}`;
-                          const attemptExpanded = Boolean(expandedThoughts[attemptKey]);
                           const attemptMessage = attempt.message?.trim() ?? "";
-                          const attemptThought = attempt.thought_summary?.trim() ?? "";
                           return (
                             <div key={attemptKey} className="attempt-block">
                               <div className="attempt-label">Attempt {attempt.attempt_number}</div>
@@ -2531,35 +2529,6 @@ export default function MainApp() {
                                 <ReactMarkdown className="chat-markdown" remarkPlugins={[remarkGfm]}>
                                   {attemptMessage}
                                 </ReactMarkdown>
-                              ) : null}
-                              {attemptThought ? (
-                                <div className="thought-summary">
-                                  <button
-                                    type="button"
-                                    className="thought-summary-toggle"
-                                    onClick={() => toggleThoughtSummary(attemptKey)}
-                                    aria-expanded={attemptExpanded}
-                                  >
-                                    <span
-                                      className={clsx(
-                                        "thought-summary-caret",
-                                        attemptExpanded && "expanded"
-                                      )}
-                                      aria-hidden="true"
-                                    >
-                                      ▾
-                                    </span>
-                                    <span>Thought summary</span>
-                                  </button>
-                                  {attemptExpanded ? (
-                                    <ReactMarkdown
-                                      className="chat-markdown thought-summary-content"
-                                      remarkPlugins={[remarkGfm]}
-                                    >
-                                      {attemptThought}
-                                    </ReactMarkdown>
-                                  ) : null}
-                                </div>
                               ) : null}
                             </div>
                           );
@@ -3330,6 +3299,32 @@ function appendPreprocessTerminalMessage(current: string, incoming?: string | nu
 function formatDiagnostics(details: unknown): string {
   if (details === null || details === undefined) return "";
   try {
+    if (typeof details === "object") {
+      const rawAttempts = (details as { attempt_messages?: unknown }).attempt_messages;
+      if (Array.isArray(rawAttempts)) {
+        const preprocessAttempts = rawAttempts
+          .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+          .map((entry) => {
+            const diagnostics = entry.diagnostics;
+            if (!diagnostics || typeof diagnostics !== "object") return null;
+            const diagnostic = diagnostics as {
+              planner_thinking?: unknown;
+              submitted_plan?: unknown;
+              execution_plan?: unknown;
+            };
+            return {
+              attempt_number: entry.attempt_number,
+              model_thinking: diagnostic.planner_thinking,
+              submitted_plan: diagnostic.submitted_plan,
+              execution_plan: diagnostic.execution_plan,
+            };
+          })
+          .filter((entry) => entry !== null);
+        if (preprocessAttempts.length > 0) {
+          return JSON.stringify({ preprocess_attempts: preprocessAttempts }, null, 2);
+        }
+      }
+    }
     return JSON.stringify(details, null, 2);
   } catch {
     return String(details);

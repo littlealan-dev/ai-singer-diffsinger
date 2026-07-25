@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 import ast
 import asyncio
+import hashlib
 import logging
 import copy
 import json
@@ -33,7 +34,7 @@ from src.backend.language_selection import (
     resolve_synthesis_language,
 )
 from src.backend.session import SessionStore
-from src.backend.storage_client import copy_blob, upload_file
+from src.backend.storage_client import copy_blob, upload_bytes, upload_file
 from src.api.audio import save_audio
 from src.api.voice_parts import (
     build_preprocessing_required_action,
@@ -1177,6 +1178,7 @@ class Orchestrator:
                 initial_thought_summary=initial_thought_summary,
                 user_id=user_id,
                 user_email=user_email,
+                preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
@@ -1393,6 +1395,7 @@ class Orchestrator:
         user_email: str,
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
+        preprocess_job_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1421,6 +1424,8 @@ class Orchestrator:
         attempt_number = 0
         max_attempts = max(1, self._settings.preprocess_max_attempts)
         attempt_messages: List[Dict[str, Any]] = []
+        preprocess_run_id = preprocess_job_id or f"interactive-{uuid.uuid4().hex}"
+        pending_thought_summary = initial_thought_summary or ""
         if any(call.name == "preprocess_voice_parts" for call in pending_calls):
             initial_attempt_entry = self._build_attempt_message_entry(
                 attempt_number=1,
@@ -1440,6 +1445,29 @@ class Orchestrator:
                 else None
             )
             attempted_plan = self._extract_preprocess_plan_from_tool_calls(pending_calls)
+            is_preprocess_attempt = any(
+                call.name == TOOL_PREPROCESS_VOICE_PARTS for call in pending_calls
+            )
+            attempt_diagnostics: Optional[Dict[str, Any]] = None
+            if is_preprocess_attempt:
+                # Keep the raw model output even if the executor process fails.
+                attempt_diagnostics = await self._persist_preprocess_attempt_artifacts(
+                    session_id=session_id,
+                    user_id=user_id,
+                    run_id=preprocess_run_id,
+                    job_id=preprocess_job_id,
+                    attempt_number=attempt_number,
+                    planner_thinking=pending_thought_summary,
+                    submitted_plan=attempted_plan,
+                    tool_result=None,
+                )
+                self._attach_attempt_diagnostics(
+                    attempt_messages,
+                    attempt_number=attempt_number,
+                    diagnostics=attempt_diagnostics,
+                )
+                if progress_callback is not None:
+                    await progress_callback(attempt_messages)
             tool_result = await self._execute_tool_calls(
                 session_id,
                 working_score,
@@ -1451,6 +1479,24 @@ class Orchestrator:
                 forced_voicebank_id=forced_voicebank_id,
                 forced_language=forced_language,
             )
+            if is_preprocess_attempt:
+                attempt_diagnostics = await self._persist_preprocess_attempt_artifacts(
+                    session_id=session_id,
+                    user_id=user_id,
+                    run_id=preprocess_run_id,
+                    job_id=preprocess_job_id,
+                    attempt_number=attempt_number,
+                    planner_thinking=pending_thought_summary,
+                    submitted_plan=attempted_plan,
+                    tool_result=tool_result,
+                )
+                self._attach_attempt_diagnostics(
+                    attempt_messages,
+                    attempt_number=attempt_number,
+                    diagnostics=attempt_diagnostics,
+                )
+                if progress_callback is not None:
+                    await progress_callback(attempt_messages)
             working_score = tool_result.score
             if tool_result.session_state_changed:
                 include_score = True
@@ -1576,6 +1622,7 @@ class Orchestrator:
                             )[0]
                         ),
                         used_bootstrap_plan_baseline=bootstrap_plan_baseline is not None,
+                        diagnostics=attempt_diagnostics,
                     ),
                 )
             response = tool_result.audio_response or {
@@ -1758,6 +1805,7 @@ class Orchestrator:
                     )[1],
                 )
                 pending_calls = list(repair_response.tool_calls)
+                pending_thought_summary = repair_response.thought_summary or ""
                 continue
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -1916,6 +1964,7 @@ class Orchestrator:
                 followup_response.tool_calls,
                 require_solfege_lyrics=require_solfege_lyrics,
             )
+            pending_thought_summary = followup_response.thought_summary or ""
 
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
@@ -3287,12 +3336,13 @@ class Orchestrator:
         replaced_best_invalid: bool,
         baseline_plan_source_for_next_repair: str,
         used_bootstrap_plan_baseline: bool,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build a lightweight persisted summary for one preprocess attempt."""
         payload = tool_result.action_required_payload if isinstance(tool_result.action_required_payload, dict) else None
         issue_entries = candidate.issues if candidate is not None else self._extract_issue_entries(payload or {})
         internal_error_reason = self._detect_followup_prompt_internal_error(tool_result)
-        return {
+        summary = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "attempt_number": attempt_number,
             "tool_names": [call.name for call in tool_calls],
@@ -3325,6 +3375,12 @@ class Orchestrator:
             "issue_domains": [str(issue.get("rule_domain") or "") for issue in issue_entries],
             **self._serialize_other_p1_measures(candidate.other_p1_measures if candidate is not None else 0),
         }
+        if isinstance(diagnostics, dict):
+            summary["diagnostic_run_id"] = diagnostics.get("run_id")
+            summary["diagnostic_artifacts"] = copy.deepcopy(
+                diagnostics.get("artifacts") or {}
+            )
+        return summary
 
     def _build_attempt_message_entry(
         self,
@@ -3344,6 +3400,166 @@ class Orchestrator:
         if thought:
             entry["thought_summary"] = thought
         return entry
+
+    def _attach_attempt_diagnostics(
+        self,
+        attempt_messages: List[Dict[str, Any]],
+        *,
+        attempt_number: int,
+        diagnostics: Dict[str, Any],
+    ) -> None:
+        """Attach attempt diagnostics to the matching UI and job-detail entry."""
+        for entry in attempt_messages:
+            if entry.get("attempt_number") == attempt_number:
+                entry["diagnostics"] = copy.deepcopy(diagnostics)
+                return
+        attempt_messages.append(
+            {
+                "attempt_number": attempt_number,
+                "diagnostics": copy.deepcopy(diagnostics),
+            }
+        )
+
+    async def _persist_preprocess_attempt_artifacts(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        run_id: str,
+        job_id: Optional[str],
+        attempt_number: int,
+        planner_thinking: str,
+        submitted_plan: Optional[Dict[str, Any]],
+        tool_result: Optional["ToolExecutionResult"],
+    ) -> Dict[str, Any]:
+        """Persist raw planner input and executor output for one preprocess attempt."""
+        local_dir = (
+            self._sessions.session_dir(session_id)
+            / "preprocess"
+            / run_id
+            / f"attempt-{attempt_number:03d}"
+        )
+        local_dir.mkdir(parents=True, exist_ok=True)
+        storage_prefix = _preprocess_attempt_storage_prefix(
+            user_id, session_id, run_id, attempt_number
+        )
+        execution = (
+            copy.deepcopy(tool_result.preprocess_execution)
+            if tool_result is not None
+            and isinstance(tool_result.preprocess_execution, dict)
+            else {}
+        )
+        execution_plan = execution.pop("execution_plan", None)
+        artifacts: Dict[str, Dict[str, Any]] = {}
+
+        async def store_bytes(
+            name: str, data: bytes, content_type: str
+        ) -> Dict[str, Any]:
+            path = local_dir / name
+            path.write_bytes(data)
+            record: Dict[str, Any] = {
+                "local_path": _relative_project_path(path, self._settings.project_root),
+                "storage_path": f"{storage_prefix}/{name}",
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "byte_size": len(data),
+                "storage_uploaded": False,
+            }
+            if self._settings.backend_use_storage:
+                try:
+                    await asyncio.to_thread(
+                        upload_bytes,
+                        self._settings.storage_bucket,
+                        data,
+                        record["storage_path"],
+                        content_type,
+                    )
+                    record["storage_uploaded"] = True
+                except Exception as exc:
+                    record["storage_error"] = str(exc)
+                    self._logger.warning(
+                        "preprocess_attempt_artifact_upload_failed session=%s job=%s attempt=%s artifact=%s error=%s",
+                        session_id,
+                        job_id,
+                        attempt_number,
+                        name,
+                        exc,
+                    )
+            return record
+
+        thinking_bytes = str(planner_thinking or "").encode("utf-8")
+        artifacts["planner_thinking"] = await store_bytes(
+            "planner_thinking.md", thinking_bytes, "text/markdown"
+        )
+        submitted_plan_copy = (
+            copy.deepcopy(submitted_plan) if isinstance(submitted_plan, dict) else None
+        )
+        artifacts["submitted_plan"] = await store_bytes(
+            "submitted_plan.json",
+            _json_artifact_bytes(submitted_plan_copy),
+            "application/json",
+        )
+        artifacts["execution_plan"] = await store_bytes(
+            "execution_plan.json",
+            _json_artifact_bytes(execution_plan),
+            "application/json",
+        )
+
+        derived_path_value = execution.get("modified_musicxml_path")
+        if isinstance(derived_path_value, str) and derived_path_value.strip():
+            derived_path = Path(derived_path_value)
+            if not derived_path.is_absolute():
+                derived_path = self._settings.project_root / derived_path
+            try:
+                derived_path = derived_path.resolve()
+                derived_path.relative_to(self._settings.project_root.resolve())
+                if derived_path.is_file():
+                    artifacts["derived_musicxml"] = await store_bytes(
+                        "derived_score.musicxml",
+                        derived_path.read_bytes(),
+                        "application/vnd.recordare.musicxml+xml",
+                    )
+                else:
+                    artifacts["derived_musicxml"] = {
+                        "source_path": str(derived_path),
+                        "missing": True,
+                    }
+            except (OSError, ValueError) as exc:
+                artifacts["derived_musicxml"] = {
+                    "source_path": str(derived_path_value),
+                    "error": str(exc),
+                }
+
+        result = {
+            "status": execution.get("status"),
+            "action": execution.get("action"),
+            "transform_id": execution.get("transform_id"),
+            "transform_hash": execution.get("transform_hash"),
+            "modified_musicxml_path": execution.get("modified_musicxml_path"),
+        }
+        manifest = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "job_id": job_id,
+            "attempt_number": attempt_number,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "result": result,
+            "artifacts": artifacts,
+        }
+        artifacts["attempt_manifest"] = await store_bytes(
+            "attempt_manifest.json", _json_artifact_bytes(manifest), "application/json"
+        )
+        return {
+            "attempt_number": attempt_number,
+            "run_id": run_id,
+            "planner_thinking": {
+                "content": str(planner_thinking or ""),
+                "note": "Model reasoning text; not an authoritative execution record.",
+            },
+            "submitted_plan": submitted_plan_copy,
+            "execution_plan": execution_plan,
+            "result": result,
+            "artifacts": artifacts,
+        }
 
     def _attach_attempt_messages(
         self,
@@ -3416,7 +3632,7 @@ class Orchestrator:
         if self._message_requests_sung_solfege(user_message):
             request["require_solfege_lyrics"] = True
 
-        target_keys = ("part_id", "part_index", "voice_id", "voice_part_id", "verse_number")
+        target_keys = ("part_id", "voice_id", "voice_part_id", "verse_number")
         synthesis_keys = (
             "voicebank",
             "language",
@@ -3448,6 +3664,7 @@ class Orchestrator:
                 "The request object states target and synthesis intent only; it is not an executable line-preparation plan.",
                 "Generate exactly one preprocess_voice_parts tool call.",
                 "Do not call synthesize in this planning turn.",
+                "Use split_coverage=selective only for an explicit user request for a particular lane, chord rank, or note subset. Otherwise, for each requested staff scope, use complete coverage and create all visible derived lanes required by that scope's maximum simultaneous note count.",
                 "Interpret other_instruction only as part-splitting/source-selection guidance for constructing a valid preprocess_voice_parts.request.plan.",
                 "Allowed other_instruction examples: take the lower note in each chord; use a named part/staff/voice as the melody or lyric source; use one source for some measures and another source for other measures; select a verse lyric line.",
                 "Disallowed other_instruction examples: transpose down an octave; change key; change tempo or rhythm; rewrite lyrics; change musical style; tune, mix, or process audio.",
@@ -5309,6 +5526,7 @@ class Orchestrator:
                 if result.get("status") in {"ready", "ready_with_warnings"} and isinstance(
                     result.get("score"), dict
                 ):
+                    preprocess_execution = _preprocess_execution_record(result)
                     current_score = self._mark_review_pending(result["score"], result)
                     await self._activate_preprocessed_score(
                         session_id,
@@ -5328,8 +5546,11 @@ class Orchestrator:
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response=None,
-                        followup_prompt=json.dumps(result, sort_keys=True),
+                        followup_prompt=json.dumps(
+                            _without_execution_plan(result), sort_keys=True
+                        ),
                         review_required=True,
+                        preprocess_execution=preprocess_execution,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 if result.get("status") == "action_required":
@@ -5346,19 +5567,26 @@ class Orchestrator:
                             session_id,
                             json.dumps(result.get("lint_findings", []), ensure_ascii=True, sort_keys=True),
                         )
+                    preprocess_execution = _preprocess_execution_record(result)
                     review_materialization = result.pop("review_materialization", None)
-                    followup_prompt = json.dumps(result, sort_keys=True)
+                    followup_prompt = json.dumps(_without_execution_plan(result), sort_keys=True)
                     return ToolExecutionResult(
                         score=current_score,
                         audio_response={"type": "chat_text", "message": ""},
                         followup_prompt=followup_prompt,
                         action_required_payload=result,
                         review_materialization=review_materialization,
+                        preprocess_execution=preprocess_execution,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 continue
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
+                synth_args = self._canonicalize_active_synthesis_target(
+                    synth_args,
+                    current_score=current_score,
+                    score_summary=score_summary,
+                )
                 target_error = self._validate_active_synthesis_target(
                     score_summary,
                     part_id=synth_args.get("part_id"),
@@ -5379,10 +5607,31 @@ class Orchestrator:
                         action_required_payload=target_error,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
-                synth_args = self._canonicalize_active_synthesis_target(
-                    synth_args,
-                    current_score=current_score,
+                resolved_part_index = self._resolve_synthesize_part_index(
+                    current_score,
+                    score_summary=score_summary,
+                    part_id=synth_args.get("part_id"),
+                    part_index=None,
                 )
+                if resolved_part_index < 0:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={
+                            "type": "chat_error",
+                            "message": "The selected score part is unavailable for synthesis.",
+                        },
+                        action_required_payload={
+                            "status": "action_required",
+                            "action": "target_not_found",
+                            "code": "target_not_found",
+                            "message": "The selected score part is unavailable for synthesis.",
+                        },
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                # Public tool arguments remain identified by part_id. The execution
+                # layer receives this resolved index because it operates on the
+                # active score representation, which can retain raw MusicXML IDs.
+                synth_args["part_index"] = resolved_part_index
                 if self._tool_calls_require_verse_selection(
                     [call],
                     score=current_score,
@@ -5798,6 +6047,7 @@ class Orchestrator:
         *,
         part_id: Optional[str],
         part_index: Optional[int],
+        score_summary: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Resolve part index for synth prechecks."""
         parts = score.get("parts") or []
@@ -5805,13 +6055,36 @@ class Orchestrator:
             selector = str(part_id).strip()
             for idx, part in enumerate(parts):
                 current_part_id = str(part.get("part_id") or "").strip()
-                if current_part_id == selector:
+                raw_part_id = str(part.get("raw_part_id") or "").strip()
+                if current_part_id == selector or raw_part_id == selector:
                     return idx
-                if (
-                    current_part_id.startswith("P_DERIVED_")
-                    and selector.startswith(f"{current_part_id}-")
-                ):
-                    return idx
+            summary_parts = (
+                score_summary.get("parts") if isinstance(score_summary, dict) else None
+            )
+            if isinstance(summary_parts, list):
+                summary_match = next(
+                    (
+                        summary_part
+                        for summary_part in summary_parts
+                        if isinstance(summary_part, dict)
+                        and str(summary_part.get("part_id") or "").strip() == selector
+                    ),
+                    None,
+                )
+                raw_part_id = (
+                    str(summary_match.get("raw_part_id") or "").strip()
+                    if isinstance(summary_match, dict)
+                    else ""
+                )
+                if raw_part_id:
+                    for idx, part in enumerate(parts):
+                        if not isinstance(part, dict):
+                            continue
+                        if raw_part_id in {
+                            str(part.get("part_id") or "").strip(),
+                            str(part.get("raw_part_id") or "").strip(),
+                        }:
+                            return idx
         if isinstance(part_index, int):
             return part_index
         if part_id is not None:
@@ -5882,25 +6155,29 @@ class Orchestrator:
         arguments: Dict[str, Any],
         *,
         current_score: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Normalize parsed MusicXML staff IDs back to active score selectors."""
+        """Normalize legacy indices to the public parser-visible part ID."""
         normalized = dict(arguments)
+        part_id = normalized.get("part_id")
+        if isinstance(part_id, str) and part_id.strip():
+            normalized.pop("part_index", None)
+            return normalized
         part_index = normalized.get("part_index")
-        if isinstance(part_index, int) and not isinstance(part_index, bool):
+        if not isinstance(part_index, int) or isinstance(part_index, bool):
             return normalized
-        raw_part_id = normalized.get("part_id")
-        if raw_part_id is None:
-            return normalized
-
-        selector = str(raw_part_id).strip()
-        resolved_index = self._resolve_synthesize_part_index(
-            current_score,
-            part_id=selector,
-            part_index=None,
+        summary_parts = (
+            score_summary.get("parts") if isinstance(score_summary, dict) else None
         )
-        if resolved_index >= 0:
-            normalized.pop("part_id", None)
-            normalized["part_index"] = resolved_index
+        if (
+            isinstance(summary_parts, list)
+            and 0 <= part_index < len(summary_parts)
+            and isinstance(summary_parts[part_index], dict)
+        ):
+            resolved_part_id = str(summary_parts[part_index].get("part_id") or "").strip()
+            if resolved_part_id:
+                normalized["part_id"] = resolved_part_id
+                normalized.pop("part_index", None)
         return normalized
 
     def _resolve_named_part_index(
@@ -5978,6 +6255,24 @@ class Orchestrator:
                     }
             return {"source_part_index": part_index}
 
+        def _lookup_derived_part(
+            part_index: int, raw_part_id: str
+        ) -> Optional[Dict[str, Any]]:
+            raw_matches = [
+                part
+                for part in summary_parts
+                if str(part.get("raw_part_id") or "").strip() == raw_part_id
+            ]
+            if len(raw_matches) == 1:
+                return raw_matches[0]
+            index_matches = [
+                part
+                for part in summary_parts
+                if isinstance(part.get("part_index"), int)
+                and part["part_index"] == part_index
+            ]
+            return index_matches[0] if len(index_matches) == 1 else None
+
         targets: List[Dict[str, Any]] = []
         seen = set()
         if isinstance(transforms, dict):
@@ -5992,17 +6287,41 @@ class Orchestrator:
                 derived_part_index = appended_ref.get("part_index")
                 if not isinstance(derived_part_index, int):
                     continue
-                derived_part_id = str(appended_ref.get("part_id") or "").strip()
-                derived_part_name = str(appended_ref.get("part_name") or "").strip()
+                raw_derived_part_id = str(appended_ref.get("part_id") or "").strip()
+                derived_summary = _lookup_derived_part(
+                    derived_part_index, raw_derived_part_id
+                )
+                derived_part_id = str(
+                    (derived_summary or {}).get("part_id") or raw_derived_part_id
+                ).strip()
+                derived_part_name = str(
+                    (derived_summary or {}).get("part_name")
+                    or appended_ref.get("part_name")
+                    or ""
+                ).strip()
+                derived_part_raw_id = str(
+                    (derived_summary or {}).get("raw_part_id") or raw_derived_part_id
+                ).strip()
+                summary_part_index = (derived_summary or {}).get("part_index")
+                if isinstance(summary_part_index, int):
+                    derived_part_index = summary_part_index
                 target_voice_part_id = str(value.get("target_voice_part_id") or "").strip()
                 source_part_index = value.get("source_part_index")
                 source_voice_part_id = str(value.get("source_voice_part_id") or "").strip()
+                derived_lane = value.get("derived_lane")
+                derived_lane_id = (
+                    str(derived_lane.get("derived_lane_id") or "").strip()
+                    if isinstance(derived_lane, dict)
+                    else ""
+                )
                 key = (
                     derived_part_index,
                     derived_part_id,
+                    derived_part_raw_id,
                     target_voice_part_id,
                     source_part_index if isinstance(source_part_index, int) else None,
                     source_voice_part_id,
+                    derived_lane_id,
                 )
                 if key in seen:
                     continue
@@ -6010,8 +6329,10 @@ class Orchestrator:
                 entry: Dict[str, Any] = {
                     "derived_part_index": derived_part_index,
                     "derived_part_id": derived_part_id or None,
+                    "derived_part_raw_id": derived_part_raw_id or None,
                     "derived_part_name": derived_part_name or None,
                     "target_voice_part_id": target_voice_part_id or None,
+                    "derived_lane_id": derived_lane_id or None,
                 }
                 entry.update(_lookup_source_part(source_part_index if isinstance(source_part_index, int) else None))
                 if source_voice_part_id:
@@ -6022,6 +6343,7 @@ class Orchestrator:
             key=lambda item: (
                 int(item.get("derived_part_index", -1)),
                 str(item.get("target_voice_part_id") or ""),
+                str(item.get("derived_lane_id") or ""),
                 str(item.get("derived_part_id") or ""),
             )
         )
@@ -6062,6 +6384,7 @@ class Orchestrator:
                     "derived_part_index": target.get("derived_part_index"),
                     "derived_part_id": target.get("derived_part_id"),
                     "target_voice_part_id": target.get("target_voice_part_id"),
+                    "derived_lane_id": target.get("derived_lane_id"),
                     "source_part_index": target.get("source_part_index"),
                     "source_voice_part_id": target.get("source_voice_part_id"),
                 }
@@ -6079,6 +6402,7 @@ class ToolExecutionResult:
     review_materialization: Optional[Dict[str, Any]] = None
     explicit_verse_number: Optional[str] = None
     session_state_changed: bool = False
+    preprocess_execution: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -6126,6 +6450,49 @@ def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: 
     """Build the storage path for job input files."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/input{safe_suffix}"
+
+
+def _preprocess_attempt_storage_prefix(
+    user_id: str, session_id: str, run_id: str, attempt_number: int
+) -> str:
+    """Build the object-storage prefix for one preprocess diagnostic bundle."""
+    return (
+        f"sessions/{user_id}/{session_id}/preprocess/{run_id}/"
+        f"attempt-{attempt_number:03d}"
+    )
+
+
+def _json_artifact_bytes(value: Any) -> bytes:
+    """Serialize a diagnostic artifact deterministically for integrity checks."""
+    payload = json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+    return payload.encode("utf-8")
+
+
+def _relative_project_path(path: Path, project_root: Path) -> str:
+    """Return a stable project-relative path for stored diagnostic metadata."""
+    try:
+        return str(path.resolve().relative_to(project_root.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def _preprocess_execution_record(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the executor fields needed for an attempt audit without retaining the score."""
+    return {
+        "status": result.get("status"),
+        "action": result.get("action"),
+        "transform_id": result.get("transform_id"),
+        "transform_hash": result.get("transform_hash"),
+        "modified_musicxml_path": result.get("modified_musicxml_path"),
+        "execution_plan": copy.deepcopy(result.get("execution_plan")),
+    }
+
+
+def _without_execution_plan(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove audit-only plan data from normal LLM follow-up context."""
+    payload = dict(result)
+    payload.pop("execution_plan", None)
+    return payload
 
 
 def _job_storage_output_path(

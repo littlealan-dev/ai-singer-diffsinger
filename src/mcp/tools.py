@@ -114,12 +114,40 @@ _LYRIC_VERSE_SUMMARY_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_LYRIC_SELECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Exact lyric-line identity used for later synthesis selection.",
+    "properties": {
+        "id": {"type": "string", "description": "Stable lyric-line identifier."},
+        "number": {"type": "string", "description": "MusicXML lyric verse number."},
+        "name": {"type": "string", "description": "MusicXML lyric name."},
+        "sample": {
+            "type": "array",
+            "description": "Bounded lyric token sample for UI and planning context.",
+            "items": {"type": "string"},
+        },
+        "is_generated_solfege": {
+            "type": "boolean",
+            "description": "Whether SightSinger generated this solfege lyric line.",
+        },
+    },
+    "required": ["id", "number", "name"],
+    "additionalProperties": False,
+}
+
 _SCORE_SUMMARY_PART_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "description": "Static metadata and lyric samples for one score part.",
     "properties": {
         "part_index": {"type": "integer", "description": "0-based score part index."},
-        "part_id": {"type": "string", "description": "MusicXML part id."},
+        "part_id": {
+            "type": "string",
+            "description": "Exact parser-visible part ID used for public selection.",
+        },
+        "raw_part_id": {
+            "type": "string",
+            "description": "Backing raw MusicXML part ID for backend provenance; do not use as a selector.",
+        },
         "part_name": {"type": ["string", "null"], "description": "MusicXML part name."},
         "has_lyrics": {"type": "boolean", "description": "Whether the part has lyric text."},
         "note_count": {"type": "integer", "description": "Count of non-rest notes."},
@@ -128,14 +156,21 @@ _SCORE_SUMMARY_PART_SCHEMA: Dict[str, Any] = {
             "description": "Available lyric verses and their bounded initial samples.",
             "items": _LYRIC_VERSE_SUMMARY_SCHEMA,
         },
+        "lyric_selections": {
+            "type": "array",
+            "description": "Exact selectable lyric lines for this parser-visible part.",
+            "items": _LYRIC_SELECTION_SCHEMA,
+        },
     },
     "required": [
         "part_index",
         "part_id",
+        "raw_part_id",
         "part_name",
         "has_lyrics",
         "note_count",
         "lyric_verses",
+        "lyric_selections",
     ],
     "additionalProperties": False,
 }
@@ -325,24 +360,24 @@ _PREPROCESS_PLAN_VOICE_REF_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "description": "Reference to a specific lane in parsed score analysis.",
     "properties": {
-        "part_index": {
-            "type": "integer",
-            "minimum": 0,
+        "part_id": {
+            "type": "string",
+            "minLength": 1,
             "description": (
-                "0-based index of the source/target part in parsed score.parts. "
-                "Use score_summary/voice_part_signals to select this value."
+                "Exact parser-visible score_summary.parts[].part_id for the source lane. "
+                "Do not use part_name, raw_part_id, or a positional index."
             ),
         },
         "voice_part_id": {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Normalized lane id within part_index (e.g., soprano/alto/voice part 1). "
+                "Normalized lane id within part_id (e.g., soprano/alto/voice part 1). "
                 "Must match available voice_part_signals for that part."
             ),
         },
     },
-    "required": ["part_index", "voice_part_id"],
+    "required": ["part_id", "voice_part_id"],
     "additionalProperties": False,
 }
 
@@ -461,21 +496,39 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
 _PREPROCESS_PLAN_REQUEST_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "description": (
-        "Top-level preprocess plan. Use one or more targets; each target defines "
-        "explicit timeline sections for derive/rest decisions."
+        "Top-level full-song preprocess plan. Each target defines an existing source, "
+        "an executor-owned output lane operation, and timeline sections."
     ),
     "properties": {
         "targets": {
             "type": "array",
             "minItems": 1,
-            "description": "List of target lanes to derive. Executed sequentially.",
+            "description": "List of derived outputs. Targets may share a source when their output lanes are distinct.",
             "items": {
                 "type": "object",
-                "description": "Plan entry for one target lane.",
+                "description": "Plan entry for one derived output lane.",
                 "properties": {
-                    "target": {
+                    "source": {
                         **_PREPROCESS_PLAN_VOICE_REF_SCHEMA,
-                        "description": "Lane to materialize as derived output.",
+                        "description": "Existing parser source lane. Never invent a source voice_part_id.",
+                    },
+                    "output": {
+                        "type": "object",
+                        "description": "Executor-owned derived lane operation. Do not provide a name, ordinal, or MusicXML id.",
+                        "properties": {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["append_new_derived_lane", "update_existing_derived_lane"],
+                            },
+                            "derived_lane_id": {"type": "string"},
+                        },
+                        "required": ["mode"],
+                        "additionalProperties": False,
+                    },
+                    "split_coverage": {
+                        "type": "string",
+                        "enum": ["complete", "selective"],
+                        "description": "complete requires simultaneous source notes to be covered by distinct outputs; selective prepares only requested ranks.",
                     },
                     "sections": {
                         "type": "array",
@@ -515,7 +568,7 @@ _PREPROCESS_PLAN_REQUEST_SCHEMA: Dict[str, Any] = {
                         "description": "Optional planner notes for debugging/audit.",
                     },
                 },
-                "required": ["target", "sections"],
+                "required": ["source", "output", "split_coverage", "sections"],
                 "additionalProperties": False,
             },
         }
@@ -945,6 +998,11 @@ _PREPROCESS_TARGET_RESULT_SCHEMA: Dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Target voice-part id for this target result.",
         },
+        "derived_lane": {
+            "type": ["object", "null"],
+            "description": "Executor-owned identity for the derived output lane, including its stable derived_lane_id.",
+            "additionalProperties": True,
+        },
         "transform_id": {
             "type": ["string", "null"],
             "description": "Transform id for this target when materialized or reconstructed.",
@@ -1094,6 +1152,24 @@ _PREPROCESS_OUTPUT_SCHEMA: Dict[str, Any] = {
         "reason": {
             "type": ["string", "null"],
             "description": "Optional machine-readable reason describing why action is required.",
+        },
+        "phase": {
+            "type": ["string", "null"],
+            "description": "Repair phase for action-required preprocess results.",
+        },
+        "failure_origin": {
+            "type": ["string", "null"],
+            "description": "Whether a failure came from the submitted plan or executor materialization.",
+        },
+        "repair_scope": {
+            "type": ["object", "null"],
+            "description": "Scope that may change in a replacement full-song plan after a preflight lint failure.",
+            "additionalProperties": True,
+        },
+        "findings": {
+            "type": "array",
+            "description": "Structured executor postflight findings when derived-lane materialization fails.",
+            "items": {"type": "object", "additionalProperties": True},
         },
         "diagnostics": {
             "type": "object",
@@ -1350,14 +1426,6 @@ TOOLS: List[Tool] = [
                     "type": "string",
                     "description": "Path to the MusicXML file to parse.",
                 },
-                "part_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional MusicXML part id to focus parsing on one part.",
-                },
-                "part_index": {
-                    "type": ["integer", "null"],
-                    "description": "Optional 0-based part index to focus parsing on one part.",
-                },
                 "verse_number": {
                     "type": ["integer", "string", "null"],
                     "description": (
@@ -1396,14 +1464,6 @@ TOOLS: List[Tool] = [
         input_schema={
             "type": "object",
             "properties": {
-                "part_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional MusicXML part id to select on reparse.",
-                },
-                "part_index": {
-                    "type": ["integer", "null"],
-                    "description": "Optional 0-based part index to select on reparse.",
-                },
                 "verse_number": {
                     "type": ["integer", "string", "null"],
                     "description": (
@@ -1427,8 +1487,8 @@ TOOLS: List[Tool] = [
             "Add deterministic solfege to exactly one selected clean part as a new generated lyric "
             "verse. One invocation never modifies any other part; multiple requested parts require "
             "one successful invocation per part. "
-            "Select it with the exact part_id copied from score_summary.parts[].part_id, or with "
-            "part_index. Do not pass part_name as part_id. Backend injects source/output paths "
+            "Select it with the exact part_id copied from score_summary.parts[].part_id. "
+            "Do not pass part_name as part_id. Backend injects source/output paths "
             "and canonical solfege settings."
         ),
         input_schema={
@@ -1438,19 +1498,10 @@ TOOLS: List[Tool] = [
                 "output_musicxml_path": {"type": "string"},
                 "settings": {"type": "object"},
                 "part_id": {
-                    "type": ["string", "null"],
+                    "type": "string",
                     "description": (
                         "Exact identifier copied verbatim from score_summary.parts[].part_id. "
-                        "This is not part_name; never pass the display name or user-facing label here. "
-                        "Use part_index instead if the exact part_id is unavailable or uncertain."
-                    ),
-                },
-                "part_index": {
-                    "type": ["integer", "null"],
-                    "minimum": 0,
-                    "description": (
-                        "Exact 0-based score_summary.parts[] index. Use this instead of guessing "
-                        "part_id from part_name."
+                        "This is not part_name; never pass the display name or user-facing label here."
                     ),
                 },
                 "reason": {
@@ -1458,29 +1509,7 @@ TOOLS: List[Tool] = [
                     "description": "Short reason the user needs a generated solfege verse.",
                 },
             },
-            "oneOf": [
-                {
-                    "required": ["part_id"],
-                    "properties": {
-                        "part_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": (
-                                "Exact score_summary.parts[].part_id value, not part_name."
-                            ),
-                        },
-                        "part_index": {"type": "null"},
-                    },
-                },
-                {
-                    "required": ["part_index"],
-                    "properties": {
-                        "part_index": {"type": "integer", "minimum": 0},
-                        "part_id": {"type": "null"},
-                    },
-                },
-            ],
-            "required": ["reason"],
+            "required": ["part_id", "reason"],
             "additionalProperties": False,
         },
         output_schema={
@@ -1620,12 +1649,12 @@ TOOLS: List[Tool] = [
                     ),
                     "properties": {
                         "part_id": {
-                            "type": ["string", "null"],
-                            "description": "Exact MusicXML part id requested by the user.",
-                        },
-                        "part_index": {
-                            "type": ["integer", "null"],
-                            "description": "0-based score.parts index requested by the user.",
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Exact parser-visible score_summary.parts[].part_id requested by "
+                                "the user. Do not use part_name, raw_part_id, or a positional index."
+                            ),
                         },
                         "voice_id": {
                             "type": ["string", "null"],
@@ -1733,11 +1762,7 @@ TOOLS: List[Tool] = [
                             ),
                         },
                     },
-                    "required": ["reason"],
-                    "oneOf": [
-                        {"required": ["part_id"]},
-                        {"required": ["part_index"]},
-                    ],
+                    "required": ["part_id", "reason"],
                     "additionalProperties": False,
                 },
             },
@@ -1814,12 +1839,11 @@ TOOLS: List[Tool] = [
                     ),
                 },
                 "part_id": {
-                    "type": ["string", "null"],
-                    "description": "Exact MusicXML/derived part id to synthesize. Use exactly one of part_id or part_index.",
-                },
-                "part_index": {
-                    "type": ["integer", "null"],
-                    "description": "0-based score.parts index to synthesize. Use exactly one of part_id or part_index.",
+                    "type": "string",
+                    "description": (
+                        "Exact parser-visible score_summary.parts[].part_id. "
+                        "Do not use part_name, raw_part_id, or a positional index."
+                    ),
                 },
                 "voice_id": {
                     "type": ["string", "null"],
@@ -1836,10 +1860,6 @@ TOOLS: List[Tool] = [
                 "source_voice_part_id": {
                     "type": ["string", "null"],
                     "description": "Optional source voice-part id hint for lyric propagation or derived-target reuse.",
-                },
-                "source_part_index": {
-                    "type": ["integer", "null"],
-                    "description": "Optional source part index hint for lyric propagation or derived-target reuse.",
                 },
                 "lyric_selection": {
                     "type": "object",
@@ -1930,11 +1950,7 @@ TOOLS: List[Tool] = [
                     ),
                 },
             },
-            "required": ["score", "language", "lyric_selection"],
-            "oneOf": [
-                {"required": ["part_id"]},
-                {"required": ["part_index"]},
-            ],
+            "required": ["score", "language", "lyric_selection", "part_id"],
             "additionalProperties": False,
         },
         output_schema=_SYNTH_OUTPUT_SCHEMA,

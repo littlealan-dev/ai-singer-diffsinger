@@ -9,9 +9,13 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 from xml.etree import ElementTree
 
-from music21 import chord, converter, harmony, note, stream, tempo
+from music21 import chord, harmony, note, stream, tempo
 
 from src.musicxml.io import read_musicxml_content
+from src.musicxml.part_reference import (
+    load_musicxml_score,
+    map_parser_part_indices_to_raw_part_ids,
+)
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 
@@ -50,8 +54,10 @@ class NoteEvent:
 class PartData:
     """Parsed part with its metadata and note events."""
     part_id: str
+    raw_part_id: Optional[str]
     part_name: Optional[str]
     notes: Sequence[NoteEvent]
+
 
 
 @dataclass(frozen=True)
@@ -81,13 +87,17 @@ def parse_musicxml(
     keep_rests: when True, rest events are included alongside notes.
     """
     source_path = Path(path)
-    score = _load_musicxml_score(source_path)
+    score = load_musicxml_score(source_path)
+    raw_lyric_selections = _raw_lyric_selections(source_path)
     selected_raw_part_ids = _validate_lyric_selection(
-        _raw_lyric_selections(source_path), lyric_selection
+        raw_lyric_selections, lyric_selection
     )
-    raw_part_ids = list(_raw_lyric_selections(source_path))
+    raw_part_ids_by_index = map_parser_part_indices_to_raw_part_ids(
+        source_path, score=score
+    )
     selected_part_indices = {
-        index for index, raw_part_id in enumerate(raw_part_ids)
+        index
+        for index, raw_part_id in raw_part_ids_by_index.items()
         if selected_raw_part_ids is not None and raw_part_id in selected_raw_part_ids
     }
     raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
@@ -101,6 +111,7 @@ def parse_musicxml(
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
         raw_single_voice_fallback=raw_single_voice_fallback,
+        raw_part_ids_by_index=raw_part_ids_by_index,
     )
 
 
@@ -116,15 +127,22 @@ def parse_musicxml_with_summary(
 ) -> tuple[ScoreData, Dict[str, Any]]:
     """Parse MusicXML and return both score data and a summary dict."""
     source_path = Path(path)
-    score = _load_musicxml_score(source_path)
+    score = load_musicxml_score(source_path)
     raw_lyric_selections = _raw_lyric_selections(source_path)
-    summary = _summarize_score(score, raw_lyric_selections=raw_lyric_selections)
+    raw_part_ids_by_index = map_parser_part_indices_to_raw_part_ids(
+        source_path, score=score
+    )
+    summary = _summarize_score(
+        score,
+        raw_lyric_selections=raw_lyric_selections,
+        raw_part_ids_by_index=raw_part_ids_by_index,
+    )
     selected_raw_part_ids = _validate_lyric_selection(
         raw_lyric_selections, lyric_selection
     )
-    raw_part_ids = list(raw_lyric_selections)
     selected_part_indices = {
-        index for index, raw_part_id in enumerate(raw_part_ids)
+        index
+        for index, raw_part_id in raw_part_ids_by_index.items()
         if selected_raw_part_ids is not None and raw_part_id in selected_raw_part_ids
     }
     raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
@@ -143,6 +161,7 @@ def parse_musicxml_with_summary(
         lyrics_only=lyrics_only,
         keep_rests=keep_rests,
         raw_single_voice_fallback=raw_single_voice_fallback,
+        raw_part_ids_by_index=raw_part_ids_by_index,
     )
     return score_data, summary
 
@@ -156,6 +175,7 @@ def _parse_score(
     lyrics_only: bool,
     keep_rests: bool,
     raw_single_voice_fallback: Optional[Dict[str, Dict[str, str]]] = None,
+    raw_part_ids_by_index: Optional[Dict[int, str]] = None,
     lyric_selection: Optional[Dict[str, str]] = None,
     lyric_selection_part_indices: Optional[set[int]] = None,
 ) -> ScoreData:
@@ -173,6 +193,12 @@ def _parse_score(
     original_part_indices = {id(part): index for index, part in enumerate(score.parts)}
     for part in selected_parts:
         part_id_value = str(part.id) if part.id is not None else ""
+        orig_index = original_part_indices.get(id(part))
+        raw_part_id_value = (
+            raw_part_ids_by_index.get(orig_index)
+            if raw_part_ids_by_index is not None and orig_index is not None
+            else part_id_value
+        )
         part_name_value = str(part.partName or "").strip()
         fallback_voice: Optional[str] = None
         if isinstance(raw_single_voice_fallback, dict):
@@ -198,21 +224,13 @@ def _parse_score(
         parts.append(
             PartData(
                 part_id=part_id_value,
+                raw_part_id=raw_part_id_value,
                 part_name=part.partName,
                 notes=part_events,
             )
         )
     title = score.metadata.title if score.metadata else None
     return ScoreData(title=title, tempos=tempos, parts=parts)
-
-
-def _load_musicxml_score(path: str | Path) -> stream.Score:
-    """Load MusicXML via a shared bounded reader for .mxl archives."""
-    source_path = Path(path)
-    if source_path.suffix.lower() != ".mxl":
-        return converter.parse(str(source_path))
-    content = read_musicxml_content(source_path)
-    return converter.parseData(content, format="musicxml")
 
 
 def _select_parts(
@@ -281,6 +299,7 @@ def _summarize_score(
     score: stream.Score,
     *,
     raw_lyric_selections: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    raw_part_ids_by_index: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
     """Summarize metadata, parts, and lyric verses for a score."""
     metadata = score.metadata
@@ -322,10 +341,12 @@ def _summarize_score(
         if lyric_numbers:
             available_verses.update(lyric_numbers)
 
+        raw_part_id = (raw_part_ids_by_index or {}).get(index, str(part.id) if part.id is not None else "")
         parts_summary.append(
             {
                 "part_index": index,
                 "part_id": str(part.id) if part.id is not None else "",
+                "raw_part_id": raw_part_id,
                 "part_name": part.partName,
                 "is_derived_part": _is_derived_part(part),
                 "has_lyrics": bool(lyric_numbers),
@@ -341,8 +362,8 @@ def _summarize_score(
                     for verse_number in sorted(lyric_numbers, key=_lyric_sort_key)
                 ],
                 "lyric_selections": list(
-                    list((raw_lyric_selections or {}).values())[index]
-                    if index < len(raw_lyric_selections or {})
+                    (raw_lyric_selections or {}).get(raw_part_id, [])
+                    if lyric_numbers
                     else []
                 ),
             }

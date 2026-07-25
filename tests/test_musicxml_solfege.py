@@ -6,6 +6,7 @@ from xml.etree import ElementTree
 from src.api.score import parse_score
 from src.musicxml.solfege import (
     GENERATED_LYRIC_NAME,
+    GENERATED_LYRIC_NUMBER,
     add_solfege_lyric_verse,
     modify_generated_solfege_verses,
 )
@@ -55,7 +56,7 @@ def test_add_movable_major_uses_key_tonic_and_preserves_existing_lyrics(tmp_path
     result = add_solfege_lyric_verse(source, output, part_id="Soprano")
 
     assert result["status"] == "ready"
-    assert result["new_verse_number"] == "2"
+    assert result["new_verse_number"] == GENERATED_LYRIC_NUMBER
     assert _lyrics(output, name=GENERATED_LYRIC_NAME) == ["do", "re", "mi", "fa", "so"]
     assert _lyrics(output)[:5] == ["one", "do", "two", "re", "three"]
     parsed = parse_score(output, verse_number="2")
@@ -124,7 +125,12 @@ def test_modify_rewrites_generated_verse_to_fixed_do_only(tmp_path: Path) -> Non
     )
 
     assert result["updated_generated_verses"] == [
-        {"part_id": "P1", "part_index": 0, "verse_number": "2", "notes_updated": 5}
+        {
+            "part_id": "P1",
+            "part_index": 0,
+            "verse_number": GENERATED_LYRIC_NUMBER,
+            "notes_updated": 5,
+        }
     ]
     assert _lyrics(output, name=GENERATED_LYRIC_NAME) == ["so", "la", "ti", "do", "re"]
     assert [value for value in _lyrics(output) if value in {"one", "two", "three", "four", "five"}] == [

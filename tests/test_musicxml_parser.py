@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 
 from src.musicxml import parse_musicxml
+from src.musicxml.part_reference import resolve_part_reference
 from src.musicxml.parser import parse_musicxml_with_summary
 
 
@@ -297,6 +298,74 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(len(score.parts), 1)
         voices = {event.voice for event in score.parts[0].notes}
         self.assertEqual(voices, {"1", "2"})
+
+    def test_lyric_selection_maps_derived_parts_after_staff_expansion(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Piano</part-name></score-part>
+    <score-part id="P_DERIVED_1"><part-name>Soprano - voice part 1 (Derived)</part-name></score-part>
+    <score-part id="P_DERIVED_2"><part-name>Soprano - voice part 2 (Derived)</part-name></score-part>
+  </part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>source</text></lyric></note></measure></part>
+  <part id="P2"><measure number="1"><attributes><divisions>1</divisions><staves>2</staves><time><beats>1</beats><beat-type>4</beat-type></time><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><staff>1</staff></note><backup><duration>1</duration></backup><note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type><staff>2</staff><lyric><text>piano</text></lyric></note></measure></part>
+  <part id="P_DERIVED_1"><measure number="1"><attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>high</text></lyric></note></measure></part>
+  <part id="P_DERIVED_2"><measure number="1"><attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>B</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>low</text></lyric></note></measure></part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "derived-with-piano.xml"
+            path.write_text(xml, encoding="utf-8")
+            _parsed, summary = parse_musicxml_with_summary(path)
+            derived_index = next(
+                index
+                for index, part in enumerate(summary["parts"])
+                if part["part_name"] == "Soprano - voice part 2 (Derived)"
+            )
+            selection = summary["parts"][derived_index]["lyric_selections"][0]
+            selected = parse_musicxml(path, lyric_selection=selection, lyrics_only=False)
+            reference = resolve_part_reference(
+                source_path=path, part_id=summary["parts"][derived_index]["part_id"]
+            )
+            with self.assertRaises(ValueError):
+                resolve_part_reference(source_path=path, part_id="P_DERIVED_2")
+
+        self.assertEqual(summary["parts"][derived_index]["raw_part_id"], "P_DERIVED_2")
+        self.assertEqual(selected.parts[derived_index].raw_part_id, "P_DERIVED_2")
+        self.assertEqual(selection["number"], "1")
+        self.assertEqual(
+            [event.lyric for event in selected.parts[derived_index].notes], ["low"]
+        )
+        self.assertEqual(reference.raw_part_id, "P_DERIVED_2")
+        self.assertEqual(reference.raw_part_index, 3)
+        self.assertEqual(reference.parser_part_index, derived_index)
+
+    def test_part_reference_maps_expanded_part_without_unique_name(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P5"><part-name>Keyboard</part-name></score-part>
+    <score-part id="P9"><part-name>Keyboard</part-name></score-part>
+  </part-list>
+  <part id="P5"><measure number="1"><attributes><divisions>1</divisions><staves>2</staves><time><beats>1</beats><beat-type>4</beat-type></time><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><staff>1</staff></note><backup><duration>1</duration></backup><note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type><staff>2</staff></note></measure></part>
+  <part id="P9"><measure number="1"><attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure></part>
+</score-partwise>"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "duplicate-names.xml"
+            path.write_text(xml, encoding="utf-8")
+            parsed = parse_musicxml(path, lyrics_only=False)
+            expanded_index = next(
+                index
+                for index, part in enumerate(parsed.parts)
+                if part.part_id != "P5" and part.part_id.startswith("P5")
+            )
+            reference = resolve_part_reference(
+                source_path=path, part_id=parsed.parts[expanded_index].part_id
+            )
+
+        self.assertEqual(reference.raw_part_id, "P5")
+        self.assertEqual(reference.parser_part_index, expanded_index)
 
 
 if __name__ == "__main__":

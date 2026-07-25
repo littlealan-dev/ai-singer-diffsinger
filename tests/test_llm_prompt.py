@@ -180,6 +180,29 @@ def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() ->
     )
     assert '"phase": "preprocess_repair_planning"' in prompt
     assert "must return exactly one `preprocess_voice_parts` tool call" in prompt
+    assert '"phase": "preprocess_postflight_repair"' in prompt
+    assert "do not retry the submitted plan" in prompt
+    assert "update_existing_derived_lane" in prompt
+
+
+def test_build_system_prompt_requires_complete_staff_scope_coverage_by_default() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="preprocess",
+    )
+
+    assert "selective` is allowed only when the user explicitly requests" in prompt
+    assert "each staff scope" in prompt
+    assert "maximum simultaneous note count" in prompt
+    assert "when the user asks to split a source/staff completely" not in prompt
 
 
 def test_build_system_prompt_includes_message_only_followup_contract() -> None:
@@ -374,7 +397,7 @@ def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> Non
     assert "Solfege lyric selection" in prompt
     assert "existing clearly solfege selection" in prompt
     assert "copy the exact `score_summary.parts[].part_id` value" in prompt
-    assert "Never put `part_name`" in prompt
+    assert "Never use part_index, raw_part_id, part_name" in prompt
     assert "One `add_solfege_lyric_verse` invocation modifies exactly one part" in prompt
     assert "successful tool result explicitly identifies that part" in prompt
     assert "`score_summary.parts[].lyric_selections[]`" in prompt

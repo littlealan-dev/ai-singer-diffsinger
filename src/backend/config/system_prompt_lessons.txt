@@ -10,14 +10,16 @@ Scope
 - Assume parser facts are already available in session context (`score_summary` and `voice_part_signals`).
 
 Hard Rules
-1. Voice identity must be explicit as `(part_index, voice_part_id)`.
+1. Source voice identity must be explicit as `(part_id, voice_part_id)`, where part_id is copied exactly from score_summary.parts[].part_id.
 1a. Follow the preprocess tool schema exactly (sections-based plan contract).
-1b. Target `voice_part_id` values must be existing parser facts for the same `part_index`; never invent a target lane such as `voice part 2`, `Soprano 2`, or `Alto 2` unless that exact ID appears in `voice_part_signals.parts[].voice_parts`.
+1b. Plan `source.voice_part_id` values must be existing parser facts for the same `part_id`; never invent a source lane such as `voice part 2`, `Soprano 2`, or `Alto 2`. Use `output.mode=append_new_derived_lane` when a new derived lane is needed.
+1c. To modify a previously derived lane, reference its mapped `derived_lane_id` with `output.mode=update_existing_derived_lane`; do not append a replacement lane.
 2. Use parser facts only. Do not invent score structure:
    - `voice_part_measure_spans`
    - `voice_part_id_to_source_voice_id`
    - `measure_lyric_coverage`
    - `measure_chord_density`
+   - `source_voice_chord_density`
    - `measure_staff_voice_map`
    - `measure_annotations`
 3. Never assume `voice part 1` is globally melody.
@@ -38,30 +40,29 @@ Hard Rules
 14. Re-expand sections to per-measure and verify exact round-trip (no missing/duplicated bars).
 15. Use `mode=rest` only when target should truly be silent or user requested silence.
 16. If facts are insufficient, request clarification instead of guessing.
-17. Include same-part sibling non-`_default` voice parts as explicit timeline targets unless user scope says otherwise.
+17. Coverage policy:
+   - `split_coverage=selective` is permitted only for an explicit user request for a particular lane, rank, or note subset.
+   - Otherwise use `split_coverage=complete` and include all source voices that share the requested staff scope as explicit timeline targets.
+   - A complete staff scope needs exactly as many visible executor-owned derived lanes as its maximum simultaneous note count. This covers both same-voice chords and multiple source voices on one staff.
 18. Optimize for target-note word-lyric coverage, not just non-empty lyric coverage.
    - Evaluate lyric supply against the target section's sung notes, not against the source lane's own note count.
 19. Lyric policy:
    - `replace_all` only when target has no native lyrics in range.
    - `fill_missing_only` when target has any native lyrics in range.
 20. `SPLIT_CHORDS_SELECT_NOTES` method behavior:
-   - Use `measure_chord_density[].measures[].max_simultaneous_notes` to estimate the densest local chord moment in the source section.
+   - Use source-local chord-density facts to estimate the densest local chord moment in the selected source section.
    - Prefer `ranked` for non-trivial chord extraction:
      - `rank_index=0` means highest note, `1` means second-highest, `2` means third-highest.
      - `rank_fallback=greedy` means when the requested rank does not exist, use the nearest available lower rank.
      - `rank_fallback=skip` means when the requested rank does not exist, emit no note at that onset.
    - Use `ranked` when the musical intent is a specific structural lane (for example soprano/alto/tenor rank), especially for 3+ note chords.
-   - Same-voice chords are not evidence that a second target voice part exists. If the part has `has_same_voice_simultaneous_notes=true` but only one listed `voice_part_id`, extract the requested rank into that existing target only.
+   - Same-voice chords are not evidence that a second source voice part exists. For complete coverage, create distinct derived outputs from the existing source using `append_new_derived_lane`; do not invent a source id.
    - When a same-part sibling target already has native notes in a section, use same-part cross-voice chord extraction only to merge missing chord noteheads from true chord onsets; do not replace the target's native line with singleton notes from another sibling voice.
 20a. Visible claim coverage:
-- For visible claim coverage, a sung measure must be carried by at least one visible exported derived target.
-- If all visible sibling targets leave a sung measure as `rest`, that measure is still unclaimed.
-- Hidden/helper/default lanes do not satisfy visible claim coverage by themselves.
-- When repairing a visible-coverage failure, revise one or more visible sibling target sections so the failing range is carried by exported output instead of remaining `rest` across all visible targets.
-- For same-part chordal source material, count visible target claimers against the source measure's `max_simultaneous_notes`.
-- If fewer visible sibling targets claim a chordal same-part source measure than that measure's `max_simultaneous_notes`, note drop is guaranteed and the plan must be revised.
-- For cross-staff lyric sourcing, do not choose a donor lane just because it seems like the corresponding harmony lane.
-- Compare donor lanes in the selected source part and prefer the one with materially stronger target-note word coverage for the section.
+- A sung measure must be carried by at least one visible exported derived target; hidden/helper/default lanes do not satisfy coverage by themselves.
+- In a complete staff scope, the visible derived-lane count must equal that scope's maximum simultaneous note count, and the plan must claim every simultaneous source note without duplicate rank selection.
+- When repairing a coverage failure, keep the full-song plan and change the reported source/ranges plus directly dependent sibling sections only.
+- For cross-staff lyric sourcing, choose the donor with materially stronger target-note word coverage; do not infer it from a corresponding harmony role.
 21. Repair-loop recommendation (soft guidance):
    - Preserve section settings that already satisfy previous lint checks.
    - Treat backend-provided `baseline_plan` as the only full repair baseline.
@@ -85,14 +86,16 @@ Hard Rules
    - If the backend stops at the best structurally valid candidate after exhausting bounded attempts, explain the remaining issues and ask the user to review that candidate.
    - When internal tool output includes `phase=preprocess_repair_planning`, treat it as a mandatory next-plan turn, not a review/explanation turn.
    - In that turn, return exactly one `preprocess_voice_parts` tool call and use the returned candidate/result metadata to plan the next attempt.
+   - If `phase=preprocess_postflight_repair` and `failure_origin=executor`, do not submit another plan. The executor must be investigated instead.
 Plan Self-Check (Before Final Output)
-- Targets use `part_index` + `voice_part_id`.
+- Targets use parser-visible `part_id` + `voice_part_id`.
 - Section ranges are explicit and complete.
 - No section is source-less.
 - Strategy/policy matches section evidence.
 - Unison duplication ranges also have lyric propagation path.
 - Word-bearing sources are preferred over extension-only sources when available.
 - Coverage is expected to satisfy post-flight target-note word-coverage checks.
+- Every non-selective staff scope has exactly the required derived-lane count and no dropped simultaneous notes.
 
 Common Failure Modes to Avoid
 - Global source reuse across sections without evidence.

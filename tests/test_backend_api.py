@@ -35,7 +35,7 @@ from src.backend.credits import (
     ReleaseCreditsResult,
     ReserveCreditsResult,
 )
-from src.musicxml.solfege import GENERATED_LYRIC_NAME
+from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
 
 
 def test_format_synthesis_error_extracts_tool_error_message():
@@ -240,8 +240,7 @@ def _make_router_call_tool():
             return add_solfege_lyric_verse(
                 PROJECT_ROOT / arguments["source_musicxml_path"],
                 PROJECT_ROOT / arguments["output_musicxml_path"],
-                part_id=arguments.get("part_id"),
-                part_index=arguments.get("part_index"),
+                part_id=arguments["part_id"],
                 settings=arguments.get("settings"),
             )
         if name == "modify_solfege_settings":
@@ -1803,6 +1802,38 @@ def test_orchestrator_excludes_hidden_default_lane_from_derived_mapping(client):
     assert [target.get("target_voice_part_id") for target in targets] == ["voice part 1"]
 
 
+def test_preprocess_mapping_uses_parser_visible_derived_part_id(client):
+    _, app = client
+    context = app.state.orchestrator._build_preprocess_mapping_context(
+        {
+            "voice_part_transforms": {
+                "derived": {
+                    "target_voice_part_id": "voice part 1",
+                    "appended_part_ref": {
+                        "part_index": 2,
+                        "part_id": "P_DERIVED_87F991C3E8",
+                        "part_name": "Soprano - voice part 1 (Derived)",
+                    },
+                }
+            }
+        },
+        score_summary={
+            "parts": [
+                {
+                    "part_index": 2,
+                    "part_id": "Soprano - voice part 1 (Derived)",
+                    "raw_part_id": "P_DERIVED_87F991C3E8",
+                    "part_name": "Soprano - voice part 1 (Derived)",
+                }
+            ]
+        },
+    )
+
+    target = context["derived_mapping"]["targets"][0]
+    assert target["derived_part_id"] == "Soprano - voice part 1 (Derived)"
+    assert target["derived_part_raw_id"] == "P_DERIVED_87F991C3E8"
+
+
 def test_upload_rejects_invalid_extension(client):
     test_client, _ = client
     session_id = _create_session(test_client)
@@ -2093,7 +2124,12 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     assert '"operation_scope": "exactly_one_part"' in payload["message"]
     assert '"completed_target"' in payload["message"]
     assert '"part_name": "Soprano"' in payload["message"]
-    assert payload["current_score"]["score"]["selected_verse_number"] == "3"
+    assert (
+        payload["current_score"]["score"]["selected_verse_number"]
+        == GENERATED_LYRIC_NUMBER
+    )
+    # available_verses retains the UI display ordinal; exact selection uses the
+    # generated system-owned number/name pair.
     assert "3" in payload["score_summary"]["available_verses"]
     assert payload["solfege_settings"] == {
         "system": "movable_do",
@@ -2116,7 +2152,12 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     settings_payload = settings_response.json()
     assert settings_payload["settings"]["system"] == "fixed_do"
     assert settings_payload["updated_generated_verses"] == [
-        {"part_id": "P1", "part_index": 0, "verse_number": "3", "notes_updated": 2}
+        {
+            "part_id": "P1",
+            "part_index": 0,
+            "verse_number": GENERATED_LYRIC_NUMBER,
+            "notes_updated": 2,
+        }
     ]
 
 
@@ -2126,6 +2167,11 @@ def test_synthesize_auto_enables_patch_for_generated_solfege_verse(client, monke
     current_score = {
         "title": "Generated Solfege",
         "selected_verse_number": "1",
+        "selected_lyric_selection": {
+            "id": "lyr_generated_solfege",
+            "number": "1",
+            "name": GENERATED_LYRIC_NAME,
+        },
         "parts": [
             {
                 "part_id": "Soprano",
@@ -2153,6 +2199,13 @@ def test_synthesize_auto_enables_patch_for_generated_solfege_verse(client, monke
                 "part_index": 0,
                 "part_id": "Soprano",
                 "part_name": "Soprano",
+                "lyric_selections": [
+                    {
+                        "id": "lyr_generated_solfege",
+                        "number": "1",
+                        "name": GENERATED_LYRIC_NAME,
+                    }
+                ],
                 "lyric_verses": [
                     {
                         "verse_number": "1",
@@ -2172,7 +2225,15 @@ def test_synthesize_auto_enables_patch_for_generated_solfege_verse(client, monke
                 "tool_calls": [
                     {
                         "name": "synthesize",
-                        "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                        "arguments": {
+                            "part_index": 0,
+                            "voicebank": "Dummy",
+                            "lyric_selection": {
+                                "id": "lyr_generated_solfege",
+                                "number": "1",
+                                "name": GENERATED_LYRIC_NAME,
+                            },
+                        },
                     }
                 ],
                 "final_message": "Starting synthesis.",
@@ -2215,6 +2276,11 @@ def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
     current_score = {
         "title": "User Solfege",
         "selected_verse_number": "1",
+        "selected_lyric_selection": {
+            "id": "lyr_user_solfege_like",
+            "number": "1",
+            "name": "",
+        },
         "parts": [
             {
                 "part_id": "Soprano",
@@ -2241,6 +2307,13 @@ def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
                 "part_index": 0,
                 "part_id": "Soprano",
                 "part_name": "Soprano",
+                "lyric_selections": [
+                    {
+                        "id": "lyr_user_solfege_like",
+                        "number": "1",
+                        "name": "",
+                    }
+                ],
                 "lyric_verses": [
                     {
                         "verse_number": "1",
@@ -2260,7 +2333,15 @@ def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
                 "tool_calls": [
                     {
                         "name": "synthesize",
-                        "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                        "arguments": {
+                            "part_index": 0,
+                            "voicebank": "Dummy",
+                            "lyric_selection": {
+                                "id": "lyr_user_solfege_like",
+                                "number": "1",
+                                "name": "",
+                            },
+                        },
                     }
                 ],
                 "final_message": "Starting synthesis.",
@@ -2300,6 +2381,11 @@ def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
     current_score = {
         "title": "Original Lyrics",
         "selected_verse_number": "1",
+        "selected_lyric_selection": {
+            "id": "lyr_original_lyrics",
+            "number": "1",
+            "name": "",
+        },
         "parts": [
             {
                 "part_id": "Alto",
@@ -2325,7 +2411,20 @@ def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
                 "available_verses": ["1"],
                 "selected_verse_number": "1",
                 "duration_seconds": 4,
-                "parts": [{"part_index": 0, "part_id": "Alto", "part_name": "Alto"}],
+                "parts": [
+                    {
+                        "part_index": 0,
+                        "part_id": "Alto",
+                        "part_name": "Alto",
+                        "lyric_selections": [
+                            {
+                                "id": "lyr_original_lyrics",
+                                "number": "1",
+                                "name": "",
+                            }
+                        ],
+                    }
+                ],
             },
         )
     )
@@ -2347,7 +2446,18 @@ def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
             return json.dumps(
                 {
                     "tool_calls": [
-                        {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}}
+                        {
+                            "name": "synthesize",
+                            "arguments": {
+                                "part_index": 0,
+                                "voicebank": "Dummy",
+                                "lyric_selection": {
+                                    "id": "lyr_original_lyrics",
+                                    "number": "1",
+                                    "name": "",
+                                },
+                            },
+                        }
                     ],
                     "final_message": "Starting synthesis.",
                     "include_score": False,
@@ -2387,7 +2497,7 @@ def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
     add_client = StaticLlmClient(
         response_text=(
             '{"tool_calls":[{"name":"add_solfege_lyric_verse",'
-            '"arguments":{"part_index":0,"reason":"Create solfege."}}],'
+            '"arguments":{"part_id":"Soprano","reason":"Create solfege."}}],'
             '"final_message":"Adding solfege.","include_score":false}'
         )
     )
@@ -3336,9 +3446,12 @@ def test_workflow_publishes_attempt_messages_during_preprocess_repairs(client):
     assert response["type"] == "chat_text"
     assert published[0][0]["attempt_number"] == 1
     assert published[0][0]["message"] == "Starting preprocess"
-    assert published[1][1]["attempt_number"] == 2
-    assert published[1][1]["message"] == "Trying one more repair."
-    assert published[1][1]["thought_summary"] == "Repair thought summary"
+    repair_batch = next(
+        batch for batch in published if any(entry.get("attempt_number") == 2 for entry in batch)
+    )
+    repair_entry = next(entry for entry in repair_batch if entry.get("attempt_number") == 2)
+    assert repair_entry["message"] == "Trying one more repair."
+    assert repair_entry["thought_summary"] == "Repair thought summary"
 
 
 def test_workflow_reprompts_when_class1_candidate_stops_early(client):
@@ -3728,6 +3841,79 @@ def test_workflow_persists_preprocess_attempt_summary(client):
     assert history[0]["replaced_best_valid"] is True
     assert history[0]["replaced_best_invalid"] is False
     assert history[0]["issue_codes"] == ["validation_failed_needs_review"]
+    artifacts = history[0]["diagnostic_artifacts"]
+    assert history[0]["diagnostic_run_id"].startswith("interactive-")
+    assert Path(artifacts["submitted_plan"]["local_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_preprocess_attempt_artifacts_store_exact_plan_and_derived_musicxml(
+    client_with_env, monkeypatch
+):
+    _, app = client_with_env
+    orchestrator = app.state.orchestrator
+    session = asyncio.run(app.state.sessions.create_session("test-user"))
+    derived_path = app.state.sessions.session_dir(session.id) / "derived.xml"
+    derived_bytes = b"<score-partwise version='3.1'/>\n"
+    derived_path.write_bytes(derived_bytes)
+    uploaded: dict[str, bytes] = {}
+
+    def fake_upload_bytes(bucket_name, data, dest_path, content_type=None):
+        assert bucket_name == "test-bucket"
+        uploaded[dest_path] = data
+
+    monkeypatch.setattr("src.backend.orchestrator.upload_bytes", fake_upload_bytes)
+    submitted_plan = {
+        "targets": [
+            {
+                "target": {"part_index": 0, "voice_part_id": "soprano"},
+                "sections": [],
+            }
+        ]
+    }
+    execution_plan = copy.deepcopy(submitted_plan)
+    diagnostics = asyncio.run(
+        orchestrator._persist_preprocess_attempt_artifacts(
+            session_id=session.id,
+            user_id="test-user",
+            run_id="preprocess-job-1",
+            job_id="preprocess-job-1",
+            attempt_number=1,
+            planner_thinking="Select the upper chord note.",
+            submitted_plan=submitted_plan,
+            tool_result=ToolExecutionResult(
+                score={},
+                audio_response=None,
+                preprocess_execution={
+                    "status": "ready",
+                    "execution_plan": execution_plan,
+                    "modified_musicxml_path": str(derived_path),
+                    "transform_id": "vp:part0:soprano:abc",
+                },
+            ),
+        )
+    )
+
+    expected_prefix = (
+        f"sessions/test-user/{session.id}/preprocess/preprocess-job-1/attempt-001"
+    )
+    assert diagnostics["submitted_plan"] == submitted_plan
+    assert diagnostics["execution_plan"] == execution_plan
+    assert diagnostics["planner_thinking"]["content"] == "Select the upper chord note."
+    assert uploaded[f"{expected_prefix}/derived_score.musicxml"] == derived_bytes
+    assert uploaded[f"{expected_prefix}/submitted_plan.json"] == (
+        json.dumps(submitted_plan, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    manifest_path = diagnostics["artifacts"]["attempt_manifest"]["local_path"]
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["result"]["status"] == "ready"
+    assert manifest["artifacts"]["derived_musicxml"]["sha256"] == diagnostics[
+        "artifacts"
+    ]["derived_musicxml"]["sha256"]
 
 
 def test_orchestrator_selection_matches_current_uses_selected_verse(client):
@@ -5299,6 +5485,11 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
     current_score = {
         "title": "Prepared",
         "selected_verse_number": "1",
+        "selected_lyric_selection": {
+            "id": "lyr_derived_1",
+            "number": "1",
+            "name": "Verse 1",
+        },
         "parts": [
             {"part_id": "P1-Staff1", "part_name": "Piano", "notes": []},
             {"part_id": "P1-Staff2", "part_name": "Piano", "notes": []},
@@ -5334,10 +5525,14 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
         "parts": [
             {"part_index": 0, "part_id": "P1-Staff1", "part_name": "Piano"},
             {"part_index": 1, "part_id": "P1-Staff2", "part_name": "Piano"},
-            {
-                "part_index": 2,
-                "part_id": "P_DERIVED_02F3BA60A5-Staff1",
-                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                {
+                    "part_index": 2,
+                    "part_id": "P_DERIVED_02F3BA60A5-Staff1",
+                    "raw_part_id": "P_DERIVED_02F3BA60A5",
+                    "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                    "lyric_selections": [
+                        {"id": "lyr_derived_1", "number": "1", "name": "Verse 1"}
+                    ],
             },
             {
                 "part_index": 3,
@@ -5358,6 +5553,11 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
                         "arguments": {
                             "part_index": 2,
                             "voicebank": "Dummy",
+                            "lyric_selection": {
+                                "id": "lyr_derived_1",
+                                "number": "1",
+                                "name": "Verse 1",
+                            },
                         },
                     }
                 ],
@@ -5387,7 +5587,7 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
     assert response.json()["type"] == "chat_text"
     assert started["session_id"] == session_id
     assert started["arguments"]["part_index"] == 2
-    assert "part_id" not in started["arguments"]
+    assert started["arguments"]["part_id"] == "P_DERIVED_02F3BA60A5-Staff1"
 
 
 def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client):
@@ -5396,6 +5596,11 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
     current_score = {
         "title": "Prepared",
         "selected_verse_number": "1",
+        "selected_lyric_selection": {
+            "id": "lyr_derived_1",
+            "number": "1",
+            "name": "Verse 1",
+        },
         "parts": [
             {"part_id": "P1-Staff1", "part_name": "Piano", "notes": []},
             {"part_id": "P1-Staff2", "part_name": "Piano", "notes": []},
@@ -5414,10 +5619,14 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
         "parts": [
             {"part_index": 0, "part_id": "P1-Staff1", "part_name": "Piano"},
             {"part_index": 1, "part_id": "P1-Staff2", "part_name": "Piano"},
-            {
-                "part_index": 2,
-                "part_id": "P_DERIVED_02F3BA60A5-Staff1",
-                "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                {
+                    "part_index": 2,
+                    "part_id": "P_DERIVED_02F3BA60A5-Staff1",
+                    "raw_part_id": "P_DERIVED_02F3BA60A5",
+                    "part_name": "P1-Staff1 - voice part 1 (Derived)",
+                    "lyric_selections": [
+                        {"id": "lyr_derived_1", "number": "1", "name": "Verse 1"}
+                    ],
             },
         ],
     }
@@ -5433,6 +5642,11 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
                         "arguments": {
                             "part_id": "P_DERIVED_02F3BA60A5-Staff1",
                             "voicebank": "Dummy",
+                            "lyric_selection": {
+                                "id": "lyr_derived_1",
+                                "number": "1",
+                                "name": "Verse 1",
+                            },
                         },
                     }
                 ],
@@ -5462,7 +5676,7 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
     assert response.json()["type"] == "chat_text"
     assert started["session_id"] == session_id
     assert started["arguments"]["part_index"] == 2
-    assert "part_id" not in started["arguments"]
+    assert started["arguments"]["part_id"] == "P_DERIVED_02F3BA60A5-Staff1"
 
 
 def test_chat_reparse_same_verse_noop_allows_direct_synthesis(client):

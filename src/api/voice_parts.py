@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
 from src.api.voice_part_lint_rules import get_lint_rule_spec, get_postflight_validation_spec
+from src.musicxml.part_reference import resolve_part_reference
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 VOICE_PART_STATUSES = {
@@ -139,6 +140,11 @@ def _is_countable_sung_note(note: Dict[str, Any]) -> bool:
         return True
 
 
+def _staff_scope_key(note: Dict[str, Any]) -> str:
+    staff = note.get("staff")
+    return str(staff).strip() if staff not in {None, ""} else "1"
+
+
 def analyze_score_voice_parts(
     score: Dict[str, Any], *, verse_number: Optional[str | int] = None
 ) -> Dict[str, Any]:
@@ -219,6 +225,7 @@ def _build_part_region_indices(
     # Regions where multiple notes start at the same offset for the same source voice.
     chord_measures: set[int] = set()
     grouped: Dict[Tuple[str, int, float], int] = {}
+    staff_grouped: Dict[Tuple[str, int, float], int] = {}
     for note in notes:
         if not _is_countable_sung_note(note):
             continue
@@ -229,9 +236,23 @@ def _build_part_region_indices(
         offset = round(float(note.get("offset_beats") or 0.0), 6)
         key = (voice, measure, offset)
         grouped[key] = grouped.get(key, 0) + 1
+        staff_key = (_staff_scope_key(note), measure, offset)
+        staff_grouped[staff_key] = staff_grouped.get(staff_key, 0) + 1
     for (_, measure, _), count in grouped.items():
         if count > 1:
             chord_measures.add(measure)
+
+    source_density_by_voice: Dict[str, Dict[int, int]] = {}
+    for (voice, measure, _), count in grouped.items():
+        if count <= 0:
+            continue
+        density = source_density_by_voice.setdefault(voice, {})
+        density[measure] = max(density.get(measure, 0), count)
+
+    staff_density: Dict[str, Dict[int, int]] = {}
+    for (staff_scope, measure, _), count in staff_grouped.items():
+        density = staff_density.setdefault(staff_scope, {})
+        density[measure] = max(density.get(measure, 0), count)
 
     default_voice_measures = sorted(
         {
@@ -266,7 +287,8 @@ def _build_part_region_indices(
                         "end_measure": rng["end"],
                     }
                 )
-        needs_split = [m for m in active if m in chord_measures]
+        source_density = source_density_by_voice.get(source_voice, {})
+        needs_split = [m for m in active if source_density.get(m, 0) > 1]
         for rng in _collapse_measure_ranges(needs_split):
             regions.append(
                 {
@@ -301,6 +323,34 @@ def _build_part_region_indices(
         "chord_regions": _collapse_measure_ranges(sorted(chord_measures)),
         "default_voice_regions": _collapse_measure_ranges(default_voice_measures),
         "target_resolution_by_voice_part": per_voice_regions,
+        "source_voice_chord_density": {
+            voice_part_id: {
+                "has_same_voice_simultaneous_notes": any(count > 1 for count in source_density_by_voice.get(source_voice, {}).values()),
+                "max_simultaneous_notes_by_measure": {
+                    str(measure): count
+                    for measure, count in sorted(source_density_by_voice.get(source_voice, {}).items())
+                    if count > 1
+                },
+                "chord_ranges": _collapse_measure_ranges(
+                    sorted(measure for measure, count in source_density_by_voice.get(source_voice, {}).items() if count > 1)
+                ),
+            }
+            for voice_part_id, source_voice in by_voice_part_id.items()
+        },
+        "staff_scope_simultaneous_density": {
+            staff_scope: {
+                "max_simultaneous_notes": max(measure_density.values(), default=0),
+                "max_simultaneous_notes_by_measure": {
+                    str(measure): count
+                    for measure, count in sorted(measure_density.items())
+                    if count > 1
+                },
+                "simultaneous_ranges": _collapse_measure_ranges(
+                    sorted(measure for measure, count in measure_density.items() if count > 1)
+                ),
+            }
+            for staff_scope, measure_density in sorted(staff_density.items())
+        },
     }
 
 
@@ -387,7 +437,7 @@ def preprocess_voice_parts(
                 "deprecated_voice_id_input",
                 (
                     "Deprecated request.voice_id is not accepted. "
-                    "Use request.plan.targets[].target.voice_part_id."
+                    "Use request.plan.targets[].source.voice_part_id."
                 ),
                 code="deprecated_voice_id_input",
             )
@@ -435,7 +485,14 @@ def preprocess_voice_parts(
         parsed = parse_voice_part_plan(plan, score=score)
         if not parsed["ok"]:
             return parsed["error"]
-        return _execute_preprocess_plan(score, parsed["plan"])
+        resolved = _resolve_plan_output_lanes(score, parsed["plan"])
+        if not resolved["ok"]:
+            return resolved["error"]
+        result = _execute_preprocess_plan(score, resolved["plan"])
+        # Return the canonical plan that passed parsing so callers can retain an
+        # authoritative execution record separately from the model's raw request.
+        result["execution_plan"] = deepcopy(resolved["plan"])
+        return result
 
     normalized_voice_part_id = _normalize_voice_part_id(
         voice_part_id=voice_part_id,
@@ -540,11 +597,12 @@ def parse_voice_part_plan(
                 "invalid_plan_payload",
                 f"targets[{target_idx}] must be an object.",
             )
-        raw_target_ref = raw_target.get("target")
+        raw_source_ref = raw_target.get("source", raw_target.get("target"))
         target_ref, error = _normalize_voice_ref(
-            raw_target_ref,
-            field_name=f"targets[{target_idx}].target",
+            raw_source_ref,
+            field_name=f"targets[{target_idx}].source",
             allow_voice_id=True,
+            score=score,
         )
         if error is not None:
             return {"ok": False, "error": error}
@@ -561,7 +619,15 @@ def parse_voice_part_plan(
                 return {"ok": False, "error": sections_error}
             normalized_targets.append(
                 {
+                    # target is retained internally while callers use source. This keeps
+                    # the existing section executor focused on musical source selection.
                     "target": target_ref,
+                    "source": target_ref,
+                    "output": _normalize_output_lane_request(raw_target.get("output")),
+                    "split_coverage": _normalize_split_coverage(raw_target.get("split_coverage")),
+                    "uses_derived_lane_contract": any(
+                        key in raw_target for key in ("source", "output", "split_coverage")
+                    ),
                     "sections": sections,
                     "verse_number": _normalize_verse_number(
                         raw_target.get("verse_number", "1")
@@ -636,6 +702,7 @@ def parse_voice_part_plan(
                         f"targets[{target_idx}].actions[{action_idx}].source"
                     ),
                     allow_voice_id=False,
+                    score=score,
                 )
                 if source_error is not None:
                     return {"ok": False, "error": source_error}
@@ -679,6 +746,7 @@ def parse_voice_part_plan(
                         f".source_priority[{source_idx}]"
                     ),
                     allow_voice_id=False,
+                    score=score,
                 )
                 if source_error is not None:
                     return {"ok": False, "error": source_error}
@@ -708,13 +776,259 @@ def parse_voice_part_plan(
         normalized_targets.append(
             {
                 "target": target_ref,
+                "source": target_ref,
+                "output": _normalize_output_lane_request(raw_target.get("output")),
+                "split_coverage": _normalize_split_coverage(raw_target.get("split_coverage")),
+                "uses_derived_lane_contract": any(
+                    key in raw_target for key in ("source", "output", "split_coverage")
+                ),
                 "actions": normalized_actions,
                 "confidence": raw_target.get("confidence"),
                 "notes": raw_target.get("notes"),
             }
         )
 
+    for target_idx, target in enumerate(normalized_targets):
+        output = target.get("output") or {}
+        mode = output.get("mode")
+        if mode not in {"append_new_derived_lane", "update_existing_derived_lane"}:
+            return _plan_error(
+                "invalid_output_lane",
+                f"targets[{target_idx}].output.mode must create or update a derived lane.",
+            )
+        if mode == "update_existing_derived_lane" and not output.get("derived_lane_id"):
+            return _plan_error(
+                "invalid_output_lane",
+                f"targets[{target_idx}].output.derived_lane_id is required when updating a lane.",
+            )
+        if target.get("split_coverage") not in {"complete", "selective"}:
+            return _plan_error(
+                "invalid_split_coverage",
+                f"targets[{target_idx}].split_coverage must be complete or selective.",
+            )
+
     return {"ok": True, "plan": {"targets": normalized_targets}}
+
+
+def _normalize_output_lane_request(raw_output: Any) -> Dict[str, Any]:
+    """Normalize executor-owned derived-lane intent without accepting caller names."""
+    if raw_output is None:
+        return {"mode": "append_new_derived_lane"}
+    if not isinstance(raw_output, dict):
+        return {"mode": "invalid"}
+    mode = str(raw_output.get("mode") or "").strip()
+    normalized: Dict[str, Any] = {"mode": mode}
+    lane_id = raw_output.get("derived_lane_id")
+    if isinstance(lane_id, str) and lane_id.strip():
+        normalized["derived_lane_id"] = lane_id.strip()
+    return normalized
+
+
+def _normalize_split_coverage(value: Any) -> str:
+    normalized = str(value or "selective").strip().lower()
+    return normalized if normalized in {"complete", "selective"} else "invalid"
+
+
+def _resolve_plan_output_lanes(score: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Allocate stable derived-lane identities before linting or materialization."""
+    resolved = deepcopy(plan)
+    used_slots: Dict[tuple[int, str], set[int]] = {}
+    known_lanes: Dict[str, Dict[str, Any]] = {}
+    transforms = score.get("voice_part_transforms")
+    if isinstance(transforms, dict):
+        for value in transforms.values():
+            if not isinstance(value, dict):
+                continue
+            lane = value.get("derived_lane")
+            if not isinstance(lane, dict):
+                continue
+            lane_id = str(lane.get("derived_lane_id") or "").strip()
+            source = lane.get("source") or {}
+            part_index = source.get("part_index")
+            voice_part_id = str(source.get("voice_part_id") or "").strip()
+            slot = lane.get("slot")
+            if lane_id:
+                known_lanes[lane_id] = dict(lane)
+            if isinstance(part_index, int) and voice_part_id and isinstance(slot, int):
+                used_slots.setdefault((part_index, voice_part_id), set()).add(slot)
+
+    allocated_ids: set[str] = set()
+    for target_idx, target in enumerate(resolved.get("targets") or []):
+        if not bool(target.get("uses_derived_lane_contract")):
+            continue
+        source = target.get("source") or target.get("target") or {}
+        part_index = int(source["part_index"])
+        voice_part_id = str(source["voice_part_id"])
+        key = (part_index, voice_part_id)
+        output = dict(target.get("output") or {})
+        mode = output.get("mode")
+        if mode == "update_existing_derived_lane":
+            lane_id = str(output.get("derived_lane_id") or "")
+            lane = known_lanes.get(lane_id)
+            if lane is None:
+                return {
+                    "ok": False,
+                    "error": _action_required(
+                        "derived_lane_not_found",
+                        "The requested derived lane is not available in the current score.",
+                        derived_lane_id=lane_id,
+                    ),
+                }
+            if lane.get("source") != {"part_index": part_index, "voice_part_id": voice_part_id}:
+                return {
+                    "ok": False,
+                    "error": _action_required(
+                        "derived_lane_source_mismatch",
+                        "The requested derived lane does not belong to this source voice.",
+                        derived_lane_id=lane_id,
+                    ),
+                }
+            resolved_lane = dict(lane)
+        else:
+            slots = used_slots.setdefault(key, set())
+            slot = 1
+            while slot in slots:
+                slot += 1
+            slots.add(slot)
+            lane_id = f"dl:p{part_index}:source:{_lane_id_slug(voice_part_id)}:slot:{slot}"
+            resolved_lane = {
+                "derived_lane_id": lane_id,
+                "source": {"part_index": part_index, "voice_part_id": voice_part_id},
+                "slot": slot,
+            }
+        lane_id = str(resolved_lane["derived_lane_id"])
+        if lane_id in allocated_ids:
+            return {
+                "ok": False,
+                "error": _action_required(
+                    "duplicate_derived_lane",
+                    "A preprocess plan cannot update the same derived lane more than once.",
+                    derived_lane_id=lane_id,
+                    target_index=target_idx,
+                ),
+            }
+        allocated_ids.add(lane_id)
+        target["output"] = {**output, **resolved_lane}
+
+    _allocate_derived_lane_display_names(score, resolved)
+    return {"ok": True, "plan": resolved}
+
+
+def _allocate_derived_lane_display_names(
+    score: Dict[str, Any], plan: Dict[str, Any]
+) -> None:
+    """Assign executor-owned, stable display names to newly allocated lanes.
+
+    A lane name describes its source.  Its per-source slot is only shown when
+    that source produces more than one lane; it must never rename another
+    source voice just because both happen to use slot one.
+    """
+    reserved_names = {
+        str(part.get("part_name") or "").strip()
+        for part in (score.get("parts") or [])
+        if isinstance(part, dict) and str(part.get("part_name") or "").strip()
+    }
+    pending: List[Dict[str, Any]] = []
+    for target in plan.get("targets") or []:
+        if not isinstance(target, dict) or not bool(target.get("uses_derived_lane_contract")):
+            continue
+        output = target.get("output")
+        if not isinstance(output, dict) or not str(output.get("derived_lane_id") or "").strip():
+            continue
+        existing_name = str(output.get("display_name") or "").strip()
+        if existing_name:
+            reserved_names.add(existing_name)
+            continue
+        source = output.get("source") or {}
+        part_index = source.get("part_index")
+        voice_part_id = str(source.get("voice_part_id") or "").strip()
+        if not isinstance(part_index, int) or not voice_part_id:
+            continue
+        pending.append(
+            {
+                "output": output,
+                "part_index": part_index,
+                "voice_part_id": voice_part_id,
+                "slot": output.get("slot"),
+            }
+        )
+
+    base_counts: Dict[str, int] = {}
+    for item in pending:
+        base_name = _derived_lane_display_name_base(
+            score,
+            part_index=item["part_index"],
+            voice_part_id=item["voice_part_id"],
+            slot=item["slot"],
+        )
+        item["base_name"] = base_name
+        base_counts[base_name] = base_counts.get(base_name, 0) + 1
+
+    allocated_names: set[str] = set()
+    for item in pending:
+        base_name = str(item["base_name"])
+        requires_source_qualifier = (
+            base_counts[base_name] > 1 or f"{base_name} (Derived)" in reserved_names
+        )
+        if requires_source_qualifier:
+            base_name = _derived_lane_display_name_base(
+                score,
+                part_index=item["part_index"],
+                voice_part_id=item["voice_part_id"],
+                slot=item["slot"],
+                include_source_part_id=True,
+            )
+        candidate = f"{base_name} (Derived)"
+        if candidate in reserved_names or candidate in allocated_names:
+            candidate = _with_derived_lane_collision_suffix(
+                candidate,
+                reserved_names | allocated_names,
+            )
+        item["output"]["display_name"] = candidate
+        allocated_names.add(candidate)
+
+
+def _derived_lane_display_name_base(
+    score: Dict[str, Any],
+    *,
+    part_index: int,
+    voice_part_id: str,
+    slot: Any,
+    include_source_part_id: bool = False,
+) -> str:
+    parts = score.get("parts") or []
+    source_part = (
+        parts[part_index]
+        if 0 <= part_index < len(parts) and isinstance(parts[part_index], dict)
+        else {}
+    )
+    source_part_name = str(source_part.get("part_name") or "").strip()
+    source_part_id = str(source_part.get("part_id") or "").strip()
+    if not source_part_name or re.match(
+        r"^voice\s+part\s+\d+$", source_part_name, re.IGNORECASE
+    ):
+        source_part_name = source_part_id or f"Part {part_index + 1}"
+    if include_source_part_id and source_part_id:
+        source_part_name = f"{source_part_name} [{source_part_id}]"
+
+    output_voice_label = voice_part_id
+    if isinstance(slot, int) and slot > 1:
+        output_voice_label = f"{output_voice_label} - split {slot}"
+    return f"{source_part_name} - {output_voice_label}"
+
+
+def _with_derived_lane_collision_suffix(name: str, reserved_names: set[str]) -> str:
+    stem = name.removesuffix(" (Derived)")
+    suffix = 2
+    while True:
+        candidate = f"{stem} - lane {suffix} (Derived)"
+        if candidate not in reserved_names:
+            return candidate
+        suffix += 1
+
+
+def _lane_id_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "voice"
 
 
 def validate_voice_part_status(status: str) -> bool:
@@ -735,6 +1049,7 @@ def _prepare_score_for_voice_part_legacy(
     verse_number: Optional[str | int] = "1",
     copy_all_verses: bool = False,
     section_overrides: Optional[Sequence[Dict[str, Any]]] = None,
+    derived_lane: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parts = score.get("parts") or []
     if not parts:
@@ -786,12 +1101,14 @@ def _prepare_score_for_voice_part_legacy(
     transformed_part = dict(part)
     transformed_part["_source_part_index"] = part_index
     transformed_part["_source_part_id"] = part.get("part_id")
+    transformed_part["_raw_source_part_id"] = part.get("raw_part_id")
     transformed_part["_source_part_name"] = part.get("part_name")
     transformed_part["notes"] = selected_notes
     transformed_part["part_name"] = target["voice_part_id"]
 
     if _part_has_any_lyric(selected_notes) and not allow_lyric_propagation:
-        source_score["parts"][part_index] = transformed_part
+        if derived_lane is None:
+            source_score["parts"][part_index] = transformed_part
         return _finalize_transform_result(
             source_score,
             part_index=part_index,
@@ -810,6 +1127,7 @@ def _prepare_score_for_voice_part_legacy(
             },
             source_musicxml_path=_resolve_source_musicxml_path(score),
             target_source_voice_id=target_voice,
+            derived_lane=derived_lane,
         )
 
     same_part_source_options = [
@@ -981,7 +1299,8 @@ def _prepare_score_for_voice_part_legacy(
         else:
             impacted_ranges = _collapse_measure_ranges(validation.get("unresolved_measures") or [])
             transformed_part["notes"] = propagated_notes
-            source_score["parts"][part_index] = transformed_part
+            if derived_lane is None:
+                source_score["parts"][part_index] = transformed_part
             return _action_required(
                 "validation_failed_needs_review",
                 "Lyric propagation did not meet minimum coverage.",
@@ -1015,7 +1334,8 @@ def _prepare_score_for_voice_part_legacy(
                 ),
             )
     transformed_part["notes"] = propagated_notes
-    source_score["parts"][part_index] = transformed_part
+    if derived_lane is None:
+        source_score["parts"][part_index] = transformed_part
     return _finalize_transform_result(
         source_score,
         part_index=part_index,
@@ -1029,6 +1349,7 @@ def _prepare_score_for_voice_part_legacy(
         validation=validation,
         source_musicxml_path=_resolve_source_musicxml_path(score),
         target_source_voice_id=target_voice,
+        derived_lane=derived_lane,
     )
 
 
@@ -1136,6 +1457,9 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             "Preflight plan lint failed. Adjust plan sections before execution.",
             code="plan_lint_failed",
             lint_findings=lint_result.get("findings", []),
+            phase="preprocess_repair_planning",
+            failure_origin="plan",
+            repair_scope=_build_plan_repair_scope(score, plan, lint_result.get("findings") or []),
         )
 
     # Multi-target plans execute sequentially and carry forward transformed score.
@@ -1307,9 +1631,100 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     merged_failed_rules = _merge_target_output_issues(target_outputs)
     if merged_failed_rules:
         final_result["failed_validation_rules"] = merged_failed_rules
+    lane_findings = _validate_final_derived_lanes(
+        working_score,
+        plan=plan,
+        target_outputs=target_outputs,
+    )
+    if lane_findings:
+        return _action_required(
+            "postflight_validation_failed",
+            "Prepared score did not contain the expected distinct derived lanes.",
+            code="postflight_validation_failed",
+            phase="preprocess_postflight_repair",
+            failure_origin="executor",
+            findings=lane_findings,
+            targets=target_outputs,
+        )
     return _cleanup_hidden_derived_outputs(
         final_result,
         source_score=original_score,
+    )
+
+
+def _build_plan_repair_scope(
+    score: Dict[str, Any], plan: Dict[str, Any], findings: Sequence[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Tell the planner what may change while preserving a full-score plan."""
+    finding = next((item for item in findings if isinstance(item, dict)), {})
+    part_index = finding.get("part_index")
+    source_voice_part_id = finding.get("source_voice_part_id") or finding.get("target_voice_part_id")
+    ranges = finding.get("missing_ranges") or []
+    max_measure = 0
+    if isinstance(part_index, int):
+        max_measure = _part_measure_end(score, part_index)
+    if max_measure <= 0:
+        max_measure = max(
+            (int(section.get("end_measure") or 0) for target in plan.get("targets") or []
+             for section in (target.get("sections") or []) if isinstance(section, dict)),
+            default=0,
+        )
+    scope: Dict[str, Any] = {
+        "require_complete_full_song_plan": True,
+        "preserve_outside_repair_scope": True,
+        "plan_duration": {"start_measure": 1, "end_measure": max_measure},
+    }
+    if isinstance(part_index, int) and isinstance(source_voice_part_id, str) and source_voice_part_id:
+        scope["source"] = {"part_index": part_index, "voice_part_id": source_voice_part_id}
+    if isinstance(ranges, list) and ranges:
+        scope["ranges"] = ranges
+    return scope
+
+
+def _validate_final_derived_lanes(
+    score: Dict[str, Any], *, plan: Dict[str, Any], target_outputs: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Verify materialization did not collapse distinct executor-owned outputs."""
+    expected = [
+        str((target.get("output") or {}).get("derived_lane_id") or "").strip()
+        for target in (plan.get("targets") or [])
+        if isinstance(target, dict)
+    ]
+    expected = [lane_id for lane_id in expected if lane_id]
+    actual_by_lane: Dict[str, Dict[str, Any]] = {}
+    for output in target_outputs:
+        lane = output.get("derived_lane")
+        ref = output.get("appended_part_ref")
+        if isinstance(lane, dict) and isinstance(ref, dict):
+            lane_id = str(lane.get("derived_lane_id") or "").strip()
+            if lane_id:
+                actual_by_lane[lane_id] = ref
+    parts_by_id = {
+        str(part.get("part_id") or "").strip()
+        for part in (score.get("parts") or [])
+        if isinstance(part, dict)
+    }
+    findings: List[Dict[str, Any]] = []
+    part_ids: set[str] = set()
+    for lane_id in expected:
+        ref = actual_by_lane.get(lane_id)
+        part_id = str((ref or {}).get("part_id") or "").strip()
+        if not ref or not part_id or part_id not in parts_by_id:
+            findings.append({"code": "missing_derived_lane", "derived_lane_id": lane_id})
+            continue
+        if part_id in part_ids:
+            findings.append({"code": "aliased_derived_lane", "derived_lane_id": lane_id, "part_id": part_id})
+        part_ids.add(part_id)
+    return findings
+
+
+def _part_measure_end(score: Dict[str, Any], part_index: int) -> int:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts) or not isinstance(parts[part_index], dict):
+        return 0
+    return max(
+        (int(note.get("measure_number") or 0) for note in (parts[part_index].get("notes") or []) if isinstance(note, dict)),
+        default=0,
     )
 
 
@@ -1322,11 +1737,19 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     by_part_claims: Dict[int, set[int]] = {}
     by_part_has_timeline_targets: Dict[int, bool] = {}
     visible_same_part_source_claims: Dict[tuple[int, str, int], set[str]] = {}
+    visible_same_part_source_ranks: Dict[tuple[int, str, int], set[int]] = {}
+    complete_split_sources: set[tuple[int, str]] = set()
+    complete_scope_lanes: Dict[tuple[int, str], set[str]] = {}
 
     for target_idx, target_entry in enumerate(targets):
         target = target_entry.get("target") or {}
         part_index = int(target.get("part_index", -1))
         target_voice_part_id = str(target.get("voice_part_id") or "")
+        output = target_entry.get("output") or {}
+        output_lane_id = str(output.get("derived_lane_id") or "").strip()
+        claim_lane_id = output_lane_id or f"legacy:target:{target_idx}:{target_voice_part_id}"
+        if target_entry.get("split_coverage") == "complete" and target_voice_part_id:
+            complete_split_sources.add((part_index, target_voice_part_id))
         sections = target_entry.get("sections") or []
         
         # Guard: Complex scores (chords or mixed regions) require sections.
@@ -1392,6 +1815,19 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             part_index=part_index,
             target_voice_part_id=target_voice_part_id,
         )
+        if (
+            target_entry.get("split_coverage") == "complete"
+            and target_is_visible
+            and target_voice_part_id
+        ):
+            for staff_scope in _source_voice_staff_scopes(
+                score,
+                part_index=part_index,
+                source_voice_part_id=target_voice_part_id,
+            ):
+                complete_scope_lanes.setdefault((part_index, staff_scope), set()).add(
+                    claim_lane_id
+                )
 
         contiguous_error = _lint_sections_contiguous_no_gaps(sections)
         if contiguous_error is not None:
@@ -1508,8 +1944,16 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                     for measure in range(start, end + 1):
                         claim_key = (part_index, melody_source_voice_part_id, measure)
                         visible_same_part_source_claims.setdefault(claim_key, set()).add(
-                            target_voice_part_id
+                            claim_lane_id
                         )
+                        if (
+                            decision_type == "SPLIT_CHORDS_SELECT_NOTES"
+                            and method == "ranked"
+                            and isinstance(section.get("rank_index"), int)
+                        ):
+                            visible_same_part_source_ranks.setdefault(claim_key, set()).add(
+                                int(section["rank_index"])
+                            )
                 if (
                     isinstance(melody_source_part, int)
                     and melody_source_part != part_index
@@ -1903,57 +2347,140 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 )
             )
 
-    for part_index in sorted(by_part_has_timeline_targets.keys()):
+    for (part_index, staff_scope), lane_ids in sorted(complete_scope_lanes.items()):
+        density_by_measure = _staff_scope_measure_max_simultaneous_notes(
+            score,
+            part_index=part_index,
+            staff_scope=staff_scope,
+        )
+        maximum = max(density_by_measure.values(), default=0)
+        if maximum <= 0 or len(lane_ids) == maximum:
+            continue
+        peak_measures = [
+            measure
+            for measure, count in density_by_measure.items()
+            if count == maximum
+        ]
+        findings.append(
+            _lint_finding(
+                "complete_split_scope_lane_count_mismatch",
+                part_index=part_index,
+                staff_scope=staff_scope,
+                missing_ranges=_collapse_measure_ranges(sorted(peak_measures)),
+                failing_attributes={
+                    "staff_scope": staff_scope,
+                    "maximum_simultaneous_note_count": maximum,
+                    "visible_derived_lane_count": len(lane_ids),
+                    "visible_derived_lane_ids": sorted(lane_ids),
+                },
+            )
+        )
+
+    for part_index, source_voice_part_id in sorted(complete_split_sources):
+        source_density_by_measure = _source_voice_measure_max_simultaneous_notes(
+            score,
+            part_index=part_index,
+            source_voice_part_id=source_voice_part_id,
+        )
+        failing_measures: List[int] = []
+        duplicate_rank_measures: List[int] = []
+        source_density_details: Dict[int, int] = {}
+        visible_claim_details: Dict[int, int] = {}
+        rank_details: Dict[int, List[int]] = {}
+        visible_lane_ids: set[str] = set()
+        for measure, required_count in sorted(source_density_by_measure.items()):
+            if required_count <= 1:
+                continue
+            claim_key = (part_index, source_voice_part_id, measure)
+            claimers = visible_same_part_source_claims.get(claim_key, set())
+            ranks = visible_same_part_source_ranks.get(claim_key, set())
+            claim_count = len(claimers)
+            if claim_count < required_count:
+                failing_measures.append(measure)
+                source_density_details[measure] = required_count
+                visible_claim_details[measure] = claim_count
+                visible_lane_ids.update(claimers)
+            if ranks and len(ranks) < min(required_count, claim_count):
+                duplicate_rank_measures.append(measure)
+                rank_details[measure] = sorted(ranks)
+        common_payload = {
+            "source_voice_part_id": source_voice_part_id,
+            "source_max_simultaneous_notes_by_measure": source_density_details,
+            "visible_output_lane_count_by_measure": visible_claim_details,
+            "visible_output_lane_ids": sorted(visible_lane_ids),
+        }
+        if failing_measures:
+            findings.append(
+                _lint_finding(
+                    "complete_split_source_underclaimed",
+                    part_index=part_index,
+                    source_voice_part_id=source_voice_part_id,
+                    missing_ranges=_collapse_measure_ranges(failing_measures),
+                    failing_attributes=common_payload,
+                )
+            )
+        if duplicate_rank_measures:
+            findings.append(
+                _lint_finding(
+                    "complete_split_duplicate_rank",
+                    part_index=part_index,
+                    source_voice_part_id=source_voice_part_id,
+                    missing_ranges=_collapse_measure_ranges(duplicate_rank_measures),
+                    failing_attributes={**common_payload, "rank_indices_by_measure": rank_details},
+                )
+            )
+
+    # Preserve the existing compact-staff safeguard for native sibling voices.
+    # The complete-split rules above cover same-source chords; this rule covers
+    # a plan that only addresses some of a multi-voice staff.
+    legacy_source_keys = {
+        (part_index, source_voice_part_id)
+        for part_index, source_voice_part_id, _measure in visible_same_part_source_claims
+    }
+    for part_index, source_voice_part_id in sorted(legacy_source_keys):
+        if (part_index, source_voice_part_id) in complete_split_sources:
+            continue
         parts = score.get("parts") or []
-        if part_index < 0 or part_index >= len(parts):
+        if part_index < 0 or part_index >= len(parts) or not isinstance(parts[part_index], dict):
             continue
         analysis = _analyze_part_voice_parts(parts[part_index], part_index)
-        # This guard is for sibling-lane plans where each simultaneous note
-        # should be represented by a visible derived lane. A single native
-        # voice can still be made monophonic by ranked chord selection.
         if int(analysis.get("voice_part_count") or 0) <= 1:
             continue
-        for source_meta in analysis.get("voice_parts") or []:
-            source_voice_part_id = str(source_meta.get("voice_part_id") or "")
-            if not source_voice_part_id:
+        density_by_measure = _source_voice_measure_max_simultaneous_notes(
+            score,
+            part_index=part_index,
+            source_voice_part_id=source_voice_part_id,
+        )
+        failing_measures: List[int] = []
+        source_density_details: Dict[int, int] = {}
+        visible_claim_details: Dict[int, int] = {}
+        visible_lane_ids: set[str] = set()
+        for measure, required_count in sorted(density_by_measure.items()):
+            if required_count <= 1:
                 continue
-            source_density_by_measure = _source_voice_measure_max_simultaneous_notes(
-                score,
-                part_index=part_index,
-                source_voice_part_id=source_voice_part_id,
+            claimers = visible_same_part_source_claims.get(
+                (part_index, source_voice_part_id, measure), set()
             )
-            failing_measures: List[int] = []
-            source_density_details: Dict[int, int] = {}
-            visible_claim_details: Dict[int, int] = {}
-            visible_target_ids: set[str] = set()
-            for measure, required_count in sorted(source_density_by_measure.items()):
-                if required_count <= 1:
-                    continue
-                claimers = visible_same_part_source_claims.get(
-                    (part_index, source_voice_part_id, measure), set()
+            if len(claimers) >= required_count:
+                continue
+            failing_measures.append(measure)
+            source_density_details[measure] = required_count
+            visible_claim_details[measure] = len(claimers)
+            visible_lane_ids.update(claimers)
+        if failing_measures:
+            findings.append(
+                _lint_finding(
+                    "same_part_chord_source_underclaimed_by_visible_targets",
+                    part_index=part_index,
+                    source_voice_part_id=source_voice_part_id,
+                    missing_ranges=_collapse_measure_ranges(failing_measures),
+                    failing_attributes={
+                        "source_max_simultaneous_notes_by_measure": source_density_details,
+                        "visible_target_count_by_measure": visible_claim_details,
+                        "visible_target_lane_ids": sorted(visible_lane_ids),
+                    },
                 )
-                claim_count = len(claimers)
-                if claim_count < required_count:
-                    failing_measures.append(measure)
-                    source_density_details[measure] = required_count
-                    visible_claim_details[measure] = claim_count
-                    visible_target_ids.update(claimers)
-            if failing_measures:
-                findings.append(
-                    _lint_finding(
-                        "same_part_chord_source_underclaimed_by_visible_targets",
-                        part_index=part_index,
-                        source_voice_part_id=source_voice_part_id,
-                        missing_ranges=_collapse_measure_ranges(failing_measures),
-                        failing_attributes={
-                            "source_voice_part_id": source_voice_part_id,
-                            "source_max_simultaneous_notes_by_measure": source_density_details,
-                            "visible_target_claim_count_by_measure": visible_claim_details,
-                            "visible_target_voice_part_ids": sorted(visible_target_ids),
-                            "failing_measure_count": len(failing_measures),
-                        },
-                    )
-                )
+            )
 
     return {"ok": len(findings) == 0, "findings": findings}
 
@@ -2302,6 +2829,59 @@ def _source_voice_measure_max_simultaneous_notes(
     return per_measure
 
 
+def _source_voice_staff_scopes(
+    score: Dict[str, Any], *, part_index: int, source_voice_part_id: str
+) -> set[str]:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return set()
+    part = parts[part_index]
+    analysis = _analyze_part_voice_parts(part, part_index)
+    source = _find_voice_part_by_id(
+        analysis.get("voice_parts") or [], source_voice_part_id
+    )
+    if source is None:
+        return set()
+    source_voice = str(source.get("source_voice_id") or "")
+    return {
+        _staff_scope_key(note)
+        for note in (part.get("notes") or [])
+        if _is_countable_sung_note(note)
+        and _voice_key(note.get("voice")) == source_voice
+    }
+
+
+def _staff_scope_measure_max_simultaneous_notes(
+    score: Dict[str, Any], *, part_index: int, staff_scope: str
+) -> Dict[int, int]:
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return {}
+    grouped: Dict[tuple[int, float], int] = {}
+    for note in (parts[part_index].get("notes") or []):
+        if not _is_countable_sung_note(note) or _staff_scope_key(note) != staff_scope:
+            continue
+        measure = int(note.get("measure_number") or 0)
+        if measure <= 0:
+            continue
+        onset = round(float(note.get("offset_beats") or 0.0), 6)
+        key = (measure, onset)
+        grouped[key] = grouped.get(key, 0) + 1
+    per_measure: Dict[int, int] = {}
+    for (measure, _onset), count in grouped.items():
+        per_measure[measure] = max(per_measure.get(measure, 0), count)
+    return per_measure
+
+
+def _resolved_derived_lane(target_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    output = target_entry.get("output")
+    if not isinstance(output, dict):
+        return None
+    if not str(output.get("derived_lane_id") or "").strip():
+        return None
+    return output
+
+
 def _execute_single_preprocess_target(
     score: Dict[str, Any], target_entry: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -2370,6 +2950,7 @@ def _execute_single_preprocess_target(
         verse_number=verse_number,
         copy_all_verses=copy_all_verses,
         section_overrides=section_overrides,
+        derived_lane=_resolved_derived_lane(target_entry),
     )
     if (
         _feature_flag_enabled("VOICE_PART_REPAIR_LOOP_ENABLED")
@@ -2404,6 +2985,7 @@ def _execute_single_preprocess_target(
                 verse_number=verse_number,
                 copy_all_verses=copy_all_verses,
                 section_overrides=section_overrides,
+                derived_lane=_resolved_derived_lane(target_entry),
             )
             repair_attempts.append(
                 {
@@ -2499,6 +3081,7 @@ def _generate_same_part_voice_part_derivations(
         transformed_part = dict(target_part)
         transformed_part["_source_part_index"] = part_index
         transformed_part["_source_part_id"] = target_part.get("part_id")
+        transformed_part["_raw_source_part_id"] = target_part.get("raw_part_id")
         transformed_part["_source_part_name"] = target_part.get("part_name")
         transformed_part["notes"] = selected_notes
         transformed_part["part_name"] = vp_id
@@ -2538,6 +3121,7 @@ def _execute_timeline_sections(
     score: Dict[str, Any], target_entry: Dict[str, Any], *, allow_repair: bool = True
 ) -> Dict[str, Any]:
     target_ref = target_entry["target"]
+    derived_lane = _resolved_derived_lane(target_entry)
     part_index = int(target_ref["part_index"])
     target_voice_part_id = str(target_ref["voice_part_id"])
     verse_number = _normalize_verse_number(target_entry.get("verse_number", "1"))
@@ -2645,6 +3229,7 @@ def _execute_timeline_sections(
                         split_selector=str(section.get("split_selector") or "upper"),
                         rank_index=int(section.get("rank_index") or 0),
                         rank_fallback=str(section.get("rank_fallback") or "greedy"),
+                        split_shared_note_policy=split_shared_note_policy,
                         preserve_source_lyrics=_should_preserve_copied_melody_lyrics(
                             melody_source, section.get("lyric_source")
                         ),
@@ -2833,10 +3418,10 @@ def _execute_timeline_sections(
     transformed_part = dict(part)
     transformed_part["_source_part_index"] = part_index
     transformed_part["_source_part_id"] = part.get("part_id")
+    transformed_part["_raw_source_part_id"] = part.get("raw_part_id")
     transformed_part["_source_part_name"] = part.get("part_name")
     transformed_part["notes"] = [dict(note) for note in working_notes]
     transformed_part["part_name"] = target_voice_part_id
-    source_score["parts"][part_index] = transformed_part
 
     validation = _validate_transformed_notes(
         transformed_notes=working_notes,
@@ -3040,6 +3625,7 @@ def _execute_timeline_sections(
         validation=validation,
         source_musicxml_path=_resolve_source_musicxml_path(score),
         target_source_voice_id=target_voice,
+        derived_lane=derived_lane,
     )
     if result.get("status") in {"ready", "ready_with_warnings", "action_required"}:
         metadata = result.setdefault("metadata", {})
@@ -3067,6 +3653,7 @@ def _split_chords_select_notes_into_target(
     split_selector: str,
     rank_index: int,
     rank_fallback: str,
+    split_shared_note_policy: str,
     preserve_source_lyrics: bool = False,
 ) -> int:
     source_notes = _resolve_source_notes_allow_lyricless(
@@ -3144,6 +3731,7 @@ def _split_chords_select_notes_into_target(
             selection_grouped,
             rank_index=rank_index,
             rank_fallback=rank_fallback,
+            duplicate_singletons=split_shared_note_policy == "duplicate_to_all",
         )
     elif method == "trivial":
         chosen = _choose_notes_trivial_ranked(
@@ -3383,6 +3971,7 @@ def _choose_notes_ranked(
     *,
     rank_index: int,
     rank_fallback: str,
+    duplicate_singletons: bool = False,
 ) -> List[Dict[str, Any]]:
     """Choose a fixed top-down rank at each onset with deterministic fallback."""
     chosen: List[Dict[str, Any]] = []
@@ -3396,6 +3985,9 @@ def _choose_notes_ranked(
             key=lambda n: float(n.get("pitch_midi") or 0.0),
             reverse=True,
         )
+        if duplicate_singletons and len(ordered) == 1:
+            chosen.append(dict(ordered[0]))
+            continue
         if rank < len(ordered):
             chosen.append(dict(ordered[rank]))
             continue
@@ -4665,6 +5257,7 @@ def _persist_transform_metadata(
     transform_id: Optional[str] = None,
     appended_part_ref: Optional[Dict[str, Any]] = None,
     modified_musicxml_path: Optional[str] = None,
+    derived_lane: Optional[Dict[str, Any]] = None,
 ) -> None:
     cache = score.setdefault("voice_part_transforms", {})
     key_score = score_fingerprint or "-"
@@ -4686,6 +5279,7 @@ def _persist_transform_metadata(
         "transform_id": transform_id,
         "appended_part_ref": appended_part_ref,
         "modified_musicxml_path": modified_musicxml_path,
+        "derived_lane": dict(derived_lane) if isinstance(derived_lane, dict) else None,
         "part": transformed_part,
     }
 
@@ -4705,7 +5299,10 @@ def _finalize_transform_result(
     source_musicxml_path: Optional[str] = None,
     target_source_voice_id: Optional[str] = None,
     allow_reuse: bool = True,
+    derived_lane: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    resolved_lane = dict(derived_lane) if isinstance(derived_lane, dict) else None
+    derived_lane_id = str((resolved_lane or {}).get("derived_lane_id") or "").strip()
     score_fingerprint = _compute_score_fingerprint(score)
     transform_payload = {
         "part_index": part_index,
@@ -4714,6 +5311,7 @@ def _finalize_transform_result(
         "source_part_index": source_part_index if source_part_index is not None else part_index,
         "propagated": propagated,
         "notes": transformed_part.get("notes") or [],
+        "derived_lane_id": derived_lane_id or None,
     }
     transform_hash = hashlib.sha256(
         json.dumps(
@@ -4723,12 +5321,19 @@ def _finalize_transform_result(
         ).encode("utf-8")
     ).hexdigest()
     transform_id = f"vp:part{part_index}:{target_voice_part_id}:{transform_hash[:12]}"
-    derived_part_id = _derived_part_id(transform_hash)
-    derived_part_name = _build_derived_part_name(
-        score=score,
-        part_index=part_index,
-        target_voice_part_id=target_voice_part_id,
+    derived_part_id = (
+        _derived_part_id(hashlib.sha256(derived_lane_id.encode("utf-8")).hexdigest())
+        if derived_lane_id
+        else _derived_part_id(transform_hash)
     )
+    derived_part_name = str((resolved_lane or {}).get("display_name") or "").strip()
+    if not derived_part_name:
+        derived_part_name = _build_derived_part_name(
+            score=score,
+            part_index=part_index,
+            target_voice_part_id=target_voice_part_id,
+            source_part_name=str(transformed_part.get("_source_part_name") or "").strip() or None,
+        )
     hidden_default_lane = (
         _is_hidden_default_lane(
             score=score,
@@ -4741,7 +5346,7 @@ def _finalize_transform_result(
         )
     )
 
-    artifact_key = f"{score_fingerprint}:{transform_hash}"
+    artifact_key = f"{score_fingerprint}:{transform_hash}:{derived_lane_id or '-'}"
     lock_key = f"{source_musicxml_path or 'memory'}:{artifact_key}"
     appended_part_ref: Optional[Dict[str, Any]] = None
     modified_musicxml_path: Optional[str] = None
@@ -4813,6 +5418,7 @@ def _finalize_transform_result(
         transform_id=transform_id,
         appended_part_ref=appended_part_ref,
         modified_musicxml_path=modified_musicxml_path,
+        derived_lane=resolved_lane,
     )
     if isinstance(modified_musicxml_path, str) and modified_musicxml_path:
         score["source_musicxml_path"] = modified_musicxml_path
@@ -4828,6 +5434,7 @@ def _finalize_transform_result(
         "modified_musicxml_path": modified_musicxml_path,
         "reused_transform": reused_transform,
         "hidden_default_lane": hidden_default_lane,
+        "derived_lane": resolved_lane,
     }
     if warnings:
         result["warnings"] = warnings
@@ -4861,16 +5468,18 @@ def _derived_part_id(transform_hash: str) -> str:
 
 
 def _build_derived_part_name(
-    *, score: Dict[str, Any], part_index: int, target_voice_part_id: str
+    *, score: Dict[str, Any], part_index: int, target_voice_part_id: str,
+    source_part_name: Optional[str] = None,
 ) -> str:
     parts = score.get("parts") or []
-    source_part_name = ""
+    resolved_source_part_name = str(source_part_name or "").strip()
     source_part_id = ""
     if 0 <= part_index < len(parts):
-        source_part_name = str(parts[part_index].get("part_name") or "").strip()
+        if not resolved_source_part_name:
+            resolved_source_part_name = str(parts[part_index].get("part_name") or "").strip()
         source_part_id = str(parts[part_index].get("part_id") or "").strip()
-    if source_part_name and not re.match(r"^voice\s+part\s+\d+$", source_part_name, re.IGNORECASE):
-        return f"{source_part_name} - {target_voice_part_id} (Derived)"
+    if resolved_source_part_name and not re.match(r"^voice\s+part\s+\d+$", resolved_source_part_name, re.IGNORECASE):
+        return f"{resolved_source_part_name} - {target_voice_part_id} (Derived)"
     if source_part_id:
         return f"{source_part_id} - {target_voice_part_id} (Derived)"
     return f"Part {part_index + 1} - {target_voice_part_id} (Derived)"
@@ -5202,10 +5811,15 @@ def _materialize_transformed_part(
     derived_part = ET.SubElement(root, q("part"), {"id": part_id})
 
     source_parts = root.findall(q("part"))
+    raw_source_part_id = _resolve_raw_source_part_id(
+        source_musicxml_path=source_musicxml_path,
+        transformed_part=transformed_part,
+    )
     reference_part = _resolve_reference_part_for_transformed(
         source_parts=source_parts,
         transformed_part=transformed_part,
         derived_part_id=part_id,
+        raw_source_part_id=raw_source_part_id,
     )
     divisions = _resolve_divisions(reference_part, q) if reference_part is not None else 1
     _append_transformed_measures(
@@ -5295,12 +5909,21 @@ def _remove_hidden_derived_parts_from_musicxml(
 def _part_name_matches_hidden_voice_part_id(
     part_name: str, hidden_voice_part_ids: set[str]
 ) -> bool:
+    """Match only legacy bare helper names, never another part's derived lane.
+
+    Voice-part labels such as ``voice part 2`` are local to a source part.  The
+    broader suffix match previously treated ``Soprano - voice part 2
+    (Derived)`` as the hidden default lane of an unrelated Piano part.
+    Source-qualified generated names are tracked through ``part_names`` above;
+    this fallback is solely for older bare names such as ``voice part 2
+    (Derived)``.
+    """
     normalized_name = re.sub(r"\s+", " ", str(part_name or "")).strip().lower()
     if not normalized_name.endswith("(derived)"):
         return False
     for voice_part_id in hidden_voice_part_ids:
         normalized_voice = re.sub(r"\s+", " ", str(voice_part_id or "")).strip().lower()
-        if normalized_voice and normalized_name.endswith(f"{normalized_voice} (derived)"):
+        if normalized_voice and normalized_name == f"{normalized_voice} (derived)":
             return True
     return False
 
@@ -5310,20 +5933,47 @@ def _resolve_reference_part_for_transformed(
     source_parts: Sequence[ET.Element],
     transformed_part: Dict[str, Any],
     derived_part_id: str,
+    raw_source_part_id: Optional[str],
 ) -> Optional[ET.Element]:
-    source_part_index = transformed_part.get("_source_part_index")
-    if isinstance(source_part_index, int) and 0 <= source_part_index < len(source_parts):
-        candidate = source_parts[source_part_index]
-        if candidate.get("id") != derived_part_id:
-            return candidate
+    if raw_source_part_id:
+        for candidate in source_parts:
+            if candidate.get("id") == raw_source_part_id:
+                return candidate
     transformed_part_id = str(transformed_part.get("part_id") or "").strip()
     if transformed_part_id:
         for candidate in source_parts:
             if candidate.get("id") == transformed_part_id:
                 return candidate
+    source_part_index = transformed_part.get("_source_part_index")
+    if isinstance(source_part_index, int) and 0 <= source_part_index < len(source_parts):
+        candidate = source_parts[source_part_index]
+        if candidate.get("id") != derived_part_id:
+            return candidate
     for candidate in source_parts:
         if candidate.get("id") != derived_part_id:
             return candidate
+    return None
+
+
+def _resolve_raw_source_part_id(
+    *, source_musicxml_path: str, transformed_part: Dict[str, Any]
+) -> Optional[str]:
+    """Resolve parser-facing source metadata before reading raw MusicXML parts."""
+    raw_source_part_id = str(
+        transformed_part.get("_raw_source_part_id")
+        or transformed_part.get("raw_part_id")
+        or ""
+    ).strip()
+    if raw_source_part_id:
+        return raw_source_part_id
+    source_part_id = str(transformed_part.get("_source_part_id") or "").strip()
+    try:
+        if source_part_id:
+            return resolve_part_reference(
+                part_id=source_part_id, source_path=source_musicxml_path
+            ).raw_part_id
+    except (OSError, ValueError, ET.ParseError):
+        return None
     return None
 
 
@@ -5819,6 +6469,7 @@ def _normalize_section_overrides(
             raw_override.get("source"),
             field_name=f"{field_name}[{idx}].source",
             allow_voice_id=False,
+            score=score,
         )
         if source_error is not None:
             return [], source_error
@@ -5971,6 +6622,7 @@ def _normalize_timeline_sections(
                     melody_raw,
                     field_name=f"{section_name}.melody_source",
                     allow_voice_id=False,
+                    score=score,
                 )
                 if melody_error is not None:
                     return [], _plan_error(
@@ -5982,6 +6634,7 @@ def _normalize_timeline_sections(
                     lyric_raw,
                     field_name=f"{section_name}.lyric_source",
                     allow_voice_id=False,
+                    score=score,
                 )
                 if lyric_error is not None:
                     return [], _plan_error(
@@ -6045,6 +6698,7 @@ def _normalize_voice_ref(
     *,
     field_name: str,
     allow_voice_id: bool,
+    score: Optional[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     if not isinstance(raw_ref, dict):
         return {}, _plan_error(
@@ -6052,11 +6706,31 @@ def _normalize_voice_ref(
             f"{field_name} must be an object.",
         )["error"]
 
+    raw_part_id = raw_ref.get("part_id")
     raw_part_index = raw_ref.get("part_index")
-    if not isinstance(raw_part_index, int):
+    part_id: Optional[str] = None
+    if isinstance(raw_part_id, str) and raw_part_id.strip():
+        if not isinstance(score, dict):
+            return {}, _plan_error(
+                "invalid_plan_target_ref",
+                f"{field_name}.part_id requires the active parsed score.",
+            )["error"]
+        try:
+            reference = resolve_part_reference(part_id=raw_part_id, score=score)
+        except ValueError as exc:
+            return {}, _plan_error("invalid_plan_target_ref", str(exc))["error"]
+        raw_part_index = reference.parser_part_index
+        part_id = reference.parser_part_id
+    elif isinstance(raw_part_index, int) and not isinstance(raw_part_index, bool):
+        # Internal and legacy compatibility. Public MCP plans use part_id.
+        if isinstance(score, dict):
+            parts = score.get("parts") or []
+            if 0 <= raw_part_index < len(parts) and isinstance(parts[raw_part_index], dict):
+                part_id = str(parts[raw_part_index].get("part_id") or "").strip() or None
+    else:
         return {}, _plan_error(
             "invalid_plan_target_ref",
-            f"{field_name}.part_index must be an integer.",
+            f"{field_name}.part_id must be an exact parser-visible part ID.",
         )["error"]
 
     voice_part_id = raw_ref.get("voice_part_id")
@@ -6076,10 +6750,13 @@ def _normalize_voice_ref(
                 f"{field_name}.voice_part_id is required.",
             )["error"]
 
-    return {
+    normalized = {
         "part_index": int(raw_part_index),
         "voice_part_id": str(voice_part_id).strip(),
-    }, None
+    }
+    if part_id:
+        normalized["part_id"] = part_id
+    return normalized, None
 
 
 def _plan_error(action: str, message: str) -> Dict[str, Any]:
@@ -6388,6 +7065,7 @@ def _build_preprocess_target_output(result: Dict[str, Any]) -> Dict[str, Any]:
         "message": result.get("message"),
         "part_index": result.get("part_index"),
         "target_voice_part_id": result.get("target_voice_part"),
+        "derived_lane": result.get("derived_lane"),
         "transform_id": result.get("transform_id"),
         "appended_part_ref": result.get("appended_part_ref"),
         "hidden_default_lane": bool(result.get("hidden_default_lane")),

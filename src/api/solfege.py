@@ -11,27 +11,37 @@ from src.musicxml.solfege import (
     add_solfege_lyric_verse as transform_add_solfege_lyric_verse,
     modify_generated_solfege_verses,
 )
+from src.musicxml.part_reference import resolve_part_reference
 
 
 def add_solfege_lyric_verse(
     source_musicxml_path: str | Path,
     output_musicxml_path: str | Path,
     *,
-    part_id: Optional[str] = None,
-    part_index: Optional[int] = None,
+    part_id: str,
     settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create, parse, and return a derived score with one new solfege verse."""
     output_path = Path(output_musicxml_path)
+    reference = resolve_part_reference(
+        part_id=part_id,
+        source_path=source_musicxml_path,
+    )
     result = transform_add_solfege_lyric_verse(
         Path(source_musicxml_path),
         output_path,
-        part_id=part_id,
-        part_index=part_index,
+        part_id=reference.raw_part_id,
         settings=settings,
     )
     if result.get("status") != "ready":
         return result
+    if isinstance(result.get("target"), dict):
+        result["target"] = {
+            **result["target"],
+            "part_id": reference.parser_part_id,
+            "raw_part_id": reference.raw_part_id,
+            "part_index": reference.parser_part_index,
+        }
     unselected = parse_score(output_path, expand_repeats=False)
     selection = _find_generated_selection(unselected, result.get("target"))
     if selection is None:
@@ -87,15 +97,20 @@ def _find_generated_selection(
     part_index = target.get("part_index") if isinstance(target, dict) else None
     summary = parsed.get("score_summary") if isinstance(parsed, dict) else None
     for index, part in enumerate((summary or {}).get("parts") or []):
-        if part_index is not None and index != part_index:
-            continue
-        if part_index is None and part_id is not None and part.get("part_id") != part_id:
-            continue
-        for selection in part.get("lyric_selections") or []:
-            if selection.get("name") == GENERATED_LYRIC_NAME:
-                return {
-                    "id": str(selection["id"]),
-                    "number": str(selection["number"]),
-                    "name": str(selection["name"]),
-                }
+        raw_part_id = part.get("raw_part_id") or part.get("part_id")
+        parsed_part_id = part.get("part_id")
+        matches = False
+        if part_index is not None and index == part_index:
+            matches = True
+        elif part_id is not None and (raw_part_id == part_id or parsed_part_id == part_id):
+            matches = True
+
+        if matches:
+            for selection in part.get("lyric_selections") or []:
+                if selection.get("name") == GENERATED_LYRIC_NAME:
+                    return {
+                        "id": str(selection["id"]),
+                        "number": str(selection["number"]),
+                        "name": str(selection["name"]),
+                    }
     return None
