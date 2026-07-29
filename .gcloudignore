@@ -34,6 +34,10 @@ env/prod.env
 
 # Assets moved to GCS (exclude from build context)
 assets/
+# Keep OpenUtau G2P model packs bundled with the phonemizer runtime.
+!src/phonemizer/assets/
+!src/phonemizer/assets/openutau/
+!src/phonemizer/assets/openutau/*.zip
 
 
 # IDE
