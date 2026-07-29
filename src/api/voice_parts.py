@@ -6088,8 +6088,20 @@ def _append_transformed_measures(
                 ET.SubElement(note_node, q("dot"))
             lyric = note.get("lyric")
             if isinstance(lyric, str) and lyric.strip():
-                lyric_node = ET.SubElement(note_node, q("lyric"))
+                lyric_attributes: Dict[str, str] = {}
+                lyric_line_index = note.get("lyric_line_index")
+                if lyric_line_index is not None and str(lyric_line_index).strip():
+                    lyric_attributes["number"] = str(lyric_line_index).strip()
+                lyric_name = note.get("lyric_name")
+                if isinstance(lyric_name, str) and lyric_name.strip():
+                    lyric_attributes["name"] = lyric_name.strip()
+                lyric_node = ET.SubElement(note_node, q("lyric"), lyric_attributes)
+                syllabic = str(note.get("syllabic") or "").strip().lower()
+                if syllabic in {"single", "begin", "middle", "end"}:
+                    ET.SubElement(lyric_node, q("syllabic")).text = syllabic
                 ET.SubElement(lyric_node, q("text")).text = lyric
+                if bool(note.get("lyric_is_extended")):
+                    ET.SubElement(lyric_node, q("extend"))
 
 
 def _single_staff_attributes_copy(attributes: ET.Element, q: Any) -> ET.Element:

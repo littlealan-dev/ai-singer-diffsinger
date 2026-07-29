@@ -3856,6 +3856,47 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertTrue(part_nodes)
         self.assertGreaterEqual(int(result["part_index"]), 1)
 
+    def test_materialize_preserves_syllabic_lyric_grouping(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Solo</part-name></score-part></part-list>
+  <part id="P1"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><lyric number="1" name="Verse 1"><syllabic>begin</syllabic><text>ho</text></lyric></note>
+    <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type><lyric number="1" name="Verse 1"><syllabic>end</syllabic><text>ly</text></lyric></note>
+  </measure></part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "syllabic-source.xml"
+            source_path.write_text(xml, encoding="utf-8")
+            score = parse_score(source_path, verse_number=1)
+            result = _finalize_transform_result(
+                score,
+                part_index=0,
+                target_voice_part_id="voice part 1",
+                source_voice_part_id="voice part 1",
+                source_part_index=0,
+                transformed_part={**score["parts"][0]},
+                propagated=False,
+                status="ready",
+                validation={},
+                source_musicxml_path=str(source_path),
+                target_source_voice_id="1",
+                allow_reuse=False,
+            )
+            reparsed = parse_score(result["modified_musicxml_path"], verse_number=1)
+
+        derived_part = next(
+            part for part in reparsed["parts"] if "(Derived)" in str(part.get("part_name"))
+        )
+        lyric_notes = [note for note in derived_part["notes"] if note.get("lyric")]
+        self.assertEqual(
+            [(note.get("lyric"), note.get("syllabic")) for note in lyric_notes],
+            [("ho", "begin"), ("ly", "end")],
+        )
+        self.assertTrue(all(note.get("lyric_name") == "Verse 1" for note in lyric_notes))
+
     def test_materialize_preserves_dotted_note_notation(self) -> None:
         source_path = self._output_dir / "dotted-source.xml"
         source_path.write_text(
