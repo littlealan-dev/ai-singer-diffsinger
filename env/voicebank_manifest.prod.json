@@ -33,7 +33,7 @@
         {"name": "06: Sweet", "suffix": "dsmain/embeds/acoustic/V5_Sweet"},
         {"name": "07: Light", "suffix": "dsmain/embeds/acoustic/V5_Light"}
       ],
-      "default_voice_color": "01: Default",
+      "default_voice_color": "03: Solid",
       "pitch_expression": 1.0,
       "pronunciation_adapters": {
         "es": [
@@ -110,7 +110,7 @@
         {"name": "B2: Alter", "suffix": "dsmain/embeds/acoustic/ALTER"},
         {"name": "C: Casual (Obsolete)", "suffix": "dsmain/embeds/acoustic/CASUAL"}
       ],
-      "default_voice_color": "A1: Solid",
+      "default_voice_color": "A4: Adult",
       "pitch_expression": 1.0,
       "pronunciation_adapters": {
         "es": [
