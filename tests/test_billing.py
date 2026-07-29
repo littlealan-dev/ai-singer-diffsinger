@@ -5,6 +5,7 @@ import warnings
 import pytest
 from google.cloud import firestore
 
+import src.backend.billing_topup as billing_topup_module
 from src.backend.billing_checkout import create_checkout_session, create_embedded_subscription_checkout_session
 from src.backend.billing_checkout_sync import sync_checkout_session
 from src.backend.billing_config import get_billing_config, get_stripe_client
@@ -243,6 +244,30 @@ def test_create_topup_checkout_session_sets_adjustable_quantity_limit():
         or {}
     )
     assert params["expires_at"] == int(hold["expiresAt"].timestamp())
+
+
+def test_create_embedded_topup_checkout_session_uses_fixed_quantity_for_one_slot(monkeypatch):
+    uid = "user-embedded-topup-one-slot"
+    ensure_billing_state_for_login(uid, "embedded-one-slot@example.com")
+    fake_stripe = _FakeStripeClient()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+    monkeypatch.setattr(
+        billing_topup_module,
+        "_create_checkout_hold",
+        lambda db, user_id, config: ("topup_hold_one_slot", 1, expires_at),
+    )
+
+    result = create_embedded_topup_checkout_session(
+        uid,
+        "embedded-one-slot@example.com",
+        config=get_billing_config(),
+        stripe_client=fake_stripe,
+    )
+
+    assert result["maxQuantity"] == 1
+    params = fake_stripe.created_checkout_sessions[0]
+    assert params["line_items"] == [{"price": "price_topup_15", "quantity": 1}]
+    assert params["metadata"]["maxQuantity"] == "1"
 
 
 def test_create_embedded_topup_checkout_session_disables_redirects():

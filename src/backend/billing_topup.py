@@ -110,21 +110,24 @@ def _create_topup_checkout_session(
         upsert_stripe_customer_id(uid, stripe_customer_id)
 
     hold_id, remaining_slots, hold_expires_at = _create_checkout_hold(db, uid, billing_config)
+    line_item: dict[str, Any] = {
+        "price": billing_config.stripe_price_topup_15,
+        "quantity": 1,
+    }
+    # Stripe requires an adjustable quantity range to contain at least two
+    # values. When only one pack can be bought, create a fixed-quantity session.
+    if remaining_slots >= 2:
+        line_item["adjustable_quantity"] = {
+            "enabled": True,
+            "minimum": 1,
+            "maximum": remaining_slots,
+        }
+
     params: dict[str, Any] = {
         "mode": "payment",
         "customer": stripe_customer_id,
         "expires_at": int(hold_expires_at.timestamp()),
-        "line_items": [
-            {
-                "price": billing_config.stripe_price_topup_15,
-                "quantity": 1,
-                "adjustable_quantity": {
-                    "enabled": True,
-                    "minimum": 1,
-                    "maximum": remaining_slots,
-                },
-            }
-        ],
+        "line_items": [line_item],
         "client_reference_id": uid,
         "metadata": {
             "firebaseUserId": uid,
