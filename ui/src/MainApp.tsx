@@ -3105,7 +3105,12 @@ export default function MainApp() {
             </div>
           </div>
 
-          <section className="score-panel">
+          <section
+            className={clsx("score-panel", isDragging && "drag-active")}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
           <div className="score-header">
             <h2>Score Preview</h2>
             <div className="score-controls">
@@ -3197,6 +3202,11 @@ export default function MainApp() {
               </div>
             ) : null}
           </div>
+          {isDragging && (
+            <div className="drop-overlay">
+              <p>Release to upload your MusicXML file.</p>
+            </div>
+          )}
         </section>
         </div>
       </main>

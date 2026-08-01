@@ -1075,7 +1075,8 @@ body.legal-active #root {
   pointer-events: none;
 }
 
-.chat-panel.drag-active {
+.chat-panel.drag-active,
+.score-panel.drag-active {
   border-color: rgba(183, 125, 255, 0.4);
   box-shadow: 0 24px 50px rgba(183, 125, 255, 0.2);
 }
