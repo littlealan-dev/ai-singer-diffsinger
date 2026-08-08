@@ -21,6 +21,7 @@ _refresh_config = get_billing_refresh_config()
 @scheduler_fn.on_schedule(
     schedule=_refresh_config.schedule,
     timeout_sec=_refresh_config.timeout_seconds,
+    service_account=_refresh_config.service_account,
 )
 def refreshCredits(event: scheduler_fn.ScheduledEvent) -> None:
     started_monotonic = time.monotonic()

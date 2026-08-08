@@ -25,6 +25,8 @@ from src.backend.orchestrator import (
     ToolExecutionResult,
     WorkflowCandidate,
     _format_synthesis_error,
+    _ensure_job_input_storage,
+    _resolve_job_input_snapshot_paths,
 )
 from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.session import SessionStore
@@ -3916,6 +3918,106 @@ def test_preprocess_attempt_artifacts_store_exact_plan_and_derived_musicxml(
     ]["derived_musicxml"]["sha256"]
 
 
+def test_job_input_snapshot_prefers_active_derived_musicxml_over_uploaded_storage(tmp_path):
+    original_path = tmp_path / "score.xml"
+    uploaded_path = tmp_path / "score.mxl"
+    derived_path = tmp_path / "score-solfege.xml"
+    original_path.write_text("<score-partwise/>", encoding="utf-8")
+    uploaded_path.write_text("original mxl", encoding="utf-8")
+    derived_path.write_text(
+        "<score-partwise><lyric name='SightSinger Solfege'/></score-partwise>",
+        encoding="utf-8",
+    )
+
+    input_path, storage_input_path = _resolve_job_input_snapshot_paths(
+        {"source_musicxml_path": str(derived_path)},
+        {
+            "musicxml_path": str(derived_path),
+            "uploaded_musicxml_path": str(uploaded_path),
+            "musicxml_storage_path": "sessions/test-user/session-1/input.mxl",
+        },
+        tmp_path,
+    )
+
+    assert input_path == str(derived_path)
+    assert storage_input_path is None
+
+
+def test_job_input_snapshot_allows_storage_fallback_for_original_mxl_upload(tmp_path):
+    canonical_path = tmp_path / "score.xml"
+    uploaded_path = tmp_path / "score.mxl"
+    canonical_path.write_text("<score-partwise/>", encoding="utf-8")
+    uploaded_path.write_text("original mxl", encoding="utf-8")
+
+    input_path, storage_input_path = _resolve_job_input_snapshot_paths(
+        {"source_musicxml_path": str(canonical_path)},
+        {
+            "musicxml_path": str(canonical_path),
+            "uploaded_musicxml_path": str(uploaded_path),
+            "musicxml_storage_path": "sessions/test-user/session-1/input.mxl",
+        },
+        tmp_path,
+    )
+
+    assert input_path == str(canonical_path)
+    assert storage_input_path == "sessions/test-user/session-1/input.mxl"
+
+
+def test_ensure_job_input_storage_uploads_existing_active_file_before_storage_fallback(
+    tmp_path, monkeypatch
+):
+    active_path = tmp_path / "score-solfege.xml"
+    active_path.write_text(
+        "<score-partwise><lyric name='SightSinger Solfege'/></score-partwise>",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_upload_file(bucket_name, source_path, dest_path, content_type=None):
+        calls.append(("upload", str(source_path)))
+
+    def fake_copy_blob(bucket_name, source_path, dest_path):
+        calls.append(("copy", source_path))
+
+    monkeypatch.setattr("src.backend.orchestrator.upload_file", fake_upload_file)
+    monkeypatch.setattr("src.backend.orchestrator.copy_blob", fake_copy_blob)
+
+    _ensure_job_input_storage(
+        "test-bucket",
+        str(active_path),
+        "sessions/test-user/session-1/input.mxl",
+        "sessions/test-user/session-1/jobs/job-1/input.xml",
+        tmp_path,
+    )
+
+    assert calls == [("upload", str(active_path.resolve()))]
+
+
+def test_ensure_job_input_storage_uses_safe_storage_fallback_when_local_missing(
+    tmp_path, monkeypatch
+):
+    calls: list[tuple[str, str]] = []
+
+    def fake_upload_file(bucket_name, source_path, dest_path, content_type=None):
+        calls.append(("upload", str(source_path)))
+
+    def fake_copy_blob(bucket_name, source_path, dest_path):
+        calls.append(("copy", source_path))
+
+    monkeypatch.setattr("src.backend.orchestrator.upload_file", fake_upload_file)
+    monkeypatch.setattr("src.backend.orchestrator.copy_blob", fake_copy_blob)
+
+    _ensure_job_input_storage(
+        "test-bucket",
+        str(tmp_path / "missing-score.xml"),
+        "sessions/test-user/session-1/input.mxl",
+        "sessions/test-user/session-1/jobs/job-1/input.mxl",
+        tmp_path,
+    )
+
+    assert calls == [("copy", "sessions/test-user/session-1/input.mxl")]
+
+
 def test_orchestrator_selection_matches_current_uses_selected_verse(client):
     test_client, app = client
     orchestrator = app.state.orchestrator
@@ -4161,6 +4263,39 @@ def test_chat_selected_language_overrides_llm_and_reaches_synthesis(client):
     _wait_for_progress(test_client, payload["progress_url"])
     assert synth_calls[-1]["voicebank"] == "VoiceB"
     assert synth_calls[-1]["language"] == "es"
+
+
+def test_synthesis_job_metadata_includes_resolved_language(client, monkeypatch):
+    _test_client, app = client
+
+    async def fake_voicebank_details():
+        return [
+            {
+                "id": "VoiceB",
+                "name": "Voice B Display",
+                "voice_colors": [{"name": "01: Default"}],
+                "default_voice_color": "01: Default",
+            }
+        ]
+
+    monkeypatch.setattr(
+        app.state.orchestrator,
+        "_get_voicebank_details",
+        fake_voicebank_details,
+    )
+
+    metadata = asyncio.run(
+        app.state.orchestrator._build_synthesis_voicebank_metadata(
+            {"voicebank": "VoiceB", "voice_color": "01: Default", "language": "es"}
+        )
+    )
+
+    assert metadata == {
+        "voicebankId": "VoiceB",
+        "voicebankName": "Voice B Display",
+        "voicebankStyle": "01: Default",
+        "synthesisLanguage": "es",
+    }
 
 
 def test_chat_rejects_selected_language_unsupported_by_voicebank(client):

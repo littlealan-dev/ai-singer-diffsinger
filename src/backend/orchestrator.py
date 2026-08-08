@@ -582,8 +582,11 @@ class Orchestrator:
             job_id = uuid.uuid4().hex
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         files = snapshot.get("files") or {}
-        input_path = files.get("musicxml_path")
-        storage_input_path = files.get("musicxml_storage_path")
+        input_path, storage_input_path = _resolve_job_input_snapshot_paths(
+            score,
+            files if isinstance(files, dict) else {},
+            self._settings.project_root,
+        )
         render_type = arguments.get("render_type")
         output_storage_path = None
         job_input_storage_path = None
@@ -5067,6 +5070,9 @@ class Orchestrator:
             "voicebankId": voicebank_id,
             "voicebankName": str(details.get("name") or voicebank_id),
         }
+        language = synth_args.get("language")
+        if isinstance(language, str) and language.strip():
+            metadata["synthesisLanguage"] = language.strip()
 
         raw_style = synth_args.get("voice_color")
         requested_style = str(raw_style).strip() if raw_style is not None else ""
@@ -6546,12 +6552,89 @@ def _ensure_job_input_storage(
     project_root: Path,
 ) -> None:
     """Ensure the job input file exists in storage, copying or uploading."""
+    if input_path:
+        local_path = Path(input_path)
+        if not local_path.is_absolute():
+            local_path = project_root / local_path
+        local_path = local_path.resolve()
+        if local_path.exists():
+            upload_file(bucket_name, local_path, job_input_storage_path, "application/xml")
+            return
+        if not storage_input_path:
+            raise RuntimeError("Local input file not found for storage copy.")
     if storage_input_path:
         copy_blob(bucket_name, storage_input_path, job_input_storage_path)
         return
-    if not input_path:
-        raise RuntimeError("Missing input path for job storage copy.")
-    local_path = (project_root / input_path).resolve()
-    if not local_path.exists():
-        raise RuntimeError("Local input file not found for storage copy.")
-    upload_file(bucket_name, local_path, job_input_storage_path, "application/xml")
+    raise RuntimeError("Missing input path for job storage copy.")
+
+
+def _resolve_job_input_snapshot_paths(
+    score: Dict[str, Any],
+    files: Dict[str, Any],
+    project_root: Path,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return local active MusicXML plus a safe storage fallback for job snapshots."""
+    active_path = _first_non_empty_string(
+        score.get("source_musicxml_path"),
+        files.get("musicxml_path"),
+    )
+    storage_path = _first_non_empty_string(files.get("musicxml_storage_path"))
+    if not storage_path:
+        return active_path, None
+    if not active_path:
+        if _session_musicxml_path_is_original_upload(files, project_root):
+            return None, storage_path
+        return None, None
+    if _storage_path_matches_active_original_upload(active_path, files, project_root):
+        return active_path, storage_path
+    return active_path, None
+
+
+def _storage_path_matches_active_original_upload(
+    active_path: str,
+    files: Dict[str, Any],
+    project_root: Path,
+) -> bool:
+    """Return True only when stored upload can safely stand in for active input."""
+    musicxml_path = _first_non_empty_string(files.get("musicxml_path"))
+    if not musicxml_path:
+        return False
+    if _resolve_path_identity(active_path, project_root) != _resolve_path_identity(
+        musicxml_path, project_root
+    ):
+        return False
+    return _session_musicxml_path_is_original_upload(files, project_root)
+
+
+def _session_musicxml_path_is_original_upload(
+    files: Dict[str, Any], project_root: Path
+) -> bool:
+    """Return True when the active session MusicXML still represents the upload."""
+    musicxml_path = _first_non_empty_string(files.get("musicxml_path"))
+    uploaded_path = _first_non_empty_string(files.get("uploaded_musicxml_path"))
+    if not musicxml_path or not uploaded_path:
+        return False
+    musicxml_resolved = _resolve_path_identity(musicxml_path, project_root)
+    uploaded_resolved = _resolve_path_identity(uploaded_path, project_root)
+    if musicxml_resolved == uploaded_resolved:
+        return True
+    return (
+        uploaded_resolved.suffix.lower() == ".mxl"
+        and musicxml_resolved.suffix.lower() in {".xml", ".musicxml"}
+        and musicxml_resolved.parent == uploaded_resolved.parent
+        and musicxml_resolved.stem == uploaded_resolved.stem
+    )
+
+
+def _resolve_path_identity(path_value: str, project_root: Path) -> Path:
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve(strict=False)
+
+
+def _first_non_empty_string(*values: Any) -> Optional[str]:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None

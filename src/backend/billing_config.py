@@ -64,6 +64,7 @@ class BillingRefreshConfig:
     max_due_users: int
     timeout_seconds: int
     metrics_enabled: bool
+    service_account: str
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,7 @@ def get_billing_refresh_config() -> BillingRefreshConfig:
         max_due_users=max_due_users,
         timeout_seconds=timeout_seconds,
         metrics_enabled=_env_bool("BILLING_REFRESH_METRICS_ENABLED", True),
+        service_account=_required_env("BILLING_REFRESH_SERVICE_ACCOUNT"),
     )
 
 
