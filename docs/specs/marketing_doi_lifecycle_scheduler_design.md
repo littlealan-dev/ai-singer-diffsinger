@@ -342,7 +342,7 @@ The job configuration must include:
 ```text
 HTTP method: POST
 URI: https://<sightsinger-billing-api-url>/internal/marketing/doi-reconcile
-OIDC service account: sightsinger-marketing-scheduler-as@sightsinger-app.iam.gserviceaccount.com
+OIDC service account: sightsinger-doi-scheduler@sightsinger-app.iam.gserviceaccount.com
 OIDC audience: https://<sightsinger-billing-api-url>
 Retry policy: no automatic retry attempts
 ```
@@ -428,11 +428,11 @@ settings layer:
 ```text
 MARKETING_DOI_RECONCILE_ENABLED=false
 MARKETING_DOI_RECONCILE_MODE=observe
-MARKETING_DOI_RECONCILE_SCHEDULE=15 03 * * *
+MARKETING_DOI_RECONCILE_SCHEDULE=30 03 * * *
 MARKETING_DOI_REMINDER_DELAY_DAYS=3
 MARKETING_DOI_EXPIRY_DAYS=14
 MARKETING_DOI_MAX_ACTIVE_USERS=500
-MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT=sightsinger-marketing-scheduler-as@sightsinger-app.iam.gserviceaccount.com
+MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT=sightsinger-doi-scheduler@sightsinger-app.iam.gserviceaccount.com
 MARKETING_DOI_SCHEDULER_AUDIENCE=https://<sightsinger-billing-api-url>
 ```
 

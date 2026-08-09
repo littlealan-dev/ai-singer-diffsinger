@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${GCP_SCHEDULER_REGION:=us-central1}"
 : "${BILLING_SERVICE:=sightsinger-billing-api}"
 : "${MARKETING_DOI_SCHEDULER_JOB:=marketing-doi-reconcile}"
-: "${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT:=sightsinger-marketing-scheduler-as@${GCP_PROJECT}.iam.gserviceaccount.com}"
+: "${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT:=sightsinger-doi-scheduler@${GCP_PROJECT}.iam.gserviceaccount.com}"
 
 PROD_ENV_FILE="${ROOT_DIR}/env/prod.env"
 if [[ ! -f "${PROD_ENV_FILE}" ]]; then
@@ -32,31 +32,29 @@ if [[ -z "${MARKETING_DOI_RECONCILE_SCHEDULE}" || -z "${MARKETING_DOI_CONFIGURED
   exit 1
 fi
 
-SERVICE_URL="$(gcloud run services describe "${BILLING_SERVICE}" \
-  --project="${GCP_PROJECT}" \
-  --region="${GCP_REGION}" \
-  --format='value(status.url)')"
-if [[ -z "${SERVICE_URL}" ]]; then
-  echo "Could not determine Cloud Run URL for ${BILLING_SERVICE}." >&2
+PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT}" --format='value(projectNumber)')"
+if [[ -z "${PROJECT_NUMBER}" ]]; then
+  echo "Could not determine project number for ${GCP_PROJECT}." >&2
   exit 1
 fi
+gcloud run services describe "${BILLING_SERVICE}" \
+  --project="${GCP_PROJECT}" \
+  --region="${GCP_REGION}" >/dev/null 2>&1 || {
+  echo "Could not find Cloud Run service ${BILLING_SERVICE} in ${GCP_REGION}." >&2
+  exit 1
+}
+SERVICE_URL="https://${BILLING_SERVICE}-${PROJECT_NUMBER}.${GCP_REGION}.run.app"
 if [[ "${MARKETING_DOI_CONFIGURED_AUDIENCE}" != "${SERVICE_URL}" ]]; then
   echo "MARKETING_DOI_SCHEDULER_AUDIENCE does not match the deployed billing service URL." >&2
-  echo "Deploy the billing service with the current service URL configured before creating the Scheduler job." >&2
+  echo "Deploy the billing service with the current service URL configured before updating the Scheduler job." >&2
   exit 1
 fi
 
 gcloud iam service-accounts describe "${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT}" \
-  --project="${GCP_PROJECT}" >/dev/null 2>&1 || \
-  gcloud iam service-accounts create "${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT%@*}" \
-    --project="${GCP_PROJECT}" \
-    --display-name="SightSinger marketing DOI scheduler"
-
-gcloud run services add-iam-policy-binding "${BILLING_SERVICE}" \
-  --project="${GCP_PROJECT}" \
-  --region="${GCP_REGION}" \
-  --member="serviceAccount:${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT}" \
-  --role="roles/run.invoker" >/dev/null
+  --project="${GCP_PROJECT}" >/dev/null 2>&1 || {
+  echo "Scheduler service account does not exist: ${MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT}" >&2
+  exit 1
+}
 
 JOB_ARGS=(
   --project="${GCP_PROJECT}"
