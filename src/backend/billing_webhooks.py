@@ -131,8 +131,7 @@ def _handle_invoice_paid(payload: dict[str, Any], *, config: BillingConfig | Non
     line_items = ((payload.get("lines") or {}).get("data") or [])
     price_id = None
     for line in line_items:
-        price = line.get("price") or {}
-        price_id = price.get("id")
+        price_id = _invoice_line_price_id(line)
         if price_id:
             break
     if not price_id:
@@ -381,6 +380,29 @@ def _apply_paid_invoice(
         )
 
     _transaction(db.transaction())
+
+
+def _invoice_line_price_id(line: dict[str, Any]) -> str | None:
+    price = line.get("price")
+    if isinstance(price, str) and price:
+        return price
+    if isinstance(price, dict):
+        price_id = _get_string(price, "id")
+        if price_id:
+            return price_id
+
+    pricing = line.get("pricing")
+    if not isinstance(pricing, dict):
+        return None
+    price_details = pricing.get("price_details")
+    if not isinstance(price_details, dict):
+        return None
+    price = price_details.get("price")
+    if isinstance(price, str) and price:
+        return price
+    if isinstance(price, dict):
+        return _get_string(price, "id")
+    return None
 
 
 def _plan_key_from_subscription(payload: dict[str, Any], config: BillingConfig) -> PlanKey | None:

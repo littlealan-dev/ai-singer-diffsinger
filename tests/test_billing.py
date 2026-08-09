@@ -1116,6 +1116,40 @@ def test_invoice_paid_immediately_grants_monthly_plan_and_reanchors():
     assert credits["lastGrantType"] == "grant_paid_subscription_cycle"
 
 
+def test_invoice_paid_grants_monthly_plan_from_current_pricing_field():
+    uid = "user-current-invoice-pricing"
+    get_or_create_credits(uid, "current-invoice-pricing@example.com")
+    event_time = int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp())
+
+    handle_event(
+        {
+            "id": "evt_invoice_paid_current_pricing",
+            "type": "invoice.paid",
+            "data": {
+                "object": {
+                    "id": "in_current_pricing",
+                    "customer": "cus_current_pricing",
+                    "subscription": "sub_current_pricing",
+                    "metadata": {"firebaseUserId": uid},
+                    "lines": {
+                        "data": [
+                            {"pricing": {"price_details": {"price": "price_solo_monthly"}}}
+                        ]
+                    },
+                    "status": "paid",
+                    "status_transitions": {"paid_at": event_time},
+                }
+            },
+        }
+    )
+
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+
+    assert user["billing"]["latestInvoiceId"] == "in_current_pricing"
+    assert user["credits"]["balance"] == 30
+    assert user["credits"]["lastGrantInvoiceId"] == "in_current_pricing"
+
+
 def test_duplicate_invoice_paid_event_does_not_double_grant():
     uid = "user-duplicate-invoice-paid"
     get_or_create_credits(uid, "duplicate-invoice@example.com")
@@ -1705,7 +1739,7 @@ def test_scheduler_paid_terminal_status_marks_inconsistent_without_free_refresh(
     assert user["billing"]["refreshScheduler"]["lastStatus"] == "billing_state_inconsistent"
 
 
-def test_scheduler_paid_cancel_scheduled_does_not_refresh_or_repair_state():
+def test_scheduler_paid_cancel_scheduled_after_period_end_does_not_refresh_or_repair_state():
     uid = "user-paid-cancel-scheduled"
     get_or_create_credits(uid, "cancel-scheduled@example.com")
     db = get_firestore_client()
@@ -1741,6 +1775,43 @@ def test_scheduler_paid_cancel_scheduled_does_not_refresh_or_repair_state():
     assert user["billing"]["cancelAtPeriodEnd"] is True
     assert user["billing"]["nextCreditRefreshAt"] == due_at
     assert user["billing"]["refreshScheduler"]["lastStatus"] == "cancel_scheduled"
+
+
+def test_scheduler_annual_cancel_scheduled_before_period_end_refreshes():
+    uid = "user-annual-cancel-scheduled"
+    get_or_create_credits(uid, "annual-cancel-scheduled@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    due_at = now - timedelta(minutes=1)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "solo_annual",
+                "family": "solo",
+                "billingInterval": "year",
+                "stripeSubscriptionStatus": "active",
+                "cancelAtPeriodEnd": True,
+                "currentPeriodEnd": now + timedelta(days=120),
+                "creditRefreshAnchor": now - timedelta(days=31),
+                "nextCreditRefreshAt": due_at,
+            },
+            "credits": {
+                "balance": 3,
+                "reserved": 0,
+                "monthlyAllowance": 30,
+            },
+        },
+        merge=True,
+    )
+
+    result = run_credit_refresh(now=now, max_users=10, run_id="refresh_test_annual_cancel_scheduled")
+
+    assert result["processed"] == 1
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 30
+    assert user["credits"]["lastGrantType"] == "grant_paid_annual_monthly_refresh"
+    assert user["billing"]["nextCreditRefreshAt"] > now
+    assert user["billing"]["refreshScheduler"]["lastStatus"] == "applied"
 
 
 def test_annual_invoice_paid_sets_paid_anchor_and_next_refresh():

@@ -118,7 +118,11 @@ def apply_due_refresh(uid: str, *, now: datetime | None = None, run_id: str | No
             )
             return "reserved"
 
-        decision = _refresh_decision(str(billing.get("activePlanKey") or "free"), billing)
+        decision = _refresh_decision(
+            str(billing.get("activePlanKey") or "free"),
+            billing,
+            now=current_time,
+        )
         if decision.status_only:
             transaction.update(
                 user_ref,
@@ -247,7 +251,12 @@ class _RefreshDecision:
         self.status_only = status_only
 
 
-def _refresh_decision(active_plan_key: str, billing: BillingState | dict[str, Any]) -> _RefreshDecision:
+def _refresh_decision(
+    active_plan_key: str,
+    billing: BillingState | dict[str, Any],
+    *,
+    now: datetime,
+) -> _RefreshDecision:
     if active_plan_key == "free":
         return _RefreshDecision(status="applied", plan_key="free", grant_type="grant_free_monthly")
 
@@ -255,7 +264,12 @@ def _refresh_decision(active_plan_key: str, billing: BillingState | dict[str, An
     subscription_status = str(billing.get("stripeSubscriptionStatus") or "")
     if subscription_status in _TERMINAL_SUBSCRIPTION_STATUSES:
         return _RefreshDecision(status="billing_state_inconsistent", status_only=True)
-    if bool(billing.get("cancelAtPeriodEnd")):
+    current_period_end = billing.get("currentPeriodEnd")
+    if (
+        bool(billing.get("cancelAtPeriodEnd"))
+        and current_period_end is not None
+        and _ensure_utc(current_period_end) <= now
+    ):
         return _RefreshDecision(status="cancel_scheduled", status_only=True)
 
     if interval == "year":
