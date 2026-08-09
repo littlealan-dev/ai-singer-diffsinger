@@ -1053,6 +1053,7 @@ def create_app() -> FastAPI:
                     source=f"{request_body.source}_authenticated",
                     consent_text=request_body.consent_text,
                     brevo_status="doi_requested",
+                    settings=settings,
                 )
         return {
             "success": result.success,

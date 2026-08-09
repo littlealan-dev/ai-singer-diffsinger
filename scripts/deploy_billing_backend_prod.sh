@@ -17,4 +17,4 @@ gcloud run deploy sightsinger-billing-api \
   --memory=512Mi \
   --min-instances=0 \
   --max-instances=10 \
-  --timeout=60
+  --timeout=300

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../hooks/useAuth.tsx";
-import { subscribeToWaitlist, verifyTurnstileToken } from "../api";
+import { requestMarketingOptIn, subscribeToWaitlist, verifyTurnstileToken } from "../api";
 import { TurnstileChallenge } from "./TurnstileChallenge";
 import "./WaitingListForm.css";
 
@@ -74,14 +74,19 @@ export function WaitingListForm({ source }: WaitingListFormProps) {
     setMessage(null);
     try {
       await requireHumanVerification();
-      const result = await subscribeToWaitlist({
-        email: email.trim(),
-        first_name: firstName.trim() || undefined,
-        feedback: feedback.trim() || undefined,
-        gdpr_consent: consent,
-        consent_text: CONSENT_TEXT,
-        source,
-      });
+      const result = user
+        ? await requestMarketingOptIn({
+            source: `${source}_authenticated`,
+            consent_text: CONSENT_TEXT,
+          })
+        : await subscribeToWaitlist({
+            email: email.trim(),
+            first_name: firstName.trim() || undefined,
+            feedback: feedback.trim() || undefined,
+            gdpr_consent: consent,
+            consent_text: CONSENT_TEXT,
+            source,
+          });
       setStatus("success");
       setMessage(result.message);
     } catch (error) {

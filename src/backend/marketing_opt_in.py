@@ -3,8 +3,9 @@ from __future__ import annotations
 """Authenticated marketing email opt-in."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
+from uuid import uuid4
 
 from src.backend.config import Settings
 from src.backend.firebase_app import get_firestore_client
@@ -40,7 +41,10 @@ def _marketing_data(user_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _has_requested_marketing_opt_in(user_data: dict[str, Any]) -> bool:
-    return bool(_marketing_data(user_data).get("emailOptInRequested"))
+    marketing = _marketing_data(user_data)
+    if not marketing.get("emailOptInRequested"):
+        return False
+    return marketing.get("emailOptInBrevoStatus") not in {"doi_expired", "doi_suppressed"}
 
 
 def _marketing_payload(
@@ -50,7 +54,10 @@ def _marketing_payload(
     consent_text: str,
     brevo_status: str,
     now: datetime,
+    reminder_delay_days: int,
+    expiry_days: int,
 ) -> dict[str, Any]:
+    expires_at = now + timedelta(days=expiry_days)
     return {
         "marketing": {
             "emailOptInRequested": True,
@@ -59,6 +66,17 @@ def _marketing_payload(
             "emailOptInEmail": email,
             "emailOptInConsentText": consent_text,
             "emailOptInBrevoStatus": brevo_status,
+            "emailOptInBrevoCycleId": str(uuid4()),
+            "emailOptInBrevoOriginalRequestedAt": now,
+            "emailOptInBrevoInitialDoiSentAt": now,
+            "emailOptInBrevoReminderSentAt": None,
+            "emailOptInBrevoNextActionAt": now + timedelta(days=reminder_delay_days),
+            "emailOptInBrevoExpiresAt": expires_at,
+            "emailOptInBrevoConfirmedAt": None,
+            "emailOptInBrevoSuppressedAt": None,
+            "emailOptInBrevoSuppressionReason": None,
+            "emailOptInBrevoLastProviderOutcome": "initial_doi_accepted",
+            "emailOptInBrevoReminderClaimedAt": None,
         }
     }
 
@@ -70,19 +88,28 @@ def mark_marketing_opt_in_requested(
     source: str,
     consent_text: str,
     brevo_status: str,
-) -> None:
-    """Persist a successful marketing opt-in request state on the user document."""
+    settings: Settings,
+) -> bool:
+    """Persist a fresh successful request without overwriting an active DOI cycle."""
     now = datetime.now(timezone.utc)
-    get_firestore_client().collection("users").document(uid).set(
+    user_ref = get_firestore_client().collection("users").document(uid)
+    existing = user_ref.get()
+    existing_data = existing.to_dict() if existing.exists else {}
+    if existing_data and _has_requested_marketing_opt_in(existing_data):
+        return False
+    user_ref.set(
         _marketing_payload(
             email=_normalize_email(email),
             source=source,
             consent_text=consent_text,
             brevo_status=brevo_status,
             now=now,
+            reminder_delay_days=settings.marketing_doi_reminder_delay_days,
+            expiry_days=settings.marketing_doi_expiry_days,
         ),
         merge=True,
     )
+    return True
 
 
 async def request_authenticated_marketing_opt_in(
@@ -131,6 +158,7 @@ async def request_authenticated_marketing_opt_in(
         source=source,
         consent_text=consent_text,
         brevo_status="doi_requested",
+        settings=settings,
     )
     return MarketingOptInResult(
         success=True,

@@ -255,6 +255,23 @@ def create_billing_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
         return {"status": "ok"}
 
+    @app.post("/internal/marketing/doi-reconcile")
+    async def reconcile_marketing_doi(request: Request) -> Dict[str, Any]:
+        """Run the DOI reconciler for the dedicated Cloud Scheduler identity."""
+        await _require_marketing_doi_scheduler_identity(request)
+        from src.backend.marketing_doi_reconcile import run_marketing_doi_reconciliation
+
+        try:
+            result = await asyncio.to_thread(
+                run_marketing_doi_reconciliation,
+                request.app.state.settings,
+            )
+        except Exception as exc:
+            logger.exception("marketing_doi_reconcile_request_failed")
+            raise HTTPException(status_code=503, detail="Marketing DOI reconciliation failed.") from exc
+        logger.info("marketing_doi_reconcile_complete result=%s", result)
+        return result
+
     return app
 
 
@@ -352,8 +369,38 @@ async def _require_app_check(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid App Check token.") from exc
 
 
+async def _require_marketing_doi_scheduler_identity(request: Request) -> None:
+    settings: Settings = request.app.state.settings
+    expected_email = settings.marketing_doi_scheduler_service_account
+    expected_audience = settings.marketing_doi_scheduler_audience
+    if not expected_email or not expected_audience:
+        raise HTTPException(status_code=503, detail="Marketing DOI scheduler is not configured.")
+    token = _extract_bearer_token(request)
+    try:
+        claims = await asyncio.to_thread(_verify_google_oidc_token, token, expected_audience)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid scheduler OIDC token.") from exc
+    email = str(claims.get("email") or "").strip().lower()
+    if email != expected_email or claims.get("email_verified") is not True:
+        raise HTTPException(status_code=403, detail="Unexpected scheduler identity.")
+
+
+def _verify_google_oidc_token(token: str, audience: str) -> dict[str, Any]:
+    """Verify a Google-signed Cloud Scheduler OIDC token for this Cloud Run URL."""
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
+
+    claims = id_token.verify_oauth2_token(token, google_requests.Request(), audience=audience)
+    return dict(claims)
+
+
 def _should_require_app_check(request: Request) -> bool:
-    return request.url.path not in {"/billing/webhook", "/healthz", "/billing/healthz"}
+    return request.url.path not in {
+        "/billing/webhook",
+        "/healthz",
+        "/billing/healthz",
+        "/internal/marketing/doi-reconcile",
+    }
 
 
 app = create_billing_app()

@@ -137,6 +137,13 @@ class Settings:
     brevo_waitlist_retry_jitter_seconds: float
     brevo_waitlist_api_key_secret: str
     brevo_waitlist_api_key_secret_version: str
+    marketing_doi_reconcile_enabled: bool
+    marketing_doi_reconcile_mode: str
+    marketing_doi_reminder_delay_days: int
+    marketing_doi_expiry_days: int
+    marketing_doi_max_active_users: int
+    marketing_doi_scheduler_service_account: str
+    marketing_doi_scheduler_audience: str
     credit_retry_max_attempts: int
     credit_retry_base_delay_seconds: float
     credit_retry_test_settle_fail_count: int
@@ -314,6 +321,33 @@ class Settings:
             "BREVO_WAITLIST_API_KEY_SECRET_VERSION",
             "latest",
         ).strip()
+        marketing_doi_reconcile_enabled = _env_bool("MARKETING_DOI_RECONCILE_ENABLED", False)
+        marketing_doi_reconcile_mode = os.getenv(
+            "MARKETING_DOI_RECONCILE_MODE",
+            "observe",
+        ).strip().lower()
+        if marketing_doi_reconcile_mode not in {"observe", "send"}:
+            raise ValueError("MARKETING_DOI_RECONCILE_MODE must be either 'observe' or 'send'.")
+        marketing_doi_reminder_delay_days = max(
+            1,
+            _env_int("MARKETING_DOI_REMINDER_DELAY_DAYS", 3),
+        )
+        marketing_doi_expiry_days = max(
+            marketing_doi_reminder_delay_days,
+            _env_int("MARKETING_DOI_EXPIRY_DAYS", 14),
+        )
+        marketing_doi_max_active_users = max(
+            1,
+            _env_int("MARKETING_DOI_MAX_ACTIVE_USERS", 500),
+        )
+        marketing_doi_scheduler_service_account = os.getenv(
+            "MARKETING_DOI_SCHEDULER_SERVICE_ACCOUNT",
+            "",
+        ).strip().lower()
+        marketing_doi_scheduler_audience = os.getenv(
+            "MARKETING_DOI_SCHEDULER_AUDIENCE",
+            "",
+        ).strip()
         credit_retry_max_attempts = max(1, _env_int("CREDIT_RETRY_MAX_ATTEMPTS", 3))
         credit_retry_base_delay_seconds = max(
             0.0,
@@ -432,6 +466,13 @@ class Settings:
             brevo_waitlist_retry_jitter_seconds=brevo_waitlist_retry_jitter_seconds,
             brevo_waitlist_api_key_secret=brevo_waitlist_api_key_secret,
             brevo_waitlist_api_key_secret_version=brevo_waitlist_api_key_secret_version,
+            marketing_doi_reconcile_enabled=marketing_doi_reconcile_enabled,
+            marketing_doi_reconcile_mode=marketing_doi_reconcile_mode,
+            marketing_doi_reminder_delay_days=marketing_doi_reminder_delay_days,
+            marketing_doi_expiry_days=marketing_doi_expiry_days,
+            marketing_doi_max_active_users=marketing_doi_max_active_users,
+            marketing_doi_scheduler_service_account=marketing_doi_scheduler_service_account,
+            marketing_doi_scheduler_audience=marketing_doi_scheduler_audience,
             credit_retry_max_attempts=credit_retry_max_attempts,
             credit_retry_base_delay_seconds=credit_retry_base_delay_seconds,
             credit_retry_test_settle_fail_count=credit_retry_test_settle_fail_count,
