@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import os
+from pathlib import Path
 
 from src.backend.secret_manager import read_secret
 
@@ -94,6 +95,32 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _required_refresh_service_account() -> str:
+    value = os.getenv("BILLING_REFRESH_SERVICE_ACCOUNT", "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    if value:
+        return value
+
+    # Firebase CLI runs Python discovery with ADMIN_PORT and omits user dotenv
+    # values. The deploy script temporarily supplies the project dotenv file.
+    project_id = os.getenv("GCLOUD_PROJECT", "").strip()
+    if os.getenv("ADMIN_PORT") and project_id:
+        env_file = Path.cwd() / f".env.{project_id}"
+        try:
+            with env_file.open(encoding="utf-8") as handle:
+                for line in handle:
+                    key, separator, raw_value = line.rstrip("\n").partition("=")
+                    if separator and key.strip() == "BILLING_REFRESH_SERVICE_ACCOUNT":
+                        value = raw_value.strip().strip("'\"")
+                        if value:
+                            return value
+        except OSError:
+            pass
+
+    raise ValueError("Missing required billing env var: BILLING_REFRESH_SERVICE_ACCOUNT")
+
+
 def _load_secret_value(
     *,
     settings: _BillingSecretSettings,
@@ -172,7 +199,7 @@ def get_billing_refresh_config() -> BillingRefreshConfig:
         max_due_users=max_due_users,
         timeout_seconds=timeout_seconds,
         metrics_enabled=_env_bool("BILLING_REFRESH_METRICS_ENABLED", True),
-        service_account=_required_env("BILLING_REFRESH_SERVICE_ACCOUNT"),
+        service_account=_required_refresh_service_account(),
     )
 
 
