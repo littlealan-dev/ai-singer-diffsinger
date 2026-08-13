@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, AsyncIterator, Iterator, Literal, Optional
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
+import json
 import time
 import os
 import shutil
@@ -33,7 +35,11 @@ from src.backend.orchestrator import Orchestrator
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
-from src.backend.session import SessionStore, FirestoreSessionStore
+from src.backend.session import (
+    FirestoreSessionStore,
+    SessionMusicXmlUnavailableError,
+    SessionStore,
+)
 from src.backend.firebase_app import (
     get_firestore_client,
     initialize_firebase_app,
@@ -67,6 +73,19 @@ _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 
 def _default_solfege_settings_response() -> Dict[str, Any]:
     return {"system": "movable_do", "mode": "major", "revision": 1}
+
+
+def _require_e2e_control(request: Request, settings: Settings) -> None:
+    """Keep local test controls unreachable in every non-E2E server mode."""
+    configured = os.getenv("BACKEND_E2E_CONTROL_TOKEN", "")
+    provided = request.headers.get("X-E2E-Control-Token", "")
+    enabled = (
+        settings.app_env.lower() == "test"
+        and os.getenv("BACKEND_E2E_TEST_MODE", "").strip() == "1"
+        and bool(configured)
+    )
+    if not enabled or not hmac.compare_digest(provided, configured):
+        raise HTTPException(status_code=404, detail="Not found.")
 
 
 class ChatRequest(BaseModel):
@@ -272,6 +291,55 @@ def create_app() -> FastAPI:
             "mcp": mcp,
         }
 
+    @app.get("/_e2e/sessions/{session_id}/state")
+    async def e2e_session_state(session_id: str, request: Request) -> Dict[str, Any]:
+        """Expose test-only session provenance to the local Playwright harness."""
+        _require_e2e_control(request, settings)
+        user_id = await _get_user_id_or_401(request)
+        snapshot = await _get_snapshot_or_404(request.app.state.sessions, session_id, user_id)
+        latest_job = await asyncio.to_thread(
+            request.app.state.job_store.get_latest_job_for_session,
+            session_id=session_id,
+        )
+        record_path = settings.data_dir / "e2e-synthesis" / f"{session_id}.json"
+        record: Dict[str, Any] | None = None
+        if record_path.is_file():
+            try:
+                payload = json.loads(record_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    record = payload
+            except (OSError, json.JSONDecodeError):
+                record = None
+        current_score = snapshot.get("current_score")
+        return {
+            "score_version": current_score.get("version") if isinstance(current_score, dict) else None,
+            "history_length": len(snapshot.get("history") or []),
+            "files": snapshot.get("files"),
+            "current_score": current_score,
+            "score_summary": snapshot.get("score_summary"),
+            "synthesis": record,
+            "job": (
+                {
+                    "id": latest_job[0],
+                    "status": latest_job[1].get("status"),
+                    "error": latest_job[1].get("errorMessage"),
+                }
+                if latest_job is not None
+                else None
+            ),
+        }
+
+    @app.post("/_e2e/sessions/{session_id}/clear-local-artifacts")
+    async def e2e_clear_local_artifacts(session_id: str, request: Request) -> Dict[str, bool]:
+        """Delete only local artifacts so the next operation must use object storage."""
+        _require_e2e_control(request, settings)
+        user_id = await _get_user_id_or_401(request)
+        sessions: SessionStore = request.app.state.sessions
+        await _get_session_or_404(sessions, session_id, user_id)
+        shutil.rmtree(sessions.session_dir(session_id), ignore_errors=True)
+        await sessions.ensure_active_musicxml(session_id, user_id)
+        return {"cleared": True}
+
     @app.post("/auth/turnstile/verify", response_model=TurnstileVerifyResponse)
     async def verify_turnstile(request: Request, body: TurnstileVerifyRequest) -> TurnstileVerifyResponse:
         """Verify a Cloudflare Turnstile token before sign-in actions."""
@@ -465,6 +533,21 @@ def create_app() -> FastAPI:
                     upload_file, settings.storage_bucket, target_path, storage_path, content_type
                 )
                 await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
+                active_storage_path = storage_path
+                if canonical_musicxml_path != target_path:
+                    active_storage_path = _session_active_musicxml_storage_path(
+                        user_id, session_id, canonical_musicxml_path.suffix
+                    )
+                    await asyncio.to_thread(
+                        upload_file,
+                        settings.storage_bucket,
+                        canonical_musicxml_path,
+                        active_storage_path,
+                        "application/vnd.recordare.musicxml+xml",
+                    )
+                await sessions.set_metadata(
+                    session_id, "active_musicxml_storage_path", active_storage_path
+                )
             if isinstance(score, dict):
                 score = dict(score)
                 score["source_musicxml_path"] = str(canonical_musicxml_path)
@@ -509,6 +592,11 @@ def create_app() -> FastAPI:
             return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpStartupInProgressError as exc:
             raise _backend_starting_http_exception(exc) from exc
+        except SessionMusicXmlUnavailableError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         except McpError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -541,6 +629,11 @@ def create_app() -> FastAPI:
                 system=payload.settings.system,
                 mode=payload.settings.mode,
             )
+        except SessionMusicXmlUnavailableError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -843,6 +936,21 @@ def create_app() -> FastAPI:
     async def get_credits(request: Request) -> Dict[str, Any]:
         """Fetch user credit balance and expiry."""
         user_id, user_email = await _get_user_context_or_401(request)
+        if _is_e2e_credit_bypass_enabled():
+            # Browser regressions exercise the real UI, which subscribes directly
+            # to this document rather than consuming this response.
+            await asyncio.to_thread(_seed_e2e_test_credit_document, user_id, user_email)
+            return {
+                "balance": 1_000_000,
+                "reserved": 0,
+                "available": 1_000_000,
+                "expires_at": None,
+                "overdrafted": False,
+                "is_expired": False,
+                "monthly_allowance": 0,
+                "last_grant_type": "e2e_test",
+                "last_grant_at": None,
+            }
         from src.backend.credits import get_or_create_credits
         user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
         return {
@@ -1099,14 +1207,26 @@ def create_app() -> FastAPI:
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
         snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
-        score_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
-        if score_path is None:
-            session = await _get_session_or_404(sessions, session_id, user_id)
-            rel_path = session.files.get("musicxml_path")
-            if not rel_path:
+        # Validate the persisted score payload before using the authoritative
+        # active-artifact pointer below. This preserves the endpoint's path
+        # traversal guard for corrupted session state.
+        score_payload_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
+        score_path: Path
+        if score_payload_path is None:
+            files = snapshot.get("files")
+            fallback_path = files.get("musicxml_path") if isinstance(files, dict) else None
+            if not isinstance(fallback_path, str) or not fallback_path.strip():
                 raise HTTPException(status_code=404, detail="Score not found.")
-            score_path = _resolve_allowlisted_score_path(settings, rel_path)
-        if not score_path.exists():
+            score_path = _resolve_allowlisted_score_path(settings, fallback_path)
+        else:
+            try:
+                score_path = await sessions.ensure_active_musicxml(session_id, user_id)
+            except SessionMusicXmlUnavailableError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": exc.code, "message": str(exc)},
+                ) from exc
+        if not score_path.is_file():
             raise HTTPException(status_code=404, detail="Score file not found.")
         content = _read_musicxml_content(
             score_path,
@@ -1753,8 +1873,45 @@ def _normalize_string_set(value: Any) -> set[str]:
     return {item.strip() for item in value if isinstance(item, str) and item.strip()}
 
 
+def _is_e2e_credit_bypass_enabled() -> bool:
+    """Allow fully isolated browser regressions to avoid billing side effects."""
+    return (
+        os.getenv("APP_ENV", "").strip().lower() == "test"
+        and os.getenv("BACKEND_E2E_TEST_MODE", "").strip() == "1"
+    )
+
+
+def _seed_e2e_test_credit_document(user_id: str, user_email: str) -> None:
+    """Publish a stable UI credit snapshot in the local emulator only."""
+    get_firestore_client().collection("users").document(user_id).set(
+        {
+            "email": user_email,
+            "credits": {
+                "balance": 1_000_000,
+                "reserved": 0,
+                "monthlyAllowance": 1_000_000,
+                "overdrafted": False,
+            },
+            "billing": {
+                "activePlanKey": "free",
+                "family": "free",
+                "billingInterval": "none",
+            },
+            "topupCredits": {
+                "totalRemaining": 0,
+                "totalReserved": 0,
+                "totalAvailable": 0,
+                "activePackCount": 0,
+            },
+        },
+        merge=True,
+    )
+
+
 async def _require_active_credits(user_id: str, user_email: str) -> None:
     """Block actions when the account is locked or credits are exhausted/expired."""
+    if _is_e2e_credit_bypass_enabled():
+        return
     from src.backend.credits import get_or_create_credits
     user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
     if user_credits.overdrafted:
@@ -1971,6 +2128,12 @@ def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> s
     """Build the storage object path for a session upload."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     return f"sessions/{user_id}/{session_id}/input{safe_suffix}"
+
+
+def _session_active_musicxml_storage_path(user_id: str, session_id: str, suffix: str) -> str:
+    """Build the storage object path for the canonical active upload artifact."""
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"sessions/{user_id}/{session_id}/musicxml/active/original{safe_suffix}"
 
 
 def _audio_media_type(storage_path: str) -> str:

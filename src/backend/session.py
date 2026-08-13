@@ -17,6 +17,15 @@ from src.backend.firebase_app import get_firestore_client
 from src.backend.storage_client import download_bytes, upload_bytes
 
 
+class SessionMusicXmlUnavailableError(RuntimeError):
+    """Raised when a session's active MusicXML cannot be recovered."""
+
+    code = "session_score_unavailable"
+    user_message = (
+        "The active score could not be restored. Please re-upload the MusicXML file and try again."
+    )
+
+
 def _default_solfege_settings() -> Dict[str, Any]:
     return {"system": "movable_do", "mode": "major", "revision": 1}
 
@@ -185,6 +194,29 @@ class SessionStore:
             state.files[key] = value
             state.last_active_at = _utcnow()
 
+    async def ensure_active_musicxml(
+        self, session_id: str, user_id: Optional[str]
+    ) -> Path:
+        """Return the active MusicXML file, restoring it from storage when needed."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            if user_id and state.user_id and state.user_id != user_id:
+                raise PermissionError(session_id)
+            if self._is_expired(state):
+                self._remove_session_locked(session_id)
+                raise KeyError(session_id)
+            path = _ensure_active_musicxml_path(
+                project_root=self._project_root,
+                session_dir=self.session_dir(session_id),
+                files=state.files,
+                backend_use_storage=self._backend_use_storage,
+                storage_bucket=self._storage_bucket,
+            )
+            state.last_active_at = _utcnow()
+            return path
+
     async def set_score(self, session_id: str, score: Dict[str, Any]) -> int:
         """Update the current score and increment its version."""
         async with self._lock:
@@ -300,7 +332,6 @@ class SessionStore:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            state.history = []
             state.files = {}
             state.original_score = None
             state.original_score_path = None
@@ -569,6 +600,34 @@ class FirestoreSessionStore:
                 {f"files.{key}": value, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
 
+    async def ensure_active_musicxml(
+        self, session_id: str, user_id: Optional[str]
+    ) -> Path:
+        """Return the active MusicXML file, restoring it from storage when needed."""
+        async with self._lock:
+            doc_ref = self._doc_ref(session_id)
+            doc = doc_ref.get()
+            if not doc.exists:
+                raise KeyError(session_id)
+            data = doc.to_dict() or {}
+            if user_id and data.get("userId") and data.get("userId") != user_id:
+                raise PermissionError(session_id)
+            files = dict(data.get("files") or {})
+            path = _ensure_active_musicxml_path(
+                project_root=self._project_root,
+                session_dir=self.session_dir(session_id),
+                files=files,
+                backend_use_storage=self._backend_use_storage,
+                storage_bucket=self._storage_bucket,
+            )
+            updates: Dict[str, Any] = {"lastActiveAt": firestore.SERVER_TIMESTAMP}
+            restored_path = files.get("musicxml_path")
+            persisted_path = (data.get("files") or {}).get("musicxml_path")
+            if restored_path != persisted_path:
+                updates["files.musicxml_path"] = restored_path
+            doc_ref.update(updates)
+            return path
+
     async def set_score(self, session_id: str, score: Dict[str, Any]) -> int:
         """Update the score and increment its version in Firestore."""
         async with self._lock:
@@ -721,7 +780,6 @@ class FirestoreSessionStore:
         async with self._lock:
             self._doc_ref(session_id).update(
                 {
-                    "history": [],
                     "files": {},
                     "originalScore": None,
                     "originalScorePath": None,
@@ -814,3 +872,91 @@ def _current_score_storage_path(user_id: Optional[str], session_id: str, version
     if not user_id:
         raise ValueError(f"Missing userId for storage-backed session {session_id}.")
     return f"sessions/{user_id}/{session_id}/scores/current.v{version}.json"
+
+
+def _ensure_active_musicxml_path(
+    *,
+    project_root: Path,
+    session_dir: Path,
+    files: Dict[str, Any],
+    backend_use_storage: bool,
+    storage_bucket: str,
+) -> Path:
+    """Return a local active score, hydrating only the exact stored artifact."""
+    local_path = _session_musicxml_local_path(project_root, session_dir, files.get("musicxml_path"))
+    if local_path is not None and local_path.is_file():
+        return local_path
+
+    storage_path = _active_musicxml_storage_path(files, project_root)
+    if not backend_use_storage or not storage_bucket or not storage_path:
+        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
+
+    suffix = Path(storage_path).suffix.lower()
+    if suffix not in {".xml", ".mxl"}:
+        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
+    destination = session_dir / f"active-rehydrated{suffix}"
+    try:
+        data = download_bytes(storage_bucket, storage_path)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = destination.with_suffix(f"{suffix}.tmp")
+        temporary_path.write_bytes(data)
+        temporary_path.replace(destination)
+    except Exception as exc:
+        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message) from exc
+
+    files["musicxml_path"] = str(destination.relative_to(project_root))
+    return destination
+
+
+def _session_musicxml_local_path(
+    project_root: Path, session_dir: Path, path_value: Any
+) -> Optional[Path]:
+    """Resolve an active MusicXML path only when it remains within its session."""
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = project_root / path
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(session_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _active_musicxml_storage_path(files: Dict[str, Any], project_root: Path) -> Optional[str]:
+    """Return the exact active artifact's object path, with a safe legacy fallback."""
+    active_path = files.get("active_musicxml_storage_path")
+    if isinstance(active_path, str) and active_path.strip():
+        return active_path
+    if _session_musicxml_path_is_original_upload(files, project_root):
+        legacy_path = files.get("musicxml_storage_path")
+        if isinstance(legacy_path, str) and legacy_path.strip():
+            return legacy_path
+    return None
+
+
+def _session_musicxml_path_is_original_upload(files: Dict[str, Any], project_root: Path) -> bool:
+    """Return True when the active path is the original upload or its MXL canonical XML."""
+    musicxml_path = _resolve_path_identity(files.get("musicxml_path"), project_root)
+    uploaded_path = _resolve_path_identity(files.get("uploaded_musicxml_path"), project_root)
+    if musicxml_path is None or uploaded_path is None:
+        return False
+    if musicxml_path == uploaded_path:
+        return True
+    return (
+        uploaded_path.suffix.lower() == ".mxl"
+        and musicxml_path.suffix.lower() in {".xml", ".musicxml"}
+        and musicxml_path.parent == uploaded_path.parent
+        and musicxml_path.stem == uploaded_path.stem
+    )
+
+
+def _resolve_path_identity(path_value: Any, project_root: Path) -> Optional[Path]:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve(strict=False)

@@ -12,6 +12,7 @@ import hashlib
 import logging
 import copy
 import json
+import os
 import re
 import uuid
 
@@ -563,7 +564,38 @@ class Orchestrator:
             "lossless_output_storage_path": lossless_storage_path,
             "duration_seconds": duration,
         }
+        self._write_e2e_synthesis_record(session_id, score, synth_args, response)
         return response
+
+    def _write_e2e_synthesis_record(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        synth_args: Dict[str, Any],
+        response: Dict[str, Any],
+    ) -> None:
+        """Capture non-sensitive provenance for the local UI regression harness."""
+        if (
+            self._settings.app_env.lower() != "test"
+            or os.getenv("BACKEND_E2E_TEST_MODE", "").strip() != "1"
+        ):
+            return
+        payload = {
+            "score_sha256": hashlib.sha256(
+                json.dumps(score, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest(),
+            "source_musicxml_path": score.get("source_musicxml_path"),
+            "part_id": synth_args.get("part_id"),
+            "part_index": synth_args.get("part_index"),
+            "lyric_selection": synth_args.get("lyric_selection"),
+            "output_path": response.get("output_path"),
+            "duration_seconds": response.get("duration_seconds"),
+        }
+        output_dir = self._settings.data_dir / "e2e-synthesis"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / f"{session_id}.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
 
     async def _start_synthesis_job(
         self,
@@ -834,6 +866,13 @@ class Orchestrator:
             self._release_fault_injection_remaining.pop(job_id, None)
         return release_credits(user_id, job_id)
 
+    def _is_e2e_credit_bypass_enabled(self) -> bool:
+        """Keep browser regression runs independent from emulator billing state."""
+        return (
+            self._settings.app_env.strip().lower() == "test"
+            and os.getenv("BACKEND_E2E_TEST_MODE", "").strip() == "1"
+        )
+
     async def _run_synthesis_job(
         self,
         session_id: str,
@@ -883,6 +922,20 @@ class Orchestrator:
                 response.get("lossless_output_storage_path")
                 or response.get("lossless_output_path")
             )
+            if self._is_e2e_credit_bypass_enabled():
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="completed",
+                    step="done",
+                    message="Here is the rendered audio.",
+                    progress=1.0,
+                    outputPath=output_path,
+                    audioUrl=response.get("audio_url"),
+                    losslessOutputPath=lossless_output_path,
+                    actualDurationSeconds=duration_seconds,
+                )
+                return
             settle_result = await retry_credit_op(
                 self._complete_job_and_settle_credits_with_retry_fault_injection,
                 user_id,
@@ -952,6 +1005,16 @@ class Orchestrator:
                 output_path=output_path,
             )
         except asyncio.CancelledError:
+            if self._is_e2e_credit_bypass_enabled():
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="cancelled",
+                    step="cancelled",
+                    message=backend_message("job.cancelled"),
+                    progress=1.0,
+                )
+                raise
             # Release credits
             release_result = await retry_credit_op(
                 self._release_credits_with_retry_fault_injection,
@@ -992,6 +1055,24 @@ class Orchestrator:
                 )
             raise
         except SynthesisActionRequired as exc:
+            if self._is_e2e_credit_bypass_enabled():
+                user_message = await self._render_synthesis_action_required_message(
+                    session_id,
+                    user_id,
+                    score,
+                    exc.payload,
+                    fallback_message=exc.message,
+                )
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="action_required",
+                    step="action_required",
+                    message=user_message,
+                    progress=1.0,
+                    actionRequired=exc.payload,
+                )
+                return
             release_result = await retry_credit_op(
                 self._release_credits_with_retry_fault_injection,
                 user_id,
@@ -1070,6 +1151,18 @@ class Orchestrator:
                     actionRequired=exc.payload,
                 )
         except Exception as exc:
+            if self._is_e2e_credit_bypass_enabled():
+                self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="failed",
+                    step="error",
+                    message=backend_message("job.finish_failed"),
+                    progress=1.0,
+                    errorMessage=_format_synthesis_error(exc),
+                )
+                return
             # Release credits
             release_result = await retry_credit_op(
                 self._release_credits_with_retry_fault_injection,
@@ -2032,8 +2125,8 @@ class Orchestrator:
             "mode": str(desired.get("mode") or current_settings.get("mode") or "major"),
         }
         files = snapshot.get("files") or {}
-        source_path = files.get("musicxml_path") if isinstance(files, dict) else None
-        if not isinstance(source_path, str) or not source_path:
+        configured_path = files.get("musicxml_path") if isinstance(files, dict) else None
+        if not isinstance(configured_path, str) or not configured_path:
             persisted_settings = await self._sessions.set_solfege_settings(
                 session_id, settings
             )
@@ -2051,9 +2144,10 @@ class Orchestrator:
                 "current_score": current_score,
                 "score_summary": snapshot.get("score_summary"),
             }
+        source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
         output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
         args = {
-            "source_musicxml_path": source_path,
+            "source_musicxml_path": self._mcp_musicxml_path(source_path),
             "output_musicxml_path": str(output_path.relative_to(self._settings.project_root)),
             "settings": settings,
             "selected_verse_number": self._score_selected_verse_number(
@@ -2108,6 +2202,7 @@ class Orchestrator:
         if not isinstance(path_value, str) or not path_value:
             raise ValueError("Solfege transform did not return an output path.")
         path = Path(path_value).resolve()
+        await self._persist_active_musicxml_artifact(session_id, path)
         await self._sessions.set_file(session_id, "musicxml_path", path)
         await self._sessions.set_score_summary(
             session_id, summary if isinstance(summary, dict) else None
@@ -2117,6 +2212,46 @@ class Orchestrator:
         if update_settings is not None:
             await self._sessions.set_solfege_settings(session_id, update_settings)
         return score, summary if isinstance(summary, dict) else None, version
+
+    async def _persist_active_musicxml_artifact(self, session_id: str, path: Path) -> None:
+        """Persist the exact active MusicXML artifact before publishing its session path."""
+        if not self._settings.backend_use_storage:
+            return
+        resolved = path.resolve()
+        session_dir = self._sessions.session_dir(session_id).resolve()
+        try:
+            resolved.relative_to(session_dir)
+        except ValueError as exc:
+            raise ValueError("Active MusicXML path is outside the session directory.") from exc
+        if not resolved.is_file():
+            raise ValueError("Active MusicXML artifact is missing.")
+        suffix = resolved.suffix.lower()
+        if suffix not in {".xml", ".mxl"}:
+            raise ValueError("Active MusicXML artifact has an unsupported extension.")
+        snapshot = await self._sessions.get_snapshot(session_id, user_id=None)
+        user_id = str(snapshot.get("user_id") or "").strip()
+        if not user_id:
+            raise ValueError("Session is missing its user identity for MusicXML storage.")
+        storage_path = _active_musicxml_storage_path(
+            user_id, session_id, artifact_id=uuid.uuid4().hex, suffix=suffix
+        )
+        await asyncio.to_thread(
+            upload_file,
+            self._settings.storage_bucket,
+            resolved,
+            storage_path,
+            "application/vnd.recordare.musicxml+xml",
+        )
+        await self._sessions.set_metadata(
+            session_id, "active_musicxml_storage_path", storage_path
+        )
+
+    def _mcp_musicxml_path(self, path: Path) -> str:
+        """Return a project-relative path when possible for an MCP file request."""
+        try:
+            return str(path.resolve().relative_to(self._settings.project_root.resolve()))
+        except ValueError:
+            return str(path.resolve())
 
     def _build_repair_planning_prompt(
         self,
@@ -3210,6 +3345,7 @@ class Orchestrator:
                 exc,
             )
 
+        await self._persist_active_musicxml_artifact(session_id, path)
         await self._sessions.set_file(session_id, "musicxml_path", path)
         await self._sessions.set_score_summary(
             session_id, summary if isinstance(summary, dict) else None
@@ -3970,12 +4106,11 @@ class Orchestrator:
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         """Re-parse the current MusicXML file with new selection filters."""
-        snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        files = snapshot.get("files") or {}
-        file_path = files.get("musicxml_path")
-        if not isinstance(file_path, str) or not file_path:
-            return None
-        parse_args: Dict[str, Any] = {"file_path": file_path, "expand_repeats": bool(expand_repeats)}
+        file_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+        parse_args: Dict[str, Any] = {
+            "file_path": self._mcp_musicxml_path(file_path),
+            "expand_repeats": bool(expand_repeats),
+        }
         if part_id is not None:
             parse_args["part_id"] = part_id
         elif part_index is not None:
@@ -4157,6 +4292,7 @@ class Orchestrator:
         user_id: Optional[str],
     ) -> Dict[str, Any]:
         """Return the score baseline to use for preprocess execution."""
+        await self._sessions.ensure_active_musicxml(session_id, user_id)
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         current_score = snapshot.get("current_score")
         if isinstance(current_score, dict) and isinstance(current_score.get("score"), dict):
@@ -5052,7 +5188,7 @@ class Orchestrator:
         self,
         synth_args: Dict[str, Any],
     ) -> Dict[str, str]:
-        """Return job metadata for the voicebank/style used by synthesis."""
+        """Return job metadata for the voicebank, style, and language used by synthesis."""
         raw_voicebank = synth_args.get("voicebank")
         voicebank_id = str(raw_voicebank).strip() if raw_voicebank is not None else ""
         if not voicebank_id:
@@ -5303,14 +5439,11 @@ class Orchestrator:
                 continue
             if call.name == TOOL_ADD_SOLFEGE_VERSE:
                 snapshot = await self._sessions.get_snapshot(session_id, user_id)
-                files = snapshot.get("files") or {}
-                source_path = files.get("musicxml_path") if isinstance(files, dict) else None
-                if not isinstance(source_path, str) or not source_path:
-                    raise ValueError("Session is missing its active MusicXML path.")
+                source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
                 output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
                 args = dict(call.arguments)
                 args.pop("reason", None)
-                args["source_musicxml_path"] = source_path
+                args["source_musicxml_path"] = self._mcp_musicxml_path(source_path)
                 args["output_musicxml_path"] = str(
                     output_path.relative_to(self._settings.project_root)
                 )
@@ -5661,27 +5794,29 @@ class Orchestrator:
                     # Review progression is LLM-driven; synth tool call implies user-approved proceed.
                     current_score = self._clear_review_pending(current_score)
                     await self._sessions.set_score(session_id, current_score)
-                # Check for overdraft before even starting
-                from src.backend.credits import get_or_create_credits, reserve_credits
-                user_credits = get_or_create_credits(user_id, user_email)
-                if user_credits.overdrafted:
-                    return ToolExecutionResult(
-                        score=current_score, 
-                        audio_response={
-                            "type": "chat_text", 
-                            "message": backend_message("account.locked_negative_balance"),
-                        },
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                if user_credits.is_expired:
-                    return ToolExecutionResult(
-                        score=current_score, 
-                        audio_response={
-                            "type": "chat_text", 
-                            "message": backend_message("account.free_trial_expired"),
-                        },
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
+                if not self._is_e2e_credit_bypass_enabled():
+                    # Check for overdraft before even starting.
+                    from src.backend.credits import get_or_create_credits, reserve_credits
+
+                    user_credits = get_or_create_credits(user_id, user_email)
+                    if user_credits.overdrafted:
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={
+                                "type": "chat_text",
+                                "message": backend_message("account.locked_negative_balance"),
+                            },
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
+                    if user_credits.is_expired:
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={
+                                "type": "chat_text",
+                                "message": backend_message("account.free_trial_expired"),
+                            },
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
 
                 # Launch an async synthesis job.
                 synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
@@ -5833,86 +5968,99 @@ class Orchestrator:
                         explicit_verse_number=selected_explicit_verse_number,
                     )
                 
-                from src.mcp.handlers import _calculate_score_duration
-                from src.backend.credits import estimate_credits
-                duration_seconds = None
-                if isinstance(score_summary, dict):
-                    duration_seconds = score_summary.get("duration_seconds")
-                if not isinstance(duration_seconds, (int, float)) or duration_seconds <= 0:
-                    duration_seconds = _calculate_score_duration(current_score)
-                est_credits = estimate_credits(float(duration_seconds))
-                
                 job_id = uuid.uuid4().hex
-                reserve_result = await retry_credit_op(
-                    reserve_credits,
-                    user_id,
-                    job_id,
-                    est_credits,
-                    self._settings.session_ttl_seconds,
-                    session_id=session_id,
-                    max_attempts=self._settings.credit_retry_max_attempts,
-                    base_delay=self._settings.credit_retry_base_delay_seconds,
-                )
-                if reserve_result.status in {"insufficient_balance", "overdrafted"}:
-                    credit_message = backend_message(
-                        "account.insufficient_credits",
-                        estimated_credits=est_credits,
-                        available_credits=user_credits.available_balance,
-                    )
-                    action_required = {
-                        "status": "action_required",
-                        "action": "insufficient_credits",
-                        "error": {
-                            "type": "insufficient_credits",
-                            "message": credit_message,
-                        },
-                        "estimated_credits": est_credits,
-                        "available_credits": user_credits.available_balance,
-                        "allowed_next_actions": [
-                            "add_more_credits",
-                            "upload_another_shorter_song",
-                        ],
-                    }
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={
-                            "type": "chat_text",
-                            "message": "",
-                        },
-                        followup_prompt=json.dumps(action_required, sort_keys=True),
-                        followup_message_only=True,
-                        action_required_payload=action_required,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                if reserve_result.status == "expired":
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={
-                            "type": "chat_text",
-                            "message": backend_message("account.free_trial_expired"),
-                        },
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                if reserve_result.status not in {"reserved", "reservation_exists"}:
-                    self._logger.error(
-                        "credit_reservation_failed session=%s job=%s status=%s",
-                        session_id,
+                if not self._is_e2e_credit_bypass_enabled():
+                    from src.mcp.handlers import _calculate_score_duration
+                    from src.backend.credits import estimate_credits
+
+                    duration_seconds = None
+                    if isinstance(score_summary, dict):
+                        duration_seconds = score_summary.get("duration_seconds")
+                    if not isinstance(duration_seconds, (int, float)) or duration_seconds <= 0:
+                        duration_seconds = _calculate_score_duration(current_score)
+                    est_credits = estimate_credits(float(duration_seconds))
+                    reserve_result = await retry_credit_op(
+                        reserve_credits,
+                        user_id,
                         job_id,
-                        reserve_result.status,
+                        est_credits,
+                        self._settings.session_ttl_seconds,
+                        session_id=session_id,
+                        max_attempts=self._settings.credit_retry_max_attempts,
+                        base_delay=self._settings.credit_retry_base_delay_seconds,
                     )
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={
-                            "type": "chat_text",
-                            "message": backend_message("billing.setup_failed_retry"),
-                        },
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
+                    if reserve_result.status in {"insufficient_balance", "overdrafted"}:
+                        credit_message = backend_message(
+                            "account.insufficient_credits",
+                            estimated_credits=est_credits,
+                            available_credits=user_credits.available_balance,
+                        )
+                        action_required = {
+                            "status": "action_required",
+                            "action": "insufficient_credits",
+                            "error": {
+                                "type": "insufficient_credits",
+                                "message": credit_message,
+                            },
+                            "estimated_credits": est_credits,
+                            "available_credits": user_credits.available_balance,
+                            "allowed_next_actions": [
+                                "add_more_credits",
+                                "upload_another_shorter_song",
+                            ],
+                        }
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={"type": "chat_text", "message": ""},
+                            followup_prompt=json.dumps(action_required, sort_keys=True),
+                            followup_message_only=True,
+                            action_required_payload=action_required,
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
+                    if reserve_result.status == "expired":
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={
+                                "type": "chat_text",
+                                "message": backend_message("account.free_trial_expired"),
+                            },
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
+                    if reserve_result.status not in {"reserved", "reservation_exists"}:
+                        self._logger.error(
+                            "credit_reservation_failed session=%s job=%s status=%s",
+                            session_id,
+                            job_id,
+                            reserve_result.status,
+                        )
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={
+                                "type": "chat_text",
+                                "message": backend_message("billing.setup_failed_retry"),
+                            },
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
                 try:
                     audio_response = await self._start_synthesis_job(
                         session_id, current_score, synth_args, user_id=user_id, job_id=job_id
                     )
                 except Exception as exc:
+                    if self._is_e2e_credit_bypass_enabled():
+                        self._logger.exception(
+                            "synthesis_job_start_failed session=%s job=%s error=%s",
+                            session_id,
+                            job_id,
+                            exc,
+                        )
+                        return ToolExecutionResult(
+                            score=current_score,
+                            audio_response={
+                                "type": "chat_text",
+                                "message": backend_message("job.start_failed_retry"),
+                            },
+                            explicit_verse_number=selected_explicit_verse_number,
+                        )
                     from src.backend.credits import (
                         mark_reservation_reconciliation_required,
                     )
@@ -6514,6 +6662,14 @@ def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
 
 
+def _active_musicxml_storage_path(
+    user_id: str, session_id: str, *, artifact_id: str, suffix: str
+) -> str:
+    """Build an immutable storage path for an active MusicXML artifact."""
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"sessions/{user_id}/{session_id}/musicxml/active/{artifact_id}{safe_suffix}"
+
+
 def _job_progress_url(session_id: str, job_id: str) -> str:
     """Build a job-specific progress URL so older audio players refresh their own job."""
     return f"/sessions/{session_id}/progress?job_id={job_id}"
@@ -6575,9 +6731,12 @@ def _resolve_job_input_snapshot_paths(
 ) -> tuple[Optional[str], Optional[str]]:
     """Return local active MusicXML plus a safe storage fallback for job snapshots."""
     active_path = _first_non_empty_string(
-        score.get("source_musicxml_path"),
         files.get("musicxml_path"),
+        score.get("source_musicxml_path"),
     )
+    storage_path = _first_non_empty_string(files.get("active_musicxml_storage_path"))
+    if storage_path:
+        return active_path, storage_path
     storage_path = _first_non_empty_string(files.get("musicxml_storage_path"))
     if not storage_path:
         return active_path, None

@@ -900,7 +900,7 @@ def test_upload_resets_previous_score_specific_state(client):
     assert second_upload.status_code == 200
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    assert snapshot["history"] == []
+    assert snapshot["history"] == [{"role": "user", "content": "old message"}]
     assert snapshot["preprocess_plan_history"] == []
     assert snapshot["preprocess_attempt_history"] == []
     assert snapshot["last_preprocess_plan"] is None
@@ -4774,6 +4774,188 @@ def test_storage_backed_session_scores_rehydrate_from_object_storage(
     assert snapshot["original_score"]["source_musicxml_path"].endswith("score.xml")
     assert snapshot["current_score"]["version"] == 1
     assert snapshot["current_score"]["score"]["source_musicxml_path"].endswith("score.xml")
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+@pytest.mark.parametrize("filename", ["score.xml", "score.mxl"])
+def test_active_uploaded_musicxml_rehydrates_for_score_requests(
+    client_with_env, monkeypatch, filename
+):
+    test_client, app = client_with_env
+    stored_blobs: dict[str, bytes] = {}
+
+    def _upload_file(bucket_name, source_path, dest_path, content_type=None):
+        stored_blobs[dest_path] = Path(source_path).read_bytes()
+
+    monkeypatch.setattr("src.backend.main.upload_file", _upload_file)
+    monkeypatch.setattr(
+        "src.backend.session.download_bytes", lambda bucket, path: stored_blobs[path]
+    )
+
+    session_id = _create_session(test_client)
+    upload = _upload_score(test_client, session_id, filename=filename)
+    assert upload.status_code == 200
+
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    active_storage_path = snapshot["files"]["active_musicxml_storage_path"]
+    local_path = app.state.settings.project_root / snapshot["files"]["musicxml_path"]
+    assert active_storage_path in stored_blobs
+    expected_content = stored_blobs[active_storage_path]
+    local_path.unlink()
+
+    response = test_client.get(f"/sessions/{session_id}/score")
+
+    assert response.status_code == 200
+    assert response.content == expected_content
+    restored_snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    restored_path = (
+        app.state.settings.project_root / restored_snapshot["files"]["musicxml_path"]
+    )
+    assert restored_path.read_bytes() == expected_content
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_reparse_restores_the_active_musicxml_before_calling_the_parser(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    stored_blobs: dict[str, bytes] = {}
+
+    def _upload_file(bucket_name, source_path, dest_path, content_type=None):
+        stored_blobs[dest_path] = Path(source_path).read_bytes()
+
+    parser_paths: list[Path] = []
+
+    def _call_tool(name, arguments):
+        assert name == "parse_score"
+        parser_path = PROJECT_ROOT / arguments["file_path"]
+        parser_paths.append(parser_path)
+        assert parser_path.is_file()
+        return parse_score(parser_path)
+
+    monkeypatch.setattr("src.backend.main.upload_file", _upload_file)
+    monkeypatch.setattr(
+        "src.backend.session.download_bytes", lambda bucket, path: stored_blobs[path]
+    )
+    app.state.router.call_tool = _call_tool
+
+    session_id = _create_session(test_client)
+    upload = _upload_score(test_client, session_id)
+    assert upload.status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    local_path = app.state.settings.project_root / snapshot["files"]["musicxml_path"]
+    local_path.unlink()
+
+    reparsed = asyncio.run(
+        app.state.orchestrator._reparse_score(
+            session_id,
+            part_id=None,
+            part_index=None,
+            verse_number=None,
+            user_id="test-user",
+        )
+    )
+
+    assert isinstance(reparsed, dict)
+    assert len(parser_paths) >= 2
+    assert parser_paths[-1].is_file()
+    assert parser_paths[-1].read_bytes() == stored_blobs[
+        snapshot["files"]["active_musicxml_storage_path"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_derived_active_musicxml_rehydrates_without_original_fallback(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    stored_blobs: dict[str, bytes] = {}
+
+    def _upload_file(bucket_name, source_path, dest_path, content_type=None):
+        stored_blobs[dest_path] = Path(source_path).read_bytes()
+
+    monkeypatch.setattr("src.backend.main.upload_file", _upload_file)
+    monkeypatch.setattr("src.backend.orchestrator.upload_file", _upload_file)
+    monkeypatch.setattr(
+        "src.backend.session.download_bytes", lambda bucket, path: stored_blobs[path]
+    )
+
+    session_id = _create_session(test_client)
+    upload = _upload_score(test_client, session_id)
+    assert upload.status_code == 200
+    original_snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    original_storage_path = original_snapshot["files"]["active_musicxml_storage_path"]
+
+    derived_path = app.state.sessions.session_dir(session_id) / "score-solfege.xml"
+    derived_xml = VERSED_SCORE_XML.replace(b"<text>O</text>", b"<text>do</text>")
+    derived_path.write_bytes(derived_xml)
+    derived_score = parse_score(derived_path)
+    derived_score.pop("score_summary", None)
+    asyncio.run(
+        app.state.orchestrator._activate_preprocessed_score(
+            session_id,
+            derived_score,
+            modified_musicxml_path=str(derived_path),
+        )
+    )
+
+    derived_snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    derived_storage_path = derived_snapshot["files"]["active_musicxml_storage_path"]
+    assert derived_storage_path != original_storage_path
+    assert stored_blobs[derived_storage_path] == derived_xml
+    derived_path.unlink()
+
+    response = test_client.get(f"/sessions/{session_id}/score")
+
+    assert response.status_code == 200
+    assert response.content == derived_xml
+
+
+@pytest.mark.parametrize(
+    "client_with_env",
+    [{"BACKEND_USE_STORAGE": "true"}],
+    indirect=True,
+)
+def test_missing_derived_musicxml_never_falls_back_to_original_upload(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    stored_blobs: dict[str, bytes] = {}
+
+    def _upload_file(bucket_name, source_path, dest_path, content_type=None):
+        stored_blobs[dest_path] = Path(source_path).read_bytes()
+
+    monkeypatch.setattr("src.backend.main.upload_file", _upload_file)
+    monkeypatch.setattr(
+        "src.backend.session.download_bytes", lambda bucket, path: stored_blobs[path]
+    )
+
+    session_id = _create_session(test_client)
+    upload = _upload_score(test_client, session_id)
+    assert upload.status_code == 200
+    derived_path = app.state.sessions.session_dir(session_id) / "score-derived.xml"
+    derived_path.write_bytes(VERSED_SCORE_XML)
+    asyncio.run(app.state.sessions.set_file(session_id, "musicxml_path", derived_path))
+    derived_path.unlink()
+
+    state = app.state.sessions._sessions[session_id]
+    state.files.pop("active_musicxml_storage_path")
+    response = test_client.get(f"/sessions/{session_id}/score")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "session_score_unavailable"
 
 
 @pytest.mark.parametrize(

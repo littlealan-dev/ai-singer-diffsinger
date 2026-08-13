@@ -4051,6 +4051,34 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertEqual(first["transform_id"], second["transform_id"])
         self.assertTrue(bool(second.get("reused_transform")))
 
+    def test_materialization_does_not_reuse_another_source_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            first_source = Path(first_dir) / TEST_XML.name
+            second_source = Path(second_dir) / TEST_XML.name
+            shutil.copyfile(TEST_XML, first_source)
+            shutil.copyfile(TEST_XML, second_source)
+
+            first = preprocess_voice_parts(
+                parse_score(first_source, part_index=0, verse_number=1),
+                part_index=0,
+                voice_part_id="alto",
+                allow_lyric_propagation=True,
+                source_part_index=0,
+                source_voice_part_id="soprano",
+            )
+            second = preprocess_voice_parts(
+                parse_score(second_source, part_index=0, verse_number=1),
+                part_index=0,
+                voice_part_id="alto",
+                allow_lyric_propagation=True,
+                source_part_index=0,
+                source_voice_part_id="soprano",
+            )
+
+        self.assertFalse(bool(first.get("reused_transform")))
+        self.assertFalse(bool(second.get("reused_transform")))
+        self.assertNotEqual(first["modified_musicxml_path"], second["modified_musicxml_path"])
+
     def test_concurrency_lock_best_effort(self) -> None:
         results: list[dict] = []
         errors: list[Exception] = []

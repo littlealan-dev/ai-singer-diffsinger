@@ -65,3 +65,40 @@ def test_static_llm_accepts_role_keyword(monkeypatch):
     response = client.generate("", [], role=LlmRole.PREPROCESS)
     payload = parse_llm_response(response)
     assert payload is not None
+
+
+def test_regression_llm_plans_the_selected_basic_take(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("BACKEND_E2E_TEST_MODE", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "regression")
+    client = create_llm_client(Settings.from_env())
+
+    assert client is not None
+    response = client.generate(
+        "",
+        [
+            {"role": "user", "content": "[e2e:basic] prepare this fixture"},
+            {"role": "user", "content": "Please sing the Solo part, verse 1."},
+        ],
+    )
+    payload = parse_llm_response(response)
+
+    assert payload is not None
+    assert payload.tool_calls[0].name == "synthesize"
+    assert payload.tool_calls[0].arguments["part_index"] == 0
+
+
+def test_regression_llm_uses_the_display_part_id_for_solfege(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("BACKEND_E2E_TEST_MODE", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "regression")
+    client = create_llm_client(Settings.from_env())
+
+    assert client is not None
+    payload = parse_llm_response(
+        client.generate("", [{"role": "user", "content": "[e2e:solfege] prepare this fixture"}])
+    )
+
+    assert payload is not None
+    assert payload.tool_calls[0].name == "add_solfege_lyric_verse"
+    assert payload.tool_calls[0].arguments["part_id"] == "Solo"

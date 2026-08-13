@@ -5346,8 +5346,14 @@ def _finalize_transform_result(
         )
     )
 
-    artifact_key = f"{score_fingerprint}:{transform_hash}:{derived_lane_id or '-'}"
-    lock_key = f"{source_musicxml_path or 'memory'}:{artifact_key}"
+    # Materialized MusicXML belongs to its source session directory. Include
+    # that path in the process-wide cache key so equivalent uploads cannot
+    # return a derived file owned by a different session.
+    source_artifact_key = (
+        str(Path(source_musicxml_path).resolve()) if source_musicxml_path else "memory"
+    )
+    artifact_key = f"{source_artifact_key}:{score_fingerprint}:{transform_hash}:{derived_lane_id or '-'}"
+    lock_key = artifact_key
     appended_part_ref: Optional[Dict[str, Any]] = None
     modified_musicxml_path: Optional[str] = None
     reused_transform = False

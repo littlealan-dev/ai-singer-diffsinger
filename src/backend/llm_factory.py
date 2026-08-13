@@ -8,7 +8,7 @@ from src.backend.config import Settings
 import json
 import os
 
-from src.backend.llm_client import LlmClient, StaticLlmClient
+from src.backend.llm_client import LlmClient, RegressionLlmClient, StaticLlmClient
 from src.backend.llm_gemini import GeminiRestClient
 from src.backend.llm_openai import OpenAIRestClient
 from src.backend.secret_manager import read_secret
@@ -50,6 +50,13 @@ def create_llm_client(settings: Settings) -> Optional[LlmClient]:
             responses=responses,
             loop=loop,
         )
+    if provider == "regression":
+        if (
+            settings.app_env.lower() != "test"
+            or os.getenv("BACKEND_E2E_TEST_MODE", "").strip() != "1"
+        ):
+            raise ValueError("Regression LLM provider is restricted to E2E test mode.")
+        return RegressionLlmClient()
     if provider == "gemini":
         api_key = settings.gemini_api_key
         if settings.app_env.lower() not in {"dev", "development", "local", "test"}:

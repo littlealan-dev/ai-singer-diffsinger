@@ -2053,6 +2053,11 @@ export default function MainApp() {
     try {
       const activeSessionId = sessionId ?? await ensureSession();
       const uploadResponse = await uploadScore(activeSessionId, file);
+      // A replacement upload starts a new score workflow while retaining the chat transcript.
+      setAudioUrl(null);
+      setActiveProgress(null);
+      setStatus(null);
+      setChatTurnBusy(false);
       const summary = uploadResponse.score_summary ?? null;
       if (uploadResponse.solfege_settings) {
         setSolfegeSystem(uploadResponse.solfege_settings.system);
@@ -2454,7 +2459,7 @@ export default function MainApp() {
             <h2>Studio Chat</h2>
             <span className="chat-subtitle">Natural language takes, no DAW edits</span>
           </div>
-          <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatScroll}>
+          <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatScroll} data-testid="chat-stream">
             {messages.length === 0 && (
               <div className="empty-state">
                 <p>Drop a MusicXML file here to begin.</p>
@@ -2581,6 +2586,7 @@ export default function MainApp() {
                       <label className="selection-field">
                         <span className="selection-label">Part</span>
                         <select
+                          data-testid="part-selection"
                           className="selection-select"
                           value={selectedPartKey ?? ""}
                           onChange={(event) => setSelectedPartKey(event.target.value)}
@@ -2595,6 +2601,7 @@ export default function MainApp() {
                       <label className="selection-field">
                         <span className="selection-label">Verse</span>
                         <select
+                          data-testid="verse-selection"
                           className="selection-select"
                           value={selectedVerse ?? ""}
                           onChange={(event) => setSelectedVerse(event.target.value)}
@@ -2611,6 +2618,7 @@ export default function MainApp() {
                       <button
                         type="button"
                         className="selection-send"
+                        data-testid="use-selection"
                         onClick={handleSelectionSend}
                         disabled={!selectedPartKey || !selectedVerse || chatTurnInProgress}
                       >
@@ -2631,6 +2639,7 @@ export default function MainApp() {
                         }
                       }}
                       className="audio-player"
+                      data-testid="synthesis-audio"
                       controls
                       src={msg.audioUrl}
                       onPlay={() => {
@@ -2719,6 +2728,7 @@ export default function MainApp() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="Ask me to sing a specific part or verse..."
+                data-testid="chat-input"
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
@@ -2735,6 +2745,7 @@ export default function MainApp() {
                 disabled={!input.trim() || creditsLocked || chatTurnInProgress}
                 aria-disabled={creditsLocked || chatTurnInProgress}
                 aria-label="Send message"
+                data-testid="send-message"
               >
                 <Send size={18} />
               </button>
@@ -2755,6 +2766,7 @@ export default function MainApp() {
                 <span>{uploading ? "Uploading..." : "Upload Score"}</span>
                 <input
                   type="file"
+                  data-testid="score-upload-input"
                   accept=".xml,.mxl"
                   disabled={uploading || creditsLocked}
                   onChange={(event) => {
@@ -3107,6 +3119,7 @@ export default function MainApp() {
 
           <section
             className={clsx("score-panel", isDragging && "drag-active")}
+            data-testid="score-preview"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
@@ -3191,7 +3204,7 @@ export default function MainApp() {
             </div>
           </div>
           <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
-            <div ref={scoreRef} className="score-surface" />
+            <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
             {scorePreviewError ? (
               <div className="score-placeholder score-error-placeholder">
                 <p>{scorePreviewError}</p>

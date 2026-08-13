@@ -14,6 +14,7 @@ import {
 import {
   getAuth,
   signInAnonymously,
+  signInWithCredential,
   signInWithRedirect,
   getRedirectResult,
   GoogleAuthProvider,
@@ -58,7 +59,8 @@ try {
     auth = getAuth(app);
     db = getFirestore(app);
     if (import.meta.env.VITE_APP_ENV === "dev") {
-      const emulatorOrigin = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:5173";
+      const emulatorOrigin = (import.meta.env.VITE_FIREBASE_AUTH_EMULATOR_URL as string | undefined)
+        || (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:9099");
       connectAuthEmulator(auth, emulatorOrigin, { disableWarnings: true });
       connectFirestoreEmulator(db, "127.0.0.1", 8080);
       console.log("Connected to Auth and Firestore emulators");
@@ -155,6 +157,18 @@ export async function getIdToken(): Promise<string | null> {
     return null;
   }
   return user.getIdToken();
+}
+
+/** Authenticate an isolated browser-test identity against the Auth Emulator. */
+export async function signInForE2E(uid: string, email: string): Promise<void> {
+  if (import.meta.env.VITE_E2E_AUTH !== "1") {
+    throw new Error("E2E authentication is disabled.");
+  }
+  if (!auth) {
+    throw new Error("Firebase Auth is not initialized.");
+  }
+  const idToken = JSON.stringify({ sub: uid, email, email_verified: true });
+  await signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
 }
 
 // ============================================================================

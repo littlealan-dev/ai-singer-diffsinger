@@ -91,6 +91,21 @@ class JobStore:
             return None
         return doc.id, data
 
+    def get_latest_job_for_session(self, *, session_id: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return the newest job for a verified session-scoped test diagnostic."""
+        self._ensure_client()
+        query = (
+            self._client.collection(self.collection)
+            .where("sessionId", "==", session_id)
+            .order_by("updatedAt", direction=firestore.Query.DESCENDING)
+            .limit(1)
+        )
+        docs = list(query.stream())
+        if not docs:
+            return None
+        doc = docs[0]
+        return doc.id, doc.to_dict() or {}
+
     def clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
         """Delete all stored jobs for a user/session pair."""
         self._ensure_client()
