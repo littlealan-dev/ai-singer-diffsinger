@@ -789,9 +789,12 @@ export default function MainApp() {
     overdrafted,
     isExpired,
     loading: creditsLoading,
+    status: creditsStatus,
+    error: creditsError,
   } = useCredits();
   const billing = useBillingState();
-  const creditsLocked = !creditsLoading && (overdrafted || isExpired || available <= 0);
+  const creditsReady = creditsStatus === "ready";
+  const creditsLocked = creditsReady && (overdrafted || isExpired || available <= 0);
   const billingWarningStatus = hasBillingPaymentIssue(billing)
     ? `${billing.stripeSubscriptionStatus || "unknown"}:${billing.latestInvoiceId || ""}:${billing.latestPaymentIntentStatus || ""}:${billing.latestPaymentFailureCode || ""}`
     : null;
@@ -1438,7 +1441,7 @@ export default function MainApp() {
   }, [billing.loading, isAuthenticated]);
 
   useEffect(() => {
-    if (creditsLoading || billing.loading) return;
+    if (!creditsReady || billing.loading || billing.error) return;
     let trigger: PaywallTrigger | null = null;
     if (overdrafted || available < 0) {
       trigger = "overdrafted";
@@ -1452,7 +1455,7 @@ export default function MainApp() {
     if (autoPaywallTriggersRef.current.has(key)) return;
     autoPaywallTriggersRef.current.add(key);
     openPaywall(trigger);
-  }, [available, billing.loading, creditsLoading, isExpired, overdrafted, user?.uid]);
+  }, [available, billing.error, billing.loading, creditsReady, isExpired, overdrafted, user?.uid]);
 
   useEffect(() => {
     if (!score) return;
@@ -2357,6 +2360,7 @@ export default function MainApp() {
             isExpired={isExpired}
             overdrafted={overdrafted}
             loading={creditsLoading || billing.loading}
+            error={creditsError || billing.error}
           />
           <div className="status-pill">{status ?? "Ready"}</div>
           <button

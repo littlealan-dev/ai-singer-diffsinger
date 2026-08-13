@@ -459,7 +459,19 @@ export async function createSession(): Promise<{ session_id: string }> {
   return request("/sessions", { method: "POST" });
 }
 
-export async function ensureCredits(): Promise<unknown> {
+export type CreditsBootstrapResponse = {
+  balance: number;
+  reserved: number;
+  available: number;
+  expires_at: string | null;
+  overdrafted: boolean;
+  is_expired: boolean;
+  monthly_allowance: number | null;
+  last_grant_type: string | null;
+  last_grant_at: string | null;
+};
+
+export async function ensureCredits(): Promise<CreditsBootstrapResponse> {
   return request("/credits", { method: "GET" });
 }
 

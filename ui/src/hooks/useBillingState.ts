@@ -85,22 +85,29 @@ export function useBillingState(): BillingState {
       return;
     }
 
-    setState((current) => ({ ...current, topupPacks: [], loading: true, error: null }));
+    setState({ ...DEFAULT_STATE, topupPacks: [], loading: true, error: null });
 
     const unsubscribe = onSnapshot(
       doc(db, "users", user.uid),
       (snapshot) => {
         if (!snapshot.exists()) {
-          setState({ ...DEFAULT_STATE, loading: false, error: null });
           return;
         }
 
         const data = snapshot.data();
-        const billing = data.billing || {};
-        const credits = data.credits || {};
-        const topupCredits = data.topupCredits || {};
-        const balance = Number(credits.balance || 0);
-        const reserved = Number(credits.reserved || 0);
+        const billing = objectValue(data.billing);
+        const credits = objectValue(data.credits);
+        if (
+          !billing ||
+          !credits ||
+          typeof billing.activePlanKey !== "string" ||
+          finiteNumber(credits.balance) === null
+        ) {
+          return;
+        }
+        const topupCredits = objectValue(data.topupCredits) ?? {};
+        const balance = finiteNumber(credits.balance) ?? 0;
+        const reserved = finiteNumber(credits.reserved) ?? 0;
         const topupTotalRemaining = Number(topupCredits.totalRemaining || 0);
         const topupReserved = Number(topupCredits.totalReserved || 0);
         const topupAvailable = Number(
@@ -125,7 +132,7 @@ export function useBillingState(): BillingState {
           cancelAtPeriodEnd: Boolean(billing.cancelAtPeriodEnd),
           currentPeriodEnd: toDate(billing.currentPeriodEnd),
           nextCreditRefreshAt: toDate(billing.nextCreditRefreshAt),
-          monthlyAllowance: Number(credits.monthlyAllowance || 0),
+          monthlyAllowance: finiteNumber(credits.monthlyAllowance) ?? 0,
           availableCredits: balance - reserved + topupAvailable,
           reservedCredits: reserved,
           subscriptionCredits: balance - reserved,
@@ -207,4 +214,14 @@ function toDate(value: unknown): Date | null {
   }
   const timestamp = value as FirestoreTimestampLike;
   return typeof timestamp.toDate === "function" ? timestamp.toDate() : null;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
 }

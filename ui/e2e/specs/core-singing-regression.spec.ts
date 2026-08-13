@@ -16,6 +16,11 @@ test.describe("core singing regression", () => {
     await expect(page.getByTestId("chat-input")).toBeEnabled();
   });
 
+  test("initializes a new account's credits without showing the paywall", async ({ page }) => {
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByText("1000000 Credits", { exact: true })).toBeVisible();
+  });
+
   test("uploads and synthesizes one voice part, one verse", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "basic-one-part.xml");
     await requestScenario(page, "basic");

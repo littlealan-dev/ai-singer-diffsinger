@@ -7,7 +7,7 @@ import './CreditsHeader.css';
 
 type CreditsHeaderProps = Pick<
     UserCredits,
-    'available' | 'subscriptionAvailable' | 'topupAvailable' | 'topupEarliestExpiresAt' | 'isExpired' | 'overdrafted' | 'loading'
+    'available' | 'subscriptionAvailable' | 'topupAvailable' | 'topupEarliestExpiresAt' | 'isExpired' | 'overdrafted' | 'loading' | 'error'
 > & {
     nextCreditRefreshAt: Date | null;
     planFamily: PlanFamily;
@@ -23,6 +23,7 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
     isExpired,
     overdrafted,
     loading,
+    error,
     planFamily,
     topupPacks,
 }) => {
@@ -49,6 +50,7 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
         };
     }, [breakdownOpen]);
 
+    if (error) return <div className="credits-pill danger" title={error}>Credits unavailable</div>;
     if (loading) return <div className="credits-pill loading">...</div>;
 
     const daysUntilReset = nextCreditRefreshAt
