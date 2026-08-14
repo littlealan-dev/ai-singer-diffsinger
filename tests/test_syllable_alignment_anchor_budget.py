@@ -162,7 +162,7 @@ class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
         self.assertEqual(anchors[1]["end_frame"] - anchors[1]["start_frame"], 9)
 
     @patch("src.api.syllable_alignment.phonemize")
-    def test_phrase_initial_prefix_becomes_own_group(self, mock_phonemize) -> None:
+    def test_phrase_initial_prefix_uses_a_silence_preroll(self, mock_phonemize) -> None:
         mock_phonemize.return_value = {
             "phonemes": ["k", "ey"],
             "phoneme_ids": [1, 2],
@@ -191,10 +191,13 @@ class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
             language="es",
             include_phonemes=True,
         )
-        self.assertEqual(payload["phonemes"], ["k", "ey"])
-        self.assertEqual(payload["word_boundaries"], [1, 1])
+        self.assertEqual(payload["phonemes"], ["SP", "k", "ey"])
+        self.assertEqual(payload["word_boundaries"], [2, 1])
         self.assertEqual(payload["group_note_indices"], [0, 0])
-        self.assertEqual(payload["word_durations"], [1, 11])
+        self.assertEqual(payload["word_durations"], [8, 4])
+        self.assertEqual(payload["initial_silence_frames"], 8)
+        self.assertEqual(payload["group_anchor_frames"][0]["note_index"], 0)
+        self.assertEqual(payload["group_anchor_frames"][1]["note_index"], 1)
         self.assertEqual(mock_phonemize.call_args.kwargs["language"], "es")
 
     @patch("src.api.syllable_alignment.resolve_manifest_onset_anchor_adapters")

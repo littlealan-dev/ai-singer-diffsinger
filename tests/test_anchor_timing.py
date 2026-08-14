@@ -114,5 +114,21 @@ class TestAnchorTiming(unittest.TestCase):
         self.assertLessEqual(out[0], 12)  # onset consonant should stay short
         self.assertGreater(out[1], 180)  # vowel absorbs long-note elasticity
 
+    def test_initial_silence_reserves_frames_for_sentence_initial_onset(self) -> None:
+        out = _apply_anchor_constrained_timing(
+            durations=[1.0, 7.0],
+            word_boundaries=[2],
+            group_anchor_frames=[{"start_frame": 0, "end_frame": 8}],
+            phoneme_timing_rules=[
+                {
+                    "initial_silence_phoneme_count": 1,
+                    "initial_onset_phoneme_count": 1,
+                    "initial_silence_frames": 2,
+                }
+            ],
+        )
+
+        self.assertEqual(out, [2, 6])
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,13 @@ from src.phonemizer.phonemizer import Phonemizer
 logger = get_logger(__name__)
 
 
+# DiffSinger needs an explicit, unvoiced window before a sentence-initial
+# consonant. These values are 23 ms of SP plus about 70 ms per onset phone at
+# the common 44.1 kHz / 512-hop configuration.
+_INITIAL_SILENCE_FRAMES = 2
+_INITIAL_ONSET_FRAMES_PER_PHONEME = 6
+
+
 def _resolve_group_lyric(group: Dict[str, Any]) -> str:
     """Return a phonemizable lyric token for a grouped word section."""
     notes = group.get("notes") or []
@@ -599,22 +606,25 @@ def _build_group_anchor_frames(
             return max(0, len(note_durations) - 1)
         return note_idx
 
+    def _timeline_note_index(group: Dict[str, Any]) -> int:
+        return _norm_note_index(group.get("timeline_note_index", group.get("note_idx", 0)))
+
     positions: List[int] = []
     durations: List[int] = []
     group_anchor_frames: List[Dict[str, int]] = []
     i = 0
     while i < len(phrase_groups):
         run_start = i
-        note_idx = _norm_note_index(phrase_groups[i].get("note_idx", 0))
+        note_idx = _timeline_note_index(phrase_groups[i])
         j = i + 1
         while j < len(phrase_groups):
-            next_idx = _norm_note_index(phrase_groups[j].get("note_idx", 0))
+            next_idx = _timeline_note_index(phrase_groups[j])
             if next_idx != note_idx:
                 break
             j += 1
 
         if j < len(phrase_groups):
-            next_note_idx = _norm_note_index(phrase_groups[j].get("note_idx", len(note_durations)))
+            next_note_idx = _timeline_note_index(phrase_groups[j])
             next_note_idx = max(note_idx + 1, min(next_note_idx, len(note_durations)))
         else:
             next_note_idx = len(note_durations)
@@ -826,6 +836,8 @@ def align(
     phrase_groups: List[Dict[str, Any]] = []
     note_phonemes: Dict[int, List[str]] = {}
     note_slur: List[int] = [0] * len(notes)
+    initial_silence_frames = 0
+    initial_silence_note_index: Optional[int] = None
 
     word_idx = 0
     coda_tails: List[Dict[str, int]] = []
@@ -1069,17 +1081,49 @@ def align(
                     note_phonemes.setdefault(prev_note_idx, []).extend(lead_ph)
             else:
                 first_note_idx = int(carrier_indices[0]) if carrier_indices else int(note_indices[0])
-                phrase_groups.append(
-                    {
-                        "position": start_frames[first_note_idx],
-                        "phonemes": list(lead_ph),
-                        "ids": list(lead_ids),
-                        "lang_ids": list(lead_lang),
-                        "tone": float(timing_midi[first_note_idx]),
-                        "note_idx": first_note_idx,
-                    }
+                first_core_count = len(chunks[0].get("ids") or []) if chunks else 0
+                requested_pre_roll = (
+                    _INITIAL_SILENCE_FRAMES
+                    + _INITIAL_ONSET_FRAMES_PER_PHONEME * len(lead_ph)
                 )
-                note_phonemes.setdefault(first_note_idx, []).extend(lead_ph)
+                available_pre_roll = max(
+                    0,
+                    int(note_durations[first_note_idx]) - max(1, first_core_count),
+                )
+                if available_pre_roll >= len(lead_ph) + 1:
+                    initial_silence_frames = min(requested_pre_roll, available_pre_roll)
+                    initial_silence_note_index = first_note_idx
+                    phrase_groups.append(
+                        {
+                            "position": start_frames[first_note_idx],
+                            "phonemes": ["SP", *lead_ph],
+                            "ids": [sp_id, *lead_ids],
+                            "lang_ids": [0, *lead_lang],
+                            "timing_rule": {
+                                "initial_silence_phoneme_count": 1,
+                                "initial_onset_phoneme_count": len(lead_ph),
+                                "initial_silence_frames": _INITIAL_SILENCE_FRAMES,
+                            },
+                            "tone": float(timing_midi[first_note_idx]),
+                            "note_idx": first_note_idx,
+                            "timeline_note_index": first_note_idx,
+                            "is_initial_silence_group": True,
+                        }
+                    )
+                    note_phonemes.setdefault(first_note_idx, []).extend(["SP", *lead_ph])
+                    lead_ph, lead_ids, lead_lang = [], [], []
+                else:
+                    phrase_groups.append(
+                        {
+                            "position": start_frames[first_note_idx],
+                            "phonemes": list(lead_ph),
+                            "ids": list(lead_ids),
+                            "lang_ids": list(lead_lang),
+                            "tone": float(timing_midi[first_note_idx]),
+                            "note_idx": first_note_idx,
+                        }
+                    )
+                    note_phonemes.setdefault(first_note_idx, []).extend(lead_ph)
 
         for idx, note_idx in enumerate(carrier_indices):
             chunk = chunks[idx] if idx < len(chunks) else {"phonemes": [], "ids": [], "lang_ids": []}
@@ -1136,13 +1180,32 @@ def align(
     if not phrase_groups:
         raise ValueError("No phoneme groups produced by aligner.")
 
-    phrase_groups.sort(key=lambda g: (int(g.get("note_idx", 0)), int(g["position"])))
+    timeline_note_durations = list(note_durations)
+    if initial_silence_frames > 0 and initial_silence_note_index is not None:
+        first_duration = int(timeline_note_durations[initial_silence_note_index])
+        timeline_note_durations[initial_silence_note_index:initial_silence_note_index + 1] = [
+            initial_silence_frames,
+            first_duration - initial_silence_frames,
+        ]
+        for group in phrase_groups:
+            if group.get("is_initial_silence_group"):
+                continue
+            note_idx = int(group.get("note_idx", 0))
+            if note_idx >= initial_silence_note_index:
+                group["timeline_note_index"] = note_idx + 1
+
+    phrase_groups.sort(
+        key=lambda g: (
+            int(g.get("timeline_note_index", g.get("note_idx", 0))),
+            int(g["position"]),
+        )
+    )
 
     # Build per-group anchor windows on note-order frame budgets, including
     # repeated note-index runs (e.g. phrase-initial prefix clusters).
     positions, durations, group_anchor_frames = _build_group_anchor_frames(
         phrase_groups=phrase_groups,
-        note_durations=note_durations,
+        note_durations=timeline_note_durations,
         phonemizer=phonemizer,
     )
 
@@ -1203,7 +1266,7 @@ def align(
         )
         _, duration_model_durations, _ = _build_group_anchor_frames(
             phrase_groups=duration_model_groups,
-            note_durations=note_durations,
+            note_durations=timeline_note_durations,
             phonemizer=phonemizer,
         )
         duration_model_boundaries = [
@@ -1252,6 +1315,8 @@ def align(
         "note_phonemes": note_phonemes,
         "note_slur": note_slur,
         "note_durations": note_durations,
+        "initial_silence_frames": initial_silence_frames,
+        "initial_silence_note_index": initial_silence_note_index,
         "coda_tails": coda_tails,
         "slur_note_groups": slur_note_groups,
         "durations_debug": ph_durations,

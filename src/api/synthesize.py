@@ -737,6 +737,35 @@ def _apply_pronunciation_timing_rule(
     """Apply a manifest-declared timing policy to a logical pronunciation span."""
     if not rule:
         return default_durations
+    initial_silence_count = rule.get("initial_silence_phoneme_count")
+    initial_onset_count = rule.get("initial_onset_phoneme_count")
+    initial_silence_frames = rule.get("initial_silence_frames")
+    if (
+        isinstance(initial_silence_count, int)
+        and not isinstance(initial_silence_count, bool)
+        and initial_silence_count == 1
+        and isinstance(initial_onset_count, int)
+        and not isinstance(initial_onset_count, bool)
+        and initial_onset_count >= 1
+        and isinstance(initial_silence_frames, int)
+        and not isinstance(initial_silence_frames, bool)
+        and initial_silence_frames >= 1
+        and len(default_durations) == initial_silence_count + initial_onset_count
+    ):
+        silence_budget = min(
+            initial_silence_frames,
+            anchor_total - initial_onset_count,
+        )
+        onset_budget = anchor_total - silence_budget
+        if silence_budget >= 1 and onset_budget >= initial_onset_count:
+            return [
+                silence_budget,
+                *_rescale_group_durations(
+                    default_durations[initial_silence_count:],
+                    onset_budget,
+                    group_index=-1,
+                ),
+            ]
     adaptive_prefix_count = rule.get("adaptive_onset_prefix_count")
     adaptive_ratio = rule.get("adaptive_onset_frame_ratio")
     adaptive_minimum = rule.get("adaptive_onset_min_frames")
@@ -1691,7 +1720,36 @@ def align_phonemes_to_notes(
         prev_rest = is_rest
 
     pitch_note_rests = [computed_note_rests[idx] for idx in pitch_indices]
-    pitch_index_map = {note_idx: pitch_idx for pitch_idx, note_idx in enumerate(pitch_indices)}
+    initial_silence_frames = int(ph_result.get("initial_silence_frames", 0) or 0)
+    initial_silence_note_index = ph_result.get("initial_silence_note_index")
+    initial_silence_pitch_index: Optional[int] = None
+    if initial_silence_frames > 0 and isinstance(initial_silence_note_index, int):
+        try:
+            initial_silence_pitch_index = pitch_indices.index(initial_silence_note_index)
+        except ValueError:
+            initial_silence_pitch_index = None
+        if initial_silence_pitch_index is not None:
+            original_duration = pitch_note_durations[initial_silence_pitch_index]
+            if initial_silence_frames >= original_duration:
+                raise ValueError("Initial silence must leave frames for the first sung note.")
+            pitch_note_durations[initial_silence_pitch_index:initial_silence_pitch_index + 1] = [
+                initial_silence_frames,
+                original_duration - initial_silence_frames,
+            ]
+            pitch_note_pitches.insert(
+                initial_silence_pitch_index,
+                pitch_note_pitches[initial_silence_pitch_index],
+            )
+            pitch_note_rests.insert(initial_silence_pitch_index, True)
+    pitch_index_map = {
+        note_idx: pitch_idx + (
+            1
+            if initial_silence_pitch_index is not None
+            and pitch_idx >= initial_silence_pitch_index
+            else 0
+        )
+        for pitch_idx, note_idx in enumerate(pitch_indices)
+    }
     slur_groups: List[List[int]] = []
     if use_v2_aligner:
         for note_indices in ph_result.get("slur_note_groups", []):
