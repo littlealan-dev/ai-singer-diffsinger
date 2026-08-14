@@ -1604,6 +1604,8 @@ export default function MainApp() {
       const appendTerminalPreprocessMessage =
         payload.job_kind === "preprocess" &&
         (payload.status === "done" || payload.status === "error");
+      const appendProgressToChatBubble =
+        payload.status !== "error" || payload.job_kind === "preprocess";
       const isTerminalProgress =
         payload.status === "done" ||
         payload.status === "error" ||
@@ -1617,7 +1619,9 @@ export default function MainApp() {
               ? msg.content
               : appendTerminalPreprocessMessage
                 ? appendPreprocessTerminalMessage(msg.content, nextMessage)
-                : appendProgressMessage(msg.content, nextMessage);
+                : appendProgressToChatBubble
+                  ? appendProgressMessage(msg.content, nextMessage)
+                  : msg.content;
           return {
             ...msg,
             content: nextContent,

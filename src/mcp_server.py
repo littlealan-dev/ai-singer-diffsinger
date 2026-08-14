@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Set
 
 from src.mcp.tools import call_tool, list_tools
 from src.mcp.logging_utils import configure_logging, summarize_payload
+from src.backend.gpu_errors import gpu_tool_error_payload
 
 
 def _error_response(request_id: Optional[Any], code: int, message: str) -> Dict[str, Any]:
@@ -112,6 +113,9 @@ def _handle_request(request: Dict[str, Any], device: str, mode: str) -> Optional
             return _result_response(request_id, result)
         except Exception as exc:
             error = {"message": str(exc), "type": exc.__class__.__name__}
+            gpu_error = gpu_tool_error_payload(exc) if name == "synthesize" else None
+            if gpu_error is not None:
+                error.update(gpu_error)
             error_code = getattr(exc, "code", None)
             if isinstance(error_code, str) and error_code:
                 error["code"] = error_code

@@ -27,7 +27,16 @@ from src.backend.llm_prompt import (
     parse_llm_response,
 )
 from src.backend.message_catalog import backend_message
-from src.backend.mcp_client import McpRouter
+from src.backend.mcp_client import McpRouter, McpToolError
+from src.backend.gpu_errors import (
+    GPU_ERROR_CATEGORY,
+    GPU_ERROR_INTERNAL_CATEGORY,
+    GPU_ERROR_INTERNAL_FAMILY,
+    GPU_ERROR_PUBLIC_CODE,
+    classify_gpu_infrastructure_error,
+    classify_gpu_tool_error,
+    format_gpu_resource_error_message,
+)
 from src.backend.job_store import JobStore
 from src.backend.language_selection import (
     collect_score_lyrics,
@@ -760,16 +769,22 @@ class Orchestrator:
         message: str,
         error_message: str,
         output_path: Optional[str] = None,
+        error_fields: Optional[Dict[str, Any]] = None,
     ) -> None:
+        fields: Dict[str, Any] = {
+            "status": status,
+            "step": step,
+            "message": message,
+            "progress": 1.0,
+            "outputPath": output_path,
+            "errorMessage": error_message,
+        }
+        if error_fields:
+            fields.update(error_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
-            status=status,
-            step=step,
-            message=message,
-            progress=1.0,
-            outputPath=output_path,
-            errorMessage=error_message,
+            **fields,
         )
 
     async def _mark_reservation_reconciliation_required(
@@ -1153,14 +1168,16 @@ class Orchestrator:
         except Exception as exc:
             if self._is_e2e_credit_bypass_enabled():
                 self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
+                error_message = _format_synthesis_error(exc)
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
                     status="failed",
                     step="error",
-                    message=backend_message("job.finish_failed"),
+                    message=_synthesis_failure_job_message(exc),
                     progress=1.0,
-                    errorMessage=_format_synthesis_error(exc),
+                    errorMessage=error_message,
+                    **_synthesis_error_job_fields(exc),
                 )
                 return
             # Release credits
@@ -1174,15 +1191,18 @@ class Orchestrator:
             self._release_fault_injection_remaining.pop(job_id, None)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
             error_message = _format_synthesis_error(exc)
+            error_fields = _synthesis_error_job_fields(exc)
+            job_message = _synthesis_failure_job_message(exc)
             if self._release_result_allows_terminal_status(release_result.status):
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
                     status="failed",
                     step="error",
-                    message=backend_message("job.finish_failed"),
+                    message=job_message,
                     progress=1.0,
                     errorMessage=error_message,
+                    **error_fields,
                 )
             else:
                 await self._mark_reservation_reconciliation_required(
@@ -1201,6 +1221,7 @@ class Orchestrator:
                     error_message=(
                         f"{error_message} | billing_rollback_status={release_result.status}"
                     ),
+                    error_fields=error_fields,
                 )
         finally:
             clear_log_context()
@@ -3839,7 +3860,13 @@ class Orchestrator:
     def _extract_call_requested_verse(self, call: ToolCall) -> Optional[str]:
         """Extract explicit requested verse from a tool call when provided."""
         if call.name == TOOL_SYNTHESIZE:
-            return self._normalize_verse_number(call.arguments.get("verse_number"))
+            direct = self._normalize_verse_number(call.arguments.get("verse_number"))
+            if direct:
+                return direct
+            lyric_selection = call.arguments.get("lyric_selection")
+            if isinstance(lyric_selection, dict):
+                return self._normalize_verse_number(lyric_selection.get("number"))
+            return None
         if call.name == TOOL_REPARSE:
             return self._normalize_verse_number(call.arguments.get("verse_number"))
         if call.name in {TOOL_PREPROCESS_VOICE_PARTS, TOOL_START_PREPROCESS_WORKFLOW}:
@@ -6677,6 +6704,9 @@ def _job_progress_url(session_id: str, job_id: str) -> str:
 
 def _format_synthesis_error(exc: Exception) -> str:
     """Return a concise troubleshooting message for failed synthesis jobs."""
+    gpu_payload = _gpu_error_payload_from_exception(exc)
+    if gpu_payload is not None:
+        return format_gpu_resource_error_message(gpu_payload)
     raw = str(exc).strip()
     if raw:
         try:
@@ -6698,6 +6728,59 @@ def _format_synthesis_error(exc: Exception) -> str:
                 return message
         return raw
     return exc.__class__.__name__
+
+
+def _synthesis_failure_job_message(exc: Exception) -> str:
+    """Return the terminal job message shown for a synthesis failure."""
+
+    if _gpu_error_payload_from_exception(exc) is not None:
+        return _format_synthesis_error(exc)
+    return backend_message("job.finish_failed")
+
+
+def _synthesis_error_job_fields(exc: Exception) -> Dict[str, Any]:
+    """Return structured job fields for classified synthesis failures."""
+
+    payload = _gpu_error_payload_from_exception(exc)
+    if payload is None:
+        return {}
+    return {
+        "errorCategory": GPU_ERROR_CATEGORY,
+        "errorCode": str(payload.get("publicCode") or GPU_ERROR_PUBLIC_CODE),
+        "errorInternalCategory": str(
+            payload.get("internalCategory") or GPU_ERROR_INTERNAL_CATEGORY
+        ),
+        "errorInternalFamily": str(
+            payload.get("internalFamily") or GPU_ERROR_INTERNAL_FAMILY
+        ),
+        "errorInternalSubcode": str(payload.get("code") or ""),
+        "errorMatchedPattern": str(payload.get("matchedPattern") or ""),
+        "retryAttempted": bool(payload.get("retryAttempted", False)),
+        "workerRestarted": bool(payload.get("workerRestarted", False)),
+    }
+
+
+def _gpu_error_payload_from_exception(exc: Exception) -> Optional[Dict[str, Any]]:
+    """Extract normalized GPU/CUDA infra error fields from an exception."""
+
+    if isinstance(exc, McpToolError):
+        info = classify_gpu_tool_error(exc.payload)
+        if info is None:
+            return None
+        payload = dict(info.payload)
+        payload.update(exc.payload)
+        payload["code"] = info.code
+        payload["matchedPattern"] = info.matched_pattern
+        payload["message"] = info.message
+        return payload
+
+    info = classify_gpu_infrastructure_error(str(exc), error_type=exc.__class__.__name__)
+    if info is None:
+        return None
+    payload = dict(info.payload)
+    payload["message"] = info.message
+    payload["type"] = exc.__class__.__name__
+    return payload
 
 
 def _ensure_job_input_storage(

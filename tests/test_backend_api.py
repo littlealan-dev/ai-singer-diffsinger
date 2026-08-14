@@ -52,6 +52,27 @@ def test_format_synthesis_error_extracts_tool_error_message():
     )
 
 
+def test_format_synthesis_error_formats_gpu_resource_error():
+    exc = McpToolError(
+        {
+            "message": (
+                "ONNXRuntimeError: BFCArena::AllocateRawInternal failed to "
+                "allocate 287244032 bytes on CUDAExecutionProvider."
+            ),
+            "type": "ONNXRuntimeError",
+            "retryable": True,
+            "workerRestartRequired": True,
+        }
+    )
+
+    assert _format_synthesis_error(exc) == (
+        "Error in GPU / CUDA resource. Please try again later.\n\n"
+        "Error Code: gpu_memory_exhausted\n"
+        "Error Message: ONNXRuntimeError: BFCArena::AllocateRawInternal failed to "
+        "allocate 287244032 bytes on CUDAExecutionProvider."
+    )
+
+
 VERSED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
 <score-partwise version='3.1'>
   <part-list>
@@ -5436,6 +5457,29 @@ def test_chat_blocks_synthesize_without_explicit_verse_for_multiverse_score(clie
     assert action_required.get("available_verses") == ["1", "2"]
     synth_calls = [args for name, args in tool_calls if name == "synthesize"]
     assert not synth_calls
+
+
+def test_synthesize_lyric_selection_counts_as_explicit_verse_for_multiverse_score(client):
+    _, app = client
+
+    assert not app.state.orchestrator._tool_calls_require_verse_selection(
+        [
+            ToolCall(
+                name="synthesize",
+                arguments={
+                    "part_index": 0,
+                    "lyric_selection": {
+                        "id": "lyr_verse_one",
+                        "number": "1",
+                        "name": "",
+                    },
+                },
+            )
+        ],
+        score={"selected_verse_number": "1"},
+        score_summary={"available_verses": ["1", "2"]},
+        explicit_verse_number=None,
+    )
 
 
 def test_chat_blocks_reparse_without_explicit_verse_for_multiverse_score(client):

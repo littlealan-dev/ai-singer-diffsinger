@@ -14,6 +14,7 @@ import time
 import sys
 
 from src.backend.config import Settings
+from src.backend.gpu_errors import classify_gpu_tool_error
 
 
 class McpError(RuntimeError):
@@ -30,6 +31,7 @@ class McpToolError(McpError):
         self.code = str(payload.get("code") or "") or None
         self.error_type = str(payload.get("type") or "") or None
         self.retryable = bool(payload.get("retryable", False))
+        self.worker_restart_required = bool(payload.get("workerRestartRequired", False))
         super().__init__(str(payload.get("message") or error))
 
 
@@ -372,6 +374,37 @@ class McpRouter:
             )
             return result
         except McpToolError as exc:
+            gpu_error = classify_gpu_tool_error(exc.payload)
+            if (
+                worker == "gpu"
+                and name == "synthesize"
+                and gpu_error is not None
+            ):
+                logging.getLogger(__name__).warning(
+                    "mcp_gpu_worker_health_error tool=%s worker=%s code=%s "
+                    "matched_pattern=%s retrying_after_restart=true",
+                    name,
+                    worker,
+                    gpu_error.code,
+                    gpu_error.matched_pattern,
+                )
+                process.stop()
+                process.start()
+                start = time.monotonic()
+                try:
+                    result = process.call_tool(name, arguments)
+                except McpToolError as retry_exc:
+                    retry_exc.payload["retryAttempted"] = True
+                    retry_exc.payload["workerRestarted"] = True
+                    raise
+                elapsed_ms = (time.monotonic() - start) * 1000.0
+                logging.getLogger(__name__).info(
+                    "mcp_tool_call tool=%s worker=%s elapsed_ms=%.2f retry_after_restart=true",
+                    name,
+                    worker,
+                    elapsed_ms,
+                )
+                return result
             logging.getLogger(__name__).warning(
                 "mcp_tool_error tool=%s worker=%s code=%s error_type=%s retry_skipped=true",
                 name,

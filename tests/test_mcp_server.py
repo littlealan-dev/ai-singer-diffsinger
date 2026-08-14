@@ -160,13 +160,28 @@ class TestMcpServer(unittest.TestCase):
         with mock.patch("src.mcp.handlers.synthesize") as mock_syn, mock.patch(
             "src.mcp.handlers.resolve_voicebank_id",
             return_value=self.voicebank_path,
+        ), mock.patch(
+            "src.mcp.handlers.get_manifest_voicebank_metadata",
+            return_value={},
+        ), mock.patch(
+            "src.mcp.handlers.resolve_manifest_synthesis_control_defaults",
+            return_value={"airiness": 0.5, "clarity": 0.5, "gender": 0.0},
         ):
             mock_syn.return_value = {"waveform": [0.0], "sample_rate": 44100}
+            lyric_selection = {
+                "id": "verse-1",
+                "number": "1",
+                "name": "Verse 1",
+            }
             result = self._call_tool(
                 "synthesize",
                 {
-                    "score": {"parts": []},
+                    "score": {
+                        "parts": [],
+                        "selected_lyric_selection": lyric_selection,
+                    },
                     "voicebank": self.voicebank_id,
+                    "lyric_selection": lyric_selection,
                     "language": "ja",
                     "articulation": 0.25,
                     "airiness": 0.9,
@@ -184,6 +199,48 @@ class TestMcpServer(unittest.TestCase):
             self.assertEqual(kwargs["intensity"], 0.9)
             self.assertEqual(kwargs["clarity"], 70.0)
             self.assertEqual(kwargs["gender"], -20.833333333333332)
+
+    def test_synthesize_gpu_error_is_retryable_worker_health_error(self):
+        with mock.patch("src.mcp.handlers.synthesize") as mock_syn, mock.patch(
+            "src.mcp.handlers.resolve_voicebank_id",
+            return_value=self.voicebank_path,
+        ), mock.patch(
+            "src.mcp.handlers.get_manifest_voicebank_metadata",
+            return_value={},
+        ), mock.patch(
+            "src.mcp.handlers.resolve_manifest_synthesis_control_defaults",
+            return_value={"airiness": 0.5, "clarity": 0.5, "gender": 0.0},
+        ):
+            mock_syn.side_effect = RuntimeError(
+                "ONNXRuntimeError: BFCArena::AllocateRawInternal failed to "
+                "allocate 287244032 bytes on CUDAExecutionProvider."
+            )
+            result = self._call_tool(
+                "synthesize",
+                {
+                    "score": {
+                        "parts": [],
+                        "selected_lyric_selection": {
+                            "id": "verse-1",
+                            "number": "1",
+                            "name": "Verse 1",
+                        },
+                    },
+                    "voicebank": self.voicebank_id,
+                    "lyric_selection": {
+                        "id": "verse-1",
+                        "number": "1",
+                        "name": "Verse 1",
+                    },
+                },
+            )
+
+        error = result["error"]
+        self.assertEqual(error["category"], "infrastructure")
+        self.assertEqual(error["publicCode"], "render_worker_resource_exhausted")
+        self.assertEqual(error["code"], "gpu_memory_exhausted")
+        self.assertTrue(error["retryable"])
+        self.assertTrue(error["workerRestartRequired"])
 
     def test_list_voicebanks(self):
         with mock.patch("src.mcp.handlers.list_voicebanks") as mock_list:

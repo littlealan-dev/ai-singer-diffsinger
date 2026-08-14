@@ -145,6 +145,116 @@ def test_mcp_tool_error_does_not_restart_or_retry(caplog):
     assert any("retry_skipped=true" in record.message for record in caplog.records)
 
 
+def test_gpu_synthesize_tool_error_restarts_and_retries_once(caplog):
+    class GpuErrorThenSuccessProcess(DummyProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def call_tool(self, name, arguments):
+            self.call_count += 1
+            if self.call_count == 1:
+                raise McpToolError(
+                    {
+                        "message": (
+                            "ONNXRuntimeError: BFCArena::AllocateRawInternal "
+                            "failed to allocate 287244032 bytes on CUDAExecutionProvider."
+                        ),
+                        "type": "ONNXRuntimeError",
+                    }
+                )
+            return {"ok": True, "tool": name}
+
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    process = GpuErrorThenSuccessProcess()
+    router._cpu = DummyProcess()
+    router._gpu = process
+
+    caplog.set_level(logging.INFO)
+    result = router._call_with_retry("gpu", "synthesize", {})
+
+    assert result == {"ok": True, "tool": "synthesize"}
+    assert process.call_count == 2
+    assert process.stop_count == 1
+    assert process.start_count == 1
+    assert any(
+        "mcp_gpu_worker_health_error tool=synthesize worker=gpu" in record.message
+        for record in caplog.records
+    )
+
+
+def test_gpu_synthesize_tool_error_marks_retry_metadata_on_second_failure():
+    class AlwaysGpuErrorProcess(DummyProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def call_tool(self, name, arguments):
+            self.call_count += 1
+            raise McpToolError(
+                {
+                    "message": "CUBLAS_STATUS_ALLOC_FAILED during CUDAExecutionProvider inference.",
+                    "type": "ONNXRuntimeError",
+                    "retryable": True,
+                    "workerRestartRequired": True,
+                }
+            )
+
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    process = AlwaysGpuErrorProcess()
+    router._cpu = DummyProcess()
+    router._gpu = process
+
+    try:
+        router._call_with_retry("gpu", "synthesize", {})
+    except McpToolError as exc:
+        assert exc.payload["retryAttempted"] is True
+        assert exc.payload["workerRestarted"] is True
+    else:
+        raise AssertionError("Expected McpToolError")
+
+    assert process.call_count == 2
+    assert process.stop_count == 1
+    assert process.start_count == 1
+
+
+def test_gpu_non_synthesize_tool_error_does_not_restart():
+    class GpuSaveAudioErrorProcess(DummyProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def call_tool(self, name, arguments):
+            self.call_count += 1
+            raise McpToolError(
+                {
+                    "message": "CUDNN_STATUS_NOT_INITIALIZED",
+                    "type": "ONNXRuntimeError",
+                    "retryable": True,
+                    "workerRestartRequired": True,
+                }
+            )
+
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    process = GpuSaveAudioErrorProcess()
+    router._cpu = DummyProcess()
+    router._gpu = process
+
+    try:
+        router._call_with_retry("gpu", "save_audio", {})
+    except McpToolError:
+        pass
+    else:
+        raise AssertionError("Expected McpToolError")
+
+    assert process.call_count == 1
+    assert process.stop_count == 0
+    assert process.start_count == 0
+
+
 def test_mcp_router_background_start_does_not_block_calls_after_ready():
     settings = Settings.from_env()
     router = McpRouter(settings)
