@@ -95,6 +95,9 @@ class ChatRequest(BaseModel):
     # Values are treated as authoritative user selections and avoid fragile text parsing.
     selection: dict[str, Any] | None = None
     selected_voicebank_id: str | None = None
+    # Score notation always remains unchanged; this only controls render order
+    # and the estimate used before a synthesis job is started.
+    expand_repeats: bool = True
     # Backend-ready structured override. UI controls will be added separately.
     selected_language: str | None = Field(
         default=None,
@@ -551,6 +554,9 @@ def create_app() -> FastAPI:
             if isinstance(score, dict):
                 score = dict(score)
                 score["source_musicxml_path"] = str(canonical_musicxml_path)
+                expanded_score = score.get("expanded_score")
+                if isinstance(expanded_score, dict):
+                    expanded_score["source_musicxml_path"] = str(canonical_musicxml_path)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -588,6 +594,7 @@ def create_app() -> FastAPI:
                 selection=payload.selection,
                 selected_voicebank_id=payload.selected_voicebank_id,
                 selected_language=payload.selected_language,
+                expand_repeats=payload.expand_repeats,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
         except McpStartupInProgressError as exc:

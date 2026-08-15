@@ -14,6 +14,7 @@ import unicodedata
 import numpy as np
 
 from src.api.phonemize import _find_dictionary, phonemize
+from src.api.score import expanded_score_for_synthesis
 import src.api.syllable_alignment as syllable_alignment
 from src.api.inference import (
     predict_durations,
@@ -1906,6 +1907,7 @@ def synthesize(
     solfege_pronunciation_patch: bool = False,
     require_solfege_lyrics: bool = False,
     skip_voice_part_preprocess: bool = False,
+    expand_repeats: bool = True,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> Dict[str, Any]:
@@ -1935,6 +1937,8 @@ def synthesize(
         solfege_pronunciation_patch: Apply deterministic English solfege spellings
         require_solfege_lyrics: Require the selected target's active lyrics to be
             generated or user-authored solfege before synthesis can begin.
+        expand_repeats: Expand MusicXML repeats and navigation marks into the
+            internal rendering score. The preview/source score remains unchanged.
         device: Device for inference
         progress_callback: Optional callback for step updates
         
@@ -1985,6 +1989,7 @@ def synthesize(
                     "pitch_expression": pitch_expression,
                     "solfege_pronunciation_patch": solfege_pronunciation_patch,
                     "require_solfege_lyrics": require_solfege_lyrics,
+                    "expand_repeats": expand_repeats,
                     "device": device,
                 }
             ),
@@ -2000,8 +2005,10 @@ def synthesize(
         raise ValueError("solfege_pronunciation_patch must be a boolean.")
     if not isinstance(require_solfege_lyrics, bool):
         raise ValueError("require_solfege_lyrics must be a boolean.")
+    if not isinstance(expand_repeats, bool):
+        raise ValueError("expand_repeats must be a boolean.")
 
-    working_score = score
+    working_score = expanded_score_for_synthesis(score) if expand_repeats else score
     estimated_duration_seconds = _estimated_score_duration_seconds(working_score)
     max_duration_seconds = _synthesis_max_duration_seconds()
     if estimated_duration_seconds > max_duration_seconds:

@@ -1481,7 +1481,11 @@ TOOLS: List[Tool] = [
                 },
                 "expand_repeats": {
                     "type": "boolean",
-                    "description": "Whether repeat structures should be expanded during parsing.",
+                    "description": (
+                        "Compatibility option. Parsing always prepares both the canonical "
+                        "notation score and its expanded played-order score; this selects "
+                        "which variant is returned at the top level."
+                    ),
                 },
             },
             "required": ["file_path"],
@@ -1505,10 +1509,6 @@ TOOLS: List[Tool] = [
                         "Use this to explicitly lock the active verse when score_summary.available_verses "
                         "contains multiple entries."
                     ),
-                },
-                "expand_repeats": {
-                    "type": "boolean",
-                    "description": "Whether repeat structures should be expanded during reparse.",
                 },
             },
             "additionalProperties": False,
@@ -1994,6 +1994,15 @@ TOOLS: List[Tool] = [
                     "description": (
                         "Fail before synthesis unless the selected target's active lyrics "
                         "are generated or clearly user-authored solfege."
+                    ),
+                },
+                "expand_repeats": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Expand repeat bars, endings, D.C./D.S., Fine, and Coda navigation "
+                        "into the internal rendering score. The displayed source score is "
+                        "never changed."
                     ),
                 },
             },

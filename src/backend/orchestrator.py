@@ -172,6 +172,7 @@ class Orchestrator:
         selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
+        expand_repeats: bool = True,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
@@ -430,6 +431,7 @@ class Orchestrator:
                     current_credit_availability=current_credit_availability,
                     forced_voicebank_id=forced_voicebank_id,
                     forced_language=forced_language,
+                    expand_repeats=expand_repeats,
                     workflow_user_message=message,
                 )
                 await self._sessions.append_history(
@@ -472,6 +474,7 @@ class Orchestrator:
         synth_args = dict(arguments)
         # Verse selection is resolved at parse/reparse stage.
         synth_args.pop("verse_number", None)
+        synth_args.setdefault("expand_repeats", True)
         synth_args["score"] = score
         if "voicebank" not in synth_args:
             synth_args["voicebank"] = await self._resolve_voicebank()
@@ -1587,6 +1590,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
+        expand_repeats: bool = True,
         preprocess_job_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
@@ -1674,6 +1678,7 @@ class Orchestrator:
                 explicit_verse_number=explicit_verse_number,
                 forced_voicebank_id=forced_voicebank_id,
                 forced_language=forced_language,
+                expand_repeats=expand_repeats,
             )
             if is_preprocess_attempt:
                 attempt_diagnostics = await self._persist_preprocess_attempt_artifacts(
@@ -4160,11 +4165,8 @@ class Orchestrator:
         part_id: Optional[str],
         part_index: Optional[int],
         verse_number: Optional[object],
-        expand_repeats: bool,
     ) -> bool:
         """Return True when reparse request would not change current score context."""
-        if expand_repeats:
-            return False
         if part_id is not None or part_index is not None:
             return False
         requested_verse = self._normalize_verse_number(verse_number)
@@ -4234,14 +4236,15 @@ class Orchestrator:
         part_index: Optional[int],
         verse_number: Optional[object],
         lyric_selection: Optional[Dict[str, str]] = None,
-        expand_repeats: bool = False,
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         """Re-parse the current MusicXML file with new selection filters."""
         file_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
         parse_args: Dict[str, Any] = {
             "file_path": self._mcp_musicxml_path(file_path),
-            "expand_repeats": bool(expand_repeats),
+            # Parsed session state always keeps canonical notation at the top
+            # level and includes the separately precomputed played-order score.
+            "expand_repeats": False,
         }
         if part_id is not None:
             parse_args["part_id"] = part_id
@@ -5603,6 +5606,7 @@ class Orchestrator:
         explicit_verse_number: Optional[str],
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
+        expand_repeats: bool = True,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -5755,13 +5759,11 @@ class Orchestrator:
                 reparse_part_index = call.arguments.get("part_index")
                 reparse_verse_number = call.arguments.get("verse_number")
                 normalized_reparse_verse = self._normalize_verse_number(reparse_verse_number)
-                reparse_expand_repeats = bool(call.arguments.get("expand_repeats", False))
                 if self._is_reparse_noop(
                     current_score,
                     part_id=reparse_part_id,
                     part_index=reparse_part_index,
                     verse_number=reparse_verse_number,
-                    expand_repeats=reparse_expand_repeats,
                 ):
                     reparse_completed_this_batch = True
                     reparse_noop_this_batch = True
@@ -5785,7 +5787,6 @@ class Orchestrator:
                     part_id=reparse_part_id,
                     part_index=reparse_part_index,
                     verse_number=reparse_verse_number,
-                    expand_repeats=reparse_expand_repeats,
                     user_id=user_id,
                 )
                 if isinstance(reparsed_score, dict):
@@ -5932,6 +5933,9 @@ class Orchestrator:
                 continue
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
+                # This is a UI-selected render option, not a notation edit or
+                # an LLM decision. It must override any tool-call default.
+                synth_args["expand_repeats"] = expand_repeats
                 synth_args = self._canonicalize_active_synthesis_target(
                     synth_args,
                     current_score=current_score,
@@ -6186,11 +6190,9 @@ class Orchestrator:
                     from src.mcp.handlers import _calculate_score_duration
                     from src.backend.credits import estimate_credits
 
-                    duration_seconds = None
-                    if isinstance(score_summary, dict):
-                        duration_seconds = score_summary.get("duration_seconds")
-                    if not isinstance(duration_seconds, (int, float)) or duration_seconds <= 0:
-                        duration_seconds = _calculate_score_duration(current_score)
+                    duration_seconds = _calculate_score_duration(
+                        current_score, expand_repeats=expand_repeats
+                    )
                     est_credits = estimate_credits(float(duration_seconds))
                     reserve_result = await retry_credit_op(
                         reserve_credits,

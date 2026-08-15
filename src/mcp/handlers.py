@@ -24,6 +24,7 @@ from src.api.voicebank_cache import (
     get_manifest_voicebank_metadata,
     resolve_manifest_synthesis_control_defaults,
 )
+from src.api.score import score_duration_seconds
 from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
 
 
@@ -180,6 +181,9 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         raise ValueError(
             "score does not match the requested lyric_selection; reparse the exact lyric line first."
         )
+    expand_repeats = params.get("expand_repeats", True)
+    if not isinstance(expand_repeats, bool):
+        raise ValueError("expand_repeats must be a boolean.")
     voicebank_id = params["voicebank"]
     voicebank_metadata = get_manifest_voicebank_metadata(voicebank_id)
     pitch_expression = float(voicebank_metadata.get("pitch_expression", 1.0))
@@ -250,6 +254,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
             "solfege_pronunciation_patch", False
         ),
         require_solfege_lyrics=params.get("require_solfege_lyrics", False),
+        expand_repeats=expand_repeats,
         device=device,
         progress_callback=progress_callback,
     )
@@ -299,49 +304,19 @@ def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, 
     return _strip_path(info)
 
 
-def _calculate_score_duration(score: Dict[str, Any]) -> float:
-    """Calculate the total duration of a score in seconds."""
-    tempos = score.get("tempos", [{"offset_beats": 0.0, "bpm": 120.0}])
-    parts = score.get("parts", [])
-    if not parts:
-        return 0.0
-        
-    # Find the max beat offset across all parts
-    max_beats = 0.0
-    for part in parts:
-        notes = part.get("notes", [])
-        if notes:
-            last_note = notes[-1]
-            max_beats = max(max_beats, last_note["offset_beats"] + last_note["duration_beats"])
-            
-    if max_beats <= 0:
-        return 0.0
-        
-    # Piecewise linear duration calculation based on tempos
-    tempos.sort(key=lambda x: x["offset_beats"])
-    
-    total_seconds = 0.0
-    current_beat = 0.0
-    
-    for i in range(len(tempos)):
-        start_beat = tempos[i]["offset_beats"]
-        bpm = tempos[i]["bpm"]
-        
-        # Determine the end beat for this tempo segment
-        if i + 1 < len(tempos):
-            end_beat = min(max_beats, tempos[i+1]["offset_beats"])
-        else:
-            end_beat = max_beats
-            
-        if end_beat > start_beat:
-            segment_beats = end_beat - start_beat
-            total_seconds += segment_beats * (60.0 / bpm)
-            current_beat = end_beat
-            
-        if current_beat >= max_beats:
-            break
-            
-    return total_seconds
+def _calculate_score_duration(
+    score: Dict[str, Any], *, expand_repeats: bool = True
+) -> float:
+    """Calculate default playback duration in seconds.
+
+    Canonical parsed scores carry a precomputed linear-performance variant. The
+    caller selects whether to estimate the written notation or played order.
+    """
+    if expand_repeats:
+        expanded_score = score.get("expanded_score")
+        if isinstance(expanded_score, dict):
+            score = expanded_score
+    return score_duration_seconds(score)
 
 
 HANDLERS = {

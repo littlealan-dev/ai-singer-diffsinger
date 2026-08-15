@@ -4299,6 +4299,7 @@ def test_upload_parses_zipped_musicxml(client):
     canonical_path = session_dir / "score.xml"
     assert canonical_path.exists()
     assert current_score["source_musicxml_path"] == str(canonical_path)
+    assert current_score["expanded_score"]["source_musicxml_path"] == str(canonical_path)
 
 
 def test_chat_text_response_with_llm(client):
@@ -6306,7 +6307,7 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
 
     response = test_client.post(
         f"/sessions/{session_id}/chat",
-        json={"message": "can you sing the prepared staff?"},
+        json={"message": "can you sing the prepared staff?", "expand_repeats": False},
     )
 
     assert response.status_code == 200
@@ -6314,6 +6315,7 @@ def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client
     assert started["session_id"] == session_id
     assert started["arguments"]["part_index"] == 2
     assert started["arguments"]["part_id"] == "P_DERIVED_02F3BA60A5-Staff1"
+    assert started["arguments"]["expand_repeats"] is False
 
 
 def test_chat_reparse_same_verse_noop_allows_direct_synthesis(client):

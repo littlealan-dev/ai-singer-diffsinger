@@ -12,6 +12,7 @@ export type ScoreSummary = {
   composer?: string | null;
   lyricist?: string | null;
   duration_seconds?: number;
+  expanded_duration_seconds?: number;
   parts?: ScoreSummaryPart[];
   available_verses?: Array<string | number>;
   selected_verse_number?: string | number | null;
@@ -632,13 +633,15 @@ export async function chat(
   sessionId: string,
   message: string,
   selection?: ChatSelection,
-  selectedVoicebankId?: string | null
+  selectedVoicebankId?: string | null,
+  expandRepeats = true
 ): Promise<ChatResponse> {
   const body: {
     message: string;
     selection?: ChatSelection;
     selected_voicebank_id?: string;
-  } = { message };
+    expand_repeats: boolean;
+  } = { message, expand_repeats: expandRepeats };
   if (selection) {
     body.selection = selection;
   }

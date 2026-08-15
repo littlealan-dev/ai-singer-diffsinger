@@ -77,6 +77,7 @@ def parse_musicxml(
     lyric_selection: Optional[Dict[str, str]] = None,
     lyrics_only: bool = True,
     keep_rests: bool = False,
+    expand_repeats: bool = False,
 ) -> ScoreData:
     """Parse MusicXML (.xml or .mxl) into a lightweight score structure.
 
@@ -85,6 +86,8 @@ def parse_musicxml(
     lyrics_only: when True, parts with lyrics drop notes without lyric tokens unless
     the lyric is marked as extended.
     keep_rests: when True, rest events are included alongside notes.
+    expand_repeats: when True, derive a linear performance score by expanding
+        repeat and navigation notation without changing the source MusicXML.
     """
     source_path = Path(path)
     score = load_musicxml_score(source_path)
@@ -101,6 +104,8 @@ def parse_musicxml(
         if selected_raw_part_ids is not None and raw_part_id in selected_raw_part_ids
     }
     raw_single_voice_fallback = _build_raw_single_voice_fallback(source_path)
+    if expand_repeats:
+        score = _expand_repeat_navigation(score, source_path)
     return _parse_score(
         score,
         part_id=part_id,
@@ -124,6 +129,7 @@ def parse_musicxml_with_summary(
     lyric_selection: Optional[Dict[str, str]] = None,
     lyrics_only: bool = True,
     keep_rests: bool = False,
+    expand_repeats: bool = False,
 ) -> tuple[ScoreData, Dict[str, Any]]:
     """Parse MusicXML and return both score data and a summary dict."""
     source_path = Path(path)
@@ -151,6 +157,8 @@ def parse_musicxml_with_summary(
         available_verses = summary.get("available_verses") if isinstance(summary, dict) else None
         if available_verses:
             normalized_verse = str(available_verses[0])
+    if expand_repeats:
+        score = _expand_repeat_navigation(score, source_path)
     score_data = _parse_score(
         score,
         part_id=part_id,
@@ -164,6 +172,23 @@ def parse_musicxml_with_summary(
         raw_part_ids_by_index=raw_part_ids_by_index,
     )
     return score_data, summary
+
+
+def _expand_repeat_navigation(score: stream.Score, source_path: Path) -> stream.Score:
+    """Return a linear performance score without mutating display notation."""
+    try:
+        expanded = score.expandRepeats()
+    except Exception as exc:
+        raise ValueError(
+            "Could not expand repeat/navigation notation for synthesis: "
+            f"{source_path.name}."
+        ) from exc
+    if not isinstance(expanded, stream.Score):
+        raise ValueError(
+            "Could not expand repeat/navigation notation for synthesis: "
+            f"{source_path.name}."
+        )
+    return expanded
 
 
 def _parse_score(

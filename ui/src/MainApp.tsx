@@ -713,6 +713,7 @@ export default function MainApp() {
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
+  const [expandRepeats, setExpandRepeats] = useState(true);
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
   const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
@@ -812,7 +813,9 @@ export default function MainApp() {
       markAsSeen
   } = useAnnouncements();
 
-  const estimatedDuration = scoreSummary?.duration_seconds;
+  const estimatedDuration = expandRepeats
+    ? (scoreSummary?.expanded_duration_seconds ?? scoreSummary?.duration_seconds)
+    : scoreSummary?.duration_seconds;
   const estimatedDurationLabel =
     typeof estimatedDuration === "number" && estimatedDuration > 0
       ? `Estimated duration: ${formatDuration(estimatedDuration)}`
@@ -2073,6 +2076,7 @@ export default function MainApp() {
         setDraftSolfegeMode(uploadResponse.solfege_settings.mode);
       }
       setScoreSummary(summary);
+      setExpandRepeats(true);
       setPendingSelection(shouldPromptSelection(summary));
       setSelectorShown(false);
       const nextPartOptions = buildPartOptions(summary);
@@ -2115,7 +2119,13 @@ export default function MainApp() {
 
     try {
       const activeSessionId = sessionId ?? await ensureSession();
-      const response = await chat(activeSessionId, content, selection, voicebankId);
+      const response = await chat(
+        activeSessionId,
+        content,
+        selection,
+        voicebankId,
+        expandRepeats
+      );
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
         return;
@@ -3210,6 +3220,22 @@ export default function MainApp() {
                 </button>
               </div>
             </div>
+          </div>
+          <div className="score-expansion-control">
+            <label htmlFor="expand-repeats-toggle">
+              <span>Expand repeats and navigation for synthesis</span>
+              <span className="score-expansion-description">
+                Uses the played order for duration and credit estimates.
+              </span>
+            </label>
+            <input
+              id="expand-repeats-toggle"
+              type="checkbox"
+              role="switch"
+              checked={expandRepeats}
+              disabled={!score}
+              onChange={(event) => setExpandRepeats(event.target.checked)}
+            />
           </div>
           <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
             <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
