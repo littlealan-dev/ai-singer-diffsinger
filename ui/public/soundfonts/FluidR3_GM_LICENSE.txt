@@ -1,0 +1,12 @@
+FluidR3_GM.sf2
+
+FluidR3_GM is a General MIDI SoundFont by Frank Wen and contributors.
+
+License: Creative Commons Attribution 3.0
+Source: https://github.com/pianobooster/fluid-soundfont
+Download: https://github.com/pianobooster/fluid-soundfont/releases/download/v3.1/FluidR3_GM.sf2
+
+This project uses FluidR3_GM.sf2 as a browser runtime asset for
+WaveformPlaylist SoundFont playback. If redistributed, keep attribution to
+Frank Wen and contributors and include the Creative Commons Attribution 3.0
+license notice.

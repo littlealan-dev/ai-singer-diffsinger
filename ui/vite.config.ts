@@ -1,3 +1,21 @@
+
+function blockSoundfontsDirectoryPlugin() {
+  return {
+    name: "block-soundfonts-directory",
+    configureServer(server: any) {
+      server.middlewares.use((req: any, res: any, next: any) => {
+        const rawUrl = req.url?.split("?")[0] || "";
+        if (rawUrl === "/soundfonts" || rawUrl === "/soundfonts/" || rawUrl === "/soundfonts/index.html") {
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "text/plain");
+          res.end("403 Forbidden: Soundfonts directory access is not allowed.");
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { execSync } from "node:child_process";
@@ -19,7 +37,7 @@ process.env.VITE_APP_VERSION ||= String(packageJson.version || "dev");
 process.env.VITE_APP_BUILD_NUMBER ||= resolveBuildNumber();
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), blockSoundfontsDirectoryPlugin()],
   server: {
     port: 5173,
     proxy: {

@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import WaveSurfer from "wavesurfer.js";
+import { SoundFontCache } from "@waveform-playlist/playout";
 import {
   WaveformPlaylistProvider,
   usePlaylistControls,
@@ -10,7 +11,7 @@ import {
 } from "@waveform-playlist/browser";
 import { useAudioTracks } from "@waveform-playlist/browser/tone";
 import { useMidiTracks } from "@waveform-playlist/midi";
-import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square } from "lucide-react";
+import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -30,6 +31,7 @@ import {
   type ChatSelection,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
+  type InstrumentalPart,
   type PerformanceMidi,
   type ProgressResponse,
   type ScoreSummary,
@@ -139,6 +141,115 @@ type MultiTrackAudioTrack = {
   volume: number;
 };
 
+export type InstrumentalTrackState = {
+  key: string;
+  partId: string;
+  rawPartId: string;
+  partIndex: number;
+  label: string;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  gmProgram: number;
+  percussion?: boolean;
+};
+
+const GM_INSTRUMENTS = [
+  { program: 0, label: "Acoustic Grand Piano" },
+  { program: 1, label: "Bright Acoustic Piano" },
+  { program: 2, label: "Electric Grand Piano" },
+  { program: 3, label: "Honky-tonk Piano" },
+  { program: 4, label: "Electric Piano (Rhodes)" },
+  { program: 5, label: "Electric Piano (DX7)" },
+  { program: 6, label: "Harpsichord" },
+  { program: 7, label: "Clavinet" },
+  { program: 8, label: "Celesta" },
+  { program: 9, label: "Glockenspiel" },
+  { program: 10, label: "Music Box" },
+  { program: 11, label: "Vibraphone" },
+  { program: 12, label: "Marimba" },
+  { program: 13, label: "Xylophone" },
+  { program: 14, label: "Tubular Bells" },
+  { program: 15, label: "Dulcimer" },
+  { program: 16, label: "Drawbar Organ" },
+  { program: 17, label: "Percussive Organ" },
+  { program: 18, label: "Rock Organ" },
+  { program: 19, label: "Church Organ" },
+  { program: 20, label: "Reed Organ" },
+  { program: 21, label: "Accordion" },
+  { program: 22, label: "Harmonica" },
+  { program: 23, label: "Tango Accordion" },
+  { program: 24, label: "Acoustic Guitar (Nylon)" },
+  { program: 25, label: "Acoustic Guitar (Steel)" },
+  { program: 26, label: "Electric Guitar (Jazz)" },
+  { program: 27, label: "Electric Guitar (Clean)" },
+  { program: 28, label: "Electric Guitar (Muted)" },
+  { program: 29, label: "Overdriven Guitar" },
+  { program: 30, label: "Distortion Guitar" },
+  { program: 31, label: "Guitar Harmonics" },
+  { program: 32, label: "Acoustic Bass" },
+  { program: 33, label: "Electric Bass (Finger)" },
+  { program: 34, label: "Electric Bass (Pick)" },
+  { program: 35, label: "Fretless Bass" },
+  { program: 36, label: "Slap Bass 1" },
+  { program: 37, label: "Slap Bass 2" },
+  { program: 38, label: "Synth Bass 1" },
+  { program: 39, label: "Synth Bass 2" },
+  { program: 40, label: "Violin" },
+  { program: 41, label: "Viola" },
+  { program: 42, label: "Cello" },
+  { program: 43, label: "Contrabass" },
+  { program: 44, label: "Tremolo Strings" },
+  { program: 45, label: "Pizzicato Strings" },
+  { program: 46, label: "Orchestral Harp" },
+  { program: 47, label: "Timpani" },
+  { program: 48, label: "String Ensemble 1" },
+  { program: 49, label: "String Ensemble 2" },
+  { program: 50, label: "Synth Strings 1" },
+  { program: 51, label: "Synth Strings 2" },
+  { program: 52, label: "Choir Aahs" },
+  { program: 53, label: "Voice Oohs" },
+  { program: 54, label: "Synth Voice" },
+  { program: 55, label: "Orchestra Hit" },
+  { program: 56, label: "Trumpet" },
+  { program: 57, label: "Trombone" },
+  { program: 58, label: "Tuba" },
+  { program: 59, label: "Muted Trumpet" },
+  { program: 60, label: "French Horn" },
+  { program: 61, label: "Brass Section" },
+  { program: 62, label: "Synth Brass 1" },
+  { program: 63, label: "Synth Brass 2" },
+  { program: 64, label: "Soprano Sax" },
+  { program: 65, label: "Alto Sax" },
+  { program: 66, label: "Tenor Sax" },
+  { program: 67, label: "Baritone Sax" },
+  { program: 68, label: "Oboe" },
+  { program: 69, label: "English Horn" },
+  { program: 70, label: "Bassoon" },
+  { program: 71, label: "Clarinet" },
+  { program: 72, label: "Piccolo" },
+  { program: 73, label: "Flute" },
+  { program: 74, label: "Recorder" },
+  { program: 75, label: "Pan Flute" },
+  { program: 76, label: "Blown Bottle" },
+  { program: 77, label: "Shakuhachi" },
+  { program: 78, label: "Whistle" },
+  { program: 79, label: "Ocarina" },
+] as const;
+
+const FLUID_R3_GM_SOUNDFONT_URL = "/soundfonts/FluidR3_GM.sf2";
+let fluidR3SoundFontCachePromise: Promise<SoundFontCache> | null = null;
+
+const loadFluidR3SoundFontCache = (): Promise<SoundFontCache> => {
+  if (!fluidR3SoundFontCachePromise) {
+    fluidR3SoundFontCachePromise = SoundFontCache.fromUrl(FLUID_R3_GM_SOUNDFONT_URL).catch((err) => {
+      fluidR3SoundFontCachePromise = null;
+      throw err;
+    });
+  }
+  return fluidR3SoundFontCachePromise;
+};
+
 type ScorePlayerPlaybackControls = {
   play: (startTime?: number) => Promise<void>;
   pause: () => void;
@@ -148,6 +259,7 @@ type ScorePlayerPlaybackControls = {
 type ScorePlayerEngineProps = {
   midiUrl: string | null;
   vocalTracks: MultiTrackAudioTrack[];
+  instrumentalTracks?: InstrumentalTrackState[];
   playbackRequestId: number;
   onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
   onEngineLoading: () => void;
@@ -191,34 +303,48 @@ const ScorePlayerEngineBridge = ({
 const ScorePlayerMixerBridge = ({
   midiTrackCount,
   vocalTracks,
-}: Pick<ScorePlayerEngineProps, "vocalTracks"> & { midiTrackCount: number }) => {
+  instrumentalTracks = [],
+}: {
+  midiTrackCount: number;
+  vocalTracks: MultiTrackAudioTrack[];
+  instrumentalTracks?: InstrumentalTrackState[];
+}) => {
   const controls = usePlaylistControls();
   const { isReady } = usePlaylistData();
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
-  const mixerSignature = vocalTracks
+  const vocalMixerSignature = vocalTracks
     .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
     .join("\u0001");
-  const mixerStateRef = useRef<Array<readonly [boolean, boolean, number]>>(
-    vocalTracks.map((track) => [track.muted, track.solo, track.volume] as const)
-  );
-  mixerStateRef.current = vocalTracks.map(
-    (track) => [track.muted, track.solo, track.volume] as const
-  );
+  const instMixerSignature = instrumentalTracks
+    .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
+    .join("\u0001");
 
   useEffect(() => {
     if (!isReady) return;
-    mixerStateRef.current.forEach(([muted, soloed, volume], index) => {
+    const currentControls = controlsRef.current;
+
+    for (let i = 0; i < midiTrackCount; i++) {
+      const track = instrumentalTracks[i] ?? (instrumentalTracks.length === 1 ? instrumentalTracks[0] : null);
+      if (track) {
+        currentControls.setTrackMute(i, track.muted);
+        currentControls.setTrackSolo(i, track.solo);
+        currentControls.setTrackVolume(i, track.volume);
+      } else {
+        currentControls.setTrackMute(i, false);
+        currentControls.setTrackSolo(i, false);
+        currentControls.setTrackVolume(i, 1);
+      }
+    }
+
+    // Apply vocal tracks mixer state
+    vocalTracks.forEach((track, index) => {
       const trackIndex = midiTrackCount + index;
-      const currentControls = controlsRef.current;
-      currentControls.setTrackMute(trackIndex, muted);
-      currentControls.setTrackSolo(trackIndex, soloed);
-      currentControls.setTrackVolume(trackIndex, volume);
+      currentControls.setTrackMute(trackIndex, track.muted);
+      currentControls.setTrackSolo(trackIndex, track.solo);
+      currentControls.setTrackVolume(trackIndex, track.volume);
     });
-    // usePlaylistControls updates its context after each setter call. Using the
-    // ref means that normal provider state changes do not reapply the mixer and
-    // create an update-depth loop; this runs only for real mixer input changes.
-  }, [isReady, midiTrackCount, mixerSignature]);
+  }, [isReady, midiTrackCount, vocalMixerSignature, instMixerSignature, instrumentalTracks, vocalTracks]);
 
   return null;
 };
@@ -226,6 +352,7 @@ const ScorePlayerMixerBridge = ({
 const ScorePlayerEngine = ({
   midiUrl,
   vocalTracks,
+  instrumentalTracks = [],
   playbackRequestId,
   onControlsChange,
   onEngineLoading,
@@ -245,6 +372,15 @@ const ScorePlayerEngine = ({
   const handleProviderError = useCallback((error: Error) => {
     callbacksRef.current.onError(error.message);
   }, []);
+  const [soundFontCache, setSoundFontCache] = useState<SoundFontCache | null>(null);
+  const [soundFontLoadState, setSoundFontLoadState] = useState<
+    "idle" | "loading" | "ready" | "fallback"
+  >("idle");
+  const shouldLoadSoundFont = Boolean(midiUrl && instrumentalTracks.length > 0);
+  const soundFontLoading =
+    shouldLoadSoundFont &&
+    soundFontLoadState !== "ready" &&
+    soundFontLoadState !== "fallback";
   const midiConfigs = useMemo(
     () => (midiUrl ? [{ src: midiUrl, name: "Score instruments" }] : []),
     [midiUrl]
@@ -281,6 +417,28 @@ const ScorePlayerEngine = ({
   const { tracks: audioTracks, loading: audioLoading, error: audioError } = useAudioTracks(
     audioConfigs
   );
+  const instrumentalProgramSignature = instrumentalTracks
+    .map((track) => `${track.key}\u0000${track.gmProgram}`)
+    .join("\u0001");
+  const configuredMidiTracks = useMemo(
+    () =>
+      midiTracks.map((track, index) => {
+        const instrumentalTrack =
+          instrumentalTracks[index] ?? (instrumentalTracks.length === 1 ? instrumentalTracks[0] : null);
+        if (!instrumentalTrack) return track;
+
+        let changed = false;
+        const clips = track.clips.map((clip) => {
+          if (!clip.midiNotes || clip.midiNotes.length === 0) return clip;
+          if (clip.midiProgram === instrumentalTrack.gmProgram) return clip;
+          changed = true;
+          return { ...clip, midiProgram: instrumentalTrack.gmProgram };
+        });
+        return changed ? { ...track, clips } : track;
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [midiTracks, instrumentalProgramSignature]
+  );
   // useAudioTracks reloads its complete declarative source list when a new
   // vocal arrives. Retain the already-decoded ClipTrack object for every
   // unchanged source so WaveformPlaylistProvider recognizes the new vocal as
@@ -301,10 +459,36 @@ const ScorePlayerEngine = ({
     return normalized;
   }, [audioTracks, vocalSources]);
   const tracks = useMemo(
-    () => [...midiTracks, ...stableAudioTracks],
-    [midiTracks, stableAudioTracks]
+    () => [...configuredMidiTracks, ...stableAudioTracks],
+    [configuredMidiTracks, stableAudioTracks]
   );
   const hasMountedPlayerRef = useRef(false);
+
+  useEffect(() => {
+    if (!shouldLoadSoundFont) {
+      setSoundFontLoadState("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setSoundFontLoadState((current) => (current === "ready" ? current : "loading"));
+    void loadFluidR3SoundFontCache()
+      .then((cache) => {
+        if (cancelled) return;
+        setSoundFontCache(cache);
+        setSoundFontLoadState("ready");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        console.warn("[score-player] FluidR3_GM.sf2 unavailable; falling back to default MIDI synth.", err);
+        setSoundFontCache(null);
+        setSoundFontLoadState("fallback");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldLoadSoundFont]);
 
   useEffect(() => {
     onError(midiError ?? audioError);
@@ -313,6 +497,10 @@ const ScorePlayerEngine = ({
   useEffect(() => {
     onEngineLoading();
   }, [midiUrl, onEngineLoading, vocalSourceSignature]);
+
+  useEffect(() => {
+    if (soundFontLoading) onEngineLoading();
+  }, [onEngineLoading, soundFontLoading]);
 
   // The documented integration mounts after the first complete set of sources.
   // Later vocal sources remain attached to the existing provider: its supported
@@ -330,15 +518,19 @@ const ScorePlayerEngine = ({
   return (
     <WaveformPlaylistProvider
       tracks={tracks}
-      onReady={handleProviderReady}
+      soundFontCache={soundFontCache ?? undefined}
       onError={handleProviderError}
     >
       <ScorePlayerEngineBridge
         onControlsChange={onControlsChange}
-        loading={midiLoading || audioLoading}
+        loading={midiLoading || audioLoading || soundFontLoading}
         onReady={handleProviderReady}
       />
-      <ScorePlayerMixerBridge midiTrackCount={midiTracks.length} vocalTracks={vocalTracks} />
+      <ScorePlayerMixerBridge
+        midiTrackCount={midiTracks.length}
+        vocalTracks={vocalTracks}
+        instrumentalTracks={instrumentalTracks}
+      />
     </WaveformPlaylistProvider>
   );
 };
@@ -555,6 +747,221 @@ const MultiTrackWaveformLane = ({
         >
           <Download size={15} aria-hidden="true" />
         </button>
+      </div>
+    </div>
+  );
+};
+
+
+type ScoreTrackControlsPanelProps = {
+  vocalTracks: MultiTrackAudioTrack[];
+  instrumentalTracks: InstrumentalTrackState[];
+  onUpdateVocalMute: (key: string, muted: boolean) => void;
+  onUpdateVocalSolo: (key: string, solo: boolean) => void;
+  onUpdateVocalVolume: (key: string, volume: number) => void;
+  onDownloadVocalTrack: (track: MultiTrackAudioTrack) => void;
+  onUpdateInstrumentalMute: (partId: string, muted: boolean) => void;
+  onUpdateInstrumentalSolo: (partId: string, solo: boolean) => void;
+  onUpdateInstrumentalVolume: (partId: string, volume: number) => void;
+  onUpdateInstrumentalGmProgram: (partId: string, gmProgram: number) => void;
+};
+
+const ScoreTrackControlsPanel = ({
+  vocalTracks,
+  instrumentalTracks,
+  onUpdateVocalMute,
+  onUpdateVocalSolo,
+  onUpdateVocalVolume,
+  onDownloadVocalTrack,
+  onUpdateInstrumentalMute,
+  onUpdateInstrumentalSolo,
+  onUpdateInstrumentalVolume,
+  onUpdateInstrumentalGmProgram,
+}: ScoreTrackControlsPanelProps) => {
+  const totalTracks = vocalTracks.length + instrumentalTracks.length;
+  if (totalTracks === 0) return null;
+
+  return (
+    <div className="score-tracks-panel" aria-label="Score multitrack controls" data-testid="score-tracks-panel">
+      <div className="score-tracks-header">
+        <div className="score-tracks-header-title">
+          <Sliders size={14} className="score-tracks-header-icon" />
+          <span>Tracks & Stems</span>
+        </div>
+        <span className="score-tracks-count-badge">
+          {totalTracks} {totalTracks === 1 ? "track" : "tracks"}
+        </span>
+      </div>
+
+      <div className="score-tracks-list">
+        {/* Audio / Vocal Tracks - TOP FIRST */}
+        {vocalTracks.map((track) => (
+          <div
+            key={track.key}
+            className={clsx("score-track-card score-track-row vocal-track", {
+              "is-muted": track.muted,
+              "is-soloed": track.solo,
+            })}
+            data-testid={`score-vocal-track-${track.key}`}
+          >
+            <div className="score-track-card-header">
+              <div className="score-track-info">
+                <span className="score-track-grip" aria-hidden="true" title="Audio stem">
+                  <GripVertical size={13} />
+                </span>
+                <div className="score-track-icon-wrapper vocal" title="Vocal Audio Track">
+                  <Mic size={14} />
+                </div>
+                <div className="score-track-details">
+                  <span className="score-track-title" title={track.label}>
+                    {track.label}
+                  </span>
+                  <div className="score-track-meta">
+                    <span className="score-track-type-tag vocal">Vocal</span>
+                    {track.verseNumber && (
+                      <span className="score-track-tag">V{track.verseNumber}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="score-track-transport-btns">
+                <button
+                  type="button"
+                  className={clsx("score-track-solo-btn", { active: track.solo })}
+                  onClick={() => onUpdateVocalSolo(track.key, !track.solo)}
+                  aria-pressed={track.solo}
+                  title={track.solo ? "Unsolo track" : "Solo track"}
+                >
+                  S
+                </button>
+                <button
+                  type="button"
+                  className={clsx("score-track-mute-btn", { muted: track.muted })}
+                  onClick={() => onUpdateVocalMute(track.key, !track.muted)}
+                  aria-pressed={track.muted}
+                  title={track.muted ? "Unmute track" : "Mute track"}
+                >
+                  {track.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                </button>
+                <button
+                  type="button"
+                  className="score-track-action-btn"
+                  onClick={() => onDownloadVocalTrack(track)}
+                  title="Download vocal audio stem"
+                  aria-label={`Download ${track.label} audio`}
+                >
+                  <Download size={13} />
+                </button>
+              </div>
+            </div>
+
+            <div className="score-track-card-footer">
+              <div className="score-track-volume-wrapper" title={`Volume: ${Math.round(track.volume * 100)}%`}>
+                <span className="score-track-volume-icon">
+                  <Volume2 size={12} />
+                </span>
+                <input
+                  type="range"
+                  className="score-track-volume-slider"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={track.volume}
+                  onChange={(e) => onUpdateVocalVolume(track.key, parseFloat(e.target.value))}
+                  aria-label={`${track.label} volume`}
+                />
+                <span className="score-track-volume-label">{Math.round(track.volume * 100)}%</span>
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {/* Instrumental / Accompaniment Tracks - FOLLOWS BELOW */}
+        {instrumentalTracks.map((inst) => (
+          <div
+            key={inst.key}
+            className={clsx("score-track-card score-track-row instrument-track", {
+              "is-muted": inst.muted,
+              "is-soloed": inst.solo,
+            })}
+            data-testid={`score-inst-track-${inst.partId}`}
+          >
+            <div className="score-track-card-header">
+              <div className="score-track-info">
+                <span className="score-track-grip" aria-hidden="true" title="Accompaniment track">
+                  <GripVertical size={13} />
+                </span>
+                <div className="score-track-icon-wrapper instrument" title="Instrument Accompaniment">
+                  <Music2 size={14} />
+                </div>
+                <div className="score-track-details">
+                  <span className="score-track-title" title={inst.label}>
+                    {inst.label}
+                  </span>
+                  <div className="score-track-meta">
+                    <span className="score-track-type-tag instrument">Accompaniment</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="score-track-transport-btns">
+                <button
+                  type="button"
+                  className={clsx("score-track-solo-btn", { active: inst.solo })}
+                  onClick={() => onUpdateInstrumentalSolo(inst.partId, !inst.solo)}
+                  aria-pressed={inst.solo}
+                  title={inst.solo ? "Unsolo track" : "Solo track"}
+                >
+                  S
+                </button>
+                <button
+                  type="button"
+                  className={clsx("score-track-mute-btn", { muted: inst.muted })}
+                  onClick={() => onUpdateInstrumentalMute(inst.partId, !inst.muted)}
+                  aria-pressed={inst.muted}
+                  title={inst.muted ? "Unmute track" : "Mute track"}
+                >
+                  {inst.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="score-track-card-footer">
+              <div className="score-track-instrument-picker">
+                <select
+                  className="score-track-instrument-select"
+                  value={inst.gmProgram}
+                  onChange={(e) => onUpdateInstrumentalGmProgram(inst.partId, parseInt(e.target.value, 10))}
+                  aria-label={`${inst.label} instrument sound`}
+                >
+                  {GM_INSTRUMENTS.map((item) => (
+                    <option key={item.program} value={item.program}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="score-track-volume-wrapper" title={`Volume: ${Math.round(inst.volume * 100)}%`}>
+                <span className="score-track-volume-icon">
+                  <Volume2 size={12} />
+                </span>
+                <input
+                  type="range"
+                  className="score-track-volume-slider"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={inst.volume}
+                  onChange={(e) => onUpdateInstrumentalVolume(inst.partId, parseFloat(e.target.value))}
+                  aria-label={`${inst.label} volume`}
+                />
+                <span className="score-track-volume-label">{Math.round(inst.volume * 100)}%</span>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -934,6 +1341,7 @@ export default function MainApp() {
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
   const [performanceMidi, setPerformanceMidi] = useState<PerformanceMidi | null>(null);
+  const [instrumentalTracks, setInstrumentalTracks] = useState<InstrumentalTrackState[]>([]);
   const [instrumentalMidiUrl, setInstrumentalMidiUrl] = useState<string | null>(null);
   const [scorePlayerControls, setScorePlayerControls] =
     useState<ScorePlayerPlaybackControls | null>(null);
@@ -1087,7 +1495,7 @@ export default function MainApp() {
       ? Math.ceil(estimatedDuration / 30)
       : null;
   const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
-  const hasScorePlayerTracks = Boolean(instrumentalMidiUrl) || multiTrackAudioTracks.length > 0;
+  const hasScorePlayerTracks = Boolean(instrumentalMidiUrl || (instrumentalTracks.length > 0 && performanceMidi?.has_instrumental_parts)) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
   const solfegeSystemLabel = solfegeSystem === "movable_do" ? "Movable Do" : "Fixed Do";
@@ -1112,6 +1520,62 @@ export default function MainApp() {
     showMultitrackTutorial && Boolean(currentMultitrackTutorialStep);
   const isMultitrackTutorialTarget = (target: MultitrackTutorialTarget) =>
     multitrackTutorialVisible && currentMultitrackTutorialStep.target === target;
+
+  useEffect(() => {
+    if (!performanceMidi?.instrumental_parts) {
+      setInstrumentalTracks([]);
+      return;
+    }
+    const eligible = performanceMidi.instrumental_parts.filter((p) => p.eligible);
+    setInstrumentalTracks((current) => {
+      return eligible.map((part) => {
+        const existing = current.find(
+          (t) => t.partId === part.part_id || t.rawPartId === part.raw_part_id
+        );
+        return {
+          key: `inst-${part.part_id || part.part_index}`,
+          partId: part.part_id,
+          rawPartId: part.raw_part_id,
+          partIndex: part.part_index,
+          label: part.label || `Part ${part.part_index + 1}`,
+          muted: existing ? existing.muted : false,
+          solo: existing ? existing.solo : false,
+          volume: existing ? existing.volume : 1.0,
+          gmProgram: existing ? existing.gmProgram : (part.midi_program ?? 0),
+          percussion: part.percussion,
+        };
+      });
+    });
+  }, [performanceMidi]);
+
+  const updateInstrumentalTrackMute = useCallback((partId: string, muted: boolean) => {
+    setInstrumentalTracks((current) =>
+      current.map((track) =>
+        track.partId === partId ? { ...track, muted, solo: muted ? false : track.solo } : track
+      )
+    );
+  }, []);
+
+  const updateInstrumentalTrackSolo = useCallback((partId: string, solo: boolean) => {
+    setInstrumentalTracks((current) =>
+      current.map((track) =>
+        track.partId === partId ? { ...track, solo, muted: solo ? false : track.muted } : track
+      )
+    );
+  }, []);
+
+  const updateInstrumentalTrackVolume = useCallback((partId: string, volume: number) => {
+    const normalized = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
+    setInstrumentalTracks((current) =>
+      current.map((track) => (track.partId === partId ? { ...track, volume: normalized } : track))
+    );
+  }, []);
+
+  const updateInstrumentalTrackGmProgram = useCallback((partId: string, gmProgram: number) => {
+    setInstrumentalTracks((current) =>
+      current.map((track) => (track.partId === partId ? { ...track, gmProgram } : track))
+    );
+  }, []);
 
   useEffect(() => {
     if (!sessionId || !performanceMidi?.has_instrumental_parts) {
@@ -2502,6 +2966,7 @@ export default function MainApp() {
     });
     handleMultiTrackStop();
     setMultiTrackAudioTracks([]);
+    setInstrumentalTracks([]);
     setPerformanceMidi(null);
     setMultiTrackExportProgress(null);
     setMultiTrackExportError(null);
@@ -3462,6 +3927,7 @@ export default function MainApp() {
             key={`score-player-${scorePlayerPlaybackRequestId}`}
             midiUrl={instrumentalMidiUrl}
             vocalTracks={multiTrackAudioTracks}
+            instrumentalTracks={instrumentalTracks}
             playbackRequestId={scorePlayerPlaybackRequestId}
             onControlsChange={handleScorePlayerControlsChange}
             onEngineLoading={handleScorePlayerEngineLoading}
@@ -3617,23 +4083,41 @@ export default function MainApp() {
               {multiTrackExportError}
             </div>
           )}
-          <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
-            <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
-            {scorePreviewError ? (
-              <div className="score-placeholder score-error-placeholder">
-                <p>{scorePreviewError}</p>
-              </div>
-            ) : !score ? (
-              <div className="score-placeholder">
-                <p>Upload a MusicXML file to render the score here.</p>
-              </div>
-            ) : null}
-            {uploading ? (
-              <div className="score-loading-overlay" role="status" aria-live="polite">
-                <span className="score-loading-spinner" aria-hidden="true" />
-                <span>Uploading and parsing score…</span>
-              </div>
-            ) : null}
+          <div className="score-body">
+            {hasScorePlayerTracks && (
+              <aside className="score-tracks-sidebar" aria-label="Score multitrack controls sidebar">
+                <ScoreTrackControlsPanel
+                  vocalTracks={multiTrackAudioTracks}
+                  instrumentalTracks={instrumentalTracks}
+                  onUpdateVocalMute={updateMultiTrackMute}
+                  onUpdateVocalSolo={updateMultiTrackSolo}
+                  onUpdateVocalVolume={updateMultiTrackVolume}
+                  onDownloadVocalTrack={handleMultiTrackTrackDownload}
+                  onUpdateInstrumentalMute={updateInstrumentalTrackMute}
+                  onUpdateInstrumentalSolo={updateInstrumentalTrackSolo}
+                  onUpdateInstrumentalVolume={updateInstrumentalTrackVolume}
+                  onUpdateInstrumentalGmProgram={updateInstrumentalTrackGmProgram}
+                />
+              </aside>
+            )}
+            <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
+              <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
+              {scorePreviewError ? (
+                <div className="score-placeholder score-error-placeholder">
+                  <p>{scorePreviewError}</p>
+                </div>
+              ) : !score ? (
+                <div className="score-placeholder">
+                  <p>Upload a MusicXML file to render the score here.</p>
+                </div>
+              ) : null}
+              {uploading ? (
+                <div className="score-loading-overlay" role="status" aria-live="polite">
+                  <span className="score-loading-spinner" aria-hidden="true" />
+                  <span>Uploading and parsing score…</span>
+                </div>
+              ) : null}
+            </div>
           </div>
           {isDragging && (
             <div className="drop-overlay">
