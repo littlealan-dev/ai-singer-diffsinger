@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Two Voices with Piano</work-title></work>
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano</part-name>
+      <score-instrument id="P1-I1"><instrument-name>Acoustic Grand Piano</instrument-name></score-instrument>
+      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+    </score-part>
+    <score-part id="P2"><part-name>Soprano</part-name></score-part>
+    <score-part id="P3"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>88</per-minute></metronome></direction-type><sound tempo="88"/></direction>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>E</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>A</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="3">
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>B</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>88</per-minute></metronome></direction-type><sound tempo="88"/></direction>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>Sing</text></lyric></note>
+    </measure>
+    <measure number="2"><note><pitch><step>A</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>with</text></lyric></note></measure>
+    <measure number="3"><note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>us</text></lyric></note></measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>88</per-minute></metronome></direction-type><sound tempo="88"/></direction>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>Come</text></lyric></note>
+    </measure>
+    <measure number="2"><note><pitch><step>F</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>and</text></lyric></note></measure>
+    <measure number="3"><note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>sing</text></lyric></note></measure>
+  </part>
+</score-partwise>

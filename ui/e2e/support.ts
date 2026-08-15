@@ -9,7 +9,14 @@ export type E2EState = {
   history_length?: number;
   files?: Record<string, unknown>;
   current_score?: Record<string, unknown>;
-  score_summary?: { parts?: Array<{ note_count?: number; part_name?: string }> } | null;
+  score_summary?: {
+    parts?: Array<{ note_count?: number; part_name?: string }>;
+    performance_midi?: {
+      has_instrumental_parts?: boolean;
+      original_midi_available?: boolean;
+      expanded_midi_available?: boolean;
+    } | null;
+  } | null;
   synthesis?: {
     score_sha256?: string;
     source_musicxml_path?: string;

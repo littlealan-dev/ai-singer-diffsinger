@@ -76,6 +76,7 @@ class RegressionLlmClient:
     """Deterministic planner used only by the local browser regression harness."""
 
     _verse_one = {"id": "lyr_24cf7b5a2230af5e8e11", "number": "1", "name": ""}
+    _repeat_piano_verse_one = {"id": "lyr_916813507b4b54954f27", "number": "1", "name": ""}
     _solfege_verse_one = {
         "id": "lyr_71ece7634e0a27d2984d",
         "number": "SSSolfege",
@@ -108,7 +109,14 @@ class RegressionLlmClient:
         scenario = next(
             (
                 name
-                for name in ("basic", "solfege", "split-staff", "split-chords", "two-verses")
+                for name in (
+                    "basic",
+                    "repeat-piano",
+                    "solfege",
+                    "split-staff",
+                    "split-chords",
+                    "two-verses",
+                )
                 if f"[e2e:{name}]" in transcript
             ),
             None,
@@ -207,11 +215,18 @@ class RegressionLlmClient:
                     {"part_index": 0, "lyric_selection": self._verse_one},
                 )
         if latest.startswith("[e2e:"):
-            if scenario == "basic":
+            if scenario in {"basic", "repeat-piano"}:
                 return self._response(
                     "Starting the take.",
                     "synthesize",
-                    {"part_index": 0, "lyric_selection": self._verse_one},
+                    {
+                        "part_index": 1 if scenario == "repeat-piano" else 0,
+                        "lyric_selection": (
+                            self._repeat_piano_verse_one
+                            if scenario == "repeat-piano"
+                            else self._verse_one
+                        ),
+                    },
                 )
             if scenario == "solfege":
                 return self._response(

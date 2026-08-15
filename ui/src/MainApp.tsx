@@ -3,6 +3,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import WaveSurfer from "wavesurfer.js";
+import {
+  WaveformPlaylistProvider,
+  usePlaylistControls,
+  usePlaylistData,
+} from "@waveform-playlist/browser";
+import { useAudioTracks } from "@waveform-playlist/browser/tone";
+import { useMidiTracks } from "@waveform-playlist/midi";
 import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -10,6 +17,7 @@ import {
   chat,
   createSession,
   exportMix,
+  fetchInstrumentalMidi,
   fetchScoreXml,
   fetchProgress,
   fetchSolfegeSettings,
@@ -22,6 +30,7 @@ import {
   type ChatSelection,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
+  type PerformanceMidi,
   type ProgressResponse,
   type ScoreSummary,
   type SolfegeMode,
@@ -130,6 +139,210 @@ type MultiTrackAudioTrack = {
   volume: number;
 };
 
+type ScorePlayerPlaybackControls = {
+  play: (startTime?: number) => Promise<void>;
+  pause: () => void;
+  stop: () => void;
+};
+
+type ScorePlayerEngineProps = {
+  midiUrl: string | null;
+  vocalTracks: MultiTrackAudioTrack[];
+  playbackRequestId: number;
+  onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
+  onEngineLoading: () => void;
+  onEngineReady: (requestId: number) => void;
+  onError: (message: string | null) => void;
+};
+
+const ScorePlayerEngineBridge = ({
+  onControlsChange,
+  loading,
+  onReady,
+}: Pick<ScorePlayerEngineProps, "onControlsChange"> & {
+  loading: boolean;
+  onReady: () => void;
+}) => {
+  const controls = usePlaylistControls();
+  const { isReady } = usePlaylistData();
+  const liveControlsRef = useRef(controls);
+  liveControlsRef.current = controls;
+  const stableControlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
+  if (!stableControlsRef.current) {
+    stableControlsRef.current = {
+      play: (startTime) => liveControlsRef.current.play(startTime),
+      pause: () => liveControlsRef.current.pause(),
+      stop: () => liveControlsRef.current.stop(),
+    };
+  }
+  useEffect(() => {
+    onControlsChange(stableControlsRef.current);
+    return () => onControlsChange(null);
+  }, [onControlsChange]);
+  // Incremental track additions use the provider's engine.addTrack() path and
+  // do not emit the provider-level onReady callback. Notify the outer player
+  // once the already-live engine and its source loaders are both ready.
+  useEffect(() => {
+    if (isReady && !loading) onReady();
+  }, [isReady, loading, onReady]);
+  return null;
+};
+
+const ScorePlayerMixerBridge = ({
+  midiTrackCount,
+  vocalTracks,
+}: Pick<ScorePlayerEngineProps, "vocalTracks"> & { midiTrackCount: number }) => {
+  const controls = usePlaylistControls();
+  const { isReady } = usePlaylistData();
+  const controlsRef = useRef(controls);
+  controlsRef.current = controls;
+  const mixerSignature = vocalTracks
+    .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
+    .join("\u0001");
+  const mixerStateRef = useRef<Array<readonly [boolean, boolean, number]>>(
+    vocalTracks.map((track) => [track.muted, track.solo, track.volume] as const)
+  );
+  mixerStateRef.current = vocalTracks.map(
+    (track) => [track.muted, track.solo, track.volume] as const
+  );
+
+  useEffect(() => {
+    if (!isReady) return;
+    mixerStateRef.current.forEach(([muted, soloed, volume], index) => {
+      const trackIndex = midiTrackCount + index;
+      const currentControls = controlsRef.current;
+      currentControls.setTrackMute(trackIndex, muted);
+      currentControls.setTrackSolo(trackIndex, soloed);
+      currentControls.setTrackVolume(trackIndex, volume);
+    });
+    // usePlaylistControls updates its context after each setter call. Using the
+    // ref means that normal provider state changes do not reapply the mixer and
+    // create an update-depth loop; this runs only for real mixer input changes.
+  }, [isReady, midiTrackCount, mixerSignature]);
+
+  return null;
+};
+
+const ScorePlayerEngine = ({
+  midiUrl,
+  vocalTracks,
+  playbackRequestId,
+  onControlsChange,
+  onEngineLoading,
+  onEngineReady,
+  onError,
+}: ScorePlayerEngineProps) => {
+  // WaveformPlaylistProvider treats callback identity changes as an engine
+  // reconfiguration. Keep its callbacks stable so parent state updates (such
+  // as setting the Play button to its active state) cannot dispose the MIDI
+  // adapter while a note sequence is playing.
+  const callbacksRef = useRef({ playbackRequestId, onEngineReady, onError });
+  callbacksRef.current = { playbackRequestId, onEngineReady, onError };
+  const handleProviderReady = useCallback(() => {
+    const callbacks = callbacksRef.current;
+    callbacks.onEngineReady(callbacks.playbackRequestId);
+  }, []);
+  const handleProviderError = useCallback((error: Error) => {
+    callbacksRef.current.onError(error.message);
+  }, []);
+  const midiConfigs = useMemo(
+    () => (midiUrl ? [{ src: midiUrl, name: "Score instruments" }] : []),
+    [midiUrl]
+  );
+  // Mixer changes are forwarded through usePlaylistControls below. Keeping
+  // them out of the source configuration prevents useAudioTracks from
+  // needlessly refetching/redecoding vocal audio on every Mute/Solo/volume edit.
+  const vocalSourceSignature = vocalTracks
+    .map((track) => `${track.key}\u0000${track.audioUrl}\u0000${track.label}\u0000${track.durationSeconds ?? ""}`)
+    .join("\u0001");
+  const vocalSources = useMemo(
+    () =>
+      vocalTracks.map((track) => ({
+        key: `${track.key}\u0000${track.audioUrl}`,
+        src: track.audioUrl,
+        name: track.label,
+        duration: track.durationSeconds ?? undefined,
+        muted: track.muted,
+        soloed: track.solo,
+        volume: track.volume,
+      })),
+    // vocalSourceSignature deliberately excludes mixer-only state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [vocalSourceSignature]
+  );
+  const audioConfigs = useMemo(
+    () => vocalSources.map(({ key: _key, ...config }) => config),
+    [vocalSources]
+  );
+  const { tracks: midiTracks, loading: midiLoading, error: midiError } = useMidiTracks(
+    midiConfigs,
+    { sampleRate: 48_000 }
+  );
+  const { tracks: audioTracks, loading: audioLoading, error: audioError } = useAudioTracks(
+    audioConfigs
+  );
+  // useAudioTracks reloads its complete declarative source list when a new
+  // vocal arrives. Retain the already-decoded ClipTrack object for every
+  // unchanged source so WaveformPlaylistProvider recognizes the new vocal as
+  // an incremental append and uses PlaylistEngine.addTrack(), rather than
+  // rebuilding the running playout engine.
+  const stableAudioTracksRef = useRef(new Map<string, (typeof audioTracks)[number]>());
+  const stableAudioTracks = useMemo(() => {
+    const next = new Map<string, (typeof audioTracks)[number]>();
+    const normalized = audioTracks.map((track, index) => {
+      const sourceKey = vocalSources[index]?.key;
+      if (!sourceKey) return track;
+      const existing = stableAudioTracksRef.current.get(sourceKey);
+      const resolved = existing ?? track;
+      next.set(sourceKey, resolved);
+      return resolved;
+    });
+    stableAudioTracksRef.current = next;
+    return normalized;
+  }, [audioTracks, vocalSources]);
+  const tracks = useMemo(
+    () => [...midiTracks, ...stableAudioTracks],
+    [midiTracks, stableAudioTracks]
+  );
+  const hasMountedPlayerRef = useRef(false);
+
+  useEffect(() => {
+    onError(midiError ?? audioError);
+  }, [audioError, midiError, onError]);
+
+  useEffect(() => {
+    onEngineLoading();
+  }, [midiUrl, onEngineLoading, vocalSourceSignature]);
+
+  // The documented integration mounts after the first complete set of sources.
+  // Later vocal sources remain attached to the existing provider: its supported
+  // incremental-add path calls PlaylistEngine.addTrack() without disposing
+  // MIDI/audio tracks that are already playing.
+  if (tracks.length === 0) {
+    hasMountedPlayerRef.current = false;
+    return null;
+  }
+  if (!hasMountedPlayerRef.current && (midiLoading || audioLoading)) {
+    return null;
+  }
+  hasMountedPlayerRef.current = true;
+
+  return (
+    <WaveformPlaylistProvider
+      tracks={tracks}
+      onReady={handleProviderReady}
+      onError={handleProviderError}
+    >
+      <ScorePlayerEngineBridge
+        onControlsChange={onControlsChange}
+        loading={midiLoading || audioLoading}
+        onReady={handleProviderReady}
+      />
+      <ScorePlayerMixerBridge midiTrackCount={midiTracks.length} vocalTracks={vocalTracks} />
+    </WaveformPlaylistProvider>
+  );
+};
+
 const shouldMuteMultiTrackForPlayback = (
   track: MultiTrackAudioTrack,
   tracks: MultiTrackAudioTrack[]
@@ -171,15 +384,34 @@ const estimateExportMixCredits = (durationSeconds: number | null | undefined): n
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
-const downloadAudioUrl = (audioUrl: string, fileName: string) => {
+class AudioDownloadError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number
+  ) {
+    super(message);
+  }
+}
+
+const isExpiredAudioDownloadError = (error: unknown): boolean =>
+  error instanceof AudioDownloadError && (error.status === 401 || error.status === 403);
+
+const downloadAudioUrl = async (audioUrl: string, fileName: string) => {
   const url = new URL(audioUrl, window.location.origin);
   url.searchParams.set("download", "1");
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new AudioDownloadError(`Download failed (${response.status}).`, response.status);
+  }
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.href = url.toString();
+  link.href = blobUrl;
   link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
 };
 
 type MultiTrackWaveformLaneProps = {
@@ -701,6 +933,12 @@ export default function MainApp() {
   const [status, setStatus] = useState<string | null>(null);
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
+  const [performanceMidi, setPerformanceMidi] = useState<PerformanceMidi | null>(null);
+  const [instrumentalMidiUrl, setInstrumentalMidiUrl] = useState<string | null>(null);
+  const [scorePlayerControls, setScorePlayerControls] =
+    useState<ScorePlayerPlaybackControls | null>(null);
+  const [scorePlayerError, setScorePlayerError] = useState<string | null>(null);
+  const [scorePlayerPlaybackRequestId, setScorePlayerPlaybackRequestId] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [multiTrackAudioTracks, setMultiTrackAudioTracks] = useState<MultiTrackAudioTrack[]>([]);
   const [multiTrackPlaying, setMultiTrackPlaying] = useState(false);
@@ -762,6 +1000,11 @@ export default function MainApp() {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const multiTrackWaveSurferRefs = useRef<Record<string, WaveSurfer | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
+  const scorePlayerAudioRefreshAttemptsRef = useRef<Set<string>>(new Set());
+  const scorePlayerControlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
+  const scorePlayerPlaybackRequestRef = useRef(0);
+  const scorePlayerPlayPendingRef = useRef(false);
+  const scorePlayerAssetsReadyRef = useRef(false);
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
@@ -780,6 +1023,24 @@ export default function MainApp() {
     chatTurnInProgressRef.current = busy;
     setChatTurnInProgress(busy);
   };
+
+  const handleScorePlayerControlsChange = useCallback(
+    (controls: ScorePlayerPlaybackControls | null) => {
+      scorePlayerControlsRef.current = controls;
+      // usePlaylistControls can return a new object after a provider render. Keep
+      // that live object in the ref, but do not feed it back into React state on
+      // every render (which otherwise remounts the provider indefinitely).
+      setScorePlayerControls((current) => {
+        if (!controls) return current ? null : current;
+        return current ?? controls;
+      });
+    },
+    []
+  );
+
+  const handleScorePlayerEngineLoading = useCallback(() => {
+    scorePlayerAssetsReadyRef.current = false;
+  }, []);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -826,6 +1087,7 @@ export default function MainApp() {
       ? Math.ceil(estimatedDuration / 30)
       : null;
   const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
+  const hasScorePlayerTracks = Boolean(instrumentalMidiUrl) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
   const solfegeSystemLabel = solfegeSystem === "movable_do" ? "Movable Do" : "Fixed Do";
@@ -850,6 +1112,52 @@ export default function MainApp() {
     showMultitrackTutorial && Boolean(currentMultitrackTutorialStep);
   const isMultitrackTutorialTarget = (target: MultitrackTutorialTarget) =>
     multitrackTutorialVisible && currentMultitrackTutorialStep.target === target;
+
+  useEffect(() => {
+    if (!sessionId || !performanceMidi?.has_instrumental_parts) {
+      setInstrumentalMidiUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return null;
+      });
+      return;
+    }
+    let disposed = false;
+    let nextUrl: string | null = null;
+    let published = false;
+    setInstrumentalMidiUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+    setScorePlayerError(null);
+    void fetchInstrumentalMidi(sessionId, expandRepeats)
+      .then((blob) => {
+        nextUrl = URL.createObjectURL(blob);
+        if (disposed) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+        setInstrumentalMidiUrl((current) => {
+          if (current) URL.revokeObjectURL(current);
+          published = true;
+          return nextUrl;
+        });
+      })
+      .catch((err: unknown) => {
+        if (!disposed) {
+          setInstrumentalMidiUrl((current) => {
+            if (current) URL.revokeObjectURL(current);
+            return null;
+          });
+          setScorePlayerError(
+            err instanceof Error ? err.message : "Instrumental MIDI is unavailable."
+          );
+        }
+      });
+    return () => {
+      disposed = true;
+      if (nextUrl && !published) URL.revokeObjectURL(nextUrl);
+    };
+  }, [expandRepeats, performanceMidi?.has_instrumental_parts, sessionId]);
 
   const dismissMultitrackTutorial = useCallback(() => {
     if (typeof window !== "undefined") {
@@ -907,7 +1215,8 @@ export default function MainApp() {
       audioUrl: string,
       audioTrack?: AudioTrackMetadata,
       jobId?: string,
-      durationSeconds?: number | null
+      durationSeconds?: number | null,
+      replaceExistingUrl = false
     ) => {
       if (!audioUrl) return;
       const identity = resolveMultiTrackIdentity(audioTrack);
@@ -917,13 +1226,14 @@ export default function MainApp() {
           typeof durationSeconds === "number" &&
           Number.isFinite(durationSeconds) &&
           durationSeconds > 0;
+        const nextAudioUrl = existing && !replaceExistingUrl ? existing.audioUrl : audioUrl;
         const nextTrack: MultiTrackAudioTrack = {
           ...identity,
-          audioUrl,
-          jobId,
+          audioUrl: nextAudioUrl,
+          jobId: jobId ?? existing?.jobId,
           durationSeconds: hasBackendDuration
             ? durationSeconds
-            : existing?.audioUrl === audioUrl
+            : existing?.audioUrl === nextAudioUrl
               ? existing?.durationSeconds
               : null,
           muted: existing?.muted ?? false,
@@ -931,6 +1241,17 @@ export default function MainApp() {
           volume: existing?.volume ?? 1,
         };
         if (existing) {
+          if (
+            existing.audioUrl === nextTrack.audioUrl &&
+            existing.jobId === nextTrack.jobId &&
+            existing.durationSeconds === nextTrack.durationSeconds &&
+            existing.label === nextTrack.label &&
+            existing.partId === nextTrack.partId &&
+            existing.partIndex === nextTrack.partIndex &&
+            existing.verseNumber === nextTrack.verseNumber
+          ) {
+            return current;
+          }
           return current.map((track) => (track.key === identity.key ? nextTrack : track));
         }
         return [...current, nextTrack];
@@ -939,7 +1260,45 @@ export default function MainApp() {
     [resolveMultiTrackIdentity]
   );
 
+  const handleScorePlayerEngineReady = useCallback((requestId: number) => {
+    scorePlayerAssetsReadyRef.current = true;
+    if (
+      !scorePlayerPlayPendingRef.current ||
+      requestId !== scorePlayerPlaybackRequestRef.current
+    ) {
+      return;
+    }
+    const controls = scorePlayerControlsRef.current;
+    if (!controls) return;
+    scorePlayerPlayPendingRef.current = false;
+    void controls.play().then(() => setMultiTrackPlaying(true)).catch((err: unknown) => {
+      setScorePlayerError(err instanceof Error ? err.message : "Unable to start multitrack playback.");
+    });
+  }, []);
+
   const handleMultiTrackPlay = useCallback(() => {
+    if (scorePlayerControls) {
+      logAnalyticsEvent("multitrack_play", {
+        ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+        has_instrumental_midi: Boolean(instrumentalMidiUrl),
+      });
+      setScorePlayerError(null);
+      if (scorePlayerAssetsReadyRef.current) {
+        void scorePlayerControls.play().then(() => setMultiTrackPlaying(true)).catch((err: unknown) => {
+          setScorePlayerError(err instanceof Error ? err.message : "Unable to start multitrack playback.");
+        });
+      } else {
+        // The initial preload is still in flight. A user play request waits for it;
+        // an earlier failed preload is retried by remounting the player once.
+        scorePlayerPlayPendingRef.current = true;
+        if (scorePlayerError) {
+          const requestId = scorePlayerPlaybackRequestRef.current + 1;
+          scorePlayerPlaybackRequestRef.current = requestId;
+          setScorePlayerPlaybackRequestId(requestId);
+        }
+      }
+      return;
+    }
     const playable = multiTrackAudioTracks
       .map((track) => ({ track, waveSurfer: multiTrackWaveSurferRefs.current[track.key] }))
       .filter((entry): entry is { track: MultiTrackAudioTrack; waveSurfer: WaveSurfer } =>
@@ -961,19 +1320,31 @@ export default function MainApp() {
     void Promise.allSettled(playable.map(({ waveSurfer }) => waveSurfer.play())).then(() => {
       setMultiTrackPlaying(true);
     });
-  }, [multiTrackAudioTracks]);
+  }, [instrumentalMidiUrl, multiTrackAudioTracks, scorePlayerControls, scorePlayerError]);
 
   const handleMultiTrackPause = useCallback(() => {
+    scorePlayerPlayPendingRef.current = false;
+    if (scorePlayerControls) {
+      scorePlayerControls.pause();
+      setMultiTrackPlaying(false);
+      return;
+    }
     Object.values(multiTrackWaveSurferRefs.current).forEach((waveSurfer) => waveSurfer?.pause());
     setMultiTrackPlaying(false);
-  }, []);
+  }, [scorePlayerControls]);
 
   const handleMultiTrackStop = useCallback(() => {
+    scorePlayerPlayPendingRef.current = false;
+    if (scorePlayerControls) {
+      scorePlayerControls.stop();
+      setMultiTrackPlaying(false);
+      return;
+    }
     Object.values(multiTrackWaveSurferRefs.current).forEach((waveSurfer) => {
       waveSurfer?.stop();
     });
     setMultiTrackPlaying(false);
-  }, []);
+  }, [scorePlayerControls]);
 
   const handleMultiTrackWaveSurferMount = useCallback((trackKey: string, instance: WaveSurfer) => {
     multiTrackWaveSurferRefs.current[trackKey] = instance;
@@ -1086,7 +1457,7 @@ export default function MainApp() {
         }
         if (payload.status === "done" && payload.audio_url) {
           setMultiTrackExportProgress(1);
-          downloadAudioUrl(payload.audio_url, "sightsinger-mix.wav");
+          await downloadAudioUrl(payload.audio_url, "sightsinger-mix.wav");
           break;
         }
         if (payload.status === "error") {
@@ -1109,26 +1480,28 @@ export default function MainApp() {
   const handleMultiTrackTrackDownload = useCallback(
     async (track: MultiTrackAudioTrack) => {
       try {
-        let nextAudioUrl = track.audioUrl;
-        if (sessionId && track.jobId) {
+        await downloadAudioUrl(track.audioUrl, "");
+      } catch (err: unknown) {
+        if (!isExpiredAudioDownloadError(err) || !sessionId || !track.jobId) {
+          setError(err instanceof Error ? err.message : "Failed to download audio.");
+          return;
+        }
+        try {
           const payload = await fetchProgress(
             `/sessions/${sessionId}/progress?job_id=${encodeURIComponent(track.jobId)}`
           );
-          nextAudioUrl = payload.audio_url || nextAudioUrl;
-        }
-        if (!nextAudioUrl) {
-          setError("No audio available to download.");
+          if (!payload.audio_url) throw new Error("Audio link expired. Please try again.");
+          await downloadAudioUrl(payload.audio_url, "");
+        } catch (refreshError: unknown) {
+          setError(refreshError instanceof Error ? refreshError.message : "Failed to refresh audio download.");
           return;
         }
-        logAnalyticsEvent("multitrack_track_download", {
-          ...multiTrackAnalyticsParams(multiTrackAudioTracks),
-          has_part_id: Boolean(track.partId),
-          has_verse_number: Boolean(track.verseNumber),
-        });
-        downloadAudioUrl(nextAudioUrl, "");
-      } catch (err: any) {
-        setError(err?.message || "Failed to refresh audio download.");
       }
+      logAnalyticsEvent("multitrack_track_download", {
+        ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+        has_part_id: Boolean(track.partId),
+        has_verse_number: Boolean(track.verseNumber),
+      });
     },
     [multiTrackAudioTracks, sessionId]
   );
@@ -1631,7 +2004,9 @@ export default function MainApp() {
             details: payload.details ?? msg.details,
             attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
             progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
-            audioUrl: nextAudioUrl || msg.audioUrl,
+            // Progress polling returns a newly signed URL each time. Keep the first
+            // one rather than rebuilding the player and re-fetching audio on every poll.
+            audioUrl: msg.audioUrl || nextAudioUrl,
             audioTrack: payload.audio_track ?? msg.audioTrack,
             jobId: payload.job_id ?? msg.jobId,
             feedback: payload.feedback ?? msg.feedback,
@@ -1640,7 +2015,7 @@ export default function MainApp() {
         })
       );
       if (nextAudioUrl) {
-        setAudioUrl(nextAudioUrl);
+        setAudioUrl((current) => current || nextAudioUrl);
         if (payload.job_kind !== "preprocess") {
           addOrReplaceMultiTrackAudio(
             nextAudioUrl,
@@ -1855,7 +2230,7 @@ export default function MainApp() {
     }
   };
 
-  const refreshMessageAudioUrl = async (
+  const refreshMessageAudioUrl = useCallback(async (
     messageId: string,
     progressUrl?: string,
     jobId?: string
@@ -1890,7 +2265,8 @@ export default function MainApp() {
           nextAudioUrl,
           payload.audio_track,
           payload.job_id,
-          payload.actual_duration_seconds
+          payload.actual_duration_seconds,
+          true
         );
       }
       return nextAudioUrl;
@@ -1901,7 +2277,79 @@ export default function MainApp() {
     } finally {
       delete audioRefreshPromisesRef.current[messageId];
     }
-  };
+  }, [addOrReplaceMultiTrackAudio]);
+
+  const handleScorePlayerEngineError = useCallback(
+    (message: string | null) => {
+      if (!message) {
+        setScorePlayerError(null);
+        return;
+      }
+      const isExpiredToken = /unauthorized|\b401\b/i.test(message);
+      if (!isExpiredToken || !scorePlayerPlayPendingRef.current) {
+        setScorePlayerError(message);
+        return;
+      }
+
+      // An audio resource is only renewed as a direct response to the Play action
+      // that caused its fetch. It is never renewed while the player is idle.
+      const loadedJobIds = new Set(
+        multiTrackAudioTracks.map((track) => track.jobId).filter((jobId): jobId is string => Boolean(jobId))
+      );
+      const refreshTargets = messages.filter((candidate) =>
+        candidate.role === "assistant" &&
+        Boolean(candidate.audioUrl) &&
+        Boolean(candidate.progressUrl) &&
+        Boolean(candidate.jobId) &&
+        loadedJobIds.has(candidate.jobId as string) &&
+        !suppressedMultiTrackMessageIdsRef.current.has(candidate.id)
+      );
+      const newTargets = refreshTargets.filter((candidate) => {
+        const attemptKey = `${candidate.id}:${candidate.audioUrl}`;
+        if (scorePlayerAudioRefreshAttemptsRef.current.has(attemptKey)) return false;
+        scorePlayerAudioRefreshAttemptsRef.current.add(attemptKey);
+        return true;
+      });
+      if (!newTargets.length) {
+        setScorePlayerError(message);
+        return;
+      }
+
+      setScorePlayerError("Refreshing expired vocal audio access…");
+      void Promise.all(
+        newTargets.map((candidate) =>
+          refreshMessageAudioUrl(candidate.id, candidate.progressUrl, candidate.jobId)
+            .then((audioUrl) => ({ jobId: candidate.jobId, audioUrl }))
+            .catch(() => ({ jobId: candidate.jobId, audioUrl: null }))
+        )
+      ).then((refreshed) => {
+        const refreshedUrls = new Map(
+          refreshed
+            .filter((result): result is { jobId: string; audioUrl: string } =>
+              Boolean(result.jobId && result.audioUrl)
+            )
+            .map((result) => [result.jobId, result.audioUrl])
+        );
+        if (!refreshedUrls.size) {
+          scorePlayerPlayPendingRef.current = false;
+          setScorePlayerError("Unable to refresh vocal audio access. Please try again.");
+          return;
+        }
+        setMultiTrackAudioTracks((current) =>
+          current.map((track) =>
+            track.jobId && refreshedUrls.has(track.jobId)
+              ? { ...track, audioUrl: refreshedUrls.get(track.jobId) as string }
+              : track
+          )
+        );
+        const requestId = scorePlayerPlaybackRequestRef.current + 1;
+        scorePlayerPlaybackRequestRef.current = requestId;
+        setScorePlayerPlaybackRequestId(requestId);
+        setScorePlayerError(null);
+      });
+    },
+    [messages, multiTrackAudioTracks, refreshMessageAudioUrl]
+  );
 
   const handleAudioPlaybackError = async (
     messageId: string,
@@ -2017,28 +2465,25 @@ export default function MainApp() {
     jobId?: string
   ) => {
     try {
-      const nextAudioUrl =
-        (await refreshMessageAudioUrl(messageId, progressUrl, jobId)) || audioUrl;
-      if (!nextAudioUrl) {
+      if (!audioUrl) {
         setError("No audio available to download.");
         return;
       }
-      const downloadUrl = new URL(nextAudioUrl, window.location.origin);
-      downloadUrl.searchParams.set("download", "1");
-      const link = document.createElement("a");
-      link.href = downloadUrl.toString();
-      link.download = "";
-      link.rel = "noopener";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      try {
+        await downloadAudioUrl(audioUrl, "");
+      } catch (downloadError: unknown) {
+        if (!isExpiredAudioDownloadError(downloadError)) throw downloadError;
+        const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl, jobId);
+        if (!nextAudioUrl) throw new Error("Audio link expired. Please try again.");
+        await downloadAudioUrl(nextAudioUrl, "");
+      }
       const message = messages.find((item) => item.id === messageId);
       if (message) {
         logAnalyticsEvent("synthesis_audio_download", synthesisAudioAnalyticsParams(message));
         openFeedbackPrompt(message, "audio_downloaded");
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to refresh audio download.");
+      setError(err?.message || "Failed to download audio.");
     }
   };
 
@@ -2057,6 +2502,7 @@ export default function MainApp() {
     });
     handleMultiTrackStop();
     setMultiTrackAudioTracks([]);
+    setPerformanceMidi(null);
     setMultiTrackExportProgress(null);
     setMultiTrackExportError(null);
     multiTrackWaveSurferRefs.current = {};
@@ -2076,6 +2522,7 @@ export default function MainApp() {
         setDraftSolfegeMode(uploadResponse.solfege_settings.mode);
       }
       setScoreSummary(summary);
+      setPerformanceMidi(uploadResponse.performance_midi ?? summary?.performance_midi ?? null);
       setExpandRepeats(true);
       setPendingSelection(shouldPromptSelection(summary));
       setSelectorShown(false);
@@ -2171,6 +2618,7 @@ export default function MainApp() {
       }
       if ("score_summary" in response && response.score_summary) {
         setScoreSummary(response.score_summary);
+        setPerformanceMidi(response.score_summary.performance_midi ?? null);
         if (response.score_summary.selected_verse_number != null) {
           setSelectedVerse(String(response.score_summary.selected_verse_number));
         }
@@ -2230,6 +2678,7 @@ export default function MainApp() {
       setDraftSolfegeMode(response.settings.mode);
       if (response.score_summary) {
         setScoreSummary(response.score_summary);
+        setPerformanceMidi(response.score_summary.performance_midi ?? null);
       }
       if (score && response.current_score) {
         const data = await fetchScoreXml(sessionId);
@@ -2659,6 +3108,7 @@ export default function MainApp() {
                       className="audio-player"
                       data-testid="synthesis-audio"
                       controls
+                      preload="none"
                       src={msg.audioUrl}
                       onPlay={() => {
                         logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));
@@ -3008,132 +3458,16 @@ export default function MainApp() {
         />
 
         <div className="score-column">
-          <div
-            className={clsx("multitrack-player", {
-              "multitrack-tutorial-highlight": isMultitrackTutorialTarget("player"),
-            })}
-            aria-label="Multitrack audio player"
-          >
-            {multitrackTutorialVisible && currentMultitrackTutorialStep ? (
-              <div
-                className={clsx(
-                  "multitrack-tutorial-bubble",
-                  `target-${currentMultitrackTutorialStep.target}`
-                )}
-                role="dialog"
-                aria-label="Multitrack player tutorial"
-              >
-                <button
-                  type="button"
-                  className="multitrack-tutorial-close"
-                  aria-label="Close multitrack player tutorial"
-                  onClick={dismissMultitrackTutorial}
-                >
-                  <X size={13} aria-hidden="true" />
-                </button>
-                <span className="multitrack-tutorial-step">
-                  {multitrackTutorialStepIndex + 1} of {MULTITRACK_TUTORIAL_STEPS.length}
-                </span>
-                <p>{currentMultitrackTutorialStep.message}</p>
-                <div className="multitrack-tutorial-actions">
-                  <button type="button" onClick={dismissMultitrackTutorial}>
-                    Skip
-                  </button>
-                  <button type="button" onClick={advanceMultitrackTutorial}>
-                    {multitrackTutorialStepIndex >= MULTITRACK_TUTORIAL_STEPS.length - 1
-                      ? "Done"
-                      : "Next"}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-            <div className="multitrack-toolbar">
-              <div>
-                <h3>Multitrack Player</h3>
-                <p>
-                  {multiTrackAudioTracks.length
-                    ? "Generated parts are added here as separate synchronized tracks."
-                    : "Generated vocal parts will appear here after synthesis."}
-                  {multiTrackAudioTracks.length > 0 && (
-                    <span className="multitrack-export-credit-estimate">
-                      Export: {exportMixRequiredCredits ?? "--"} credits
-                    </span>
-                  )}
-                </p>
-              </div>
-              <div className="multitrack-transport">
-                <button
-                  type="button"
-                  className={clsx("multitrack-transport-button", "multitrack-export-button", {
-                    exporting: multiTrackExportProgress !== null,
-                    "multitrack-tutorial-target": isMultitrackTutorialTarget("export"),
-                  })}
-                  onClick={handleMultiTrackExport}
-                  disabled={
-                    !multiTrackAudioTracks.length ||
-                    creditsLocked ||
-                    exportMixRequiredCredits === null ||
-                    multiTrackExportProgress !== null
-                  }
-                  aria-label="Export mix"
-                  title="Export mix"
-                >
-                  {multiTrackExportPercent ?? <Upload size={16} />}
-                </button>
-                <button
-                  type="button"
-                  className={clsx("multitrack-transport-button", {
-                    "multitrack-tutorial-target": isMultitrackTutorialTarget("play"),
-                  })}
-                  onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
-                  disabled={!multiTrackAudioTracks.length}
-                  aria-label={multiTrackPlaying ? "Pause all tracks" : "Play all tracks"}
-                  title={multiTrackPlaying ? "Pause all tracks" : "Play all tracks"}
-                >
-                  {multiTrackPlaying ? <Pause size={16} /> : <Play size={16} />}
-                </button>
-                <button
-                  type="button"
-                  className="multitrack-transport-button"
-                  onClick={handleMultiTrackStop}
-                  disabled={!multiTrackAudioTracks.length}
-                  aria-label="Stop all tracks"
-                  title="Stop all tracks"
-                >
-                  <Square size={15} />
-                </button>
-              </div>
-            </div>
-            {multiTrackExportError && (
-              <div className="multitrack-export-error" role="alert">
-                {multiTrackExportError}
-              </div>
-            )}
-            <div className="multitrack-lanes">
-              {multiTrackAudioTracks.length ? (
-                multiTrackAudioTracks.map((track, index) => (
-                  <MultiTrackWaveformLane
-                    key={track.key}
-                    track={track}
-                    index={index}
-                    onWaveSurferMount={handleMultiTrackWaveSurferMount}
-                    onWaveSurferUnmount={handleMultiTrackWaveSurferUnmount}
-                    onTrackFinished={handleMultiTrackFinished}
-                    onTrackSeek={handleMultiTrackSeek}
-                    onMuteChange={updateMultiTrackMute}
-                    onSoloChange={updateMultiTrackSolo}
-                    onVolumeChange={updateMultiTrackVolume}
-                    onDownloadTrack={handleMultiTrackTrackDownload}
-                    onDurationChange={updateMultiTrackDuration}
-                  />
-                ))
-              ) : (
-                <div className="multitrack-empty">
-                  <span>No tracks yet</span>
-                </div>
-              )}
-            </div>
-          </div>
+          <ScorePlayerEngine
+            key={`score-player-${scorePlayerPlaybackRequestId}`}
+            midiUrl={instrumentalMidiUrl}
+            vocalTracks={multiTrackAudioTracks}
+            playbackRequestId={scorePlayerPlaybackRequestId}
+            onControlsChange={handleScorePlayerControlsChange}
+            onEngineLoading={handleScorePlayerEngineLoading}
+            onEngineReady={handleScorePlayerEngineReady}
+            onError={handleScorePlayerEngineError}
+          />
 
           <section
             className={clsx("score-panel", isDragging && "drag-active")}
@@ -3144,10 +3478,10 @@ export default function MainApp() {
           >
           <div className="score-header">
             <h2>Score Preview</h2>
-            <div className="score-controls">
-              <div className="score-subtitles">
-                <span className="chat-subtitle">
-                  Latest upload only {audioUrl ? "· Audio ready" : ""}
+              <div className="score-controls">
+                <div className="score-subtitles">
+                  <span className="chat-subtitle">
+                    Latest upload only {audioUrl ? "· Audio ready" : ""}
                 </span>
                 {estimatedDurationLabel && (
                   <span className="score-estimate">{estimatedDurationLabel}</span>
@@ -3155,6 +3489,17 @@ export default function MainApp() {
                 {estimatedCostLabel && (
                   <span className="score-estimate">{estimatedCostLabel}</span>
                 )}
+              </div>
+              <div className="score-expansion-control">
+                <label htmlFor="expand-repeats-toggle">Expand Repeats</label>
+                <input
+                  id="expand-repeats-toggle"
+                  type="checkbox"
+                  role="switch"
+                  checked={expandRepeats}
+                  disabled={!score}
+                  onChange={(event) => setExpandRepeats(event.target.checked)}
+                />
               </div>
               <div className="zoom-controls">
                 <button
@@ -3175,6 +3520,47 @@ export default function MainApp() {
                   disabled={!score || Boolean(scorePreviewError)}
                 >
                   <Plus size={16} />
+                </button>
+              </div>
+              <div className="score-player-transport" aria-label="Score player transport">
+                <button
+                  type="button"
+                  className="score-action-button"
+                  onClick={handleMultiTrackExport}
+                  disabled={
+                    !multiTrackAudioTracks.length ||
+                    creditsLocked ||
+                    exportMixRequiredCredits === null ||
+                    multiTrackExportProgress !== null
+                  }
+                  aria-label="Export vocal mix"
+                  title={
+                    exportMixRequiredCredits === null
+                      ? "Export vocal mix"
+                      : `Export vocal mix · ${exportMixRequiredCredits} credits`
+                  }
+                >
+                  {multiTrackExportPercent ?? <Upload size={16} />}
+                </button>
+                <button
+                  type="button"
+                  className="score-action-button"
+                  onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
+                  disabled={!hasScorePlayerTracks || !scorePlayerControls}
+                  aria-label={multiTrackPlaying ? "Pause score player" : "Play score player"}
+                  title={multiTrackPlaying ? "Pause" : "Play"}
+                >
+                  {multiTrackPlaying ? <Pause size={16} /> : <Play size={16} />}
+                </button>
+                <button
+                  type="button"
+                  className="score-action-button"
+                  onClick={handleMultiTrackStop}
+                  disabled={!hasScorePlayerTracks || !scorePlayerControls}
+                  aria-label="Stop score player"
+                  title="Stop"
+                >
+                  <Square size={15} />
                 </button>
               </div>
               <div className="score-action-controls" aria-label="Score export controls">
@@ -3221,22 +3607,16 @@ export default function MainApp() {
               </div>
             </div>
           </div>
-          <div className="score-expansion-control">
-            <label htmlFor="expand-repeats-toggle">
-              <span>Expand repeats and navigation for synthesis</span>
-              <span className="score-expansion-description">
-                Uses the played order for duration and credit estimates.
-              </span>
-            </label>
-            <input
-              id="expand-repeats-toggle"
-              type="checkbox"
-              role="switch"
-              checked={expandRepeats}
-              disabled={!score}
-              onChange={(event) => setExpandRepeats(event.target.checked)}
-            />
-          </div>
+          {scorePlayerError && (
+            <div className="score-player-error" role="alert">
+              {scorePlayerError}
+            </div>
+          )}
+          {multiTrackExportError && (
+            <div className="score-player-error" role="alert">
+              {multiTrackExportError}
+            </div>
+          )}
           <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
             <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
             {scorePreviewError ? (
@@ -3246,6 +3626,12 @@ export default function MainApp() {
             ) : !score ? (
               <div className="score-placeholder">
                 <p>Upload a MusicXML file to render the score here.</p>
+              </div>
+            ) : null}
+            {uploading ? (
+              <div className="score-loading-overlay" role="status" aria-live="polite">
+                <span className="score-loading-spinner" aria-hidden="true" />
+                <span>Uploading and parsing score…</span>
               </div>
             ) : null}
           </div>

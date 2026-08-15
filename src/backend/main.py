@@ -572,6 +572,9 @@ def create_app() -> FastAPI:
             "parsed": True,
             "current_score": {"score": score, "version": version},
             "score_summary": score_summary,
+            # Instrumental MIDI is intentionally generated on the first
+            # successful synthesis request, not while parsing an upload.
+            "performance_midi": None,
             "solfege_settings": _default_solfege_settings_response(),
         }
 
@@ -1247,7 +1250,57 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/sessions/{session_id}/instrumental-midi")
+    async def get_instrumental_midi(
+        session_id: str, request: Request, expand_repeats: bool = True
+    ) -> FileResponse:
+        """Serve the session's notation- or played-order instrumental MIDI file."""
+        sessions: SessionStore = request.app.state.sessions
+        settings: Settings = request.app.state.settings
+        user_id = await _get_user_id_or_401(request)
+        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        files = snapshot.get("files")
+        current_score = snapshot.get("current_score")
+        current_version = (
+            str(current_score.get("version")) if isinstance(current_score, dict) else None
+        )
+        generated_version = (
+            files.get("instrumental_midi_score_version") if isinstance(files, dict) else None
+        )
+        if not current_version or generated_version != current_version:
+            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+        key = (
+            "instrumental_midi_expanded_path"
+            if expand_repeats
+            else "instrumental_midi_original_path"
+        )
+        stored_path = files.get(key) if isinstance(files, dict) else None
+        if not isinstance(stored_path, str) or not stored_path:
+            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+        midi_path = _resolve_allowlisted_session_midi_path(settings, stored_path)
+        if not midi_path.is_file():
+            raise HTTPException(status_code=404, detail="Instrumental MIDI file not found.")
+        return FileResponse(
+            midi_path,
+            media_type="audio/midi",
+            filename=midi_path.name,
+            headers={"Cache-Control": "no-store"},
+        )
+
     return app
+
+
+def _resolve_allowlisted_session_midi_path(settings: Settings, stored_path: str) -> Path:
+    """Resolve a session MIDI path without allowing it to escape session storage."""
+    candidate = (settings.project_root / stored_path).resolve()
+    session_root = settings.sessions_dir.resolve()
+    try:
+        candidate.relative_to(session_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Instrumental MIDI not found.") from exc
+    if candidate.suffix.lower() not in {".mid", ".midi"}:
+        raise HTTPException(status_code=404, detail="Instrumental MIDI not found.")
+    return candidate
 
 
 def _log_onnx_providers() -> None:

@@ -910,26 +910,20 @@ body.legal-active #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin: -2px 0 14px;
-  padding: 10px 12px;
+  gap: 10px;
+  margin: 0;
+  padding: 6px 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
+  border-radius: 999px;
   background: rgba(255, 255, 255, 0.035);
 }
 
 .score-expansion-control label {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
   color: var(--text-strong);
   font-size: 13px;
+  white-space: nowrap;
   cursor: pointer;
-}
-
-.score-expansion-description {
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .score-expansion-control input {
@@ -967,6 +961,21 @@ body.legal-active #root {
 .score-expansion-control input:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.score-player-transport {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.score-player-error {
+  margin: -4px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  border-radius: 10px;
+  color: rgba(254, 202, 202, 0.95);
+  font-size: 12px;
 }
 
 .zoom-controls {
@@ -2855,6 +2864,29 @@ img.voice-picker-option-avatar {
   padding: 0 24px;
 }
 
+.score-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+  font-weight: 650;
+  background: rgba(18, 21, 36, 0.82);
+  backdrop-filter: blur(3px);
+}
+
+.score-loading-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(194, 166, 255, 0.24);
+  border-top-color: #ba90ff;
+  border-radius: 50%;
+  animation: score-loading-spin 0.82s linear infinite;
+}
+
 .score-error-placeholder {
   color: #ff9b9b;
 }
@@ -2876,6 +2908,18 @@ img.voice-picker-option-avatar {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes score-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .score-loading-spinner {
+    animation-duration: 2.4s;
   }
 }
 

@@ -875,10 +875,13 @@ def test_upload_musicxml_parses_and_saves(client):
     current_score = payload["current_score"]
     assert current_score["version"] == 1
     assert "score" in current_score
+    assert payload["performance_midi"] is None
     score_path = app.state.settings.data_dir / "sessions" / session_id / "score.xml"
     assert score_path.exists()
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"] == current_score["score"]
+    assert "instrumental_midi_score_version" not in snapshot["files"]
+    assert not list(score_path.parent.glob("*.mid"))
 
 
 def test_upload_resets_previous_score_specific_state(client):

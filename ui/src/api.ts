@@ -7,12 +7,35 @@ export type ScoreSummaryPart = {
   has_lyrics?: boolean;
 };
 
+export type InstrumentalPart = {
+  part_index: number;
+  part_id: string;
+  raw_part_id: string;
+  label: string;
+  eligible: boolean;
+  has_lyrics: boolean;
+  midi_program: number;
+  midi_channel?: number | null;
+  percussion: boolean;
+  diagnostic?: string | null;
+};
+
+export type PerformanceMidi = {
+  version: number;
+  instrumental_parts: InstrumentalPart[];
+  has_instrumental_parts: boolean;
+  original_midi_available: boolean;
+  expanded_midi_available: boolean;
+  diagnostic?: string | null;
+};
+
 export type ScoreSummary = {
   title?: string | null;
   composer?: string | null;
   lyricist?: string | null;
   duration_seconds?: number;
   expanded_duration_seconds?: number;
+  performance_midi?: PerformanceMidi;
   parts?: ScoreSummaryPart[];
   available_verses?: Array<string | number>;
   selected_verse_number?: string | number | null;
@@ -38,6 +61,7 @@ export type UploadResponse = {
   parsed: boolean;
   current_score?: unknown;
   score_summary?: ScoreSummary | null;
+  performance_midi?: PerformanceMidi | null;
   solfege_settings?: SolfegeSettings;
 };
 
@@ -603,6 +627,23 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
     throw await errorFromResponse(response, "Failed to load score.");
   }
   return response.text();
+}
+
+export async function fetchInstrumentalMidi(
+  sessionId: string,
+  expandRepeats: boolean
+): Promise<Blob> {
+  let headers = await withAppCheckHeaders();
+  headers = await withAuthHeaders(headers);
+  const query = new URLSearchParams({ expand_repeats: String(expandRepeats) });
+  const response = await fetchWithTimeout(
+    `${API_BASE}/sessions/${sessionId}/instrumental-midi?${query.toString()}`,
+    { headers, cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await errorFromResponse(response, "Failed to load instrumental MIDI.");
+  }
+  return response.blob();
 }
 
 export async function fetchSolfegeSettings(

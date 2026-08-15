@@ -52,6 +52,10 @@ from src.api.voice_parts import (
     synthesize_preflight_action_required,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
+from src.musicxml.performance_midi import (
+    PERFORMANCE_MIDI_VERSION,
+    build_instrumental_performance_midis,
+)
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
@@ -6257,6 +6261,11 @@ class Orchestrator:
                             explicit_verse_number=selected_explicit_verse_number,
                         )
                 try:
+                    score_summary = await self._ensure_instrumental_midi_artifacts(
+                        session_id,
+                        score_summary=score_summary,
+                        user_id=user_id,
+                    )
                     audio_response = await self._start_synthesis_job(
                         session_id,
                         current_score,
@@ -6347,7 +6356,102 @@ class Orchestrator:
             score=current_score,
             audio_response=audio_response,
             explicit_verse_number=selected_explicit_verse_number,
+            # MIDI metadata is added during synthesis so the response can
+            # immediately initialise instrumental playback in the client.
+            session_state_changed=audio_response is not None,
         )
+
+    async def _ensure_instrumental_midi_artifacts(
+        self,
+        session_id: str,
+        *,
+        score_summary: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Create per-version instrumental MIDI only when synthesis starts.
+
+        The parsed score remains the source of truth for notation.  A score
+        version marker prevents a second synthesis from redoing the MIDI work,
+        while a reparse (which increments the version) naturally generates a
+        new pair of written- and played-order MIDI files.
+        """
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        current_score = snapshot.get("current_score")
+        version = (
+            int(current_score.get("version") or 0)
+            if isinstance(current_score, dict)
+            else 0
+        )
+        if version <= 0:
+            return score_summary
+
+        files = snapshot.get("files")
+        files = files if isinstance(files, dict) else {}
+        persisted_summary = snapshot.get("score_summary")
+        summary = dict(persisted_summary) if isinstance(persisted_summary, dict) else dict(score_summary or {})
+        existing = summary.get("performance_midi")
+        session_dir = self._sessions.session_dir(session_id)
+        written_path = session_dir / f"instrumental-written-v{version}.mid"
+        expanded_path = session_dir / f"instrumental-expanded-v{version}.mid"
+        marker_matches = files.get("instrumental_midi_score_version") == str(version)
+        generated_without_parts = (
+            isinstance(existing, dict)
+            and existing.get("version") == PERFORMANCE_MIDI_VERSION
+            and not existing.get("has_instrumental_parts")
+            and existing.get("diagnostic") is None
+        )
+        generated_with_files = (
+            isinstance(existing, dict)
+            and existing.get("version") == PERFORMANCE_MIDI_VERSION
+            and bool(existing.get("has_instrumental_parts"))
+            and written_path.is_file()
+            and expanded_path.is_file()
+        )
+        if marker_matches and (generated_without_parts or generated_with_files):
+            return summary
+
+        try:
+            source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+            performance_midi = await asyncio.to_thread(
+                build_instrumental_performance_midis,
+                source_path,
+                original_output_path=written_path,
+                expanded_output_path=expanded_path,
+            )
+        except Exception as exc:  # MIDI playback must never prevent vocal synthesis.
+            self._logger.warning(
+                "instrumental_midi_generation_failed session=%s version=%s error=%s",
+                session_id,
+                version,
+                exc,
+            )
+            performance_midi = {
+                "version": PERFORMANCE_MIDI_VERSION,
+                "instrumental_parts": [],
+                "has_instrumental_parts": False,
+                "original_midi_available": False,
+                "expanded_midi_available": False,
+                "diagnostic": f"Instrumental MIDI could not be prepared: {exc}",
+            }
+
+        summary["performance_midi"] = performance_midi
+        await self._sessions.set_score_summary(session_id, summary)
+        await self._sessions.set_metadata(
+            session_id, "instrumental_midi_score_version", str(version)
+        )
+        if performance_midi.get("original_midi_available"):
+            await self._sessions.set_file(
+                session_id, "instrumental_midi_original_path", written_path
+            )
+        else:
+            await self._sessions.set_metadata(session_id, "instrumental_midi_original_path", "")
+        if performance_midi.get("expanded_midi_available"):
+            await self._sessions.set_file(
+                session_id, "instrumental_midi_expanded_path", expanded_path
+            )
+        else:
+            await self._sessions.set_metadata(session_id, "instrumental_midi_expanded_path", "")
+        return summary
 
     def _extract_preprocess_plan(self, preprocess_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Return the request.plan object from a preprocess tool call, if present."""
