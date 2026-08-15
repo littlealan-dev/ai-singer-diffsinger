@@ -12,6 +12,22 @@ test.describe.configure({ mode: "serial" });
 test.describe("core singing regression", () => {
   test.beforeEach(async ({ page }) => {
     sessionId = "";
+    if (test.info().title.includes("plays deferred repeat-expanded piano MIDI")) {
+      await page.addInitScript(() => {
+        const playback = { audioBufferStarts: 0, oscillatorStarts: 0 };
+        Object.defineProperty(window, "__e2ePlayback", { value: playback, configurable: true });
+        const audioStart = AudioBufferSourceNode.prototype.start;
+        AudioBufferSourceNode.prototype.start = function (...args) {
+          playback.audioBufferStarts += 1;
+          return audioStart.apply(this, args);
+        };
+        const oscillatorStart = OscillatorNode.prototype.start;
+        OscillatorNode.prototype.start = function (...args) {
+          playback.oscillatorStarts += 1;
+          return oscillatorStart.apply(this, args);
+        };
+      });
+    }
     await signInAsE2EUser(page, test.info().title.replaceAll(" ", "-"));
     await expect(page.getByTestId("chat-input")).toBeEnabled();
   });
@@ -59,6 +75,48 @@ test.describe("core singing regression", () => {
     expect(state.synthesis?.part_index).toBe(0);
     expect(state.synthesis?.lyric_selection?.number).toBe("1");
     expect(state.synthesis?.lyric_selection?.name).toBe("");
+  });
+
+  test("plays deferred repeat-expanded piano MIDI alongside synthesized vocals", async ({ page, request }, testInfo) => {
+    const updateDepthWarnings: string[] = [];
+    page.on("console", (message) => {
+      if (/Maximum update depth exceeded/.test(message.text())) {
+        updateDepthWarnings.push(message.text());
+      }
+    });
+    await uploadFixture(page, "repeat-piano-accompaniment.xml");
+    // Register before the synthesis response is handled by React: the app starts
+    // fetching deferred MIDI as soon as it receives the newly persisted metadata.
+    const midiResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith("/instrumental-midi")
+    );
+    await requestScenario(page, "repeat-piano");
+    const state = await waitForAudio(page, request, testInfo);
+
+    expect(state.score_summary?.performance_midi).toMatchObject({
+      has_instrumental_parts: true,
+      expanded_midi_available: true,
+    });
+    expect((await midiResponse).ok()).toBeTruthy();
+    const play = page.getByRole("button", { name: "Play score player" });
+    await expect(play).toBeEnabled();
+    await play.click();
+
+    await expect.poll(async () => page.evaluate(() => (window as any).__e2ePlayback), {
+      timeout: 15_000,
+    }).toMatchObject({
+      audioBufferStarts: expect.any(Number),
+      oscillatorStarts: expect.any(Number),
+    });
+    await expect.poll(async () => page.evaluate(() => (window as any).__e2ePlayback.audioBufferStarts), {
+      timeout: 15_000,
+    }).toBeGreaterThan(0);
+    // The expanded written order is 1-2-1-2-3, so the piano must schedule
+    // multiple notes. A one-note MIDI failure cannot satisfy this assertion.
+    await expect.poll(async () => page.evaluate(() => (window as any).__e2ePlayback.oscillatorStarts), {
+      timeout: 15_000,
+    }).toBeGreaterThanOrEqual(5);
+    expect(updateDepthWarnings).toEqual([]);
   });
 
   test("adds solfege, rehydrates the active artifact, then synthesizes it", async ({ page, request }, testInfo) => {
