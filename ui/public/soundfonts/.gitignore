@@ -1,0 +1,7 @@
+# SoundFont sample banks are downloaded at setup time from MusyngKite/FluidR3 GM.
+# They are ~2-3 MB each and should not be committed to git.
+*.json
+*.sf2
+
+# Block directory listing page
+!index.html

@@ -49,286 +49,299 @@
       ]
     }
   ],
- "hosting": {
-  "public": "ui/dist",
-  "ignore": [
-    "firebase.json",
-    "**/.*",
-    "**/node_modules/**"
-  ],
-  "headers": [
-    {
-      "source": "/",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/faq",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/pricing",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/privacy",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/terms",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/credits-and-ai-voices",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/learn",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/learn/**",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/tools",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/tools/**",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/waitlist/confirmed",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/what-it-does",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/who-for",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/app",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/app/**",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/demo",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/demo/**",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    }
-  ],
-  "rewrites": [
-    {
-      "source": "/__/auth/**",
-      "destination": "/__/auth/handler"
-    },
-    {
-      "source": "/__/firebase/**",
-      "destination": "/__/firebase/init.json"
-    },
-    {
-      "source": "/sessions",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
+  "hosting": {
+    "public": "ui/dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "/",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/faq",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/pricing",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/privacy",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/terms",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/credits-and-ai-voices",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/learn",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/learn/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/tools",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/tools/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/waitlist/confirmed",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/what-it-does",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/who-for",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/app",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/app/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/demo",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/demo/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/soundfonts/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000, immutable"
+          },
+          {
+            "key": "X-Robots-Tag",
+            "value": "noindex, nofollow"
+          }
+        ]
       }
-    },
-    {
-      "source": "/sessions/**",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
+    ],
+    "rewrites": [
+      {
+        "source": "/__/auth/**",
+        "destination": "/__/auth/handler"
+      },
+      {
+        "source": "/__/firebase/**",
+        "destination": "/__/firebase/init.json"
+      },
+      {
+        "source": "/sessions",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/sessions/**",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/credits",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/maintenance/status",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/api/voicebanks",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/feedback",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/feedback/**",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/marketing/opt-in",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/billing/**",
+        "run": {
+          "serviceId": "sightsinger-billing-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/waitlist/subscribe",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/healthz",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/readyz",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
+        "source": "/app",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/app/**",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/demo",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/demo/**",
+        "destination": "/app.html"
+      },
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "sightsinger-marketing-be",
+          "region": "us-east4"
+        }
       }
-    },
-    {
-      "source": "/credits",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/maintenance/status",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/api/voicebanks",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/feedback",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/feedback/**",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/marketing/opt-in",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/billing/**",
-      "run": {
-        "serviceId": "sightsinger-billing-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/waitlist/subscribe",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/healthz",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/readyz",
-      "run": {
-        "serviceId": "sightsinger-api",
-        "region": "us-east4"
-      }
-    },
-    {
-      "source": "/app",
-      "destination": "/app.html"
-    },
-    {
-      "source": "/app/**",
-      "destination": "/app.html"
-    },
-    {
-      "source": "/demo",
-      "destination": "/app.html"
-    },
-    {
-      "source": "/demo/**",
-      "destination": "/app.html"
-    },
-    {
-      "source": "**",
-      "run": {
-        "serviceId": "sightsinger-marketing-be",
-        "region": "us-east4"
-      }
-    }
-  ]
-},
+    ]
+  },
   "storage": {
     "rules": "storage.rules"
   },

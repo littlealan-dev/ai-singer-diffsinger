@@ -98,6 +98,24 @@ test.describe("core singing regression", () => {
       expanded_midi_available: true,
     });
     expect((await midiResponse).ok()).toBeTruthy();
+
+    // Verify per-track controls panel rendering and order
+    const tracksPanel = page.getByTestId("score-tracks-panel");
+    await expect(tracksPanel).toBeVisible();
+    const trackRows = tracksPanel.locator(".score-track-row");
+    await expect(trackRows).toHaveCount(2); // 1 vocal track + 1 accompaniment piano track
+    await expect(trackRows.nth(0)).toHaveClass(/vocal-track/);
+    await expect(trackRows.nth(1)).toHaveClass(/instrument-track/);
+    await expect(trackRows.nth(1).locator(".score-track-instrument-select")).toBeVisible();
+
+    // Verify mute / solo toggles and volume control
+    const instSoloBtn = trackRows.nth(1).locator(".score-track-solo-btn");
+    await expect(instSoloBtn).toHaveText("S");
+    await instSoloBtn.click();
+    await expect(instSoloBtn).toHaveClass(/active/);
+    await instSoloBtn.click();
+    await expect(instSoloBtn).not.toHaveClass(/active/);
+
     const play = page.getByRole("button", { name: "Play score player" });
     await expect(play).toBeEnabled();
     await play.click();
