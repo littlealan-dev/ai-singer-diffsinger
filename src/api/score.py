@@ -45,7 +45,10 @@ def parse_score(
         part_id: Specific part ID to extract (deprecated; full score is always parsed)
         part_index: Specific part index to extract (deprecated; full score is always parsed)
         verse_number: Lyric verse number to select (optional)
-        expand_repeats: If True, expand repeat signs into linear sequence
+        expand_repeats: Compatibility option that selects the expanded score as
+            the top-level return value. Normal upload and reparse flows leave
+            this False so the top-level score remains suitable for notation
+            preview; in either case both parse variants are prepared.
         
     Returns:
         Score as a JSON-serializable dict with structure:
@@ -71,6 +74,117 @@ def parse_score(
                 }
             ),
         )
+    original_score = _parse_score_variant(
+        file_path,
+        part_id=part_id,
+        part_index=part_index,
+        verse_number=verse_number,
+        lyric_selection=lyric_selection,
+        expand_repeats=False,
+    )
+    expanded_score = _parse_score_variant(
+        file_path,
+        part_id=part_id,
+        part_index=part_index,
+        verse_number=verse_number,
+        lyric_selection=lyric_selection,
+        expand_repeats=True,
+    )
+
+    # Keep the canonical (notation) score and its linear performance score
+    # together. This happens while the upload/reupload is parsed, allowing
+    # later duration estimation and synthesis to use the same played order
+    # without mutating the score preview or reparsing the source file.
+    _attach_variant_durations(original_score, expanded_score)
+    if expand_repeats:
+        expanded_score["original_score"] = original_score
+        result = expanded_score
+    else:
+        original_score["expanded_score"] = expanded_score
+        result = original_score
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("parse_score output=%s", summarize_payload(result))
+    return result
+
+
+def _attach_variant_durations(
+    original_score: Dict[str, Any], expanded_score: Dict[str, Any]
+) -> None:
+    """Expose both cached playback durations from each parsed score variant."""
+    original_summary = original_score.get("score_summary")
+    expanded_summary = expanded_score.get("score_summary")
+    if not isinstance(original_summary, dict) or not isinstance(expanded_summary, dict):
+        return
+    original_duration = score_duration_seconds(original_score)
+    expanded_duration = score_duration_seconds(expanded_score)
+    if original_duration > 0:
+        original_summary["duration_seconds"] = original_duration
+    if expanded_duration > 0:
+        expanded_summary["duration_seconds"] = expanded_duration
+        original_summary["expanded_duration_seconds"] = expanded_duration
+    if original_duration > 0:
+        expanded_summary["original_duration_seconds"] = original_duration
+
+
+def score_duration_seconds(score: Dict[str, Any]) -> float:
+    """Return a duration from parsed notes and tempo marks.
+
+    Music21's ``secondsMap`` is based on written offsets and therefore cannot
+    reliably describe a score whose repeat/navigation structure has been
+    expanded into a new played order. The parsed note offsets are canonical for
+    both representations.
+    """
+    max_beats = 0.0
+    for part in score.get("parts", []):
+        if not isinstance(part, dict):
+            continue
+        for note in part.get("notes", []):
+            if not isinstance(note, dict):
+                continue
+            offset = note.get("offset_beats")
+            duration = note.get("duration_beats")
+            if isinstance(offset, (int, float)) and isinstance(duration, (int, float)):
+                max_beats = max(max_beats, float(offset) + float(duration))
+    if max_beats <= 0:
+        return 0.0
+
+    tempo_events: List[tuple[float, float]] = []
+    for tempo in score.get("tempos", []):
+        if not isinstance(tempo, dict):
+            continue
+        offset = tempo.get("offset_beats")
+        bpm = tempo.get("bpm")
+        if isinstance(offset, (int, float)) and isinstance(bpm, (int, float)) and bpm > 0:
+            tempo_events.append((max(0.0, float(offset)), float(bpm)))
+    tempo_events.sort()
+
+    total_seconds = 0.0
+    current_beat = 0.0
+    current_bpm = 120.0
+    for tempo_offset, tempo_bpm in tempo_events:
+        if tempo_offset > current_beat:
+            end_beat = min(tempo_offset, max_beats)
+            total_seconds += (end_beat - current_beat) * (60.0 / current_bpm)
+            current_beat = end_beat
+        current_bpm = tempo_bpm
+        if current_beat >= max_beats:
+            break
+    if current_beat < max_beats:
+        total_seconds += (max_beats - current_beat) * (60.0 / current_bpm)
+    return total_seconds
+
+
+def _parse_score_variant(
+    file_path: Union[str, Path],
+    *,
+    part_id: Optional[str],
+    part_index: Optional[int],
+    verse_number: Optional[str | int],
+    lyric_selection: Optional[Dict[str, str]],
+    expand_repeats: bool,
+) -> Dict[str, Any]:
+    """Parse one immutable score representation without attaching variants."""
     # Delegate parsing to the MusicXML adapter, keeping rests for alignment.
     score_data, score_summary = parse_musicxml_with_summary(
         file_path,
@@ -80,6 +194,7 @@ def parse_score(
         lyric_selection=lyric_selection,
         lyrics_only=False,
         keep_rests=True,
+        expand_repeats=expand_repeats,
     )
     
     selected_verse_number = (
@@ -125,9 +240,18 @@ def parse_score(
         Path(file_path)
     )
     
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("parse_score output=%s", summarize_payload(score_dict))
     return score_dict
+
+
+def expanded_score_for_synthesis(score: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the precomputed linear performance score when available.
+
+    Upload/reupload parsing stores the expanded score alongside the canonical
+    notation score. Scores created by older callers may not have that variant,
+    so they remain usable as-is rather than unexpectedly reparsing their source.
+    """
+    expanded_score = score.get("expanded_score")
+    return expanded_score if isinstance(expanded_score, dict) else score
 
 
 def _strip_empty_lyric_names(score_dict: Dict[str, Any]) -> None:
