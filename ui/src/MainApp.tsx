@@ -6,6 +6,7 @@ import WaveSurfer from "wavesurfer.js";
 import { SoundFontCache } from "@waveform-playlist/playout";
 import {
   WaveformPlaylistProvider,
+  usePlaybackAnimation,
   usePlaylistControls,
   usePlaylistData,
 } from "@waveform-playlist/browser";
@@ -260,6 +261,7 @@ const GM_INSTRUMENTS = [
 ] as const;
 
 const FLUID_R3_GM_SOUNDFONT_URL = "/soundfonts/FluidR3_GM.sf2";
+const DEFAULT_INSTRUMENT_TRACK_VOLUME = 0.65;
 let fluidR3SoundFontCachePromise: Promise<SoundFontCache> | null = null;
 
 const loadFluidR3SoundFontCache = (): Promise<SoundFontCache> => {
@@ -286,6 +288,7 @@ type ScorePlayerEngineProps = {
   onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
   onEngineLoading: () => void;
   onEngineReady: (requestId: number) => void;
+  onPlaybackStateChange: (isPlaying: boolean) => void;
   onError: (message: string | null) => void;
 };
 
@@ -293,12 +296,15 @@ const ScorePlayerEngineBridge = ({
   onControlsChange,
   loading,
   onReady,
+  onPlaybackStateChange,
 }: Pick<ScorePlayerEngineProps, "onControlsChange"> & {
   loading: boolean;
   onReady: () => void;
+  onPlaybackStateChange: (isPlaying: boolean) => void;
 }) => {
   const controls = usePlaylistControls();
   const { isReady } = usePlaylistData();
+  const { isPlaying } = usePlaybackAnimation();
   const liveControlsRef = useRef(controls);
   liveControlsRef.current = controls;
   const stableControlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
@@ -319,6 +325,12 @@ const ScorePlayerEngineBridge = ({
   useEffect(() => {
     if (isReady && !loading) onReady();
   }, [isReady, loading, onReady]);
+  // This is the provider's native playback lifecycle state. In particular, it
+  // switches to false when its engine reaches the end of the timeline, which
+  // keeps the outer transport icon in sync after natural completion.
+  useEffect(() => {
+    onPlaybackStateChange(isPlaying);
+  }, [isPlaying, onPlaybackStateChange]);
   return null;
 };
 
@@ -379,6 +391,7 @@ const ScorePlayerEngine = ({
   onControlsChange,
   onEngineLoading,
   onEngineReady,
+  onPlaybackStateChange,
   onError,
 }: ScorePlayerEngineProps) => {
   // WaveformPlaylistProvider treats callback identity changes as an engine
@@ -547,6 +560,7 @@ const ScorePlayerEngine = ({
         onControlsChange={onControlsChange}
         loading={midiLoading || audioLoading || soundFontLoading}
         onReady={handleProviderReady}
+        onPlaybackStateChange={onPlaybackStateChange}
       />
       <ScorePlayerMixerBridge
         midiTrackCount={midiTracks.length}
@@ -1665,6 +1679,10 @@ export default function MainApp() {
     scorePlayerAssetsReadyRef.current = false;
   }, []);
 
+  const handleScorePlayerPlaybackStateChange = useCallback((isPlaying: boolean) => {
+    setMultiTrackPlaying((current) => (current === isPlaying ? current : isPlaying));
+  }, []);
+
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
     [splitPct]
@@ -1756,7 +1774,7 @@ export default function MainApp() {
           label: part.label || `Part ${part.part_index + 1}`,
           muted: existing ? existing.muted : false,
           solo: existing ? existing.solo : false,
-          volume: existing ? existing.volume : 1.0,
+          volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
           gmProgram: existing ? existing.gmProgram : (part.midi_program ?? 0),
           percussion: part.percussion,
         };
@@ -4113,6 +4131,7 @@ export default function MainApp() {
             onControlsChange={handleScorePlayerControlsChange}
             onEngineLoading={handleScorePlayerEngineLoading}
             onEngineReady={handleScorePlayerEngineReady}
+            onPlaybackStateChange={handleScorePlayerPlaybackStateChange}
             onError={handleScorePlayerEngineError}
           />
 
