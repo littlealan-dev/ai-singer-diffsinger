@@ -6,5 +6,6 @@ gcloud run services update sightsinger-api \
   --region=us-east4 \
   --image=gcr.io/sightsinger-app/ai-singer-api:latest \
   --concurrency=2 \
+  --max=3 \
   --max-instances=3 \
   --env-vars-file=env/prod.env
