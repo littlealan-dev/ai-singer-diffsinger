@@ -89,6 +89,30 @@ def test_mixed_collision_cannot_pass_generated_solfege_validation(tmp_path: Path
     assert _selected_part_solfege_diagnostics(default_parse["parts"][0])["is_solfege"] is False
 
 
+def test_lyric_selection_survives_line_broken_part_names(tmp_path: Path) -> None:
+    """Map a music21-normalized name back to its raw MusicXML part ID."""
+    source = tmp_path / "line-broken-part-names.xml"
+    source.write_text(
+        _SCORE.replace("Soprano", "S\nA").replace("Alto", "T\nB"),
+        encoding="utf-8",
+    )
+
+    summary = parse_score(source)["score_summary"]
+    upper, lower = summary["parts"]
+    assert upper["part_id"] == "S A"
+    assert lower["part_id"] == "T B"
+    assert upper["raw_part_id"] == "P1"
+    assert lower["raw_part_id"] == "P2"
+    assert upper["lyric_selections"][0]["number"] == "part1verse1"
+    assert lower["lyric_selections"][0]["number"] == "part2verse1"
+
+    selected = parse_score(source, lyric_selection=upper["lyric_selections"][0])
+    assert [note["lyric"] for note in selected["parts"][0]["notes"]] == [
+        "word",
+        "word",
+    ]
+
+
 def test_solfege_targets_each_derived_lane_after_staff_expansion(tmp_path: Path) -> None:
     source = tmp_path / "source.xml"
     first = tmp_path / "first.xml"

@@ -224,7 +224,19 @@
       "profile_image": "liee_immortal_idol_2025.png",
       "selector_image": "liee_immortal_idol_2025.png",
       "path_hint": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
-      "languages": ["en", "es", "ja", "zh"],
+      "languages": ["en", "es", "fr", "it", "ja", "pt", "pt-eu", "zh", "zh-yue"],
+      "language_details": {
+        "zh": {
+          "label": "Mandarin Chinese",
+          "romanization": "Pinyin",
+          "aliases": ["Mandarin", "Putonghua", "普通话", "國語"]
+        },
+        "zh-yue": {
+          "label": "Cantonese Chinese",
+          "romanization": "Jyutping",
+          "aliases": ["Cantonese", "Yue Chinese", "粤语", "廣東話"]
+        }
+      },
       "japanese_dictionary_form": "kana",
       "has_duration_model": true,
       "has_pitch_model": true,
@@ -232,7 +244,7 @@
       "speakers": [],
       "voice_colors": [],
       "default_voice_color": null,
-      "pitch_expression": 1.0,
+      "pitch_expression": 0.75,
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,

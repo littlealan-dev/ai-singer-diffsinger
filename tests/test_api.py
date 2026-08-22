@@ -780,6 +780,12 @@ class TestVoicebankAPIs(unittest.TestCase):
                                 "name": "Raine Rena",
                                 "path_hint": "Raine_Rena_2.01",
                                 "languages": [],
+                                "language_details": {
+                                    "zh": {
+                                        "label": "Mandarin Chinese",
+                                        "romanization": "Pinyin",
+                                    }
+                                },
                                 "has_duration_model": True,
                                 "has_pitch_model": True,
                                 "has_variance_model": True,
@@ -802,6 +808,10 @@ class TestVoicebankAPIs(unittest.TestCase):
 
         self.assertEqual(info["gender"], "female")
         self.assertEqual(info["voice_type"], "alto")
+        self.assertEqual(
+            info["language_details"]["zh"],
+            {"label": "Mandarin Chinese", "romanization": "Pinyin"},
+        )
 
     def test_get_voicebank_info_includes_manifest_metadata_for_nested_voicebank_path(self):
         nested_voicebank_path = ROOT_DIR / "assets/voicebanks/Katyusha_v170/configs"

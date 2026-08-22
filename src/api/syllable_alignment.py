@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
+import unicodedata
 
 from src.api.phonemize import phonemize
 from src.api.timing_errors import InfeasibleAnchorError
@@ -16,6 +18,10 @@ from src.phonemizer.phonemizer import Phonemizer
 
 
 logger = get_logger(__name__)
+
+
+_HANZI_CHARACTER = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff]$")
+_CHINESE_LANGUAGE_CODES = frozenset({"zh", "zh-yue"})
 
 
 # DiffSinger needs an explicit, unvoiced window before a sentence-initial
@@ -102,6 +108,102 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 current["carrier_indices"].append(idx)
 
     return groups
+
+
+def _is_sustain_note(note: Dict[str, Any]) -> bool:
+    lyric = note.get("lyric")
+    return (
+        bool(note.get("lyric_is_extended"))
+        or note.get("tie_type") in ("stop", "continue")
+        or (isinstance(lyric, str) and lyric.startswith("+"))
+    )
+
+
+def _is_chinese_syllable_carrier(note: Dict[str, Any]) -> bool:
+    """Return whether a lyric event is one Hanzi plus display punctuation.
+
+    A MusicXML ``begin``/``middle``/``end`` chain represents a written word,
+    but Chinese pronunciation is still one syllable per Hanzi. Keep the guard
+    deliberately narrow so regular multi-note English words retain their
+    existing word-level grouping behavior.
+    """
+    lyric = str(note.get("lyric", "") or "").strip()
+    if not lyric or lyric.startswith("+"):
+        return False
+    hanzi = [character for character in lyric if _HANZI_CHARACTER.fullmatch(character)]
+    return len(hanzi) == 1 and all(
+        _HANZI_CHARACTER.fullmatch(character)
+        or character.isspace()
+        or unicodedata.category(character).startswith("P")
+        for character in lyric
+    )
+
+
+def split_chinese_syllabic_groups(
+    groups: List[Dict[str, Any]],
+    language: str,
+) -> List[Dict[str, Any]]:
+    """Preserve a Chinese syllable event per Hanzi before G2P.
+
+    MusicXML's syllabic labels make the generic grouping layer combine
+    ``恩`` + extension + ``典、`` into one word token. That is correct for
+    alphabetic lyric spelling, but Mandarin or Cantonese romanizers must see
+    individual Hanzi to return Pinyin/Jyutping one syllable at a time. This
+    transforms only all-Hanzi chains into per-carrier groups and attaches
+    each extension/tie to the preceding carrier, retaining timing without
+    making it a new lyric or phoneme anchor.
+    """
+    normalized_language = str(language or "").strip().lower()
+    if normalized_language not in _CHINESE_LANGUAGE_CODES:
+        return groups
+
+    split_groups: List[Dict[str, Any]] = []
+    for group in groups:
+        if group.get("is_rest") or not group.get("is_syllabic_chain"):
+            split_groups.append(group)
+            continue
+
+        notes = list(group.get("notes") or [])
+        note_indices = list(group.get("note_indices") or [])
+        carrier_notes = [note for note in notes if not _is_sustain_note(note)]
+        if (
+            not carrier_notes
+            or not all(_is_chinese_syllable_carrier(note) for note in carrier_notes)
+        ):
+            split_groups.append(group)
+            continue
+
+        expanded_groups: List[Dict[str, Any]] = []
+        current: Optional[Dict[str, Any]] = None
+        malformed = False
+        for note, note_idx in zip(notes, note_indices):
+            if _is_sustain_note(note):
+                # A valid syllabic group begins with its sounding carrier. If
+                # malformed input begins with an extension, preserve the old
+                # group unchanged rather than silently losing that note.
+                if current is None:
+                    malformed = True
+                    break
+                current["notes"].append(note)
+                current["note_indices"].append(note_idx)
+                current["sustain_indices"].append(note_idx)
+                continue
+
+            current = {
+                "notes": [note],
+                "note_indices": [note_idx],
+                "is_rest": False,
+                "is_syllabic_chain": False,
+                "sustain_indices": [],
+                "carrier_indices": [note_idx],
+            }
+            expanded_groups.append(current)
+        if malformed:
+            split_groups.append(group)
+        else:
+            split_groups.extend(expanded_groups)
+
+    return split_groups
 
 
 def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -800,7 +902,7 @@ def align(
 ) -> Dict[str, Any]:
     """Align score notes into DS-contract payload using syllable-based strategy."""
     sp_id = phonemizer._phoneme_to_id["SP"]
-    groups = _group_notes(notes)
+    groups = split_chinese_syllabic_groups(_group_notes(notes), language)
 
     lyrics: List[str] = []
     for group in groups:

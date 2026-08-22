@@ -22,6 +22,8 @@ from .language_g2p import (
     DiffSingerCantoneseJyutpingPhonemizer,
     DiffSingerEnglishPhonemizer,
     DiffSingerFrenchMillefeuillePhonemizer,
+    DiffSingerItalianPhonemizer,
+    DiffSingerPortuguesePhonemizer,
     DiffSingerSpanishPhonemizer,
     LanguageG2pProvider,
 )
@@ -350,6 +352,27 @@ LanguagePronunciationRegistry.register(
         language="fr",
         romanizer=IdentityRomanizer(),
         g2p_fallback=DiffSingerFrenchMillefeuillePhonemizer(),
+    )
+)
+LanguagePronunciationRegistry.register(
+    LanguagePronunciationPipeline(
+        language="it",
+        romanizer=IdentityRomanizer(),
+        g2p_fallback=DiffSingerItalianPhonemizer(),
+    )
+)
+LanguagePronunciationRegistry.register(
+    LanguagePronunciationPipeline(
+        language="pt",
+        romanizer=IdentityRomanizer(),
+        g2p_fallback=DiffSingerPortuguesePhonemizer(),
+    )
+)
+LanguagePronunciationRegistry.register(
+    LanguagePronunciationPipeline(
+        language="pt-eu",
+        romanizer=IdentityRomanizer(),
+        g2p_fallback=DiffSingerPortuguesePhonemizer(),
     )
 )
 LanguagePronunciationRegistry.register(

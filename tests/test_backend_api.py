@@ -4319,6 +4319,50 @@ def test_synthesis_job_metadata_includes_resolved_language(client, monkeypatch):
     }
 
 
+def test_voicebank_details_forward_language_details_to_llm_context(client):
+    _test_client, app = client
+
+    def call_tool(name, arguments):
+        if name == "list_voicebanks":
+            return [{"id": "LIEE", "name": "LIEE", "path": "assets/voicebanks/LIEE"}]
+        if name == "get_voicebank_info":
+            assert arguments == {"voicebank": "LIEE"}
+            return {
+                "name": "LIEE",
+                "languages": ["zh", "zh-yue"],
+                "language_details": {
+                    "zh": {"label": "Mandarin Chinese", "romanization": "Pinyin"},
+                    "zh-yue": {"label": "Cantonese Chinese", "romanization": "Jyutping"},
+                },
+                "voice_colors": [],
+                "use_lang_id": False,
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    app.state.orchestrator._cached_voicebank_details = None
+
+    details = asyncio.run(app.state.orchestrator._get_voicebank_details())
+
+    assert details == [
+        {
+            "id": "LIEE",
+            "name": "LIEE",
+            "gender": None,
+            "voice_type": None,
+            "languages": ["zh", "zh-yue"],
+            "language_details": {
+                "zh": {"label": "Mandarin Chinese", "romanization": "Pinyin"},
+                "zh-yue": {"label": "Cantonese Chinese", "romanization": "Jyutping"},
+            },
+            "use_lang_id": False,
+            "voice_colors": [],
+            "default_voice_color": None,
+            "synthesis_control_defaults": None,
+        }
+    ]
+
+
 def test_chat_rejects_selected_language_unsupported_by_voicebank(client):
     test_client, app = client
     session_id = _create_session(test_client)

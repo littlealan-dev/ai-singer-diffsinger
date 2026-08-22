@@ -146,7 +146,7 @@ def test_build_system_prompt_declares_full_score_credit_capability_contract() ->
     assert "offer exactly these two next actions: add more credits, or upload another shorter song" in prompt
 
 
-def test_build_system_prompt_requires_explicit_supported_synthesis_language() -> None:
+def test_build_system_prompt_requires_resolved_compatible_synthesis_language() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -160,9 +160,11 @@ def test_build_system_prompt_requires_explicit_supported_synthesis_language() ->
     )
 
     assert "Every `synthesize` tool call must include an explicit `language` code" in prompt
-    assert "infer the language only from lyric text visible in the score context" in prompt
-    assert "the chosen language must be in that list" in prompt
-    assert "ask the user to choose a language or voicebank" in prompt
+    assert "Use canonical `language_details` labels and aliases" in prompt
+    assert "explicit Cantonese request into Mandarin, or vice versa" in prompt
+    assert "ask the user to choose before synthesizing" in prompt
+    assert "Language compatibility is mandatory" in prompt
+    assert "do not synthesize or silently replace it" in prompt
 
 
 def test_build_system_prompt_requires_tool_call_for_preprocess_repair_phase() -> None:
@@ -311,6 +313,9 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
                 "gender": "female",
                 "voice_type": "soprano",
                 "languages": ["en", "ja", "zh"],
+                "language_details": {
+                    "zh": {"label": "Mandarin Chinese", "romanization": "Pinyin"}
+                },
                 "use_lang_id": True,
                 "voice_colors": [{"name": "01: standard", "suffix": "embeds/standard"}],
                 "default_voice_color": "01: standard",
@@ -322,6 +327,7 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
     assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text
     assert '"languages": [' in bundle.dynamic_prompt_text
     assert '"ja"' in bundle.dynamic_prompt_text
+    assert '"Mandarin Chinese"' in bundle.dynamic_prompt_text
     assert '"use_lang_id": true' in bundle.dynamic_prompt_text
 
 
@@ -365,7 +371,7 @@ def test_build_prompt_bundle_includes_canonical_solfege_settings() -> None:
     assert '"revision": 4' in bundle.dynamic_prompt_text
 
 
-def test_system_prompt_defaults_to_qixuan_unless_clear_male_lower_part() -> None:
+def test_system_prompt_selects_from_language_compatible_voicebanks_before_qixuan() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -377,9 +383,10 @@ def test_system_prompt_defaults_to_qixuan_unless_clear_male_lower_part() -> None
         last_preprocess_plan=None,
         voicebank_details=None,
     )
-    assert "use `Qixuan_v2.7.0_DiffSinger_OpenUtau` as the default voicebank" in prompt
-    assert "tenor, bass, baritone" in prompt
-    assert "If there is no clear relationship" in prompt
+    assert "choose only from language-compatible voicebanks" in prompt
+    assert "tenor, bass, baritone, or equivalent" in prompt
+    assert "Qixuan_v2.7.0_DiffSinger_OpenUtau` is compatible" in prompt
+    assert "use `Qixuan_v2.7.0_DiffSinger_OpenUtau` as the default voicebank" not in prompt
 
 
 def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> None:

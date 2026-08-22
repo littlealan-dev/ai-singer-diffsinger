@@ -16,7 +16,12 @@ from typing import Optional, Protocol, Sequence
 
 from g2p_en import G2p
 
-from .openutau_es_g2p import OpenUtauFrenchMillefeuilleG2p, OpenUtauSpanishG2p
+from .openutau_es_g2p import (
+    OpenUtauFrenchMillefeuilleG2p,
+    OpenUtauItalianG2p,
+    OpenUtauPortugueseG2p,
+    OpenUtauSpanishG2p,
+)
 
 
 ARPABET_TO_VOICEBANK = {
@@ -142,6 +147,30 @@ class DiffSingerFrenchMillefeuillePhonemizer:
         return self._g2p.phonemize(token)
 
 
+class DiffSingerItalianPhonemizer:
+    """Italian fallback using OpenUtau's bundled ``g2p-it`` pack."""
+
+    language = "it"
+
+    def __init__(self) -> None:
+        self._g2p = OpenUtauItalianG2p()
+
+    def phonemize(self, token: str) -> Sequence[str]:
+        return self._g2p.phonemize(token)
+
+
+class DiffSingerPortuguesePhonemizer:
+    """Portuguese fallback using OpenUtau's bundled ``g2p-pt`` pack."""
+
+    language = "pt"
+
+    def __init__(self) -> None:
+        self._g2p = OpenUtauPortugueseG2p()
+
+    def phonemize(self, token: str) -> Sequence[str]:
+        return self._g2p.phonemize(token)
+
+
 class DiffSingerCantoneseJyutpingPhonemizer:
     """Map tone-free Jyutping syllables to LIEE's shared phone inventory.
 
@@ -152,6 +181,12 @@ class DiffSingerCantoneseJyutpingPhonemizer:
     """
 
     language = "zh-yue"
+    # These are model-specific corrections for individual Jyutping syllables.
+    # ``cung`` (for example, 重 / 充) needs LIEE's English-ch phone rather
+    # than the otherwise appropriate forward /tsʰ/-like ``t z`` onset.
+    _SYLLABLE_OVERRIDES = {
+        "cung": ("ch", "u", "ng"),
+    }
     _ONSETS = (
         ("gw", ("g", "w")),
         ("kw", ("k", "w")),
@@ -159,7 +194,19 @@ class DiffSingerCantoneseJyutpingPhonemizer:
         ("b", ("b",)), ("p", ("p",)), ("m", ("m",)), ("f", ("f",)),
         ("d", ("d",)), ("t", ("t",)), ("n", ("n",)), ("l", ("l",)),
         ("g", ("g",)), ("k", ("k",)), ("h", ("h",)), ("w", ("w",)),
-        ("z", ("dz",)), ("c", ("cz",)), ("s", ("s",)), ("j", ("j",)),
+        # Jyutping ``c`` is the front /tsʰ/ affricate. LIEE's native
+        # Mandarin dictionary realizes the same affricate family as ``t z``;
+        # its standalone ``cz`` phone is a more posterior sound in practice.
+        # The rounded-front ``zy-`` family is realized with LIEE's English-j
+        # onset while retaining its /y/ glide: zyu -> jh y u. This must come
+        # before the ordinary ``z`` onset, which remains /ts/-like (``dz``).
+        ("zy", ("jh", "y")),
+        # The corresponding aspirated ``cy-`` family uses LIEE's English-ch
+        # onset while retaining its /y/ glide: cyun -> ch y u n. It must be
+        # matched before ordinary ``c``, which is the forward /tsʰ/-like
+        # ``t z`` sequence.
+        ("cy", ("ch", "y")),
+        ("z", ("dz",)), ("c", ("t", "z")), ("s", ("s",)), ("j", ("j",)),
     )
     _RIMES = {
         "aap": ("aa", "p"), "aat": ("aa", "t"), "aak": ("aa", "k"),
@@ -191,6 +238,9 @@ class DiffSingerCantoneseJyutpingPhonemizer:
 
     def phonemize(self, token: str) -> Sequence[str]:
         syllable = str(token).lower().rstrip("123456")
+        override = self._SYLLABLE_OVERRIDES.get(syllable)
+        if override is not None:
+            return override
         for onset, phones in self._ONSETS:
             if syllable.startswith(onset) and syllable != onset:
                 rime = syllable[len(onset):]

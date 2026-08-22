@@ -4,7 +4,7 @@
   "voicebanks": [
     {
       "id": "Keiro_Revenant_v170",
-      "enabled": true,
+      "enabled": false,
       "storage_object": "assets/voicebanks/Keiro_Revenant_v170.tar.gz",
       "name": "Keiro Revenant v170",
       "profile_image": "keiro_revenant.webp",
@@ -78,7 +78,7 @@
         {"name": "06: Sweet", "suffix": "dsmain/embeds/acoustic/V5_Sweet"},
         {"name": "07: Light", "suffix": "dsmain/embeds/acoustic/V5_Light"}
       ],
-      "default_voice_color": "01: Default",
+      "default_voice_color": "03: Solid",
       "pitch_expression": 0.75,
       "pronunciation_adapters": {
         "es": [
@@ -156,7 +156,7 @@
         {"name": "B2: Alter", "suffix": "dsmain/embeds/acoustic/ALTER"},
         {"name": "C: Casual (Obsolete)", "suffix": "dsmain/embeds/acoustic/CASUAL"}
       ],
-      "default_voice_color": "A1: Solid",
+      "default_voice_color": "A4: Adult",
       "pitch_expression": 0.75,
       "pronunciation_adapters": {
         "es": [
@@ -263,7 +263,7 @@
     },
     {
       "id": "Umidaji_DS_v110",
-      "enabled": true,
+      "enabled": false,
       "storage_object": "assets/voicebanks/Umidaji_DS_v110.zip",
       "name": "Umidaji DS v110",
       "path_hint": "Umidaji_DS_v110",
@@ -306,7 +306,7 @@
     },
     {
       "id": "Nishiren_Diffsinger_v2.0",
-      "enabled": true,
+      "enabled": false,
       "storage_object": "assets/voicebanks/Nishiren.Diffsinger.v2.0.zip",
       "name": "Nishiren DS v2.0",
       "path_hint": "Nishiren Diffsinger v2.0",
@@ -340,7 +340,7 @@
     },
     {
       "id": "Apollo_DS_1.0_TENSION",
-      "enabled": true,
+      "enabled": false,
       "storage_object": "assets/voicebanks/Apollo_DS_1.0_TENSION.zip",
       "name": "Apollo DS 1.0 (TENSION)",
       "path_hint": "Apollo_DS_1.0_TENSION",
@@ -380,10 +380,19 @@
       "profile_image": "liee_immortal_idol_2025.png",
       "selector_image": "liee_immortal_idol_2025.png",
       "path_hint": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
-      "languages": [
-        "de", "en", "es", "fil", "fr", "it", "ja", "ko", "pl",
-        "pt", "pt-eu", "ru", "tl", "vi", "zh", "zh-yue"
-      ],
+      "languages": ["en", "es", "fr", "it", "ja", "pt", "pt-eu", "zh", "zh-yue"],
+      "language_details": {
+        "zh": {
+          "label": "Mandarin Chinese",
+          "romanization": "Pinyin",
+          "aliases": ["Mandarin", "Putonghua", "普通话", "國語"]
+        },
+        "zh-yue": {
+          "label": "Cantonese Chinese",
+          "romanization": "Jyutping",
+          "aliases": ["Cantonese", "Yue Chinese", "粤语", "廣東話"]
+        }
+      },
       "japanese_dictionary_form": "kana",
       "has_duration_model": true,
       "has_pitch_model": true,
@@ -391,7 +400,7 @@
       "speakers": [],
       "voice_colors": [],
       "default_voice_color": null,
-      "pitch_expression": 1.0,
+      "pitch_expression": 0.75,
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Dict, Tuple
 import zipfile
 
@@ -43,6 +44,29 @@ _FRENCH_MILLEFEUILLE_PHONEMES = (
 _FRENCH_MILLEFEUILLE_MODEL_PATH = (
     Path(__file__).with_name("assets") / "openutau" / "g2p-fr-millefeuille.zip"
 )
+_ITALIAN_GRAPHEMES = (
+    "", "", "", "", "'", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x",
+    "y", "z", "à", "è", "é", "ì", "í", "ò", "ù", "ú",
+)
+_ITALIAN_PHONEMES = (
+    "", "", "", "", "a", "b", "d", "dz", "dZZ", "e", "EE", "f", "g", "i",
+    "j", "JJ", "k", "l", "LL", "m", "n", "nf", "ng", "o", "OO", "p", "r",
+    "s", "SS", "t", "ts", "tSS", "u", "v", "w", "z",
+)
+_ITALIAN_MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-it.zip"
+_PORTUGUESE_GRAPHEMES = (
+    "", "", "", "", "-", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x",
+    "y", "z", "à", "á", "â", "ã", "ç", "è", "é", "ê", "í", "î", "ó", "ô",
+    "õ", "ú", "û", "ü",
+)
+_PORTUGUESE_PHONEMES = (
+    "", "", "", "", "E", "J", "L", "O", "R", "S", "X", "Z", "a", "a~", "b",
+    "d", "dZ", "e", "e~", "f", "g", "i", "i~", "j", "j~", "k", "l", "m", "n",
+    "o", "o~", "p", "r", "s", "t", "tS", "u", "u~", "v", "w", "w~", "z",
+)
+_PORTUGUESE_MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-pt.zip"
 
 
 @lru_cache(maxsize=None)
@@ -74,6 +98,7 @@ class OpenUtauG2pPack:
     path: Path
     graphemes: Tuple[str, ...]
     phonemes: Tuple[str, ...]
+    remove_tail_digits: bool = False
 
     @lru_cache(maxsize=4096)
     def phonemize(self, word: str) -> Tuple[str, ...]:
@@ -81,7 +106,10 @@ class OpenUtauG2pPack:
         normalized = str(word).lower()
         dictionary, grapheme_indexes, session = _load_pack(str(self.path), self.graphemes)
         if normalized in dictionary:
-            return dictionary[normalized]
+            result = dictionary[normalized]
+            if self.remove_tail_digits:
+                return tuple(re.sub(r"\\d+$", "", phone) for phone in result)
+            return result
 
         encoded = [
             grapheme_indexes[character]
@@ -133,4 +161,35 @@ class OpenUtauFrenchMillefeuilleG2p:
     @lru_cache(maxsize=4096)
     def phonemize(self, word: str) -> Tuple[str, ...]:
         """Return bare OpenUtau French Millefeuille phonemes for a lyric word."""
+        return self._pack.phonemize(word)
+
+
+class OpenUtauItalianG2p:
+    """Italian configuration of OpenUtau's ``g2p-it`` pack."""
+
+    _pack = OpenUtauG2pPack(
+        path=_ITALIAN_MODEL_PATH,
+        graphemes=_ITALIAN_GRAPHEMES,
+        phonemes=_ITALIAN_PHONEMES,
+        remove_tail_digits=True,
+    )
+
+    @lru_cache(maxsize=4096)
+    def phonemize(self, word: str) -> Tuple[str, ...]:
+        """Return bare OpenUtau Italian phonemes for a normalized lyric word."""
+        return self._pack.phonemize(word)
+
+
+class OpenUtauPortugueseG2p:
+    """Portuguese configuration of OpenUtau's ``g2p-pt`` pack."""
+
+    _pack = OpenUtauG2pPack(
+        path=_PORTUGUESE_MODEL_PATH,
+        graphemes=_PORTUGUESE_GRAPHEMES,
+        phonemes=_PORTUGUESE_PHONEMES,
+    )
+
+    @lru_cache(maxsize=4096)
+    def phonemize(self, word: str) -> Tuple[str, ...]:
+        """Return bare OpenUtau Portuguese phonemes for a normalized lyric word."""
         return self._pack.phonemize(word)

@@ -5359,6 +5359,7 @@ class Orchestrator:
                         "gender": info.get("gender"),
                         "voice_type": info.get("voice_type"),
                         "languages": info.get("languages", []),
+                        "language_details": info.get("language_details", {}),
                         "use_lang_id": bool(info.get("use_lang_id", False)),
                         "voice_colors": info.get("voice_colors", []),
                         "default_voice_color": info.get("default_voice_color"),

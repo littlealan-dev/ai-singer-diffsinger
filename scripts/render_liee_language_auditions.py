@@ -24,8 +24,10 @@ from src.backend.llm_prompt import parse_llm_response
 
 VOICEBANK = ROOT / "assets/voicebanks/Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
 FIXTURES = (
-    ("fr", ROOT / "tests/fixtures/liee_french_two_measures.musicxml"),
-    ("zh-yue", ROOT / "tests/fixtures/liee_cantonese_two_measures.musicxml"),
+    ("fr", ROOT / "tests/fixtures/liee_french_phoneme_coverage.musicxml"),
+    ("it", ROOT / "tests/fixtures/liee_italian_phoneme_coverage.musicxml"),
+    ("pt", ROOT / "tests/fixtures/liee_portuguese_phoneme_coverage.musicxml"),
+    ("es", ROOT / "tests/fixtures/liee_spanish_phoneme_coverage.musicxml"),
 )
 OUTPUT_DIR = ROOT / "tests/output/liee_language_auditions"
 
@@ -75,7 +77,7 @@ def main() -> None:
         )
         if result.get("status") == "action_required":
             raise RuntimeError(f"Unexpected action required: {result}")
-        audio_path = OUTPUT_DIR / f"liee_{language}_two_measures.wav"
+        audio_path = OUTPUT_DIR / f"liee_{language}_phoneme_coverage.wav"
         save_audio(result["waveform"], audio_path, sample_rate=result["sample_rate"])
         requests.append(
             {

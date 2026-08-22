@@ -169,14 +169,14 @@ def _map_score_parts_to_raw_part_ids(
     raw_part_names = {part.part_id: part.part_name for part in raw_parts}
     raw_ids_by_name: Dict[str, List[str]] = {}
     for raw_part in raw_parts:
-        normalized_name = str(raw_part.part_name or "").strip()
+        normalized_name = _normalize_part_name(raw_part.part_name)
         if normalized_name:
             raw_ids_by_name.setdefault(normalized_name, []).append(raw_part.part_id)
 
     result: Dict[int, str] = {}
     for index, part in enumerate(score.parts):
         parser_part_id = str(part.id or "").strip()
-        parser_part_name = str(part.partName or "").strip()
+        parser_part_name = _normalize_part_name(part.partName)
         raw_part_id = parser_part_id if parser_part_id in raw_part_names else ""
         if not raw_part_id:
             candidates = raw_ids_by_name.get(parser_part_name, [])
@@ -199,6 +199,16 @@ def _map_score_parts_to_raw_part_ids(
         if raw_part_id:
             result[index] = raw_part_id
     return result
+
+
+def _normalize_part_name(value: object) -> str:
+    """Normalize display-only whitespace before matching raw and parser parts.
+
+    MusicXML exporters may line-break a part name for engraving, while music21
+    returns the same name with a single space.  Collapsing whitespace preserves
+    name matching without changing any public parser-visible identifier.
+    """
+    return " ".join(str(value or "").split())
 
 
 def _local_name(tag: str) -> str:
