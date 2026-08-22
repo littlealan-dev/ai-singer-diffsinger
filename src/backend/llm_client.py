@@ -108,7 +108,7 @@ class RegressionLlmClient:
         scenario = next(
             (
                 name
-                for name in ("basic", "solfege", "split-staff", "split-chords")
+                for name in ("basic", "solfege", "split-staff", "split-chords", "two-verses")
                 if f"[e2e:{name}]" in transcript
             ),
             None,
@@ -197,6 +197,15 @@ class RegressionLlmClient:
                 "synthesize",
                 {"part_index": 1, "lyric_selection": lyric_selection},
             )
+        if scenario == "two-verses":
+            if latest.startswith("[e2e:"):
+                return self._response("Choose the displayed part and verse.")
+            if "Please sing" in latest:
+                return self._response(
+                    "Starting the selected verse.",
+                    "synthesize",
+                    {"part_index": 0, "lyric_selection": self._verse_one},
+                )
         if latest.startswith("[e2e:"):
             if scenario == "basic":
                 return self._response(

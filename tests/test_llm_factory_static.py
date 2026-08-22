@@ -102,3 +102,30 @@ def test_regression_llm_uses_the_display_part_id_for_solfege(monkeypatch):
     assert payload is not None
     assert payload.tool_calls[0].name == "add_solfege_lyric_verse"
     assert payload.tool_calls[0].arguments["part_id"] == "Solo"
+
+
+def test_regression_llm_waits_for_two_verse_selection_then_synthesizes_verse_one(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("BACKEND_E2E_TEST_MODE", "1")
+    monkeypatch.setenv("LLM_PROVIDER", "regression")
+    client = create_llm_client(Settings.from_env())
+
+    assert client is not None
+    initial = parse_llm_response(
+        client.generate("", [{"role": "user", "content": "[e2e:two-verses] prepare this fixture"}])
+    )
+    selected = parse_llm_response(
+        client.generate(
+            "",
+            [
+                {"role": "user", "content": "[e2e:two-verses] prepare this fixture"},
+                {"role": "user", "content": "Please sing the Solo part, verse 1."},
+            ],
+        )
+    )
+
+    assert initial is not None
+    assert initial.tool_calls == []
+    assert selected is not None
+    assert selected.tool_calls[0].name == "synthesize"
+    assert selected.tool_calls[0].arguments["lyric_selection"]["number"] == "1"
