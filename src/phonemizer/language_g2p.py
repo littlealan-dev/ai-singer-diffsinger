@@ -16,7 +16,7 @@ from typing import Optional, Protocol, Sequence
 
 from g2p_en import G2p
 
-from .openutau_es_g2p import OpenUtauSpanishG2p
+from .openutau_es_g2p import OpenUtauFrenchMillefeuilleG2p, OpenUtauSpanishG2p
 
 
 ARPABET_TO_VOICEBANK = {
@@ -128,3 +128,73 @@ class DiffSingerSpanishPhonemizer:
 
     def phonemize(self, token: str) -> Sequence[str]:
         return self._g2p.phonemize(token)
+
+
+class DiffSingerFrenchMillefeuillePhonemizer:
+    """French fallback using OpenUtau's ``g2p-fr-millefeuille`` pack."""
+
+    language = "fr"
+
+    def __init__(self) -> None:
+        self._g2p = OpenUtauFrenchMillefeuilleG2p()
+
+    def phonemize(self, token: str) -> Sequence[str]:
+        return self._g2p.phonemize(token)
+
+
+class DiffSingerCantoneseJyutpingPhonemizer:
+    """Map tone-free Jyutping syllables to LIEE's shared phone inventory.
+
+    OpenUtau's DIFFS ZH-YUE phonemizer first converts Hanzi to tone-free
+    Jyutping. LIEE's shipped ``dsdict-zh-yue.yaml`` supplies the common phone
+    symbols but no Jyutping word entries, so SightSinger expands each Jyutping
+    syllable here before applying the dictionary's replacements.
+    """
+
+    language = "zh-yue"
+    _ONSETS = (
+        ("gw", ("g", "w")),
+        ("kw", ("k", "w")),
+        ("ng", ("ng",)),
+        ("b", ("b",)), ("p", ("p",)), ("m", ("m",)), ("f", ("f",)),
+        ("d", ("d",)), ("t", ("t",)), ("n", ("n",)), ("l", ("l",)),
+        ("g", ("g",)), ("k", ("k",)), ("h", ("h",)), ("w", ("w",)),
+        ("z", ("dz",)), ("c", ("cz",)), ("s", ("s",)), ("j", ("j",)),
+    )
+    _RIMES = {
+        "aap": ("aa", "p"), "aat": ("aa", "t"), "aak": ("aa", "k"),
+        "aam": ("aa", "m"), "aan": ("aa", "n"), "aang": ("aa", "ng"),
+        "aai": ("aa", "y"), "aau": ("aa", "w"), "aa": ("aa",),
+        "ap": ("a", "p"), "at": ("a", "t"), "ak": ("a", "k"),
+        "am": ("a", "m"), "an": ("a", "n"), "ang": ("a", "ng"),
+        "ai": ("a", "y"), "au": ("a", "w"), "a": ("a",),
+        "oet": ("E", "t"), "oek": ("E", "k"), "oeng": ("E", "ng"),
+        "oen": ("E", "n"), "oei": ("E", "y"), "oe": ("E",),
+        "eot": ("eh", "t"), "eon": ("eh", "n"), "eoi": ("eh", "y"),
+        "eo": ("eh",),
+        "ep": ("e", "p"), "et": ("e", "t"), "ek": ("e", "k"),
+        "em": ("e", "m"), "en": ("e", "n"), "eng": ("e", "ng"),
+        "ei": ("e", "y"), "eu": ("e", "w"), "e": ("e",),
+        "op": ("o", "p"), "ot": ("o", "t"), "ok": ("o", "k"),
+        "om": ("o", "m"), "on": ("o", "n"), "ong": ("o", "ng"),
+        "oi": ("o", "y"), "ou": ("o", "w"), "o": ("o",),
+        "yut": ("y", "u", "t"), "yun": ("y", "u", "n"), "yung": ("y", "u", "ng"),
+        "yu": ("y", "u"),
+        "ip": ("i", "p"), "it": ("i", "t"), "ik": ("i", "k"),
+        "im": ("i", "m"), "in": ("i", "n"), "ing": ("i", "ng"),
+        "iu": ("i", "w"), "i": ("i",),
+        "up": ("u", "p"), "ut": ("u", "t"), "uk": ("u", "k"),
+        "um": ("u", "m"), "un": ("u", "n"), "ung": ("u", "ng"),
+        "ui": ("u", "y"), "u": ("u",),
+        "m": ("m",), "ng": ("ng",),
+    }
+
+    def phonemize(self, token: str) -> Sequence[str]:
+        syllable = str(token).lower().rstrip("123456")
+        for onset, phones in self._ONSETS:
+            if syllable.startswith(onset) and syllable != onset:
+                rime = syllable[len(onset):]
+                mapped_rime = self._RIMES.get(rime)
+                if mapped_rime is not None:
+                    return (*phones, *mapped_rime)
+        return self._RIMES.get(syllable, ())

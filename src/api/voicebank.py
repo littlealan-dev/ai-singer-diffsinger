@@ -134,6 +134,27 @@ def load_voicebank_config(voicebank_path: Union[str, Path]) -> Dict[str, Any]:
     return config
 
 
+def resolve_phonemizer_languages_path(
+    voicebank_path: Union[str, Path],
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[Path]:
+    """Return the language-ID map required for phonemization, when applicable.
+
+    ``languages.json`` describes model conditioning IDs, not necessarily the
+    lyric languages a cross-language voicebank can pronounce.  When a bank
+    opts out of language-ID conditioning, the map must not reject an otherwise
+    valid language-specific dictionary such as ``dsdict-en.yaml``.
+    """
+    path = Path(voicebank_path)
+    resolved_config = config if config is not None else load_voicebank_config(path)
+    if not bool(resolved_config.get("use_lang_id", False)):
+        return None
+    languages_ref = resolved_config.get("languages")
+    if not isinstance(languages_ref, str) or not languages_ref.strip():
+        return None
+    return (path / languages_ref).resolve()
+
+
 def _resolve_vocoder_model_from_dir(vocoder_dir: Path) -> Optional[Path]:
     """Resolve a vocoder model file from a directory or its vocoder.yaml."""
     vocoder_yaml = vocoder_dir / "vocoder.yaml"

@@ -1,8 +1,8 @@
-"""Spanish G2P fallback compatible with OpenUtau's DiffSinger phonemizer.
+"""OpenUtau G2P fallbacks compatible with DiffSinger phonemizers.
 
-The bundled model is OpenUtau's ``g2p-es.zip`` resource.  OpenUtau uses its
-word dictionary first and then this model for a Spanish word that is absent
-from ``dsdict-es.yaml``; this module follows the same order.
+Each bundled resource has OpenUtau's word dictionary and ONNX G2P model.
+OpenUtau uses its dictionary first and then its model for a missing word; this
+module follows the same order.
 """
 
 from __future__ import annotations
@@ -28,6 +28,21 @@ _PHONEMES = (
     "U", "w", "x", "y", "Y", "z",
 )
 _MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-es.zip"
+
+_FRENCH_MILLEFEUILLE_GRAPHEMES = (
+    "", "", "", "", "'", "-", "a", "b", "c", "d", "e", "f", "g", "h", "i",
+    "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w",
+    "x", "y", "z", "é", "è", "ê", "à", "â", "î", "ô", "ù", "û", "ç", "œ",
+    "ï", "(", ")", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+)
+_FRENCH_MILLEFEUILLE_PHONEMES = (
+    "", "", "", "", "ah", "eh", "ae", "ee", "oe", "ih", "oh", "oo", "ou",
+    "uh", "en", "in", "on", "uy", "y", "w", "f", "k", "p", "s", "sh", "t",
+    "h", "b", "d", "g", "l", "m", "n", "r", "v", "z", "j", "ng", "q",
+)
+_FRENCH_MILLEFEUILLE_MODEL_PATH = (
+    Path(__file__).with_name("assets") / "openutau" / "g2p-fr-millefeuille.zip"
+)
 
 
 @lru_cache(maxsize=None)
@@ -103,4 +118,19 @@ class OpenUtauSpanishG2p:
     @lru_cache(maxsize=4096)
     def phonemize(self, word: str) -> Tuple[str, ...]:
         """Return bare OpenUtau Spanish phonemes for a normalized lyric word."""
+        return self._pack.phonemize(word)
+
+
+class OpenUtauFrenchMillefeuilleG2p:
+    """French configuration of OpenUtau's ``g2p-fr-millefeuille`` pack."""
+
+    _pack = OpenUtauG2pPack(
+        path=_FRENCH_MILLEFEUILLE_MODEL_PATH,
+        graphemes=_FRENCH_MILLEFEUILLE_GRAPHEMES,
+        phonemes=_FRENCH_MILLEFEUILLE_PHONEMES,
+    )
+
+    @lru_cache(maxsize=4096)
+    def phonemize(self, word: str) -> Tuple[str, ...]:
+        """Return bare OpenUtau French Millefeuille phonemes for a lyric word."""
         return self._pack.phonemize(word)

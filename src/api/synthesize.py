@@ -24,6 +24,7 @@ from src.api.diffsinger_stage_tokens import build_stage_token_bundle
 from src.api.voicebank import (
     load_voicebank_config,
     resolve_default_voice_color,
+    resolve_phonemizer_languages_path,
     resolve_voice_color_speaker,
 )
 from src.api.voice_parts import build_infeasible_anchor_action_required
@@ -1032,9 +1033,7 @@ def _init_phonemizer(
     """Create a phonemizer configured for a voicebank."""
     config = load_voicebank_config(voicebank_path)
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
-    languages_path = None
-    if "languages" in config:
-        languages_path = (voicebank_path / config["languages"]).resolve()
+    languages_path = resolve_phonemizer_languages_path(voicebank_path, config)
     dictionary_path = _find_dictionary(voicebank_path, language=language)
     return Phonemizer(
         phonemes_path=phonemes_path,

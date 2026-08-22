@@ -10,8 +10,13 @@ from pathlib import Path
 import tempfile
 
 from src.api import phonemize
+from src.api.phonemize import _find_dictionary
 from src.phonemizer import Phonemizer, UnsupportedLyricTokenError
-from src.phonemizer.language_g2p import DiffSingerSpanishPhonemizer
+from src.phonemizer.language_g2p import (
+    DiffSingerCantoneseJyutpingPhonemizer,
+    DiffSingerFrenchMillefeuillePhonemizer,
+    DiffSingerSpanishPhonemizer,
+)
 from src.phonemizer.language_pronunciation import (
     LanguagePronunciationRegistry,
     get_language_pronunciation_pipeline,
@@ -27,6 +32,7 @@ KEIRO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Keiro_Revenant_v1
 QIXUAN_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Qixuan_v2.7.0_DiffSinger_OpenUtau"
 PM_INDIGO_ROOT = Path(__file__).parent.parent / "assets/voicebanks/PM-31_Commercial_Indigo"
 PM_SCARLET_ROOT = Path(__file__).parent.parent / "assets/voicebanks/PM-31_Commercial_Scarlet"
+LIEE_ROOT = Path(__file__).parent.parent / "assets/voicebanks/Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
 
 
 class PhonemizerClassTests(unittest.TestCase):
@@ -43,6 +49,33 @@ class PhonemizerClassTests(unittest.TestCase):
                 language="en",
             )
         self.assertIn("dsdict.yaml", str(ctx.exception))
+
+    def test_dictionary_language_is_allowed_when_model_language_ids_are_disabled(self) -> None:
+        """Cross-language banks must not treat model IDs as lyric-language limits."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            duration_dir = root / "dsdur"
+            duration_dir.mkdir()
+            (root / "dsconfig.yaml").write_text(
+                "phonemes: phonemes.json\n"
+                "languages: languages.json\n"
+                "use_lang_id: false\n",
+                encoding="utf8",
+            )
+            (root / "phonemes.json").write_text(
+                '{"SP": 0, "AP": 1, "hh": 2, "ah": 3}',
+                encoding="utf8",
+            )
+            (root / "languages.json").write_text('{"mm": 1}', encoding="utf8")
+            (duration_dir / "dsdict-en.yaml").write_text(
+                "entries:\n  - grapheme: hello\n    phonemes: [hh, ah]\n",
+                encoding="utf8",
+            )
+
+            result = phonemize(["hello"], root, language="en")
+
+        self.assertEqual(result["phonemes"], ["hh", "ah"])
+        self.assertEqual(result["language_ids"], [0, 0])
 
     def test_g2p_fallback_with_language_id(self) -> None:
         """G2P should produce phonemes with language prefixes."""
@@ -199,7 +232,34 @@ class PhonemizerClassTests(unittest.TestCase):
         self.assertIsInstance(pipeline.g2p_fallback, DiffSingerSpanishPhonemizer)
         self.assertEqual(
             LanguagePronunciationRegistry.registered_languages(),
-            ("en", "es", "ja", "zh"),
+            ("en", "es", "fr", "ja", "zh", "zh-yue"),
+        )
+
+    def test_french_g2p_is_resolved_by_the_language_registry(self) -> None:
+        pipeline = get_language_pronunciation_pipeline("fr")
+
+        self.assertIsInstance(pipeline.g2p_fallback, DiffSingerFrenchMillefeuillePhonemizer)
+
+    def test_cantonese_jyutping_is_phrase_romanized_and_resolved_by_registry(self) -> None:
+        pipeline = get_language_pronunciation_pipeline("zh-yue")
+
+        self.assertIsInstance(pipeline.g2p_fallback, DiffSingerCantoneseJyutpingPhonemizer)
+        prepared = pipeline.prepare(["你", "好"])
+        self.assertEqual([lyric.lookup for lyric in prepared], ["nei", "hou"])
+        self.assertEqual(pipeline.g2p_fallback.phonemize("nei"), ("n", "e", "y"))
+        self.assertEqual(pipeline.g2p_fallback.phonemize("hou"), ("h", "o", "w"))
+
+    @unittest.skipUnless(LIEE_ROOT.is_dir(), "LIEE voicebank is not installed")
+    def test_liee_french_and_cantonese_fallbacks_produce_model_phones(self) -> None:
+        """The two LIEE fixtures cover the real dictionaries and shared inventory."""
+        french = phonemize(["Bon", "jour", "mon", "ami"], LIEE_ROOT, language="fr")
+        cantonese = phonemize(["你", "好", "我", "好"], LIEE_ROOT, language="zh-yue")
+
+        self.assertEqual(french["word_boundaries"], [2, 3, 2, 3])
+        self.assertEqual(cantonese["word_boundaries"], [3, 3, 2, 3])
+        self.assertEqual(
+            _find_dictionary(LIEE_ROOT, language="zh-yue").name,
+            "dsdict.yaml",
         )
 
     def test_qixuan_spanish_uses_native_phone_approximation_dictionary(self) -> None:

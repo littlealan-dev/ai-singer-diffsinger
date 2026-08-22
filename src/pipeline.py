@@ -12,7 +12,7 @@ from src.phonemizer.phonemizer import Phonemizer
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
 from src.vocoder.model import Vocoder
 from src.musicxml.parser import parse_musicxml, ScoreData, NoteEvent, TempoEvent
-from src.api.voicebank import resolve_vocoder_model_path
+from src.api.voicebank import resolve_phonemizer_languages_path, resolve_vocoder_model_path
 from src.api.voicebank_cache import resolve_manifest_pitch_expression
 
 
@@ -190,9 +190,7 @@ class Pipeline:
         """
         conf = yaml.safe_load((self.root / "dsconfig.yaml").read_text())
         phonemes_path = (self.root / conf["phonemes"]).resolve()
-        languages_path = None
-        if "languages" in conf:
-            languages_path = (self.root / conf["languages"]).resolve()
+        languages_path = resolve_phonemizer_languages_path(self.root, conf)
         dictionary_path = self._resolve_dictionary_path()
         return Phonemizer(
             phonemes_path=phonemes_path,

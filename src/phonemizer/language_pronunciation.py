@@ -16,9 +16,12 @@ import unicodedata
 
 from pykakasi import kakasi
 from pypinyin import Style, lazy_pinyin
+from ToJyutping import get_jyutping_list
 
 from .language_g2p import (
+    DiffSingerCantoneseJyutpingPhonemizer,
     DiffSingerEnglishPhonemizer,
+    DiffSingerFrenchMillefeuillePhonemizer,
     DiffSingerSpanishPhonemizer,
     LanguageG2pProvider,
 )
@@ -238,6 +241,44 @@ class OpenUtauChineseRomanizer:
         )
 
 
+class OpenUtauCantoneseRomanizer:
+    """Prepare Cantonese Hanzi as tone-free Jyutping for DIFFS ZH-YUE.
+
+    This has the same phrase-aware shape as the Mandarin preparation above.
+    ``csharp-pinyin`` is OpenUtau's implementation dependency; ToJyutping is
+    its Python replacement here and returns a Jyutping syllable per Hanzi.
+    """
+
+    _hanzi_token = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff]$")
+
+    @staticmethod
+    def _jyutping_phrase(tokens: Sequence[str]) -> Sequence[str]:
+        converted = get_jyutping_list("".join(tokens))
+        return tuple(
+            re.sub(r"[1-6]+$", "", str(value or "")).lower()
+            for _, value in converted
+        )
+
+    def prepare(self, lyrics: Sequence[PreparedLyric]) -> Sequence[PreparedLyric]:
+        lookups = [lyric.lookup for lyric in lyrics]
+        index = 0
+        while index < len(lookups):
+            if not self._hanzi_token.fullmatch(lookups[index]):
+                index += 1
+                continue
+            end = index + 1
+            while end < len(lookups) and self._hanzi_token.fullmatch(lookups[end]):
+                end += 1
+            jyutping = self._jyutping_phrase(lookups[index:end])
+            if len(jyutping) == end - index and all(jyutping):
+                lookups[index:end] = jyutping
+            index = end
+        return tuple(
+            PreparedLyric(original=lyric.original, lookup=lookup)
+            for lyric, lookup in zip(lyrics, lookups)
+        )
+
+
 @dataclass(frozen=True)
 class LanguagePronunciationPipeline:
     """Language behavior applied before and after voicebank dictionary lookup."""
@@ -303,6 +344,20 @@ LanguagePronunciationRegistry.register(
 )
 LanguagePronunciationRegistry.register(
     LanguagePronunciationPipeline(language="zh", romanizer=OpenUtauChineseRomanizer())
+)
+LanguagePronunciationRegistry.register(
+    LanguagePronunciationPipeline(
+        language="fr",
+        romanizer=IdentityRomanizer(),
+        g2p_fallback=DiffSingerFrenchMillefeuillePhonemizer(),
+    )
+)
+LanguagePronunciationRegistry.register(
+    LanguagePronunciationPipeline(
+        language="zh-yue",
+        romanizer=OpenUtauCantoneseRomanizer(),
+        g2p_fallback=DiffSingerCantoneseJyutpingPhonemizer(),
+    )
 )
 
 

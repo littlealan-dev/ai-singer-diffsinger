@@ -449,7 +449,11 @@ class Phonemizer:
         for replacement in data.get("replacements", []) if isinstance(data, dict) else []:
             if not isinstance(replacement, dict):
                 continue
-            source = str(replacement.get("from", "")).strip()
+            source_value = replacement.get("from", "")
+            # PyYAML's YAML 1.1 compatibility resolves an unquoted ``on`` as
+            # boolean True. OpenUtau dictionaries use it as a phoneme symbol,
+            # so retain the intended token rather than registering ``True``.
+            source = "on" if source_value is True else str(source_value).strip()
             target = replacement.get("to", "")
             if isinstance(target, (list, tuple)):
                 targets = [str(item).strip() for item in target if str(item).strip()]

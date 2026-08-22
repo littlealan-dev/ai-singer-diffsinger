@@ -6,8 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import yaml
+
 from src.phonemizer.phonemizer import Phonemizer
-from src.api.voicebank import load_voicebank_config
+from src.api.voicebank import load_voicebank_config, resolve_phonemizer_languages_path
 from src.api.voicebank_cache import (
     resolve_manifest_japanese_dictionary_form,
     resolve_manifest_pronunciation_adapters,
@@ -111,9 +113,7 @@ def phonemize(
     
     # Resolve paths from config.
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
-    languages_path = None
-    if "languages" in config:
-        languages_path = (voicebank_path / config["languages"]).resolve()
+    languages_path = resolve_phonemizer_languages_path(voicebank_path, config)
     
     # Find dictionary for token-to-phoneme lookup.
     dictionary_path = _find_dictionary(voicebank_path, language=language)
@@ -223,11 +223,24 @@ def _dictionary_candidates(voicebank_path: Path, language: str = "en") -> List[P
 
 
 def _find_dictionary(voicebank_path: Path, language: str = "en") -> Path:
-    """Find phoneme dictionary in voicebank."""
+    """Find the first parseable phoneme dictionary in a voicebank.
+
+    A language-specific resource is preferred, but an invalid upstream YAML
+    file must not prevent a valid generic dictionary from being used. This is
+    relevant to LIEE's current ``dsdict-zh-yue.yaml``, which has one malformed
+    replacement entry and no word entries of its own.
+    """
     candidates = _dictionary_candidates(voicebank_path, language=language)
     for path in candidates:
-        if path.exists():
-            return path.resolve()
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as dictionary_file:
+                yaml.safe_load(dictionary_file)
+        except yaml.YAMLError as exc:
+            logger.warning("Skipping invalid phoneme dictionary %s: %s", path, exc)
+            continue
+        return path.resolve()
     raise FileNotFoundError(
         f"Could not find phoneme dictionary for language '{language}' in {voicebank_path}"
     )

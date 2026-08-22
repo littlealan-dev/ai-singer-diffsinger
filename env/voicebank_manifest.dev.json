@@ -371,6 +371,32 @@
       "use_lang_id": true,
       "gender": null,
       "voice_type": null
+    },
+    {
+      "id": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
+      "enabled": true,
+      "storage_object": "assets/voicebanks/Diffsinger_LIEE_Immortal_Idol_JubiLIEE_2025.tar.gz",
+      "name": "LIEE: Immortal Idol 'Lilia' (2025)",
+      "profile_image": "liee_immortal_idol_2025.png",
+      "selector_image": "liee_immortal_idol_2025.png",
+      "path_hint": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
+      "languages": [
+        "de", "en", "es", "fil", "fr", "it", "ja", "ko", "pl",
+        "pt", "pt-eu", "ru", "tl", "vi", "zh", "zh-yue"
+      ],
+      "japanese_dictionary_form": "kana",
+      "has_duration_model": true,
+      "has_pitch_model": true,
+      "has_variance_model": true,
+      "speakers": [],
+      "voice_colors": [],
+      "default_voice_color": null,
+      "pitch_expression": 1.0,
+      "sample_rate": 44100,
+      "hop_size": 512,
+      "use_lang_id": false,
+      "gender": null,
+      "voice_type": "alto"
     }
   ]
 }
