@@ -68,6 +68,9 @@ assets
 !src/phonemizer/assets/openutau/g2p-it.zip
 !src/phonemizer/assets/openutau/g2p-pt.zip
 !src/phonemizer/assets/openutau/NOTICE
+!src/phonemizer/assets/openutau/g2p_packs.yaml
+!src/phonemizer/assets/openutau/lexicons/
+!src/phonemizer/assets/openutau/lexicons/it.yaml
 logs/
 runs/
 checkpoints/

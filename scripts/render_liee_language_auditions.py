@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the short LIEE French and Cantonese auditions without a live LLM.
+"""Render short LIEE language auditions without a live LLM.
 
 The static client provides the same structured ``synthesize`` call that the
 backend accepts. The script then asserts the selected language before handing
@@ -24,10 +24,11 @@ from src.backend.llm_prompt import parse_llm_response
 
 VOICEBANK = ROOT / "assets/voicebanks/Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
 FIXTURES = (
-    ("fr", ROOT / "tests/fixtures/liee_french_phoneme_coverage.musicxml"),
-    ("it", ROOT / "tests/fixtures/liee_italian_phoneme_coverage.musicxml"),
-    ("pt", ROOT / "tests/fixtures/liee_portuguese_phoneme_coverage.musicxml"),
-    ("es", ROOT / "tests/fixtures/liee_spanish_phoneme_coverage.musicxml"),
+    ("fr", "french_phoneme_coverage", ROOT / "tests/fixtures/liee_french_phoneme_coverage.musicxml"),
+    ("it", "italian_phoneme_coverage", ROOT / "tests/fixtures/liee_italian_phoneme_coverage.musicxml"),
+    ("it", "italian_cia_lexicon", ROOT / "tests/fixtures/liee_italian_cia_lexicon.musicxml"),
+    ("pt", "portuguese_phoneme_coverage", ROOT / "tests/fixtures/liee_portuguese_phoneme_coverage.musicxml"),
+    ("es", "spanish_phoneme_coverage", ROOT / "tests/fixtures/liee_spanish_phoneme_coverage.musicxml"),
 )
 OUTPUT_DIR = ROOT / "tests/output/liee_language_auditions"
 
@@ -66,7 +67,7 @@ def main() -> None:
         raise FileNotFoundError(f"LIEE voicebank not found: {VOICEBANK}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     requests: list[dict[str, object]] = []
-    for language, fixture in FIXTURES:
+    for language, output_name, fixture in FIXTURES:
         request = _fake_synthesize_request(language)
         score = parse_score(fixture, verse_number=1)
         result = synthesize(
@@ -77,7 +78,7 @@ def main() -> None:
         )
         if result.get("status") == "action_required":
             raise RuntimeError(f"Unexpected action required: {result}")
-        audio_path = OUTPUT_DIR / f"liee_{language}_phoneme_coverage.wav"
+        audio_path = OUTPUT_DIR / f"liee_{output_name}.wav"
         save_audio(result["waveform"], audio_path, sample_rate=result["sample_rate"])
         requests.append(
             {

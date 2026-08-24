@@ -19,6 +19,13 @@ from src.phonemizer.language_g2p import (
     DiffSingerPortuguesePhonemizer,
     DiffSingerSpanishPhonemizer,
 )
+from src.phonemizer.openutau_g2p import (
+    OpenUtauFrenchMillefeuilleG2p,
+    OpenUtauItalianG2p,
+    OpenUtauPortugueseG2p,
+    OpenUtauSpanishG2p,
+    _load_overlay_lexicon,
+)
 from src.phonemizer.language_pronunciation import (
     LanguagePronunciationRegistry,
     get_language_pronunciation_pipeline,
@@ -256,6 +263,32 @@ class PhonemizerClassTests(unittest.TestCase):
             DiffSingerPortuguesePhonemizer,
         )
 
+    def test_italian_lexicon_overrides_stress_ambiguous_cia_words(self) -> None:
+        """Lexical entries retain the pronounced /i/ in ``-cia`` words."""
+        g2p = OpenUtauItalianG2p()
+
+        self.assertEqual(g2p.phonemize("Lucia"), ("l", "u", "tSS", "i", "a"))
+        self.assertEqual(
+            g2p.phonemize("farmacia"),
+            ("f", "a", "r", "m", "a", "tSS", "i", "a"),
+        )
+        # These ordinary spellings stay with the OpenUtau dictionary/ONNX path.
+        self.assertEqual(g2p.phonemize("ciao"), ("tSS", "a", "o"))
+        self.assertEqual(g2p.phonemize("focaccia"), ("f", "o", "k", "a", "t", "tSS", "a"))
+        self.assertEqual(g2p.phonemize("cuore"), ("k", "w", "OO", "r", "e"))
+
+    def test_packs_without_an_app_lexicon_keep_their_existing_outputs(self) -> None:
+        """A lexicon configured for Italian must not affect the other G2P packs."""
+        self.assertEqual(_load_overlay_lexicon("es"), {})
+        self.assertEqual(_load_overlay_lexicon("fr"), {})
+        self.assertEqual(_load_overlay_lexicon("pt"), {})
+        self.assertEqual(OpenUtauSpanishG2p().phonemize("salve"), ("s", "a", "l", "B", "e"))
+        self.assertEqual(
+            OpenUtauFrenchMillefeuilleG2p().phonemize("bonjour"),
+            ("b", "on", "j", "ou", "r"),
+        )
+        self.assertEqual(OpenUtauPortugueseG2p().phonemize("olá"), ("o", "l", "a"))
+
     def test_cantonese_jyutping_is_phrase_romanized_and_resolved_by_registry(self) -> None:
         pipeline = get_language_pronunciation_pipeline("zh-yue")
 
@@ -281,6 +314,7 @@ class PhonemizerClassTests(unittest.TestCase):
         """The two LIEE fixtures cover the real dictionaries and shared inventory."""
         french = phonemize(["Bon", "jour", "mon", "ami"], LIEE_ROOT, language="fr")
         italian = phonemize(["Ciao", "bella", "mio", "amore"], LIEE_ROOT, language="it")
+        italian_lexical = phonemize(["Lucia", "farmacia"], LIEE_ROOT, language="it")
         portuguese = phonemize(["Olá", "meu", "amor", "coração"], LIEE_ROOT, language="pt")
         european_portuguese = phonemize(
             ["Olá", "meu", "amor", "coração"], LIEE_ROOT, language="pt-eu"
@@ -289,6 +323,11 @@ class PhonemizerClassTests(unittest.TestCase):
 
         self.assertEqual(french["word_boundaries"], [2, 3, 2, 3])
         self.assertEqual(italian["word_boundaries"], [3, 5, 3, 5])
+        self.assertEqual(italian_lexical["phonemes"], [
+            "l", "u", "ch", "i", "a",
+            "f", "a", "dx", "m", "a", "ch", "i", "a",
+        ])
+        self.assertEqual(italian_lexical["word_boundaries"], [5, 8])
         self.assertEqual(portuguese["word_boundaries"], [3, 3, 4, 7])
         self.assertEqual(european_portuguese["word_boundaries"], [3, 3, 4, 7])
         self.assertEqual(cantonese["word_boundaries"], [3, 3, 2, 3])

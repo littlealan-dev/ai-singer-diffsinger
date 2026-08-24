@@ -16,7 +16,7 @@ from typing import Optional, Protocol, Sequence
 
 from g2p_en import G2p
 
-from .openutau_es_g2p import (
+from .openutau_g2p import (
     OpenUtauFrenchMillefeuilleG2p,
     OpenUtauItalianG2p,
     OpenUtauPortugueseG2p,

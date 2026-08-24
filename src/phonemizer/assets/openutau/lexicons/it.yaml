@@ -1,0 +1,5 @@
+# Lexical pronunciations that cannot be inferred reliably from spelling alone.
+# Phone symbols are the bare output expected by OpenUtau's g2p-it pack.
+entries:
+  lucia: [l, u, tSS, i, a]
+  farmacia: [f, a, r, m, a, tSS, i, a]

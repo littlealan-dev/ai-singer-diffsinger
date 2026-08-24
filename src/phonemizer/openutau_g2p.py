@@ -1,8 +1,9 @@
 """OpenUtau G2P fallbacks compatible with DiffSinger phonemizers.
 
 Each bundled resource has OpenUtau's word dictionary and ONNX G2P model.
-OpenUtau uses its dictionary first and then its model for a missing word; this
-module follows the same order.
+OpenUtau uses its dictionary first and then its model for a missing word.  An
+optional SightSinger lexicon overlay can supply corrections for words whose
+pronunciation requires lexical information that an ONNX fallback cannot infer.
 """
 
 from __future__ import annotations
@@ -11,11 +12,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 import re
-from typing import Dict, Tuple
+from typing import Dict, Mapping, Tuple
 import zipfile
 
 import numpy as np
 import onnxruntime as ort
+import yaml
 
 
 _GRAPHEMES = (
@@ -28,7 +30,10 @@ _PHONEMES = (
     "i", "I", "k", "l", "ll", "m", "n", "o", "p", "r", "rr", "s", "t", "u",
     "U", "w", "x", "y", "Y", "z",
 )
-_MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-es.zip"
+_OPENUTAU_ASSET_ROOT = Path(__file__).with_name("assets") / "openutau"
+_G2P_PACK_CONFIG_PATH = _OPENUTAU_ASSET_ROOT / "g2p_packs.yaml"
+
+_MODEL_PATH = _OPENUTAU_ASSET_ROOT / "g2p-es.zip"
 
 _FRENCH_MILLEFEUILLE_GRAPHEMES = (
     "", "", "", "", "'", "-", "a", "b", "c", "d", "e", "f", "g", "h", "i",
@@ -41,9 +46,7 @@ _FRENCH_MILLEFEUILLE_PHONEMES = (
     "uh", "en", "in", "on", "uy", "y", "w", "f", "k", "p", "s", "sh", "t",
     "h", "b", "d", "g", "l", "m", "n", "r", "v", "z", "j", "ng", "q",
 )
-_FRENCH_MILLEFEUILLE_MODEL_PATH = (
-    Path(__file__).with_name("assets") / "openutau" / "g2p-fr-millefeuille.zip"
-)
+_FRENCH_MILLEFEUILLE_MODEL_PATH = _OPENUTAU_ASSET_ROOT / "g2p-fr-millefeuille.zip"
 _ITALIAN_GRAPHEMES = (
     "", "", "", "", "'", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x",
@@ -54,7 +57,7 @@ _ITALIAN_PHONEMES = (
     "j", "JJ", "k", "l", "LL", "m", "n", "nf", "ng", "o", "OO", "p", "r",
     "s", "SS", "t", "ts", "tSS", "u", "v", "w", "z",
 )
-_ITALIAN_MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-it.zip"
+_ITALIAN_MODEL_PATH = _OPENUTAU_ASSET_ROOT / "g2p-it.zip"
 _PORTUGUESE_GRAPHEMES = (
     "", "", "", "", "-", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x",
@@ -66,7 +69,56 @@ _PORTUGUESE_PHONEMES = (
     "d", "dZ", "e", "e~", "f", "g", "i", "i~", "j", "j~", "k", "l", "m", "n",
     "o", "o~", "p", "r", "s", "t", "tS", "u", "u~", "v", "w", "w~", "z",
 )
-_PORTUGUESE_MODEL_PATH = Path(__file__).with_name("assets") / "openutau" / "g2p-pt.zip"
+_PORTUGUESE_MODEL_PATH = _OPENUTAU_ASSET_ROOT / "g2p-pt.zip"
+
+
+@lru_cache(maxsize=1)
+def _load_g2p_pack_config() -> Mapping[str, Mapping[str, str]]:
+    """Load optional per-pack configuration without language-specific code."""
+    if not _G2P_PACK_CONFIG_PATH.is_file():
+        return {}
+    loaded = yaml.safe_load(_G2P_PACK_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Expected a mapping in {_G2P_PACK_CONFIG_PATH}.")
+    packs = loaded.get("packs", {})
+    if not isinstance(packs, dict):
+        raise ValueError(f"Expected a 'packs' mapping in {_G2P_PACK_CONFIG_PATH}.")
+    return {
+        str(language): settings
+        for language, settings in packs.items()
+        if isinstance(settings, dict)
+    }
+
+
+@lru_cache(maxsize=None)
+def _load_lexicon(path: str) -> Dict[str, Tuple[str, ...]]:
+    """Load a pronunciation lexicon used ahead of OpenUtau's packed dict."""
+    lexicon_path = Path(path)
+    loaded = yaml.safe_load(lexicon_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Expected a mapping in {lexicon_path}.")
+    entries = loaded.get("entries", {})
+    if not isinstance(entries, dict):
+        raise ValueError(f"Expected an 'entries' mapping in {lexicon_path}.")
+    lexicon: Dict[str, Tuple[str, ...]] = {}
+    for word, phonemes in entries.items():
+        if not isinstance(word, str) or not isinstance(phonemes, list):
+            raise ValueError(f"Invalid pronunciation entry in {lexicon_path}.")
+        if not all(isinstance(phone, str) and phone for phone in phonemes):
+            raise ValueError(f"Invalid phonemes for '{word}' in {lexicon_path}.")
+        lexicon[word.lower()] = tuple(phonemes)
+    return lexicon
+
+
+@lru_cache(maxsize=None)
+def _load_overlay_lexicon(language: str) -> Dict[str, Tuple[str, ...]]:
+    """Resolve a pack's configured app lexicon, if it has one."""
+    settings = _load_g2p_pack_config().get(language, {})
+    relative_path = settings.get("lexicon")
+    if not relative_path:
+        return {}
+    lexicon_path = _OPENUTAU_ASSET_ROOT / relative_path
+    return _load_lexicon(str(lexicon_path))
 
 
 @lru_cache(maxsize=None)
@@ -95,21 +147,27 @@ def _load_pack(
 class OpenUtauG2pPack:
     """Reusable runner for an OpenUtau ``g2p-<language>.zip`` resource."""
 
+    language: str
     path: Path
     graphemes: Tuple[str, ...]
     phonemes: Tuple[str, ...]
     remove_tail_digits: bool = False
+
+    def _normalize_result(self, phonemes: Tuple[str, ...]) -> Tuple[str, ...]:
+        if self.remove_tail_digits:
+            return tuple(re.sub(r"\d+$", "", phone) for phone in phonemes)
+        return phonemes
 
     @lru_cache(maxsize=4096)
     def phonemize(self, word: str) -> Tuple[str, ...]:
         """Return bare phonemes for a normalized lyric word."""
         normalized = str(word).lower()
         dictionary, grapheme_indexes, session = _load_pack(str(self.path), self.graphemes)
+        overlay = _load_overlay_lexicon(self.language)
+        if normalized in overlay:
+            return self._normalize_result(overlay[normalized])
         if normalized in dictionary:
-            result = dictionary[normalized]
-            if self.remove_tail_digits:
-                return tuple(re.sub(r"\\d+$", "", phone) for phone in result)
-            return result
+            return self._normalize_result(dictionary[normalized])
 
         encoded = [
             grapheme_indexes[character]
@@ -138,6 +196,7 @@ class OpenUtauSpanishG2p:
     """Spanish configuration of the reusable OpenUtau G2P pack runner."""
 
     _pack = OpenUtauG2pPack(
+        language="es",
         path=_MODEL_PATH,
         graphemes=_GRAPHEMES,
         phonemes=_PHONEMES,
@@ -153,6 +212,7 @@ class OpenUtauFrenchMillefeuilleG2p:
     """French configuration of OpenUtau's ``g2p-fr-millefeuille`` pack."""
 
     _pack = OpenUtauG2pPack(
+        language="fr",
         path=_FRENCH_MILLEFEUILLE_MODEL_PATH,
         graphemes=_FRENCH_MILLEFEUILLE_GRAPHEMES,
         phonemes=_FRENCH_MILLEFEUILLE_PHONEMES,
@@ -168,6 +228,7 @@ class OpenUtauItalianG2p:
     """Italian configuration of OpenUtau's ``g2p-it`` pack."""
 
     _pack = OpenUtauG2pPack(
+        language="it",
         path=_ITALIAN_MODEL_PATH,
         graphemes=_ITALIAN_GRAPHEMES,
         phonemes=_ITALIAN_PHONEMES,
@@ -184,6 +245,7 @@ class OpenUtauPortugueseG2p:
     """Portuguese configuration of OpenUtau's ``g2p-pt`` pack."""
 
     _pack = OpenUtauG2pPack(
+        language="pt",
         path=_PORTUGUESE_MODEL_PATH,
         graphemes=_PORTUGUESE_GRAPHEMES,
         phonemes=_PORTUGUESE_PHONEMES,

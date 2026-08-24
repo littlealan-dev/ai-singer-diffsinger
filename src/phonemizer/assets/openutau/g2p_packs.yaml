@@ -1,0 +1,5 @@
+# Optional application lexicons for bundled OpenUtau G2P packs.
+# Each lexicon is applied before the package's own dict.txt and ONNX fallback.
+packs:
+  it:
+    lexicon: lexicons/it.yaml
