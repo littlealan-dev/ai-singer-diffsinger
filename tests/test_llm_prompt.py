@@ -391,6 +391,26 @@ def test_build_prompt_bundle_includes_canonical_solfege_settings() -> None:
     assert '"revision": 4' in bundle.dynamic_prompt_text
 
 
+def test_build_prompt_bundle_includes_current_credit_availability() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        current_credit_availability={
+            "available_credits": 53,
+            "monthly_credits_balance": 8,
+            "monthly_credits_reserved": 0,
+            "topup_credits_available": 45,
+        },
+    )
+
+    assert "Treat Current credit availability in Dynamic Context" in bundle.static_prompt_text
+    assert "Current credit availability (authoritative, refreshed for this request):" in (
+        bundle.dynamic_prompt_text
+    )
+    assert '"available_credits": 53' in bundle.dynamic_prompt_text
+    assert '"topup_credits_available": 45' in bundle.dynamic_prompt_text
+
+
 def test_system_prompt_selects_from_language_compatible_voicebanks_before_liee() -> None:
     prompt = build_system_prompt(
         tools=[],

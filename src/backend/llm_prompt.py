@@ -70,6 +70,7 @@ def build_prompt_bundle(
     selected_language: Optional[str] = None,
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
+    current_credit_availability: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
@@ -162,6 +163,11 @@ def build_prompt_bundle(
         solfege_settings_text = json.dumps(
             solfege_settings, indent=2, sort_keys=True, ensure_ascii=False
         )
+    current_credit_availability_text = "unavailable"
+    if current_credit_availability is not None:
+        current_credit_availability_text = json.dumps(
+            current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
+        )
     score_context_update_text = "CURRENT SCORE CONTEXT UPDATED.\n" if score_context_updated else ""
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
@@ -200,6 +206,8 @@ def build_prompt_bundle(
         f"User-selected language override: {selected_language_text}\n"
         "Canonical current solfege settings (authoritative):\n"
         f"{solfege_settings_text}\n"
+        "Current credit availability (authoritative, refreshed for this request):\n"
+        f"{current_credit_availability_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -222,6 +230,7 @@ def build_system_prompt(
     selected_language: Optional[str] = None,
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
+    current_credit_availability: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
@@ -239,6 +248,7 @@ def build_system_prompt(
         selected_language=selected_language,
         score_context_updated=score_context_updated,
         solfege_settings=solfege_settings,
+        current_credit_availability=current_credit_availability,
         role=role,
     )
     return bundle.full_prompt_text

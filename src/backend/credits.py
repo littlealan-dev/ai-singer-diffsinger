@@ -202,9 +202,8 @@ def mark_reservation_reconciliation_required(
         )
         return False
 
-def get_or_create_credits(uid: str, email: str) -> UserCredits:
-    """Fetch user credits after ensuring billing bootstrap or migration is applied."""
-    data = ensure_billing_state_for_login(uid, email)
+def _user_credits_from_data(data: Dict[str, Any]) -> UserCredits:
+    """Build the public credit view from an existing user document."""
     credits_data = data.get("credits") or {}
     topup_data = data.get("topupCredits") or {}
     return UserCredits(
@@ -234,6 +233,21 @@ def get_or_create_credits(uid: str, email: str) -> UserCredits:
         last_grant_at=credits_data.get("lastGrantAt"),
         last_grant_invoice_id=credits_data.get("lastGrantInvoiceId"),
     )
+
+
+def get_credits_by_user_id(uid: str) -> Optional[UserCredits]:
+    """Read an existing user's canonical credit state without mutating it."""
+    snapshot = get_firestore_client().collection("users").document(uid).get()
+    if not snapshot.exists:
+        return None
+    data = snapshot.to_dict() or {}
+    return _user_credits_from_data(data)
+
+
+def get_or_create_credits(uid: str, email: str) -> UserCredits:
+    """Fetch user credits after ensuring billing bootstrap or migration is applied."""
+    data = ensure_billing_state_for_login(uid, email)
+    return _user_credits_from_data(data)
 
 def estimate_credits(duration_seconds: float) -> int:
     """Calculate estimated credits for a given duration."""

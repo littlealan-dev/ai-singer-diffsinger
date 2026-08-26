@@ -1850,6 +1850,135 @@ def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     assert '"voice_part_id": "voice part 1"' in prompt
 
 
+def test_orchestrator_injects_live_credit_availability_into_prompt(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {
+        "current_score": {"score": {"source_musicxml_path": "/tmp/original.xml"}},
+        "score_summary": {"title": "Test"},
+        "history": [],
+    }
+    prompt = None
+
+    class CapturingClient:
+        def generate(self, system_prompt, history):
+            nonlocal prompt
+            prompt = system_prompt
+            return '{"tool_calls":[],"final_message":"ok","include_score":false}'
+
+    monkeypatch.setattr(orchestrator, "_is_e2e_credit_bypass_enabled", lambda: False)
+    monkeypatch.setattr(
+        "src.backend.credits.get_credits_by_user_id",
+        lambda user_id: UserCredits(
+            balance=8,
+            reserved=0,
+            expires_at=None,
+            overdrafted=False,
+            topup_total_remaining=45,
+            topup_total_available=45,
+        ),
+    )
+    orchestrator._llm_client = CapturingClient()
+
+    response, error = asyncio.run(
+        orchestrator._decide_with_llm(
+            snapshot,
+            score_available=True,
+            user_id="test-user",
+            user_email="test@example.com",
+        )
+    )
+
+    assert error is None
+    assert response is not None
+    assert prompt is not None
+    assert '"available_credits": 53' in prompt
+    assert '"topup_credits_available": 45' in prompt
+
+
+@pytest.mark.parametrize("helper_name", [
+    "_decide_message_only_followup_with_llm",
+    "_decide_followup_with_llm",
+])
+def test_followup_prompts_receive_request_credit_context(client, helper_name):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    snapshot = {
+        "current_score": {"score": {"source_musicxml_path": "/tmp/original.xml"}},
+        "score_summary": {"title": "Test"},
+        "history": [],
+    }
+    prompts = []
+
+    class CapturingClient:
+        def generate(self, system_prompt, history):
+            prompts.append(system_prompt)
+            return '{"tool_calls":[],"final_message":"ok","include_score":false}'
+
+    orchestrator._llm_client = CapturingClient()
+    helper = getattr(orchestrator, helper_name)
+    response, error = asyncio.run(
+        helper(
+            snapshot,
+            '{"status":"reparse_ready"}',
+            snapshot["current_score"]["score"],
+            current_credit_availability={
+                "available_credits": 53,
+                "monthly_credits_balance": 8,
+                "monthly_credits_reserved": 0,
+                "topup_credits_available": 45,
+            },
+        )
+    )
+
+    assert error is None
+    assert response is not None
+    assert len(prompts) == 1
+    assert '"available_credits": 53' in prompts[0]
+    assert '"topup_credits_available": 45' in prompts[0]
+
+
+def test_background_action_required_prompt_reads_canonical_credit_context(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    prompt = None
+
+    class CapturingClient:
+        def generate(self, system_prompt, history):
+            nonlocal prompt
+            prompt = system_prompt
+            return '{"tool_calls":[],"final_message":"Please add credits.","include_score":false}'
+
+    async def fake_snapshot(*_args, **_kwargs):
+        return {"history": [], "score_summary": {"title": "Test"}}
+
+    async def fake_credit_context(*_args, **_kwargs):
+        return {
+            "available_credits": 53,
+            "monthly_credits_balance": 8,
+            "monthly_credits_reserved": 0,
+            "topup_credits_available": 45,
+        }
+
+    orchestrator._llm_client = CapturingClient()
+    monkeypatch.setattr(app.state.sessions, "get_snapshot", fake_snapshot)
+    monkeypatch.setattr(orchestrator, "_get_current_credit_availability", fake_credit_context)
+
+    message = asyncio.run(
+        orchestrator._render_synthesis_action_required_message(
+            "session-1",
+            "test-user",
+            {"parts": []},
+            {"action": "insufficient_credits", "available_credits": 53},
+            fallback_message="Insufficient credits.",
+        )
+    )
+
+    assert message == "Please add credits."
+    assert prompt is not None
+    assert '"available_credits": 53' in prompt
+
+
 def test_orchestrator_excludes_hidden_default_lane_from_derived_mapping(client):
     _, app = client
     orchestrator = app.state.orchestrator

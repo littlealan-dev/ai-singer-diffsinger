@@ -217,6 +217,13 @@ class Orchestrator:
             self._logger.debug("chat_user session=%s message=%s", session_id, message)
             await self._sessions.append_history(session_id, "user", message)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            # This is the canonical balance snapshot for every LLM prompt in this
+            # chat request. It deliberately stays request-scoped: a later user
+            # message performs a fresh Firestore read after any top-up or billing
+            # event has completed.
+            current_credit_availability = await self._get_current_credit_availability(
+                user_id,
+            )
             current_score = snapshot.get("current_score")
             response_message = "Acknowledged."
             include_score = self._should_include_score(message)
@@ -247,6 +254,9 @@ class Orchestrator:
                 snapshot,
                 score_available=True,
                 session_id=session_id,
+                user_id=user_id,
+                user_email=user_email,
+                current_credit_availability=current_credit_availability,
                 selected_voicebank_id=forced_voicebank_id,
                 selected_language=forced_language,
             )
@@ -310,6 +320,7 @@ class Orchestrator:
                         self._build_multiple_tool_calls_followup_prompt(llm_response.tool_calls),
                         current_score["score"],
                         session_id=session_id,
+                        current_credit_availability=current_credit_availability,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
                         instructions=(
@@ -412,6 +423,7 @@ class Orchestrator:
                     initial_thought_summary=llm_response.thought_summary,
                     user_id=user_id,
                     user_email=user_email,
+                    current_credit_availability=current_credit_availability,
                     forced_voicebank_id=forced_voicebank_id,
                     forced_language=forced_language,
                     workflow_user_message=message,
@@ -890,6 +902,36 @@ class Orchestrator:
             and os.getenv("BACKEND_E2E_TEST_MODE", "").strip() == "1"
         )
 
+    async def _get_current_credit_availability(
+        self,
+        user_id: Optional[str],
+    ) -> Optional[Dict[str, int]]:
+        """Return the live, LLM-safe credit snapshot for the current chat turn."""
+        if self._is_e2e_credit_bypass_enabled() or not user_id:
+            return None
+        from src.backend.credits import get_credits_by_user_id
+
+        try:
+            credits = await asyncio.to_thread(
+                get_credits_by_user_id,
+                user_id,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "credit_context_unavailable user_id=%s error=%s",
+                user_id,
+                exc,
+            )
+            return None
+        if credits is None:
+            return None
+        return {
+            "available_credits": credits.available_balance,
+            "monthly_credits_balance": credits.balance,
+            "monthly_credits_reserved": credits.reserved,
+            "topup_credits_available": credits.topup_total_available,
+        }
+
     async def _run_synthesis_job(
         self,
         session_id: str,
@@ -1268,11 +1310,15 @@ class Orchestrator:
                 jobKind="preprocess",
             )
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_credit_availability = await self._get_current_credit_availability(
+                user_id,
+            )
             if not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
                     snapshot,
                     score,
                     planning_context,
+                    current_credit_availability=current_credit_availability,
                 )
                 if plan_error:
                     raise PreprocessPlanningError(plan_error)
@@ -1297,6 +1343,7 @@ class Orchestrator:
                 initial_thought_summary=initial_thought_summary,
                 user_id=user_id,
                 user_email=user_email,
+                current_credit_availability=current_credit_availability,
                 preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
             )
@@ -1365,6 +1412,9 @@ class Orchestrator:
         """Ask the LLM to turn a synthesize action_required payload into user-facing prose."""
         if self._llm_client is None:
             return fallback_message
+        current_credit_availability = await self._get_current_credit_availability(
+            user_id,
+        )
         try:
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
             followup_response, followup_error = (
@@ -1373,6 +1423,7 @@ class Orchestrator:
                     json.dumps(payload, sort_keys=True),
                     score,
                     session_id=session_id,
+                    current_credit_availability=current_credit_availability,
                     instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
                 )
             )
@@ -1385,6 +1436,8 @@ class Orchestrator:
             return await self._render_synthesis_action_required_message_minimal(
                 session_id,
                 payload,
+                user_id=user_id,
+                current_credit_availability=current_credit_availability,
                 fallback_message=fallback_message,
             )
         if followup_error:
@@ -1396,12 +1449,16 @@ class Orchestrator:
             return await self._render_synthesis_action_required_message_minimal(
                 session_id,
                 payload,
+                user_id=user_id,
+                current_credit_availability=current_credit_availability,
                 fallback_message=fallback_message,
             )
         if followup_response is None:
             return await self._render_synthesis_action_required_message_minimal(
                 session_id,
                 payload,
+                user_id=user_id,
+                current_credit_availability=current_credit_availability,
                 fallback_message=fallback_message,
             )
         final_message = str(followup_response.final_message or "").strip()
@@ -1409,6 +1466,8 @@ class Orchestrator:
             return await self._render_synthesis_action_required_message_minimal(
                 session_id,
                 payload,
+                user_id=user_id,
+                current_credit_availability=current_credit_availability,
                 fallback_message=fallback_message,
             )
         return self._format_followup_message_text(final_message)
@@ -1418,6 +1477,8 @@ class Orchestrator:
         session_id: str,
         payload: Dict[str, Any],
         *,
+        user_id: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         fallback_message: str,
     ) -> str:
         """Fallback LLM rendering for background jobs when rich session context is unavailable."""
@@ -1438,6 +1499,11 @@ class Orchestrator:
         prompt_bundle = build_prompt_bundle(
             [],
             score_available=False,
+            current_credit_availability=(
+                current_credit_availability
+                if current_credit_availability is not None
+                else await self._get_current_credit_availability(user_id)
+            ),
             role=LlmRole.DEFAULT,
         )
         try:
@@ -1513,6 +1579,7 @@ class Orchestrator:
         initial_thought_summary: Optional[str],
         user_id: str,
         user_email: str,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
         preprocess_job_id: Optional[str] = None,
@@ -1521,6 +1588,10 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns."""
         include_score = initial_include_score
+        if current_credit_availability is None:
+            current_credit_availability = await self._get_current_credit_availability(
+                user_id,
+            )
         response_message = initial_response_message
         thought_block_for_response = initial_thought_block
         require_solfege_lyrics = self._message_requests_sung_solfege(
@@ -1779,6 +1850,8 @@ class Orchestrator:
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
                         stop_reason="quality_class_3",
                     )
                     include_score = True
@@ -1793,6 +1866,8 @@ class Orchestrator:
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
                         stop_reason="attempt_budget_exhausted",
                     )
                     if candidate_response is not None:
@@ -1831,6 +1906,9 @@ class Orchestrator:
                     ),
                     working_score,
                     session_id=session_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_credit_availability=current_credit_availability,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
                     role=LlmRole.PREPROCESS,
@@ -1844,6 +1922,8 @@ class Orchestrator:
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
                         stop_reason="repair_planning_failed",
                     )
                     if candidate_response is not None:
@@ -1865,6 +1945,8 @@ class Orchestrator:
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
                         stop_reason="repair_plan_missing",
                     )
                     if candidate_response is not None:
@@ -1949,6 +2031,9 @@ class Orchestrator:
                         followup_prompt,
                         working_score,
                         session_id=session_id,
+                        user_id=user_id,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
                         instructions=message_only_instructions,
@@ -1960,6 +2045,9 @@ class Orchestrator:
                     followup_prompt,
                     working_score,
                     session_id=session_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_credit_availability=current_credit_availability,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
                 )
@@ -3386,6 +3474,8 @@ class Orchestrator:
         current_score: Dict[str, Any],
         candidate: Optional["WorkflowCandidate"],
         *,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         stop_reason: str,
     ) -> Optional[Dict[str, Any]]:
         """Render a selected reviewable candidate with one final LLM explanation step."""
@@ -3403,6 +3493,9 @@ class Orchestrator:
             self._build_terminal_candidate_prompt(summary_payload),
             current_score,
             session_id=session_id,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
             instructions=(
                 "This is a terminal prepared-score review message. No tools will "
                 "be executed from this response. Summarize what remains unresolved "
@@ -4489,6 +4582,9 @@ class Orchestrator:
         planning_context: Dict[str, Any],
         *,
         selected_voicebank_id: Optional[str],
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
     ) -> tuple[str, Optional[str]]:
         """Ask the default LLM role for natural copy before line preparation starts."""
         payload = {
@@ -4509,6 +4605,9 @@ class Orchestrator:
             snapshot,
             json.dumps(payload, sort_keys=True),
             score,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
             selected_voicebank_id=selected_voicebank_id,
             instructions=(
                 "This is a message-only line-preparation start notice. No tools "
@@ -4529,6 +4628,8 @@ class Orchestrator:
         snapshot: Dict[str, Any],
         score: Dict[str, Any],
         planning_context: Dict[str, Any],
+        *,
+        current_credit_availability: Optional[Dict[str, int]] = None,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the preprocess LLM role to author the initial preprocess plan."""
         max_llm_responses = max(
@@ -4545,6 +4646,7 @@ class Orchestrator:
                 json.dumps(attempt_context, sort_keys=True),
                 score,
                 role=LlmRole.PREPROCESS,
+                current_credit_availability=current_credit_availability,
             )
             if error:
                 return None, error
@@ -4666,6 +4768,9 @@ class Orchestrator:
         score_available: bool,
         *,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
@@ -4677,6 +4782,10 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
+            if current_credit_availability is None:
+                current_credit_availability = await self._get_current_credit_availability(
+                    user_id,
+                )
             llm_tools = self._with_voicebank_enum(
                 self._llm_tools_for_role(role),
                 voicebank_ids,
@@ -4724,6 +4833,7 @@ class Orchestrator:
                     if isinstance(snapshot.get("solfege_settings"), dict)
                     else None
                 ),
+                current_credit_availability=current_credit_availability,
                 role=role,
             )
             text = await asyncio.to_thread(
@@ -4761,12 +4871,21 @@ class Orchestrator:
         return response, None
 
     async def _render_tool_followup(
-        self, snapshot: Dict[str, Any], tool_summary: str
+        self,
+        snapshot: Dict[str, Any],
+        tool_summary: str,
+        *,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
     ) -> str:
         """Ask the LLM to turn a tool summary into a user-facing response."""
         response, error = await self._decide_message_only_followup_with_llm(
             snapshot,
             tool_summary,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
             instructions=MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
         )
         if error:
@@ -4798,6 +4917,9 @@ class Orchestrator:
         current_score: Optional[Dict[str, Any]] = None,
         *,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
@@ -4821,6 +4943,10 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
+            if current_credit_availability is None:
+                current_credit_availability = await self._get_current_credit_availability(
+                    user_id,
+                )
             planning_score = self._resolve_llm_planning_score(snapshot, current_score)
             voice_part_signals = (
                 planning_score.get("voice_part_signals")
@@ -4865,6 +4991,7 @@ class Orchestrator:
                     if isinstance(snapshot.get("solfege_settings"), dict)
                     else None
                 ),
+                current_credit_availability=current_credit_availability,
                 role=LlmRole.DEFAULT,
             )
             text = await asyncio.to_thread(
@@ -4916,6 +5043,9 @@ class Orchestrator:
         current_score: Optional[Dict[str, Any]] = None,
         *,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
@@ -4933,6 +5063,10 @@ class Orchestrator:
         try:
             voicebank_ids = await self._get_voicebank_ids()
             voicebank_details = await self._get_voicebank_details()
+            if current_credit_availability is None:
+                current_credit_availability = await self._get_current_credit_availability(
+                    user_id,
+                )
             llm_tools = self._with_voicebank_enum(
                 self._llm_tools_for_role(role),
                 voicebank_ids,
@@ -4981,6 +5115,7 @@ class Orchestrator:
                     if isinstance(snapshot.get("solfege_settings"), dict)
                     else None
                 ),
+                current_credit_availability=current_credit_availability,
                 role=role,
             )
             text = await asyncio.to_thread(
@@ -6091,7 +6226,11 @@ class Orchestrator:
                         )
                 try:
                     audio_response = await self._start_synthesis_job(
-                        session_id, current_score, synth_args, user_id=user_id, job_id=job_id
+                        session_id,
+                        current_score,
+                        synth_args,
+                        user_id=user_id,
+                        job_id=job_id,
                     )
                 except Exception as exc:
                     if self._is_e2e_credit_bypass_enabled():
