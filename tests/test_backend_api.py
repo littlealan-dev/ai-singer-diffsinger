@@ -922,6 +922,7 @@ def test_upload_resets_previous_score_specific_state(client):
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"] == [{"role": "user", "content": "old message"}]
+    assert snapshot["score_context_updated"] is True
     assert snapshot["preprocess_plan_history"] == []
     assert snapshot["preprocess_attempt_history"] == []
     assert snapshot["last_preprocess_plan"] is None
@@ -944,6 +945,71 @@ def test_upload_resets_previous_score_specific_state(client):
         session_id=session_id,
     )
     assert latest is None
+
+
+def test_upload_score_context_update_marker_is_delivered_once(client):
+    class RecordingLlmClient:
+        def __init__(self):
+            self.prompts = []
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            self.prompts.append(prompt_bundle.dynamic_prompt_text)
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": "Ready.",
+                    "include_score": False,
+                }
+            )
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    llm_client = RecordingLlmClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    first_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "What parts are available?"}
+    )
+    assert first_response.status_code == 200
+    assert "CURRENT SCORE CONTEXT UPDATED." in llm_client.prompts[-1]
+    first_snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert first_snapshot["score_context_updated"] is False
+
+    second_response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "What verse is selected?"}
+    )
+    assert second_response.status_code == 200
+    assert "CURRENT SCORE CONTEXT UPDATED." not in llm_client.prompts[-1]
+
+    reparsed_score = asyncio.run(
+        app.state.orchestrator._reparse_score(
+            session_id,
+            part_id=None,
+            part_index=None,
+            verse_number=None,
+            user_id="test-user",
+        )
+    )
+    assert reparsed_score is not None
+    reparse_snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert reparse_snapshot["score_context_updated"] is True
+    followup, error = asyncio.run(
+        app.state.orchestrator._decide_followup_with_llm(
+            reparse_snapshot,
+            '{"status":"reparse_ready"}',
+            reparsed_score,
+            session_id=session_id,
+        )
+    )
+    assert error is None
+    assert followup is not None
+    assert "CURRENT SCORE CONTEXT UPDATED." in llm_client.prompts[-1]
+    reparse_acknowledged = asyncio.run(
+        app.state.sessions.get_snapshot(session_id, "test-user")
+    )
+    assert reparse_acknowledged["score_context_updated"] is False
 
 
 def test_upload_rejects_invalid_extension_without_resetting_session(client):

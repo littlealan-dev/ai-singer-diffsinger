@@ -280,6 +280,26 @@ def test_build_prompt_bundle_splits_static_and_dynamic_content() -> None:
     assert "End Dynamic Context." in bundle.dynamic_prompt_text
 
 
+def test_build_prompt_bundle_includes_score_context_update_marker_only_when_pending() -> None:
+    updated = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_context_updated=True,
+    )
+    unchanged = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+    )
+
+    assert "CURRENT SCORE CONTEXT UPDATED." in updated.dynamic_prompt_text
+    assert "CURRENT SCORE CONTEXT UPDATED." not in unchanged.dynamic_prompt_text
+    assert "When Dynamic Context contains `CURRENT SCORE CONTEXT UPDATED`" in (
+        updated.static_prompt_text
+    )
+    assert "previously stated languages, parts, verses" in updated.static_prompt_text
+    assert "voice styles" in updated.static_prompt_text
+
+
 def test_build_prompt_bundle_supports_legacy_string_containment() -> None:
     bundle = build_prompt_bundle(
         tools=[],
@@ -371,11 +391,14 @@ def test_build_prompt_bundle_includes_canonical_solfege_settings() -> None:
     assert '"revision": 4' in bundle.dynamic_prompt_text
 
 
-def test_system_prompt_selects_from_language_compatible_voicebanks_before_qixuan() -> None:
+def test_system_prompt_selects_from_language_compatible_voicebanks_before_liee() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
-        voicebank_ids=["PM-31_Commercial_Indigo", "Qixuan_v2.7.0_DiffSinger_OpenUtau"],
+        voicebank_ids=[
+            "PM-31_Commercial_Indigo",
+            "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
+        ],
         score_summary=None,
         parsed_score_json=None,
         voice_part_signals=None,
@@ -385,8 +408,11 @@ def test_system_prompt_selects_from_language_compatible_voicebanks_before_qixuan
     )
     assert "choose only from language-compatible voicebanks" in prompt
     assert "tenor, bass, baritone, or equivalent" in prompt
-    assert "Qixuan_v2.7.0_DiffSinger_OpenUtau` is compatible" in prompt
-    assert "use `Qixuan_v2.7.0_DiffSinger_OpenUtau` as the default voicebank" not in prompt
+    assert "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)` is compatible" in prompt
+    assert "choose LIEE" in prompt
+    assert "list every language-compatible voicebank" in prompt
+    assert "try one of those voices or sing in solfege" in prompt
+    assert "selected part, verse/lyric selection, resolved singing language" in prompt
 
 
 def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> None:
@@ -445,4 +471,5 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     assert '"id": "VoiceB"' in bundle.dynamic_prompt_text
     assert '"name": "Voice B Display"' in bundle.dynamic_prompt_text
     assert "VOICEBANK OVERRIDE ACTIVE" in bundle.dynamic_prompt_text
-    assert "Do not choose, recommend, or mention another voicebank" in bundle.dynamic_prompt_text
+    assert "while it supports the resolved singing language" in bundle.dynamic_prompt_text
+    assert "list the compatible available voices" in bundle.dynamic_prompt_text

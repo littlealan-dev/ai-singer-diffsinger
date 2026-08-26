@@ -246,6 +246,7 @@ class Orchestrator:
             llm_response, llm_error = await self._decide_with_llm(
                 snapshot,
                 score_available=True,
+                session_id=session_id,
                 selected_voicebank_id=forced_voicebank_id,
                 selected_language=forced_language,
             )
@@ -308,6 +309,7 @@ class Orchestrator:
                         snapshot,
                         self._build_multiple_tool_calls_followup_prompt(llm_response.tool_calls),
                         current_score["score"],
+                        session_id=session_id,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
                         instructions=(
@@ -1370,6 +1372,7 @@ class Orchestrator:
                     snapshot,
                     json.dumps(payload, sort_keys=True),
                     score,
+                    session_id=session_id,
                     instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
                 )
             )
@@ -1827,6 +1830,7 @@ class Orchestrator:
                         fixed_other_issue_keys=fixed_other_issue_keys,
                     ),
                     working_score,
+                    session_id=session_id,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
                     role=LlmRole.PREPROCESS,
@@ -1944,6 +1948,7 @@ class Orchestrator:
                         latest_snapshot,
                         followup_prompt,
                         working_score,
+                        session_id=session_id,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
                         instructions=message_only_instructions,
@@ -1954,6 +1959,7 @@ class Orchestrator:
                     latest_snapshot,
                     followup_prompt,
                     working_score,
+                    session_id=session_id,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
                 )
@@ -3396,6 +3402,7 @@ class Orchestrator:
             latest_snapshot,
             self._build_terminal_candidate_prompt(summary_payload),
             current_score,
+            session_id=session_id,
             instructions=(
                 "This is a terminal prepared-score review message. No tools will "
                 "be executed from this response. Summarize what remains unresolved "
@@ -4157,6 +4164,7 @@ class Orchestrator:
         )
         await self._sessions.set_original_score(session_id, score)
         await self._sessions.set_score(session_id, score)
+        await self._sessions.mark_score_context_updated(session_id)
         return score
 
     def _resolve_llm_planning_score(
@@ -4657,6 +4665,7 @@ class Orchestrator:
         snapshot: Dict[str, Any],
         score_available: bool,
         *,
+        session_id: Optional[str] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
@@ -4709,6 +4718,7 @@ class Orchestrator:
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
                 selected_language=selected_language,
+                score_context_updated=bool(snapshot.get("score_context_updated")),
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -4746,6 +4756,8 @@ class Orchestrator:
                 invalid_tool,
             )
             return None, "LLM returned a tool that is not available in this workflow. Please try again."
+        if snapshot.get("score_context_updated") and session_id:
+            await self._sessions.acknowledge_score_context_updated(session_id)
         return response, None
 
     async def _render_tool_followup(
@@ -4785,6 +4797,7 @@ class Orchestrator:
         tool_summary: str,
         current_score: Optional[Dict[str, Any]] = None,
         *,
+        session_id: Optional[str] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
@@ -4846,6 +4859,7 @@ class Orchestrator:
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
                 selected_language=selected_language,
+                score_context_updated=bool(snapshot.get("score_context_updated")),
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -4891,6 +4905,8 @@ class Orchestrator:
                 [call.name for call in response.tool_calls],
             )
             response = replace(response, tool_calls=[])
+        if snapshot.get("score_context_updated") and session_id:
+            await self._sessions.acknowledge_score_context_updated(session_id)
         return response, None
 
     async def _decide_followup_with_llm(
@@ -4899,6 +4915,7 @@ class Orchestrator:
         tool_summary: str,
         current_score: Optional[Dict[str, Any]] = None,
         *,
+        session_id: Optional[str] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         role: LlmRole = LlmRole.DEFAULT,
@@ -4958,6 +4975,7 @@ class Orchestrator:
                 voicebank_details=voicebank_details,
                 selected_voicebank_id=selected_voicebank_id,
                 selected_language=selected_language,
+                score_context_updated=bool(snapshot.get("score_context_updated")),
                 solfege_settings=(
                     snapshot.get("solfege_settings")
                     if isinstance(snapshot.get("solfege_settings"), dict)
@@ -5005,6 +5023,8 @@ class Orchestrator:
                 invalid_tool,
             )
             return None, "LLM returned a tool that is not available in this workflow. Please try again."
+        if snapshot.get("score_context_updated") and session_id:
+            await self._sessions.acknowledge_score_context_updated(session_id)
         return response, None
 
     def _extract_followup_prose_fallback(self, text: str) -> str:

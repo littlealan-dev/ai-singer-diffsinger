@@ -68,6 +68,7 @@ def build_prompt_bundle(
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
     selected_language: Optional[str] = None,
+    score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> PromptBundle:
@@ -125,8 +126,10 @@ def build_prompt_bundle(
                 "VOICEBANK OVERRIDE ACTIVE. The user explicitly selected this voicebank "
                 "in the UI. Every synthesize tool call and every future synthesis request "
                 "inside start_preprocess_voice_part_workflow must set voicebank to this "
-                "exact id. Describe this voicebank in final_message. Do not choose, "
-                "recommend, or mention another voicebank as the selected singer."
+                "exact id while it supports the resolved singing language. Describe this "
+                "voicebank in final_message. If it does not support that language, do not "
+                "synthesize or silently switch: list the compatible available voices and "
+                "ask the user to choose one of them or solfege."
             ),
         }
         if voicebank_details:
@@ -159,6 +162,7 @@ def build_prompt_bundle(
         solfege_settings_text = json.dumps(
             solfege_settings, indent=2, sort_keys=True, ensure_ascii=False
         )
+    score_context_update_text = "CURRENT SCORE CONTEXT UPDATED.\n" if score_context_updated else ""
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
     ).replace("{tool_json}", tool_json)
@@ -177,6 +181,7 @@ def build_prompt_bundle(
         "AUTHORITATIVE CURRENT APPLICATION STATE: The values below are current and supersede "
         "any conflicting statements or assumptions in conversation history. Use them in tool "
         "decisions and user-facing replies.\n"
+        f"{score_context_update_text}"
         f"Score status: {score_hint}.\n"
         "Score summary (if available):\n"
         f"{score_summary_text}\n"
@@ -215,6 +220,7 @@ def build_system_prompt(
     voicebank_details: Optional[List[Dict[str, Any]]] = None,
     selected_voicebank_id: Optional[str] = None,
     selected_language: Optional[str] = None,
+    score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     role: Any = "default",
 ) -> str:
@@ -231,6 +237,7 @@ def build_system_prompt(
         voicebank_details=voicebank_details,
         selected_voicebank_id=selected_voicebank_id,
         selected_language=selected_language,
+        score_context_updated=score_context_updated,
         solfege_settings=solfege_settings,
         role=role,
     )

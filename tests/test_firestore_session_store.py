@@ -94,3 +94,12 @@ def test_firestore_session_store_roundtrip(monkeypatch, tmp_path):
     assert snapshot["id"] == session.id
     assert snapshot["files"]["musicxml_name"] == "score.xml"
     assert snapshot["current_score"]["score"]["title"] == "Test"
+    assert snapshot["score_context_updated"] is False
+
+    asyncio.run(sessions.mark_score_context_updated(session.id))
+    marked_snapshot = asyncio.run(sessions.get_snapshot(session.id, user_id="user-1"))
+    assert marked_snapshot["score_context_updated"] is True
+
+    asyncio.run(sessions.acknowledge_score_context_updated(session.id))
+    acknowledged_snapshot = asyncio.run(sessions.get_snapshot(session.id, user_id="user-1"))
+    assert acknowledged_snapshot["score_context_updated"] is False

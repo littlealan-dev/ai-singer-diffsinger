@@ -173,7 +173,7 @@ class Settings:
         session_ttl_seconds = _env_int("BACKEND_SESSION_TTL_SECONDS", 5 * 24 * 60 * 60)
         max_sessions = _env_int("BACKEND_MAX_SESSIONS", 200)
         default_voicebank = os.getenv(
-            "BACKEND_DEFAULT_VOICEBANK", "Qixuan_v2.7.0_DiffSinger_OpenUtau"
+            "BACKEND_DEFAULT_VOICEBANK", "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
         )
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
         audio_format = os.getenv("BACKEND_AUDIO_FORMAT", "mp3").strip().lower()

@@ -51,6 +51,7 @@ class SessionState:
     current_score: Optional[Dict[str, Any]] = None
     current_score_path: Optional[str] = None
     current_score_version: int = 0
+    score_context_updated: bool = False
     score_summary: Optional[Dict[str, Any]] = None
     solfege_settings: Dict[str, Any] = field(default_factory=_default_solfege_settings)
     current_audio: Optional[Dict[str, Any]] = None
@@ -73,6 +74,7 @@ class SessionState:
                 else None
             ),
             "current_score": self._score_snapshot(),
+            "score_context_updated": self.score_context_updated,
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
@@ -236,6 +238,24 @@ class SessionStore:
             state.last_active_at = _utcnow()
             return state.current_score_version
 
+    async def mark_score_context_updated(self, session_id: str) -> None:
+        """Mark that the next LLM decision must re-evaluate score-derived context."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.score_context_updated = True
+            state.last_active_at = _utcnow()
+
+    async def acknowledge_score_context_updated(self, session_id: str) -> None:
+        """Clear the one-shot score-context update marker after LLM delivery."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.score_context_updated = False
+            state.last_active_at = _utcnow()
+
     async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
         """Persist the original parsed score baseline for future replanning."""
         async with self._lock:
@@ -341,6 +361,7 @@ class SessionStore:
             state.current_score = None
             state.current_score_path = None
             state.current_score_version = 0
+            state.score_context_updated = True
             state.score_summary = None
             state.solfege_settings = _default_solfege_settings()
             state.current_audio = None
@@ -500,6 +521,7 @@ class FirestoreSessionStore:
             ),
             current_score_path=data.get("currentScorePath"),
             current_score_version=int(data.get("currentScoreVersion") or 0),
+            score_context_updated=bool(data.get("scoreContextUpdated", False)),
             score_summary=data.get("scoreSummary"),
             solfege_settings=dict(data.get("solfegeSettings") or _default_solfege_settings()),
             current_audio=data.get("currentAudio"),
@@ -524,6 +546,7 @@ class FirestoreSessionStore:
                 "currentScore": None,
                 "currentScorePath": None,
                 "currentScoreVersion": 0,
+                "scoreContextUpdated": False,
                 "scoreSummary": None,
                 "solfegeSettings": _default_solfege_settings(),
                 "currentAudio": None,
@@ -661,6 +684,26 @@ class FirestoreSessionStore:
                 )
             return version
 
+    async def mark_score_context_updated(self, session_id: str) -> None:
+        """Mark that the next LLM decision must re-evaluate score-derived context."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "scoreContextUpdated": True,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
+    async def acknowledge_score_context_updated(self, session_id: str) -> None:
+        """Clear the one-shot score-context update marker after LLM delivery."""
+        async with self._lock:
+            self._doc_ref(session_id).update(
+                {
+                    "scoreContextUpdated": False,
+                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
+                }
+            )
+
     async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
         """Persist the original parsed score baseline in Firestore."""
         async with self._lock:
@@ -790,6 +833,7 @@ class FirestoreSessionStore:
                     "currentScore": None,
                     "currentScorePath": None,
                     "currentScoreVersion": 0,
+                    "scoreContextUpdated": True,
                     "scoreSummary": None,
                     "solfegeSettings": _default_solfege_settings(),
                     "currentAudio": None,
