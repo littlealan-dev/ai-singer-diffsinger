@@ -1807,7 +1807,7 @@ def synthesize(
     voice_color: Optional[str] = None,
     articulation: float = 0.0,
     airiness: Optional[float] = None,
-    intensity: float = 0.5,
+    intensity: Optional[float] = None,
     clarity: Optional[float] = None,
     gender: Optional[float] = None,
     pitch_expression: Optional[float] = None,
@@ -1833,7 +1833,8 @@ def synthesize(
         articulation: Global legato/staccato adjustment (-1.0 to +1.0)
         airiness: Absolute OpenUtau BREC control. When omitted, use the selected
             voicebank's manifest default (system fallback: 0).
-        intensity: Global tension multiplier (0.0 to 1.0)
+        intensity: Global tension multiplier (0.0 to 1.0). When omitted, use
+            the selected voicebank's manifest default (system fallback: 0.5).
         clarity: Absolute extended OpenUtau VOIC control. When omitted, use the
             selected voicebank's manifest default (system fallback: 100).
         gender: Absolute OpenUtau GENC control. When omitted, use the selected
@@ -1926,6 +1927,7 @@ def synthesize(
     config = load_voicebank_config(voicebank_path)
     control_defaults = resolve_manifest_synthesis_control_defaults(voicebank_path)
     resolved_airiness = control_defaults["airiness"] if airiness is None else airiness
+    resolved_intensity = control_defaults["intensity"] if intensity is None else intensity
     resolved_clarity = control_defaults["clarity"] if clarity is None else clarity
     resolved_gender = control_defaults["gender"] if gender is None else gender
     resolved_pitch_expression = (
@@ -1945,7 +1947,7 @@ def synthesize(
 
     if resolved_airiness < -100.0 or resolved_airiness > 100.0:
         raise ValueError("airiness must be between -100.0 and 100.0 (OpenUtau BREC).")
-    if intensity < 0.0 or intensity > 1.0:
+    if resolved_intensity < 0.0 or resolved_intensity > 1.0:
         raise ValueError("intensity must be between 0.0 and 1.0.")
     if resolved_clarity < 0.0 or resolved_clarity > 200.0:
         raise ValueError("clarity must be between 0.0 and 200.0 (extended OpenUtau VOIC).")
@@ -2179,7 +2181,7 @@ def synthesize(
     breathiness = _apply_openutau_breathiness(
         var_result["breathiness"], resolved_airiness
     )
-    tension = _scale_curve(var_result["tension"], intensity)
+    tension = _scale_curve(var_result["tension"], resolved_intensity)
     voicing = _apply_openutau_voicing(var_result["voicing"], resolved_clarity)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(

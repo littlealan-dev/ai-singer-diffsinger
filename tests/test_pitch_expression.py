@@ -62,6 +62,7 @@ def test_manifest_synthesis_control_defaults_resolve_from_nested_path(tmp_path, 
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     data["voicebanks"][0]["synthesis_control_defaults"] = {
         "airiness": 0.0,
+        "intensity": 0.75,
         "clarity": 170.0,
         "gender": 20.83,
     }
@@ -72,6 +73,7 @@ def test_manifest_synthesis_control_defaults_resolve_from_nested_path(tmp_path, 
 
     assert voicebank_cache.resolve_manifest_synthesis_control_defaults(voicebank_path) == {
         "airiness": 0.0,
+        "intensity": 0.75,
         "clarity": 170.0,
         "gender": 20.83,
     }
@@ -168,6 +170,7 @@ def test_legacy_pipeline_passes_configured_expression_to_model():
 
 
 def test_mcp_handler_passes_manifest_expression_to_synthesis(tmp_path):
+    lyric_selection = {"id": "verse-1", "number": "1", "name": "Verse 1"}
     with mock.patch.object(
         handlers,
         "get_manifest_voicebank_metadata",
@@ -182,7 +185,11 @@ def test_mcp_handler_passes_manifest_expression_to_synthesis(tmp_path):
         return_value={"waveform": [0.0], "sample_rate": 44100},
     ) as synthesize_mock:
         handlers.handle_synthesize(
-            {"score": {"parts": []}, "voicebank": "TestBank"},
+            {
+                "score": {"parts": [], "selected_lyric_selection": lyric_selection},
+                "lyric_selection": lyric_selection,
+                "voicebank": "TestBank",
+            },
             device="cpu",
         )
 
@@ -190,6 +197,7 @@ def test_mcp_handler_passes_manifest_expression_to_synthesis(tmp_path):
 
 
 def test_mcp_handler_uses_manifest_controls_when_omitted(tmp_path):
+    lyric_selection = {"id": "verse-1", "number": "1", "name": "Verse 1"}
     with mock.patch.object(
         handlers,
         "get_manifest_voicebank_metadata",
@@ -197,7 +205,7 @@ def test_mcp_handler_uses_manifest_controls_when_omitted(tmp_path):
     ), mock.patch.object(
         handlers,
         "resolve_manifest_synthesis_control_defaults",
-        return_value={"airiness": 0.0, "clarity": 170.0, "gender": 20.83},
+        return_value={"airiness": 0.0, "intensity": 0.75, "clarity": 170.0, "gender": 20.83},
     ), mock.patch.object(
         handlers,
         "resolve_voicebank_id",
@@ -208,10 +216,15 @@ def test_mcp_handler_uses_manifest_controls_when_omitted(tmp_path):
         return_value={"waveform": [0.0], "sample_rate": 44100},
     ) as synthesize_mock:
         handlers.handle_synthesize(
-            {"score": {"parts": []}, "voicebank": "TestBank"},
+            {
+                "score": {"parts": [], "selected_lyric_selection": lyric_selection},
+                "lyric_selection": lyric_selection,
+                "voicebank": "TestBank",
+            },
             device="cpu",
         )
 
     assert synthesize_mock.call_args.kwargs["clarity"] == 170.0
     assert synthesize_mock.call_args.kwargs["gender"] == 20.83
     assert synthesize_mock.call_args.kwargs["airiness"] == 0.0
+    assert synthesize_mock.call_args.kwargs["intensity"] == 0.75

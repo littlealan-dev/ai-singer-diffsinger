@@ -1377,12 +1377,13 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
             "type": "object",
             "properties": {
                 "airiness": {"type": "number"},
+                "intensity": {"type": "number"},
                 "clarity": {"type": "number"},
                 "gender": {"type": "number"},
             },
-            "required": ["airiness", "clarity", "gender"],
+            "required": ["airiness", "intensity", "clarity", "gender"],
             "additionalProperties": False,
-            "description": "Manifest-declared baseline VOIC and GENC controls for this voicebank.",
+            "description": "Manifest-declared baseline TENC, BREC, VOIC, and GENC controls for this voicebank.",
         },
         "gender": {
             "type": ["string", "null"],
@@ -1909,8 +1910,7 @@ TOOLS: List[Tool] = [
                     "type": "number",
                     "minimum": 0.0,
                     "maximum": 1.0,
-                    "default": 0.5,
-                    "description": "Intensity control value for the synthesis backend.",
+                    "description": "Tension (TENC) multiplier. Omit to use the selected voicebank's manifest default.",
                 },
                 "clarity": {
                     "type": "number",

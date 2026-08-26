@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 _SYSTEM_SYNTHESIS_CONTROL_DEFAULTS = {
     "airiness": 0.0,
+    "intensity": 0.5,
     "clarity": 100.0,
     "gender": 0.0,
 }
@@ -130,6 +131,7 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                 )
             for control, minimum, maximum in (
                 ("airiness", -100.0, 100.0),
+                ("intensity", 0.0, 1.0),
                 ("clarity", 0.0, 200.0),
                 ("gender", -100.0, 100.0),
             ):

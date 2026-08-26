@@ -185,6 +185,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     pitch_expression = float(voicebank_metadata.get("pitch_expression", 1.0))
     control_defaults = resolve_manifest_synthesis_control_defaults(voicebank_id)
     airiness = params.get("airiness", control_defaults["airiness"])
+    intensity = params.get("intensity", control_defaults.get("intensity", 0.5))
     clarity = params.get("clarity", control_defaults["clarity"])
     gender = params.get("gender", control_defaults["gender"])
     voicebank_path = resolve_voicebank_id(voicebank_id)
@@ -241,7 +242,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         voice_color=params.get("voice_color"),
         articulation=params.get("articulation", 0.0),
         airiness=airiness,
-        intensity=params.get("intensity", 0.5),
+        intensity=intensity,
         clarity=clarity,
         gender=gender,
         pitch_expression=pitch_expression,
