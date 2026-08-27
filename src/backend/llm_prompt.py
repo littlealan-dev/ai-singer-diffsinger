@@ -71,6 +71,7 @@ def build_prompt_bundle(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
+    synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
@@ -172,6 +173,10 @@ def build_prompt_bundle(
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
     ).replace("{tool_json}", tool_json)
+    static_prompt = static_prompt.replace(
+        "{synthesis_max_duration_seconds}",
+        str(synthesis_max_duration_seconds),
+    )
     static_prompt = (
         static_prompt.replace("{score_hint}", "<provided in Dynamic Context>")
         .replace("{voicebanks}", "<provided in Dynamic Context>")
@@ -231,6 +236,7 @@ def build_system_prompt(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
+    synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> str:
     """Build the full prompt for providers that do not support prompt caching."""
@@ -249,6 +255,7 @@ def build_system_prompt(
         score_context_updated=score_context_updated,
         solfege_settings=solfege_settings,
         current_credit_availability=current_credit_availability,
+        synthesis_max_duration_seconds=synthesis_max_duration_seconds,
         role=role,
     )
     return bundle.full_prompt_text

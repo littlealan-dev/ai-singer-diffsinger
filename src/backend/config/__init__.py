@@ -79,6 +79,7 @@ class Settings:
     default_voice_id: str | None
     audio_format: str
     audio_mp3_bitrate: str
+    synthesis_max_duration_seconds: float
     backend_debug: bool
     llm_provider: str
     gemini_api_key: str
@@ -178,6 +179,12 @@ class Settings:
         default_voice_id = os.getenv("BACKEND_DEFAULT_VOICE_ID")
         audio_format = os.getenv("BACKEND_AUDIO_FORMAT", "mp3").strip().lower()
         audio_mp3_bitrate = os.getenv("BACKEND_AUDIO_MP3_BITRATE", "256k").strip()
+        synthesis_max_duration_seconds = _env_float(
+            "SYNTHESIS_MAX_DURATION_SECONDS",
+            300.0,
+        )
+        if synthesis_max_duration_seconds <= 0:
+            raise ValueError("SYNTHESIS_MAX_DURATION_SECONDS must be greater than zero.")
         backend_debug = os.getenv("BACKEND_DEBUG", "").lower() in {"1", "true", "yes"}
         llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
         gemini_api_key = os.getenv("GEMINI_API_KEY", "")
@@ -408,6 +415,7 @@ class Settings:
             default_voice_id=default_voice_id,
             audio_format=audio_format,
             audio_mp3_bitrate=audio_mp3_bitrate,
+            synthesis_max_duration_seconds=synthesis_max_duration_seconds,
             backend_debug=backend_debug,
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,

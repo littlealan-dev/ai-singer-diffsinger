@@ -146,6 +146,19 @@ def test_build_system_prompt_declares_full_score_credit_capability_contract() ->
     assert "offer exactly these two next actions: add more credits, or upload another shorter song" in prompt
 
 
+def test_build_system_prompt_caches_duration_limit_check_before_synthesis() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary={"duration_seconds": 360},
+        synthesis_max_duration_seconds=300,
+    )
+
+    assert "The configured maximum duration for one synthesis is `300` seconds" in bundle.static_prompt_text
+    assert "Before every `synthesize` call, inspect `score_summary.duration_seconds`" in bundle.static_prompt_text
+    assert "Synthesis duration limit" not in bundle.dynamic_prompt_text
+
+
 def test_build_system_prompt_requires_resolved_compatible_synthesis_language() -> None:
     prompt = build_system_prompt(
         tools=[],

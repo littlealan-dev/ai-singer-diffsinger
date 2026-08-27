@@ -3,6 +3,7 @@ Convenience synthesize API - runs the full pipeline.
 """
 
 import logging
+import math
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -40,10 +41,101 @@ from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
 
+DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS = 300.0
+
 
 def _env_flag_enabled(name: str) -> bool:
     raw = str(os.environ.get(name, "")).strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _synthesis_max_duration_seconds() -> float:
+    """Return the positive configured duration limit for one synthesis call."""
+    raw = os.environ.get("SYNTHESIS_MAX_DURATION_SECONDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid_synthesis_duration_limit value=%r using_default=%s",
+            raw,
+            DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS,
+        )
+        return DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "invalid_synthesis_duration_limit value=%r using_default=%s",
+            raw,
+            DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS,
+        )
+        return DEFAULT_SYNTHESIS_MAX_DURATION_SECONDS
+    return value
+
+
+def _estimated_score_duration_seconds(score: Dict[str, Any]) -> float:
+    """Return a conservative score-wide duration estimate without model inference."""
+    summary_duration = 0.0
+    summary = score.get("score_summary")
+    if isinstance(summary, dict):
+        try:
+            candidate = float(summary.get("duration_seconds"))
+            if math.isfinite(candidate) and candidate >= 0:
+                summary_duration = candidate
+        except (TypeError, ValueError):
+            pass
+
+    max_end_beat = 0.0
+    for part in score.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        for note in part.get("notes") or []:
+            if not isinstance(note, dict):
+                continue
+            try:
+                offset = float(note.get("offset_beats", 0.0))
+                duration = float(note.get("duration_beats", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(offset) and math.isfinite(duration):
+                max_end_beat = max(max_end_beat, offset + max(0.0, duration))
+
+    timeline_duration = 0.0
+    if max_end_beat > 0:
+        tempos = []
+        for tempo in score.get("tempos") or []:
+            if not isinstance(tempo, dict):
+                continue
+            try:
+                offset = float(tempo.get("offset_beats", 0.0))
+                bpm = float(tempo.get("bpm", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(offset) and math.isfinite(bpm) and bpm > 0:
+                tempos.append({"offset_beats": offset, "bpm": bpm})
+        try:
+            timeline_duration = TimeAxis(tempos).get_ms_at_beat(max_end_beat) / 1000.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            timeline_duration = 0.0
+    return max(summary_duration, timeline_duration)
+
+
+def _build_duration_limit_action_required(
+    *, estimated_duration_seconds: float, max_duration_seconds: float
+) -> Dict[str, Any]:
+    """Build a structured no-GPU result for an oversized synthesis request."""
+    return {
+        "status": "action_required",
+        "action": "synthesis_duration_limit_exceeded",
+        "code": "synthesis_duration_limit_exceeded",
+        "reason": "estimated_duration_exceeds_limit",
+        "message": "The selected score exceeds the configured synthesis duration limit.",
+        "failed_validation_rules": ["resource_limit.score_duration_exceeds_maximum"],
+        "diagnostics": {
+            "estimated_duration_seconds": round(estimated_duration_seconds, 3),
+            "max_duration_seconds": max_duration_seconds,
+        },
+    }
 
 
 def _build_unsupported_lyric_action_required(
@@ -1910,6 +2002,19 @@ def synthesize(
         raise ValueError("require_solfege_lyrics must be a boolean.")
 
     working_score = score
+    estimated_duration_seconds = _estimated_score_duration_seconds(working_score)
+    max_duration_seconds = _synthesis_max_duration_seconds()
+    if estimated_duration_seconds > max_duration_seconds:
+        logger.warning(
+            "synthesis_duration_limit_exceeded estimated_duration_seconds=%.3f "
+            "max_duration_seconds=%.3f",
+            estimated_duration_seconds,
+            max_duration_seconds,
+        )
+        return _build_duration_limit_action_required(
+            estimated_duration_seconds=estimated_duration_seconds,
+            max_duration_seconds=max_duration_seconds,
+        )
     effective_part_index = int(part_index)
     preflight = synthesize_preflight_action_required(
         working_score,

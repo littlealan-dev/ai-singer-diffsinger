@@ -73,7 +73,11 @@ SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS = (
     "or starting any further work. If the action is unsupported_lyric_language, "
     "explain that synthesis stopped because the lyrics cannot be phonemized by "
     "the current pronunciation engine. You may say the user can ask to add a "
-    "generated solfege verse as a next step."
+    "generated solfege verse as a next step. If the action is "
+    "synthesis_duration_limit_exceeded, explain that the selected score is too "
+    "long for one render and state the available duration limit naturally. Do "
+    "not echo the tool payload verbatim or promise that you can split, combine, "
+    "or retry sections."
 )
 INSUFFICIENT_CREDITS_MESSAGE_ONLY_INSTRUCTIONS = (
     "This is a terminal insufficient-credit result before synthesis begins. "
@@ -1504,6 +1508,7 @@ class Orchestrator:
                 if current_credit_availability is not None
                 else await self._get_current_credit_availability(user_id)
             ),
+            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
             role=LlmRole.DEFAULT,
         )
         try:
@@ -4834,6 +4839,7 @@ class Orchestrator:
                     else None
                 ),
                 current_credit_availability=current_credit_availability,
+                synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
             )
             text = await asyncio.to_thread(
@@ -4992,6 +4998,7 @@ class Orchestrator:
                     else None
                 ),
                 current_credit_availability=current_credit_availability,
+                synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=LlmRole.DEFAULT,
             )
             text = await asyncio.to_thread(
@@ -5116,6 +5123,7 @@ class Orchestrator:
                     else None
                 ),
                 current_credit_availability=current_credit_availability,
+                synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
             )
             text = await asyncio.to_thread(

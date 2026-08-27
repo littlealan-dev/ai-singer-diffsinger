@@ -1226,6 +1226,7 @@ _SYNTH_FAILED_RULE_SCHEMA: Dict[str, Any] = {
         "input_validation.part_index_out_of_range",
         "verse_lock.requested_verse_differs_from_selected_verse",
         "workflow_restart.reparse_and_repreprocess_required",
+        "resource_limit.score_duration_exceeds_maximum",
     ],
 }
 
@@ -1240,16 +1241,25 @@ _SYNTH_ACTION_REQUIRED_SCHEMA: Dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["preprocessing_required", "infeasible_anchor_budget"],
+            "enum": [
+                "preprocessing_required",
+                "infeasible_anchor_budget",
+                "synthesis_duration_limit_exceeded",
+            ],
             "description": (
                 "Action key for deterministic handling. "
                 "preprocessing_required means the selected singing line must be prepared with preprocess_voice_parts first. "
-                "infeasible_anchor_budget means timing constraints cannot be satisfied."
+                "infeasible_anchor_budget means timing constraints cannot be satisfied. "
+                "synthesis_duration_limit_exceeded means the score is too long for one render."
             ),
         },
         "code": {
             "type": "string",
-            "enum": ["preprocessing_required", "infeasible_anchor_budget"],
+            "enum": [
+                "preprocessing_required",
+                "infeasible_anchor_budget",
+                "synthesis_duration_limit_exceeded",
+            ],
             "description": "Machine-readable code aligned with action.",
         },
         "reason": {
@@ -1262,6 +1272,7 @@ _SYNTH_ACTION_REQUIRED_SCHEMA: Dict[str, Any] = {
                 "complexity_signal_unavailable_without_derived_target",
                 "target_part_not_found_for_preflight",
                 "verse_change_requires_repreprocess",
+                "estimated_duration_exceeds_limit",
             ],
             "description": "Specific preflight reason explaining why synthesis cannot proceed yet.",
         },

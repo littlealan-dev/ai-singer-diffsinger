@@ -612,6 +612,51 @@ class TestAlignPhonemesToNotes(unittest.TestCase):
 class TestSynthesizeActions(unittest.TestCase):
     """Tests for synthesize action-required conversion."""
 
+    def test_duration_limit_returns_action_required_before_alignment(self):
+        synthesize_module = importlib.import_module("src.api.synthesize")
+        score = {
+            "score_summary": {"duration_seconds": 1},
+            "tempos": [{"offset_beats": 0, "bpm": 120}],
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "notes": [
+                        {"offset_beats": 0, "duration_beats": 602, "lyric": "la"}
+                    ],
+                }
+            ],
+        }
+
+        with mock.patch.dict(
+            os.environ,
+            {"SYNTHESIS_MAX_DURATION_SECONDS": "300"},
+            clear=False,
+        ), mock.patch.object(
+            synthesize_module,
+            "synthesize_preflight_action_required",
+            return_value=None,
+        ), mock.patch.object(
+            synthesize_module,
+            "align_phonemes_to_notes",
+            side_effect=AssertionError("alignment must not run"),
+        ):
+            result = synthesize_module.synthesize(
+                score,
+                Path("/tmp/test-voicebank"),
+                part_index=0,
+            )
+
+        self.assertEqual(result.get("status"), "action_required")
+        self.assertEqual(result.get("code"), "synthesis_duration_limit_exceeded")
+        self.assertEqual(result.get("reason"), "estimated_duration_exceeds_limit")
+        self.assertEqual(
+            result.get("failed_validation_rules"),
+            ["resource_limit.score_duration_exceeds_maximum"],
+        )
+        diagnostics = result.get("diagnostics") or {}
+        self.assertGreater(diagnostics.get("estimated_duration_seconds", 0), 300)
+        self.assertEqual(diagnostics.get("max_duration_seconds"), 300.0)
+
     def test_unsupported_lyric_token_returns_action_required(self):
         """Unsupported lyric tokens should not surface as generic exceptions."""
         synthesize_module = importlib.import_module("src.api.synthesize")
