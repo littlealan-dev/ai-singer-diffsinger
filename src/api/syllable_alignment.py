@@ -1018,6 +1018,28 @@ def align(
             if int(span["start"]) >= first_start
         ]
 
+        # A C+liquid onset is peeled in two stages.  For example, ``d r iy``
+        # first leaves ``d`` as the phrase lead because the liquid owns the
+        # syllable boundary, then sees ``r`` as another lead in the remaining
+        # stream.  Leaving that second prefix for the chunk splitter loses it
+        # when ordinary (non-manifest-adapted) prefixes are carried.  Keep the
+        # complete onset together so every source phone reaches the model:
+        # ``d r iy`` -> lead ``d r`` + core ``iy``.
+        #
+        # Logical pronunciation adapters retain their own coordinate and
+        # prefix handling below, so this only applies to ordinary phoneme
+        # streams such as English /dr/, /kr/, /pl/, and /kw/.
+        if lead_ph and not logical_spans and core_ph:
+            nested_starts = _syllable_start_indices(core_ph, phonemizer)
+            nested_first_start = nested_starts[0] if nested_starts else 0
+            if nested_first_start > 0:
+                lead_ph.extend(core_ph[:nested_first_start])
+                lead_ids.extend(core_ids[:nested_first_start])
+                lead_lang.extend(core_lang[:nested_first_start])
+                core_ph = core_ph[nested_first_start:]
+                core_ids = core_ids[nested_first_start:]
+                core_lang = core_lang[nested_first_start:]
+
         forced_following_onsets = 0
         if onset_adapter is not None and onset_adapter.get(
             "preserve_following_syllable_onsets", False

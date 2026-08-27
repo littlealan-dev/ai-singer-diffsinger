@@ -315,6 +315,7 @@ class PhonemizerClassTests(unittest.TestCase):
         french = phonemize(["Bon", "jour", "mon", "ami"], LIEE_ROOT, language="fr")
         italian = phonemize(["Ciao", "bella", "mio", "amore"], LIEE_ROOT, language="it")
         italian_lexical = phonemize(["Lucia", "farmacia"], LIEE_ROOT, language="it")
+        italian_labiodental_nasal = phonemize(["nfronte a"], LIEE_ROOT, language="it")
         portuguese = phonemize(["Olá", "meu", "amor", "coração"], LIEE_ROOT, language="pt")
         european_portuguese = phonemize(
             ["Olá", "meu", "amor", "coração"], LIEE_ROOT, language="pt-eu"
@@ -325,9 +326,14 @@ class PhonemizerClassTests(unittest.TestCase):
         self.assertEqual(italian["word_boundaries"], [3, 5, 3, 5])
         self.assertEqual(italian_lexical["phonemes"], [
             "l", "u", "ch", "i", "a",
-            "f", "a", "dx", "m", "a", "ch", "i", "a",
+            "f", "a", "r", "m", "a", "ch", "i", "a",
         ])
         self.assertEqual(italian_lexical["word_boundaries"], [5, 8])
+        self.assertEqual(
+            italian_labiodental_nasal["phonemes"],
+            ["m", "f", "r", "o", "n", "t", "e", "a"],
+        )
+        self.assertEqual(italian_labiodental_nasal["word_boundaries"], [8])
         self.assertEqual(portuguese["word_boundaries"], [3, 3, 4, 7])
         self.assertEqual(european_portuguese["word_boundaries"], [3, 3, 4, 7])
         self.assertEqual(cantonese["word_boundaries"], [3, 3, 2, 3])

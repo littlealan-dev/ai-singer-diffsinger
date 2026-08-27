@@ -16,15 +16,16 @@ from src.api.timing_errors import InfeasibleAnchorError
 
 
 class _StubPhonemizer:
-    def __init__(self, vowels: set[str]) -> None:
+    def __init__(self, vowels: set[str], glides: set[str] | None = None) -> None:
         self._vowels = set(vowels)
+        self._glides = set(glides or ())
         self._phoneme_to_id = {"SP": 0}
 
     def is_vowel(self, phoneme: str) -> bool:
         return phoneme in self._vowels
 
     def is_glide(self, phoneme: str) -> bool:
-        return False
+        return phoneme in self._glides
 
 
 class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
@@ -199,6 +200,108 @@ class TestSyllableAlignmentAnchorBudget(unittest.TestCase):
         self.assertEqual(payload["group_anchor_frames"][0]["note_index"], 0)
         self.assertEqual(payload["group_anchor_frames"][1]["note_index"], 1)
         self.assertEqual(mock_phonemize.call_args.kwargs["language"], "es")
+
+    def test_v2_preserves_liquids_after_consonant_prefixes(self) -> None:
+        """No V2 split may discard the liquid in an English C+liquid onset.
+
+        These are the actual phone streams from LIEE and Qixuan for
+        ``dream-ing`` and ``Christ-mas``.  Both dictionaries mark their R
+        phone as a liquid, which formerly let the nested V2 split drop it.
+        """
+        notes = [
+            {
+                "is_rest": False,
+                "lyric": "dream",
+                "syllabic": "begin",
+                "offset_beats": 0.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 60,
+            },
+            {
+                "is_rest": False,
+                "lyric": "ing",
+                "syllabic": "end",
+                "offset_beats": 2.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 60,
+            },
+            {
+                "is_rest": False,
+                "lyric": "Christ",
+                "syllabic": "begin",
+                "offset_beats": 4.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 60,
+            },
+            {
+                "is_rest": False,
+                "lyric": "mas",
+                "syllabic": "end",
+                "offset_beats": 6.0,
+                "duration_beats": 2.0,
+                "pitch_midi": 60,
+            },
+        ]
+        cases = {
+            "LIEE": {
+                "phonemes": [
+                    "d0", "r0", "iy", "m", "ih", "ng",
+                    "k", "r0", "ih", "s", "m", "ah", "s",
+                ],
+                "vowels": {"iy", "ih", "ah"},
+                "glides": {"r0"},
+            },
+            "Qixuan": {
+                "phonemes": [
+                    "en/jh", "en/_r", "en/iy", "en/m", "en/ih", "en/ng",
+                    "en/k", "en/r", "en/ih", "en/s", "en/m", "en/ax", "en/s",
+                ],
+                "vowels": {"en/iy", "en/ih", "en/ax"},
+                "glides": {"en/_r", "en/r"},
+            },
+        }
+
+        for voicebank_name, case in cases.items():
+            with self.subTest(voicebank=voicebank_name):
+                phonemes = case["phonemes"]
+                phonemizer = _StubPhonemizer(case["vowels"], case["glides"])
+                phonemizer._phoneme_to_id.update(
+                    {phone: index + 1 for index, phone in enumerate(phonemes)}
+                )
+                phoneme_result = {
+                    "phonemes": phonemes,
+                    "phoneme_ids": [phonemizer._phoneme_to_id[phone] for phone in phonemes],
+                    "language_ids": [1] * len(phonemes),
+                    "word_boundaries": [6, 7],
+                }
+                with patch(
+                    "src.api.syllable_alignment.phonemize",
+                    return_value=phoneme_result,
+                ), patch(
+                    "src.api.syllable_alignment.resolve_manifest_pronunciation_adapters",
+                    return_value=[],
+                ), patch(
+                    "src.api.syllable_alignment.resolve_manifest_onset_anchor_adapters",
+                    return_value=[],
+                ):
+                    payload = align(
+                        notes=notes,
+                        start_frames=[0, 86, 172, 258],
+                        end_frames=[86, 172, 258, 345],
+                        timing_midi=[60.0] * 4,
+                        note_durations=[86, 86, 86, 87],
+                        phonemizer=phonemizer,  # type: ignore[arg-type]
+                        voicebank_path=Path(voicebank_name),
+                        language="en",
+                        include_phonemes=True,
+                    )
+
+                # ``SP`` is an intentional phrase-initial insertion. Every
+                # source phone, especially each liquid R, must survive V2.
+                self.assertEqual(
+                    [phone for phone in payload["phonemes"] if phone != "SP"],
+                    phonemes,
+                )
 
     @patch("src.api.syllable_alignment.resolve_manifest_onset_anchor_adapters")
     @patch("src.api.syllable_alignment.phonemize")
