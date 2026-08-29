@@ -14,6 +14,14 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: 'version_1_0_3',
+    title: 'SightSinger 1.0.3 Update',
+    content: '- New AI Voice: DiffSinger LIEE: Immortal Idol, supporting English, Spanish, French, Italian, Japanese, Portuguese, European Portuguese, Mandarin Chinese, and Cantonese Chinese.\n\n- Support Bass voice through LIEE: Immortal Idol.\n\n- Bug fixes.',
+    effect: 'none',
+    date: '2026-08-29',
+    effectiveFrom: '2026-08-29',
+  },
+  {
     id: 'version_1_0_2',
     title: 'SightSinger 1.0.2 Update',
     content: '- Added solfege support: SightSinger can now add and sing solfege lyrics.\n\n- Supports both movable-do and fixed-do solfege.\n\n- Solfege can be used to sing scores when the original lyric language is not supported yet.\n\n- Added Download score and Print score buttons to the Studio score preview.\n\n- Added a Page / Horizontal layout toggle for the Studio score preview.',
