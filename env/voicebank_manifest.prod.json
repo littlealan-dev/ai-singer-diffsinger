@@ -224,7 +224,7 @@
     },
     {
       "id": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
-      "enabled": false,
+      "enabled": true,
       "storage_object": "assets/voicebanks/Diffsinger_LIEE_Immortal_Idol_JubiLIEE_2025.tar.gz",
       "name": "Diffsinger LIEE : Immortal Idol 'Lilia'",
       "profile_image": "liee_immortal_idol_2025.png",
