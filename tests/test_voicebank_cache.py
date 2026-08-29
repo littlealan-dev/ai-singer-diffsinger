@@ -56,8 +56,7 @@ class TestVoicebankCache(unittest.TestCase):
                                 "sample_rate": 44100,
                                 "hop_size": 512,
                                 "use_lang_id": False,
-                                "gender": None,
-                                "voice_type": None,
+                                "profile_gender": None,
                             }
                         ],
                     }
@@ -132,8 +131,7 @@ class TestVoicebankCache(unittest.TestCase):
                                 "sample_rate": 44100,
                                 "hop_size": 512,
                                 "use_lang_id": False,
-                                "gender": None,
-                                "voice_type": None,
+                                "profile_gender": None,
                             }
                         ],
                     }
@@ -212,8 +210,7 @@ class TestVoicebankCache(unittest.TestCase):
                                 "sample_rate": 44100,
                                 "hop_size": 512,
                                 "use_lang_id": False,
-                                "gender": None,
-                                "voice_type": None,
+                                "profile_gender": None,
                             }
                         ],
                     }

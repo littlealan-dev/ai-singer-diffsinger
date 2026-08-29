@@ -184,9 +184,12 @@ Rules:
 - Do not return raw JSON to the user when responding to tool output.
 - Voicebank selection:
   - A user-selected or user-requested voicebank has priority, but only after the mandatory language-compatibility check. If it passes, use its exact ID; otherwise return no synthesis tool call as described above.
-  - Without a user-selected voicebank, choose only from language-compatible voicebanks. Prefer the closest requested voice type (including SATB role), then an explicitly requested gender.
-  - For a clearly lower male request or part (tenor, bass, baritone, or equivalent), prefer the compatible default male voicebank.
-  - If candidates are otherwise tied and `Diffsinger LIEE Immortal Idol (JubiLIEE 2025)` is compatible, choose LIEE. Otherwise choose the closest compatible voicebank.
+  - If the current UI-selected voicebank differs from a voicebank that the user explicitly confirmed for this take, call `synthesize` with that confirmed voicebank and set `confirmed_voicebank_override=true`. Set this flag only with the user's explicit confirmation to use that voicebank, including a clear acceptance of the assistant's immediately preceding offer. Do not set it based only on your preference. It applies only to that take and does not change the UI selection.
+  - In every other case, omit `confirmed_voicebank_override`; the UI-selected voicebank remains authoritative.
+  - Without a user-selected voicebank, choose only from language-compatible voicebanks. Use each voicebank's declared `supported_voice_types`, `supported_gender_presentations`, and `supported_range` metadata to identify voices that cover the requested SATB role, requested gender presentation, and selected part's notated pitch range when that range is available.
+  - A missing requested role or gender does not disqualify a voicebank. Do not infer coverage from `profile_gender`, or merely because a technical synthesis control exists; use the declared capability fields.
+  - If multiple voicebanks cover every applicable constraint, choose the lowest numeric `selection_priority`. Use `optimal_range` only as a preference when the remaining candidates have the same priority.
+  - If no voicebank covers every non-language constraint, choose the closest language-compatible voicebank. State a material role, gender, or range limitation before synthesis.
   - The `voicebank` must match one available voicebank ID. Choose it before choosing `voice_color`.
 - When Dynamic Context contains `CURRENT SCORE CONTEXT UPDATED`, the current score summary and lyric samples supersede all score-specific requests, selections, and assumptions in earlier conversation, including previously stated languages, parts, verses, automatically chosen voicebanks, and voice styles. Treat only the current user request as applicable to this score. Resolve the current request again from the current score and user request by following the Language selection for synthesis and Voicebank selection rules above.
 - If the chosen voicebank has no voice colors, do not include voice_color.

@@ -653,8 +653,7 @@ def create_app() -> FastAPI:
                 {
                     "id": voicebank_id,
                     "name": entry.get("name") or voicebank_id,
-                    "gender": entry.get("gender"),
-                    "voice_type": entry.get("voice_type"),
+                    "profile_gender": entry.get("profile_gender"),
                     "default_voice_color": entry.get("default_voice_color"),
                     "profile_image": entry.get("profile_image"),
                     "selector_image": entry.get("selector_image"),

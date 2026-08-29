@@ -97,5 +97,14 @@ def test_metadata_tools_have_field_descriptions() -> None:
     voicebank_info = schema_map["get_voicebank_info"]["outputSchema"]
     assert voicebank_info["description"]
     assert voicebank_info["properties"]["speakers"]["items"]["description"]
+    assert voicebank_info["properties"]["supported_voice_types"]["description"]
+    assert voicebank_info["properties"]["supported_gender_presentations"]["description"]
+    assert voicebank_info["properties"]["selection_priority"]["description"]
+
+    synthesize = schema_map["synthesize"]["inputSchema"]
+    override = synthesize["properties"]["confirmed_voicebank_override"]
+    assert override["default"] is False
+    assert "including a clear acceptance of the assistant's immediately preceding offer" in override["description"]
+    assert "does not change the UI selection" in override["description"]
 
     assert "estimate_credits" not in schema_map

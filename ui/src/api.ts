@@ -26,8 +26,7 @@ export type ChatSelection = {
 export type VoicebankOption = {
   id: string;
   name: string;
-  gender?: string | null;
-  voice_type?: string | null;
+  profile_gender?: string | null;
   default_voice_color?: string | null;
   profile_image?: string | null;
   selector_image?: string | null;

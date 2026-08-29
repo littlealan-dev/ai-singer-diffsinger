@@ -77,8 +77,10 @@
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
-      "gender": "male",
-      "voice_type": "tenor"
+      "profile_gender": "male",
+      "supported_voice_types": ["tenor"],
+      "supported_gender_presentations": ["male"],
+      "selection_priority": 20
     },
     {
       "id": "PM-31_Commercial_Scarlet",
@@ -155,8 +157,10 @@
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
-      "gender": "male",
-      "voice_type": "tenor"
+      "profile_gender": "male",
+      "supported_voice_types": ["tenor"],
+      "supported_gender_presentations": ["male"],
+      "selection_priority": 20
     },
     {
       "id": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
@@ -213,8 +217,10 @@
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": true,
-      "gender": "female",
-      "voice_type": "soprano"
+      "profile_gender": "female",
+      "supported_voice_types": ["soprano"],
+      "supported_gender_presentations": ["female"],
+      "selection_priority": 10
     },
     {
       "id": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
@@ -249,10 +255,12 @@
       "sample_rate": 44100,
       "hop_size": 512,
       "use_lang_id": false,
-      "gender": "non-binary and genderless",
-      "voice_type": null,
+      "profile_gender": "genderless",
       "supported_range": "D2 - D6",
-      "optimal_range": "C3 - G5 (alto)"
+      "optimal_range": "C3 - G5 (alto)",
+      "supported_voice_types": ["soprano", "alto", "tenor", "bass"],
+      "supported_gender_presentations": ["female", "male", "genderless"],
+      "selection_priority": 1
     }
   ]
 }

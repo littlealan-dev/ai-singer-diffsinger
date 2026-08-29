@@ -4421,6 +4421,35 @@ def test_chat_selected_voicebank_overrides_llm_voicebank(client):
     assert job_data["consumedCredits"] == 1
 
 
+def test_confirmed_voicebank_override_beats_ui_selection_for_one_take(client):
+    _test_client, app = client
+    orchestrator = app.state.orchestrator
+    orchestrator._cached_voicebank_ids = ["VoiceA", "VoiceB"]
+
+    confirmed = asyncio.run(
+        orchestrator._apply_forced_voicebank(
+            {"voicebank": "VoiceA", "confirmed_voicebank_override": True},
+            "VoiceB",
+        )
+    )
+    assert confirmed["voicebank"] == "VoiceA"
+    assert confirmed["_skip_default_voice_id"] is True
+    assert "confirmed_voicebank_override" not in confirmed
+
+    ui_selected = asyncio.run(
+        orchestrator._apply_forced_voicebank({"voicebank": "VoiceA"}, "VoiceB")
+    )
+    assert ui_selected["voicebank"] == "VoiceB"
+
+    with pytest.raises(ValueError, match="available voicebank"):
+        asyncio.run(
+            orchestrator._apply_forced_voicebank(
+                {"voicebank": "Unknown", "confirmed_voicebank_override": True},
+                "VoiceB",
+            )
+        )
+
+
 def test_chat_selected_language_overrides_llm_and_reaches_synthesis(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -4531,6 +4560,11 @@ def test_voicebank_details_forward_language_details_to_llm_context(client):
                 },
                 "voice_colors": [],
                 "use_lang_id": False,
+                "supported_range": "D2 - D6",
+                "optimal_range": "C3 - G5 (alto)",
+                "supported_voice_types": ["soprano", "alto", "tenor", "bass"],
+                "supported_gender_presentations": ["female", "male", "genderless"],
+                "selection_priority": 1,
             }
         return _make_router_call_tool()(name, arguments)
 
@@ -4543,8 +4577,12 @@ def test_voicebank_details_forward_language_details_to_llm_context(client):
         {
             "id": "LIEE",
             "name": "LIEE",
-            "gender": None,
-            "voice_type": None,
+            "profile_gender": None,
+            "supported_range": "D2 - D6",
+            "optimal_range": "C3 - G5 (alto)",
+            "supported_voice_types": ["soprano", "alto", "tenor", "bass"],
+            "supported_gender_presentations": ["female", "male", "genderless"],
+            "selection_priority": 1,
             "languages": ["zh", "zh-yue"],
             "language_details": {
                 "zh": {"label": "Mandarin Chinese", "romanization": "Pinyin"},
@@ -4678,8 +4716,7 @@ def test_chat_drops_voice_color_when_voicebank_has_no_colors(client):
                 "sample_rate": 44100,
                 "hop_size": 512,
                 "use_lang_id": False,
-                "gender": "female",
-                "voice_type": "soprano",
+                "profile_gender": "female",
             }
         if name == "synthesize":
             synth_calls.append(dict(arguments))

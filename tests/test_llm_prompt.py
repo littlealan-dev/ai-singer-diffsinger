@@ -329,7 +329,7 @@ def test_build_prompt_bundle_supports_legacy_string_containment() -> None:
     assert '"title": "My Tribute"' in str(bundle)
 
 
-def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
+def test_build_prompt_bundle_includes_voicebank_selection_metadata() -> None:
     bundle = build_prompt_bundle(
         tools=[],
         score_available=True,
@@ -343,8 +343,12 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
             {
                 "id": "Katyusha_v170",
                 "name": "Katyusha v170",
-                "gender": "female",
-                "voice_type": "soprano",
+                "profile_gender": "female",
+                "supported_range": "C3 - C6",
+                "optimal_range": "F3 - A5",
+                "supported_voice_types": ["soprano", "alto"],
+                "supported_gender_presentations": ["female"],
+                "selection_priority": 10,
                 "languages": ["en", "ja", "zh"],
                 "language_details": {
                     "zh": {"label": "Mandarin Chinese", "romanization": "Pinyin"}
@@ -356,8 +360,12 @@ def test_build_prompt_bundle_includes_voicebank_gender_and_voice_type() -> None:
         ],
     )
     assert "Voicebank metadata (if available):" in bundle.dynamic_prompt_text
-    assert '"gender": "female"' in bundle.dynamic_prompt_text
-    assert '"voice_type": "soprano"' in bundle.dynamic_prompt_text
+    assert '"profile_gender": "female"' in bundle.dynamic_prompt_text
+    assert '"supported_range": "C3 - C6"' in bundle.dynamic_prompt_text
+    assert '"optimal_range": "F3 - A5"' in bundle.dynamic_prompt_text
+    assert '"supported_voice_types": [' in bundle.dynamic_prompt_text
+    assert '"supported_gender_presentations": [' in bundle.dynamic_prompt_text
+    assert '"selection_priority": 10' in bundle.dynamic_prompt_text
     assert '"languages": [' in bundle.dynamic_prompt_text
     assert '"ja"' in bundle.dynamic_prompt_text
     assert '"Mandarin Chinese"' in bundle.dynamic_prompt_text
@@ -424,7 +432,7 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
     assert '"topup_credits_available": 45' in bundle.dynamic_prompt_text
 
 
-def test_system_prompt_selects_from_language_compatible_voicebanks_before_liee() -> None:
+def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -440,9 +448,14 @@ def test_system_prompt_selects_from_language_compatible_voicebanks_before_liee()
         voicebank_details=None,
     )
     assert "choose only from language-compatible voicebanks" in prompt
-    assert "tenor, bass, baritone, or equivalent" in prompt
-    assert "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)` is compatible" in prompt
-    assert "choose LIEE" in prompt
+    assert "supported_voice_types" in prompt
+    assert "supported_gender_presentations" in prompt
+    assert "supported_range" in prompt
+    assert "lowest numeric `selection_priority`" in prompt
+    assert "Do not infer coverage" in prompt
+    assert "confirmed_voicebank_override=true" in prompt
+    assert "including a clear acceptance of the assistant's immediately preceding offer" in prompt
+    assert "does not change the UI selection" in prompt
     assert "list every language-compatible voicebank" in prompt
     assert "try one of those voices or sing in solfege" in prompt
     assert "selected part, verse/lyric selection, resolved singing language" in prompt
@@ -493,8 +506,7 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
             {
                 "id": "VoiceB",
                 "name": "Voice B Display",
-                "gender": "female",
-                "voice_type": "soprano",
+                "profile_gender": "female",
                 "voice_colors": [],
                 "default_voice_color": None,
             }

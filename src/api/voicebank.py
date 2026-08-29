@@ -368,8 +368,14 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
                 "sample_rate": manifest_entry.get("sample_rate", 44100),
                 "hop_size": manifest_entry.get("hop_size", 512),
                 "use_lang_id": manifest_entry.get("use_lang_id", False),
-                "gender": manifest_entry.get("gender"),
-                "voice_type": manifest_entry.get("voice_type"),
+                "profile_gender": manifest_entry.get("profile_gender"),
+                "supported_range": manifest_entry.get("supported_range"),
+                "optimal_range": manifest_entry.get("optimal_range"),
+                "supported_voice_types": manifest_entry.get("supported_voice_types", []),
+                "supported_gender_presentations": manifest_entry.get(
+                    "supported_gender_presentations", []
+                ),
+                "selection_priority": manifest_entry.get("selection_priority", 1000),
             }
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("get_voicebank_info output=%s", summarize_payload(result))
@@ -431,8 +437,14 @@ def get_voicebank_info(voicebank: Union[str, Path]) -> Dict[str, Any]:
         "sample_rate": config.get("sample_rate", 44100),
         "hop_size": config.get("hop_size", 512),
         "use_lang_id": config.get("use_lang_id", False),
-        "gender": manifest_metadata.get("gender"),
-        "voice_type": manifest_metadata.get("voice_type"),
+        "profile_gender": manifest_metadata.get("profile_gender"),
+        "supported_range": manifest_metadata.get("supported_range"),
+        "optimal_range": manifest_metadata.get("optimal_range"),
+        "supported_voice_types": manifest_metadata.get("supported_voice_types", []),
+        "supported_gender_presentations": manifest_metadata.get(
+            "supported_gender_presentations", []
+        ),
+        "selection_priority": manifest_metadata.get("selection_priority", 1000),
     }
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("get_voicebank_info output=%s", summarize_payload(result))

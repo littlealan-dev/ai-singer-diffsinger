@@ -5294,16 +5294,30 @@ class Orchestrator:
         available_ids = await self._get_voicebank_ids()
         return selected if selected in set(available_ids) else None
 
-    def _apply_forced_voicebank(
+    async def _apply_forced_voicebank(
         self,
         synth_args: Dict[str, Any],
         forced_voicebank_id: Optional[str],
     ) -> Dict[str, Any]:
-        """Force synthesis to use the user's selected voicebank when provided."""
-        if not forced_voicebank_id:
-            return synth_args
+        """Apply the UI voicebank selection unless the user confirmed a one-shot override."""
         updated = dict(synth_args)
+        confirmed_override = updated.pop("confirmed_voicebank_override", False)
+        if not isinstance(confirmed_override, bool):
+            raise ValueError("confirmed_voicebank_override must be a boolean.")
+        if not forced_voicebank_id:
+            return updated
         previous_voicebank = updated.get("voicebank")
+        if confirmed_override and previous_voicebank != forced_voicebank_id:
+            requested_voicebank_id = await self._normalize_selected_voicebank_id(
+                str(previous_voicebank or "")
+            )
+            if not requested_voicebank_id:
+                raise ValueError(
+                    "A confirmed voicebank override must name an available voicebank."
+                )
+            updated["voicebank"] = requested_voicebank_id
+            updated["_skip_default_voice_id"] = True
+            return updated
         updated["voicebank"] = forced_voicebank_id
         updated["_skip_default_voice_id"] = True
         if previous_voicebank != forced_voicebank_id:
@@ -5519,8 +5533,14 @@ class Orchestrator:
                     {
                         "id": voicebank_id,
                         "name": info.get("name") or entry.get("name") or voicebank_id,
-                        "gender": info.get("gender"),
-                        "voice_type": info.get("voice_type"),
+                        "profile_gender": info.get("profile_gender"),
+                        "supported_range": info.get("supported_range"),
+                        "optimal_range": info.get("optimal_range"),
+                        "supported_voice_types": info.get("supported_voice_types", []),
+                        "supported_gender_presentations": info.get(
+                            "supported_gender_presentations", []
+                        ),
+                        "selection_priority": info.get("selection_priority", 1000),
                         "languages": info.get("languages", []),
                         "language_details": info.get("language_details", {}),
                         "use_lang_id": bool(info.get("use_lang_id", False)),
@@ -6010,7 +6030,9 @@ class Orchestrator:
                         )
 
                 # Launch an async synthesis job.
-                synth_args = self._apply_forced_voicebank(synth_args, forced_voicebank_id)
+                synth_args = await self._apply_forced_voicebank(
+                    synth_args, forced_voicebank_id
+                )
                 language_resolution = await self._resolve_synthesis_language(
                     current_score,
                     synth_args,

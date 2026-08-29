@@ -1396,13 +1396,31 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
             "additionalProperties": False,
             "description": "Manifest-declared baseline TENC, BREC, VOIC, and GENC controls for this voicebank.",
         },
-        "gender": {
+        "profile_gender": {
             "type": ["string", "null"],
-            "description": "Curated singer gender metadata from the active voicebank manifest, if available.",
+            "description": "Public identity/profile gender metadata from the active voicebank manifest, if available; it is not a selection capability.",
         },
-        "voice_type": {
+        "supported_range": {
             "type": ["string", "null"],
-            "description": "Curated SATB-style voice type metadata from the active voicebank manifest, if available.",
+            "description": "Curated supported vocal pitch range from the active voicebank manifest, if available.",
+        },
+        "optimal_range": {
+            "type": ["string", "null"],
+            "description": "Curated optimal vocal pitch range from the active voicebank manifest, if available.",
+        },
+        "supported_voice_types": {
+            "type": "array",
+            "description": "Declared SATB voice types this voicebank can cover.",
+            "items": {"type": "string"},
+        },
+        "supported_gender_presentations": {
+            "type": "array",
+            "description": "Declared vocal gender presentations this voicebank can cover.",
+            "items": {"type": "string"},
+        },
+        "selection_priority": {
+            "type": "integer",
+            "description": "Product default selection rank among otherwise fully compatible voicebanks; lower values are preferred.",
         },
         "sample_rate": {"type": "integer", "description": "Native output sample rate in Hz."},
         "hop_size": {"type": "integer", "description": "Model hop size used by the backend."},
@@ -1418,8 +1436,12 @@ _VOICEBANK_INFO_SCHEMA: Dict[str, Any] = {
         "voice_colors",
         "default_voice_color",
         "synthesis_control_defaults",
-        "gender",
-        "voice_type",
+        "profile_gender",
+        "supported_range",
+        "optimal_range",
+        "supported_voice_types",
+        "supported_gender_presentations",
+        "selection_priority",
         "sample_rate",
         "hop_size",
         "use_lang_id",
@@ -1838,6 +1860,20 @@ TOOLS: List[Tool] = [
                 "voicebank": {
                     "type": "string",
                     "description": "Voicebank id to render with.",
+                },
+                "confirmed_voicebank_override": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Set true only with the user's explicit confirmation to use this "
+                        "voicebank for this synthesis despite a different voicebank "
+                        "currently selected in the UI, including a clear acceptance of "
+                        "the assistant's immediately preceding offer. The backend then permits this "
+                        "one synthesis to use `voicebank` after verifying that it is "
+                        "available and supports the resolved language. This does not "
+                        "change the UI selection or persist a new default. Omit or set "
+                        "false in every other case; do not set it based only on the model's preference."
+                    ),
                 },
                 "language": {
                     "type": "string",

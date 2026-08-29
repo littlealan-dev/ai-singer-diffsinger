@@ -806,7 +806,7 @@ class TestVoicebankAPIs(unittest.TestCase):
             color_names = [entry.get("name") for entry in voice_colors]
             self.assertIn(info.get("default_voice_color"), color_names)
 
-    def test_get_voicebank_info_includes_manifest_gender_and_voice_type(self):
+    def test_get_voicebank_info_includes_manifest_profile_and_selection_metadata(self):
         if not VOICEBANK_PATH.exists():
             self.skipTest(f"Voicebank not found at {VOICEBANK_PATH}")
 
@@ -840,8 +840,12 @@ class TestVoicebankAPIs(unittest.TestCase):
                                 "sample_rate": 44100,
                                 "hop_size": 512,
                                 "use_lang_id": True,
-                                "gender": "female",
-                                "voice_type": "alto",
+                                "profile_gender": "female",
+                                "supported_range": "A2 - C6",
+                                "optimal_range": "C3 - G5",
+                                "supported_voice_types": ["alto", "tenor"],
+                                "supported_gender_presentations": ["female"],
+                                "selection_priority": 10,
                             }
                         ],
                     }
@@ -851,8 +855,12 @@ class TestVoicebankAPIs(unittest.TestCase):
             with mock.patch.dict(os.environ, {"VOICEBANK_MANIFEST_PATH": str(manifest_path)}):
                 info = get_voicebank_info("Raine_Rena_2.01")
 
-        self.assertEqual(info["gender"], "female")
-        self.assertEqual(info["voice_type"], "alto")
+        self.assertEqual(info["profile_gender"], "female")
+        self.assertEqual(info["supported_range"], "A2 - C6")
+        self.assertEqual(info["optimal_range"], "C3 - G5")
+        self.assertEqual(info["supported_voice_types"], ["alto", "tenor"])
+        self.assertEqual(info["supported_gender_presentations"], ["female"])
+        self.assertEqual(info["selection_priority"], 10)
         self.assertEqual(
             info["language_details"]["zh"],
             {"label": "Mandarin Chinese", "romanization": "Pinyin"},
@@ -887,8 +895,7 @@ class TestVoicebankAPIs(unittest.TestCase):
                                 "sample_rate": 44100,
                                 "hop_size": 512,
                                 "use_lang_id": True,
-                                "gender": "female",
-                                "voice_type": "soprano",
+                                "profile_gender": "female",
                             }
                         ],
                     }
@@ -898,8 +905,7 @@ class TestVoicebankAPIs(unittest.TestCase):
             with mock.patch.dict(os.environ, {"VOICEBANK_MANIFEST_PATH": str(manifest_path)}):
                 info = get_voicebank_info(nested_voicebank_path)
 
-        self.assertEqual(info["gender"], "female")
-        self.assertEqual(info["voice_type"], "soprano")
+        self.assertEqual(info["profile_gender"], "female")
 
     def test_resolve_vocoder_model_path_uses_shared_assets(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
