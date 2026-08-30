@@ -168,6 +168,11 @@ test.describe("core singing regression", () => {
     }
     await page.getByRole("button", { name: "Horizontal" }).click();
     await expect(page.getByRole("button", { name: "Horizontal" })).toHaveAttribute("aria-pressed", "true");
+    const horizontalRenderer = page.getByTestId("horizontal-score-incremental-renderer");
+    await expect(horizontalRenderer).toBeVisible();
+    // Horizontal rendering is one continuous OSMD score. It must not use
+    // independent range excerpts, which would redraw clefs at every boundary.
+    await expect(horizontalRenderer.locator("svg")).toHaveCount(1);
     // Keep the header at desktop width for the layout switch, then constrain
     // the preview to prove that a later measure is followed horizontally.
     await page.setViewportSize({ width: 600, height: 480 });
@@ -198,6 +203,9 @@ test.describe("core singing regression", () => {
     await page.keyboard.press("Escape");
     await installActiveMeasureObserver(page);
     await page.getByRole("button", { name: "Horizontal" }).click();
+    const horizontalRenderer = page.getByTestId("horizontal-score-incremental-renderer");
+    await expect(horizontalRenderer).toBeVisible();
+    await expect(horizontalRenderer.locator("svg")).toHaveCount(1);
     await page.getByRole("button", { name: "Play score player" }).click();
 
     await expect.poll(
@@ -207,6 +215,10 @@ test.describe("core singing regression", () => {
           history.some((entry) => `${entry.playedMeasureIndex}:${entry.sourceMeasureIndex}` === expected),
         );
       },
+      { timeout: 15_000 },
+    ).toBe(true);
+    await expect.poll(
+      async () => (await getActiveMeasureHistory(page)).some((entry) => entry.sourceMeasureIndex >= 8),
       { timeout: 15_000 },
     ).toBe(true);
   });
