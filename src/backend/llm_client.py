@@ -112,6 +112,8 @@ class RegressionLlmClient:
                 for name in (
                     "basic",
                     "repeat-piano",
+                    "active-measure-written",
+                    "active-measure-repeat",
                     "solfege",
                     "split-staff",
                     "split-chords",
@@ -227,6 +229,12 @@ class RegressionLlmClient:
                             else self._verse_one
                         ),
                     },
+                )
+            if scenario in {"active-measure-written", "active-measure-repeat"}:
+                return self._response(
+                    "Starting the take.",
+                    "synthesize",
+                    {"part_index": 1, "lyric_selection": self._repeat_piano_verse_one},
                 )
             if scenario == "solfege":
                 return self._response(

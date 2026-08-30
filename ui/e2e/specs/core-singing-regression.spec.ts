@@ -137,6 +137,80 @@ test.describe("core singing regression", () => {
     expect(updateDepthWarnings).toEqual([]);
   });
 
+  test("highlights and follows written-order measures in page and horizontal score views", async ({ page, request }, testInfo) => {
+    // At the default 1280px test viewport, the responsive header controls
+    // overlap the Horizontal button with the score-download control. Exercise
+    // the desktop layout that exposes both controls as a user would.
+    await page.setViewportSize({ width: 1920, height: 480 });
+    await uploadFixture(page, "active-measure-written-order.xml");
+    await requestScenario(page, "active-measure-written");
+    await waitForAudio(page, request, testInfo);
+
+    // The onboarding menu can receive focus after a synthesis completes in the
+    // test shell. Close it before clicking the real score-player transport.
+    await page.keyboard.press("Escape");
+    await installActiveMeasureObserver(page);
+    const canvas = page.locator(".score-canvas");
+    await canvas.evaluate((element) => element.scrollTo({ top: 0, left: 0 }));
+    await page.getByRole("button", { name: "Play score player" }).click();
+
+    await expect.poll(
+      async () => (await getActiveMeasureHistory(page)).some((entry) => entry.sourceMeasureIndex >= 10),
+      { timeout: 15_000 },
+    ).toBe(true);
+    await expect.poll(() => canvas.evaluate((element) => element.scrollTop), { timeout: 15_000 }).toBeGreaterThan(0);
+
+    await page.getByRole("button", { name: "Stop score player" }).click();
+    // Make the full staffline wider than the constrained horizontal viewport.
+    // This proves the follow behavior rather than merely the cursor mapping.
+    for (let index = 0; index < 5; index += 1) {
+      await page.getByRole("button", { name: "Zoom in" }).click();
+    }
+    await page.getByRole("button", { name: "Horizontal" }).click();
+    await expect(page.getByRole("button", { name: "Horizontal" })).toHaveAttribute("aria-pressed", "true");
+    // Keep the header at desktop width for the layout switch, then constrain
+    // the preview to prove that a later measure is followed horizontally.
+    await page.setViewportSize({ width: 600, height: 480 });
+    await canvas.evaluate((element) => {
+      element.style.flex = "0 0 220px";
+      element.style.width = "220px";
+    });
+    await canvas.evaluate((element) => element.scrollTo({ top: 0, left: 0 }));
+    await clearActiveMeasureHistory(page);
+    await page.getByRole("button", { name: "Play score player" }).click();
+
+    await expect.poll(
+      async () => (await getActiveMeasureHistory(page)).some((entry) => entry.sourceMeasureIndex >= 10),
+      { timeout: 15_000 },
+    ).toBe(true);
+    await expect.poll(() => canvas.evaluate((element) => element.scrollLeft), { timeout: 15_000 }).toBeGreaterThan(0);
+  });
+
+  test("returns the active highlight to repeated source measures", async ({ page, request }, testInfo) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await uploadFixture(page, "active-measure-repeat.xml");
+    await requestScenario(page, "active-measure-repeat");
+    const state = await waitForAudio(page, request, testInfo);
+
+    expect(state.score_summary?.performance_measure_map?.expanded.map((entry) => entry.source_measure_index))
+      .toEqual([0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+
+    await page.keyboard.press("Escape");
+    await installActiveMeasureObserver(page);
+    await page.getByRole("button", { name: "Horizontal" }).click();
+    await page.getByRole("button", { name: "Play score player" }).click();
+
+    await expect.poll(
+      async () => {
+        const history = await getActiveMeasureHistory(page);
+        return ["0:0", "1:1", "2:2", "3:3", "4:0"].every((expected) =>
+          history.some((entry) => `${entry.playedMeasureIndex}:${entry.sourceMeasureIndex}` === expected),
+        );
+      },
+      { timeout: 15_000 },
+    ).toBe(true);
+  });
+
   test("adds solfege, rehydrates the active artifact, then synthesizes it", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "solfege-source.xml");
     await requestScenario(page, "solfege");
@@ -215,6 +289,58 @@ async function uploadFixture(page: Page, filename: string): Promise<void> {
 
 async function requestScenario(page: Page, scenario: string): Promise<void> {
   await sendMessage(page, `[e2e:${scenario}] prepare this fixture`);
+}
+
+type ActiveMeasureHistoryEntry = {
+  playedMeasureIndex: number;
+  sourceMeasureIndex: number;
+};
+
+async function installActiveMeasureObserver(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const targetWindow = window as Window & {
+      __e2eActiveMeasureHistory?: ActiveMeasureHistoryEntry[];
+      __e2eActiveMeasureObserver?: MutationObserver;
+    };
+    targetWindow.__e2eActiveMeasureObserver?.disconnect();
+    targetWindow.__e2eActiveMeasureHistory = [];
+    targetWindow.__e2eActiveMeasureObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        const target = record.target as HTMLElement;
+        const playedMeasureIndex = Number(target.dataset.playedMeasureIndex);
+        const sourceMeasureIndex = Number(target.dataset.sourceMeasureIndex);
+        if (!Number.isFinite(playedMeasureIndex) || !Number.isFinite(sourceMeasureIndex)) continue;
+        const history = targetWindow.__e2eActiveMeasureHistory!;
+        const previous = history[history.length - 1];
+        if (
+          previous?.playedMeasureIndex !== playedMeasureIndex ||
+          previous.sourceMeasureIndex !== sourceMeasureIndex
+        ) {
+          history.push({ playedMeasureIndex, sourceMeasureIndex });
+        }
+      }
+    });
+    targetWindow.__e2eActiveMeasureObserver.observe(document.body, {
+      attributes: true,
+      subtree: true,
+      attributeFilter: ["data-played-measure-index"],
+    });
+  });
+}
+
+async function clearActiveMeasureHistory(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as Window & { __e2eActiveMeasureHistory?: ActiveMeasureHistoryEntry[] })
+      .__e2eActiveMeasureHistory = [];
+  });
+}
+
+async function getActiveMeasureHistory(page: Page): Promise<ActiveMeasureHistoryEntry[]> {
+  return page.evaluate(
+    () =>
+      (window as Window & { __e2eActiveMeasureHistory?: ActiveMeasureHistoryEntry[] })
+        .__e2eActiveMeasureHistory ?? [],
+  );
 }
 
 async function sendMessage(page: Page, message: string): Promise<Record<string, unknown>> {

@@ -191,6 +191,110 @@ def _expand_repeat_navigation(score: stream.Score, source_path: Path) -> stream.
     return expanded
 
 
+def build_performance_measure_map(path: str | Path) -> Dict[str, List[Dict[str, Any]]]:
+    """Return written and played-order measure timing mapped to source notation.
+
+    ``music21.expandRepeats()`` creates linear copies of measures.  Its copied
+    measures retain a derivation origin, which lets the score player point a
+    repeated or navigated pass back to the one measure drawn by OSMD.
+    """
+    source_path = Path(path)
+    written_score = load_musicxml_score(source_path)
+    expanded_score = _expand_repeat_navigation(written_score, source_path)
+    return {
+        "written": _build_measure_timing_entries(written_score, written_score),
+        "expanded": _build_measure_timing_entries(expanded_score, written_score),
+    }
+
+
+def _build_measure_timing_entries(
+    performance_score: stream.Score,
+    source_score: stream.Score,
+) -> List[Dict[str, Any]]:
+    """Build one linear timing entry per measure from the first score part."""
+    if not source_score.parts or not performance_score.parts:
+        return []
+
+    source_measures = list(source_score.parts[0].getElementsByClass(stream.Measure))
+    performance_measures = list(
+        performance_score.parts[0].getElementsByClass(stream.Measure)
+    )
+    if not source_measures or not performance_measures:
+        return []
+
+    source_indices = {id(measure): index for index, measure in enumerate(source_measures)}
+    source_fallback_indices = {
+        (measure.number, measure.numberSuffix): index
+        for index, measure in enumerate(source_measures)
+    }
+    tempo_events = _extract_tempos(performance_score)
+    passed_counts: Dict[int, int] = {}
+    entries: List[Dict[str, Any]] = []
+    cursor_beats = 0.0
+
+    for played_index, measure in enumerate(performance_measures):
+        origin = getattr(getattr(measure, "derivation", None), "origin", None)
+        source_measure = origin if isinstance(origin, stream.Measure) else measure
+        source_index = source_indices.get(id(source_measure))
+        if source_index is None:
+            source_index = source_fallback_indices.get(
+                (source_measure.number, source_measure.numberSuffix)
+            )
+        if source_index is None:
+            # A malformed expansion should not prevent score upload. The UI can
+            # still highlight the closest written measure when provenance is
+            # unavailable.
+            source_index = min(played_index, len(source_measures) - 1)
+
+        duration_beats = _measure_duration_beats(measure)
+        start_seconds = _seconds_at_beat(cursor_beats, tempo_events)
+        end_seconds = _seconds_at_beat(cursor_beats + duration_beats, tempo_events)
+        pass_index = passed_counts.get(source_index, 0)
+        passed_counts[source_index] = pass_index + 1
+        entries.append(
+            {
+                "played_measure_index": played_index,
+                "source_measure_index": source_index,
+                "source_measure_number": str(source_measures[source_index].number),
+                "pass_index": pass_index,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+            }
+        )
+        cursor_beats += duration_beats
+
+    return entries
+
+
+def _measure_duration_beats(measure: stream.Measure) -> float:
+    """Return a stable linear duration, including empty but timed measures."""
+    try:
+        duration = float(measure.barDuration.quarterLength)
+    except (AttributeError, TypeError, ValueError):
+        duration = float(measure.duration.quarterLength)
+    return max(0.0, duration)
+
+
+def _seconds_at_beat(beat: float, tempo_events: Sequence[TempoEvent]) -> float:
+    """Match score_duration_seconds' default-tempo behaviour in beat space."""
+    target = max(0.0, float(beat))
+    current_beat = 0.0
+    current_bpm = 120.0
+    total_seconds = 0.0
+    for event in tempo_events:
+        event_beat = max(0.0, float(event.offset_beats))
+        if event_beat > current_beat:
+            segment_end = min(event_beat, target)
+            total_seconds += (segment_end - current_beat) * (60.0 / current_bpm)
+            current_beat = segment_end
+        if current_beat >= target:
+            return total_seconds
+        current_bpm = float(event.bpm)
+    if current_beat < target:
+        total_seconds += (target - current_beat) * (60.0 / current_bpm)
+    return total_seconds
+
+
 def _parse_score(
     score: stream.Score,
     *,
