@@ -2874,6 +2874,12 @@ img.voice-picker-option-avatar {
   max-width: none;
 }
 
+.score-canvas.horizontal-layout .horizontal-incremental-score-surface,
+.horizontal-score-incremental-renderer {
+  display: block;
+  min-height: 100%;
+}
+
 .score-placeholder {
   position: absolute;
   inset: 0;

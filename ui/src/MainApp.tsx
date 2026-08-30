@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
@@ -1406,6 +1406,140 @@ const enableOffscreenPageContentVisibility = (container: HTMLElement): void => {
   }
 };
 
+// Keep each native incremental-rendering batch within a bounded engraving
+// budget. A two-staff piano part counts as two simultaneous staves, so dense
+// scores naturally render fewer measures ahead than solo scores.
+const HORIZONTAL_SCORE_STAFF_MEASURE_BUDGET = 16;
+const HORIZONTAL_SCORE_MAX_MEASURES_PER_BATCH = 16;
+
+const countParallelScoreStaves = (scoreData: string, fallbackPartCount: number): number => {
+  try {
+    const document = new DOMParser().parseFromString(scoreData, "application/xml");
+    const parts = Array.from(document.querySelectorAll("score-partwise > part"));
+    if (!parts.length) return Math.max(1, fallbackPartCount);
+    return Math.max(
+      1,
+      parts.reduce((total, part) => {
+        const stavesText = part.querySelector("measure > attributes > staves")?.textContent;
+        const staves = Number.parseInt(stavesText ?? "", 10);
+        return total + (Number.isFinite(staves) && staves > 0 ? staves : 1);
+      }, 0)
+    );
+  } catch {
+    return Math.max(1, fallbackPartCount);
+  }
+};
+
+const getHorizontalScoreIncrementalBatchSize = (parallelStaffCount: number): number =>
+  Math.max(
+    1,
+    Math.min(
+      HORIZONTAL_SCORE_MAX_MEASURES_PER_BATCH,
+      Math.floor(HORIZONTAL_SCORE_STAFF_MEASURE_BUDGET / Math.max(1, parallelStaffCount))
+    )
+  );
+
+type HorizontalScoreRendererHandle = {
+  osmd: OpenSheetMusicDisplay;
+  ensureSourceMeasureRendered: (sourceMeasureIndex: number) => void;
+};
+
+type HorizontalScoreRendererProps = {
+  scoreData: string;
+  zoomLevel: number;
+  measuresPerBatch: number;
+  scrollContainerRef: RefObject<HTMLElement>;
+  onRendererChange: (renderer: HorizontalScoreRendererHandle | null) => void;
+  onReady: () => void;
+  onRenderError: () => void;
+};
+
+const HorizontalScoreRenderer = ({
+  scoreData,
+  zoomLevel,
+  measuresPerBatch,
+  scrollContainerRef,
+  onRendererChange,
+  onReady,
+  onRenderError,
+}: HorizontalScoreRendererProps) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let cancelled = false;
+    let osmd: OpenSheetMusicDisplay | null = null;
+    container.replaceChildren();
+
+    void (async () => {
+      try {
+        osmd = new OpenSheetMusicDisplay(container, {
+          autoResize: false,
+          drawTitle: true,
+          followCursor: false,
+          cursorsOptions: [{ type: 3, color: "#8b5cf6", alpha: 0.24, follow: false }],
+          pageFormat: "Endless",
+          renderSingleHorizontalStaffline: true,
+        });
+        await osmd.load(scoreData);
+        if (cancelled) return;
+        osmd.zoom = zoomLevel;
+
+        // OSMD 2.x keeps one continuous notation model and appends to the
+        // same SVG. Unlike the former range-per-chunk implementation, this
+        // preserves the actual score start (one clef/key/time signature) and
+        // has no fabricated system boundaries between batches.
+        osmd.renderNext({ measures: measuresPerBatch });
+        osmd.cursor.hide();
+        const ensureSourceMeasureRendered = (sourceMeasureIndex: number) => {
+          let guard = 0;
+          while (
+            !osmd!.IncrementalRenderingComplete &&
+            osmd!.IncrementalRenderProgress.renderedMeasures <= sourceMeasureIndex &&
+            guard++ < 256
+          ) {
+            osmd!.renderNext({ measures: measuresPerBatch });
+          }
+        };
+        onRendererChange({ osmd, ensureSourceMeasureRendered });
+        onReady();
+        osmd.enableIncrementalRenderingOnScroll({
+          measures: measuresPerBatch,
+          scrollElement: scrollContainerRef.current ?? undefined,
+        });
+      } catch {
+        if (!cancelled) onRenderError();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      onRendererChange(null);
+      try {
+        osmd?.disableIncrementalRenderingOnScroll();
+        osmd?.clear();
+      } catch {
+        // Ignore cleanup from a partially initialized renderer.
+      }
+    };
+  }, [measuresPerBatch, onReady, onRenderError, onRendererChange, scoreData, scrollContainerRef, zoomLevel]);
+
+  return (
+    <div
+      className="score-surface horizontal-incremental-score-surface"
+      data-testid="score-preview-surface"
+      data-measures-per-batch={measuresPerBatch}
+    >
+      <div
+        ref={containerRef}
+        className="horizontal-score-incremental-renderer"
+        data-testid="horizontal-score-incremental-renderer"
+      />
+    </div>
+  );
+};
+
 const renderScorePageLayoutForPrint = async (
   scoreData: string,
   zoomLevel: number
@@ -1710,6 +1844,7 @@ export default function MainApp() {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
   const [scorePreviewWidth, setScorePreviewWidth] = useState(0);
+  const [horizontalRendererRevision, setHorizontalRendererRevision] = useState(0);
   const [expandRepeats, setExpandRepeats] = useState(true);
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
@@ -1767,12 +1902,16 @@ export default function MainApp() {
   const scoreCanvasRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const horizontalScoreRendererRef = useRef<HorizontalScoreRendererHandle | null>(null);
   const scorePageFitZoomRef = useRef(1);
   const activeScoreMeasureRef = useRef<string | null>(null);
+  const activePerformanceMeasureRef = useRef<PerformanceMeasureMapEntry | null>(null);
   const performanceMeasureMapRef = useRef(scoreSummary?.performance_measure_map ?? null);
   performanceMeasureMapRef.current = scoreSummary?.performance_measure_map ?? null;
   const expandRepeatsRef = useRef(expandRepeats);
   expandRepeatsRef.current = expandRepeats;
+  const scorePreviewLayoutRef = useRef(scorePreviewLayout);
+  scorePreviewLayoutRef.current = scorePreviewLayout;
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
@@ -1786,6 +1925,14 @@ export default function MainApp() {
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
+
+  const horizontalScoreMeasuresPerBatch = useMemo(() => {
+    const fallbackPartCount = scoreSummary?.parts?.length ?? 1;
+    const parallelStaffCount = score
+      ? countParallelScoreStaves(score.data, fallbackPartCount)
+      : fallbackPartCount;
+    return getHorizontalScoreIncrementalBatchSize(parallelStaffCount);
+  }, [score?.data, scoreSummary?.parts?.length]);
 
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
@@ -1814,20 +1961,23 @@ export default function MainApp() {
     setMultiTrackPlaying((current) => (current === isPlaying ? current : isPlaying));
   }, []);
 
-  const handleScorePlayerPlaybackPositionChange = useCallback((playbackSeconds: number) => {
-    const performanceMeasureMap = performanceMeasureMapRef.current;
-    const entries = expandRepeatsRef.current
-      ? performanceMeasureMap?.expanded ?? []
-      : performanceMeasureMap?.written ?? [];
-    const activeMeasure = findActivePerformanceMeasure(entries, playbackSeconds);
-    if (!activeMeasure) return;
-
+  const positionActiveScoreMeasure = useCallback((activeMeasure: PerformanceMeasureMapEntry) => {
     const activeKey = `${activeMeasure.played_measure_index}:${activeMeasure.source_measure_index}`;
-    if (activeScoreMeasureRef.current === activeKey) return;
+    let osmd: OpenSheetMusicDisplay | null = null;
 
-    const cursor = osmdRef.current?.cursor;
-    if (!cursor) return;
+    if (scorePreviewLayoutRef.current === "horizontal") {
+      const renderer = horizontalScoreRendererRef.current;
+      if (!renderer) return;
+      renderer.ensureSourceMeasureRendered(activeMeasure.source_measure_index);
+      osmd = renderer.osmd;
+      if (!osmd) return;
+    } else {
+      osmd = osmdRef.current;
+    }
+
+    if (!osmd || activeScoreMeasureRef.current === activeKey) return;
     try {
+      const cursor = osmd.cursor;
       cursor.reset();
       for (let index = 0; index < activeMeasure.source_measure_index; index += 1) {
         cursor.nextMeasure();
@@ -1851,6 +2001,46 @@ export default function MainApp() {
     }
   }, []);
 
+  const handleHorizontalScoreRendererChange = useCallback(
+    (renderer: HorizontalScoreRendererHandle | null) => {
+      horizontalScoreRendererRef.current = renderer;
+      setHorizontalRendererRevision((current) => current + 1);
+    },
+    []
+  );
+
+  const handleHorizontalScoreReady = useCallback(() => {
+    setScorePreviewError(null);
+    setScoreReady(true);
+  }, []);
+
+  const handleScorePlayerPlaybackPositionChange = useCallback((playbackSeconds: number) => {
+    const performanceMeasureMap = performanceMeasureMapRef.current;
+    const entries = expandRepeatsRef.current
+      ? performanceMeasureMap?.expanded ?? []
+      : performanceMeasureMap?.written ?? [];
+    const activeMeasure = findActivePerformanceMeasure(entries, playbackSeconds);
+    if (!activeMeasure) return;
+    activePerformanceMeasureRef.current = activeMeasure;
+    positionActiveScoreMeasure(activeMeasure);
+  }, [positionActiveScoreMeasure]);
+
+  useEffect(() => {
+    if (scorePreviewLayout !== "horizontal") return;
+    const activeMeasure = activePerformanceMeasureRef.current;
+    if (activeMeasure) positionActiveScoreMeasure(activeMeasure);
+  }, [horizontalRendererRevision, positionActiveScoreMeasure, scorePreviewLayout]);
+
+  useEffect(() => {
+    activeScoreMeasureRef.current = null;
+    activePerformanceMeasureRef.current = null;
+    horizontalScoreRendererRef.current = null;
+    if (scorePreviewLayout === "horizontal" && score) {
+      setScoreReady(false);
+      setScorePreviewError(null);
+    }
+  }, [score?.data, scorePreviewLayout]);
+
   useEffect(() => {
     const scoreElement = scoreRef.current;
     if (!scoreElement) return;
@@ -1862,7 +2052,7 @@ export default function MainApp() {
     const observer = new ResizeObserver(updateWidth);
     observer.observe(scoreElement);
     return () => observer.disconnect();
-  }, [score]);
+  }, [score, scorePreviewLayout]);
 
   // The preview is always the original score, but the playback position may
   // switch between its written and repeat-expanded performance maps while the
@@ -2782,7 +2972,7 @@ export default function MainApp() {
   }, [billing.activePlanKey, billing.loading, isAuthenticated]);
 
   useEffect(() => {
-    if (!scoreRef.current || !score) return;
+    if (scorePreviewLayout !== "page" || !scoreRef.current || !score) return;
     let cancelled = false;
     beginScorePreviewTrap();
     setScoreReady(false);
@@ -2803,8 +2993,8 @@ export default function MainApp() {
           drawTitle: true,
           followCursor: false,
           cursorsOptions: [{ type: 3, color: "#8b5cf6", alpha: 0.24, follow: false }],
-          pageFormat: scorePreviewLayout === "page" ? "A4_P" : "Endless",
-          renderSingleHorizontalStaffline: scorePreviewLayout === "horizontal",
+          pageFormat: "A4_P",
+          renderSingleHorizontalStaffline: false,
         });
         osmdRef.current = osmd;
 
@@ -4594,11 +4784,23 @@ export default function MainApp() {
               ref={scoreCanvasRef}
               className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}
             >
-              <div
-                ref={scoreRef}
-                className={clsx("score-surface", { "page-layout": scorePreviewLayout === "page" })}
-                data-testid="score-preview-surface"
-              />
+              {scorePreviewLayout === "horizontal" && score ? (
+                <HorizontalScoreRenderer
+                  scoreData={score.data}
+                  zoomLevel={zoomLevel}
+                  measuresPerBatch={horizontalScoreMeasuresPerBatch}
+                  scrollContainerRef={scoreCanvasRef}
+                  onRendererChange={handleHorizontalScoreRendererChange}
+                  onReady={handleHorizontalScoreReady}
+                  onRenderError={handleScorePreviewFailure}
+                />
+              ) : (
+                <div
+                  ref={scoreRef}
+                  className="score-surface page-layout"
+                  data-testid="score-preview-surface"
+                />
+              )}
               {scorePreviewError ? (
                 <div className="score-placeholder score-error-placeholder">
                   <p>{scorePreviewError}</p>
