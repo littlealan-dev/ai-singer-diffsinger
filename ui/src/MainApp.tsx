@@ -13,6 +13,7 @@ import {
 import { useAudioTracks } from "@waveform-playlist/browser/tone";
 import { useMidiTracks } from "@waveform-playlist/midi";
 import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
@@ -34,6 +35,7 @@ import {
   type FeedbackRatingsRequest,
   type InstrumentalPart,
   type PerformanceMidi,
+  type PerformanceMeasureMapEntry,
   type ProgressResponse,
   type ScoreSummary,
   type SolfegeMode,
@@ -152,6 +154,8 @@ export type InstrumentalTrackState = {
   solo: boolean;
   volume: number;
   gmProgram: number;
+  soundfontBank: number;
+  presetKind: "melodic" | "percussion_kit";
   percussion?: boolean;
 };
 
@@ -238,6 +242,244 @@ const GM_INSTRUMENTS = [
   { program: 79, label: "Ocarina" },
 ] as const;
 
+type GmInstrumentOption = {
+  program: number;
+  label: string;
+};
+
+type GmInstrumentGroup = {
+  id: string;
+  label: string;
+  instruments: readonly GmInstrumentOption[];
+};
+
+const GM_INSTRUMENT_GROUPS: readonly GmInstrumentGroup[] = [
+  // These are the official General MIDI Level 1 program families. The UI
+  // currently exposes the first 80 programs, through the Pipe family.
+  { id: "piano", label: "Piano", instruments: GM_INSTRUMENTS.slice(0, 8) },
+  { id: "chromatic-percussion", label: "Chromatic Percussion", instruments: GM_INSTRUMENTS.slice(8, 16) },
+  { id: "organ", label: "Organ", instruments: GM_INSTRUMENTS.slice(16, 24) },
+  { id: "guitar", label: "Guitar", instruments: GM_INSTRUMENTS.slice(24, 32) },
+  { id: "bass", label: "Bass", instruments: GM_INSTRUMENTS.slice(32, 40) },
+  { id: "strings", label: "Strings", instruments: GM_INSTRUMENTS.slice(40, 48) },
+  { id: "ensemble", label: "Ensemble", instruments: GM_INSTRUMENTS.slice(48, 56) },
+  { id: "brass", label: "Brass", instruments: GM_INSTRUMENTS.slice(56, 64) },
+  { id: "reed", label: "Reed", instruments: GM_INSTRUMENTS.slice(64, 72) },
+  { id: "pipe", label: "Pipe", instruments: GM_INSTRUMENTS.slice(72, 80) },
+];
+
+// GM Level 1 specifies a single note-based percussion map on channel 10;
+// alternate kits require a non-GM1 extension (for example GM2, GS, or XG).
+const GM_PERCUSSION_GROUPS: readonly GmInstrumentGroup[] = [
+  {
+    id: "percussion",
+    label: "Percussion",
+    instruments: [{ program: 0, label: "Standard GM Percussion" }],
+  },
+];
+
+const FLUIDR3_PERCUSSION_GROUPS: readonly GmInstrumentGroup[] = [
+  {
+    id: "fluidr3-percussion",
+    label: "FluidR3 Drum Kits",
+    instruments: [
+      { program: 0, label: "Standard Kit" },
+      { program: 8, label: "Room Kit" },
+      { program: 16, label: "Power Kit" },
+      { program: 24, label: "Electronic Kit" },
+      { program: 25, label: "TR-808 Kit" },
+      { program: 32, label: "Jazz Kit" },
+      { program: 40, label: "Brush Kit" },
+      { program: 48, label: "Orchestra Kit" },
+    ],
+  },
+];
+
+type GroupedInstrumentPickerProps = {
+  label: string;
+  gmProgram: number;
+  percussion?: boolean;
+  soundfontBank?: number;
+  presetKind?: "melodic" | "percussion_kit";
+  onChange: (gmProgram: number) => void;
+};
+
+const GroupedInstrumentPicker = ({
+  label,
+  gmProgram,
+  percussion = false,
+  soundfontBank,
+  presetKind,
+  onChange,
+}: GroupedInstrumentPickerProps) => {
+  const groups = percussion
+    // The player uses FluidR3's bank 128 for every percussion route.  The
+    // provider patch in patches/@waveform-playlist+playout+*.patch makes its
+    // SoundFont track honour this program number on MIDI channel 10.
+    ? soundfontBank === 128 && presetKind === "percussion_kit"
+      ? FLUIDR3_PERCUSSION_GROUPS
+      : GM_PERCUSSION_GROUPS
+    : GM_INSTRUMENT_GROUPS;
+  const selectedGroup =
+    groups.find((group) => group.instruments.some((instrument) => instrument.program === gmProgram)) ??
+    groups[0];
+  const selectedInstrument =
+    selectedGroup.instruments.find((instrument) => instrument.program === gmProgram) ??
+    selectedGroup.instruments[0];
+  const [open, setOpen] = useState(false);
+  const [openGroupId, setOpenGroupId] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPosition, setMenuPosition] = useState<CSSProperties | null>(null);
+  const openGroup = groups.find((group) => group.id === openGroupId) ?? null;
+
+  useEffect(() => {
+    if (!open) {
+      setOpenGroupId(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        pickerRef.current &&
+        !pickerRef.current.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open || !triggerRef.current) {
+      setMenuPosition(null);
+      return;
+    }
+
+    const updateMenuPosition = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const viewportPadding = 12;
+      const gap = 6;
+      const menuWidth = Math.min(250, window.innerWidth - viewportPadding * 2);
+      const spaceAbove = rect.top - viewportPadding;
+      const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+      const openUpward = spaceAbove >= spaceBelow;
+      const availableHeight = Math.max(
+        120,
+        Math.min(260, (openUpward ? spaceAbove : spaceBelow) - gap)
+      );
+      const left = Math.max(
+        viewportPadding,
+        Math.min(rect.left, window.innerWidth - menuWidth - viewportPadding)
+      );
+      setMenuPosition(
+        openUpward
+          ? { left, bottom: window.innerHeight - rect.top + gap, width: menuWidth, maxHeight: availableHeight }
+          : { left, top: rect.bottom + gap, width: menuWidth, maxHeight: availableHeight }
+      );
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    document.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      document.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open]);
+
+  const pickerMenu = open && menuPosition ? (
+    <div
+      className="score-track-instrument-menu"
+      ref={menuRef}
+      style={menuPosition}
+      role="menu"
+      aria-label={`${label} sound selection`}
+    >
+      {openGroup ? (
+        <>
+          <button
+            type="button"
+            className="score-track-instrument-menu-back"
+            onClick={() => setOpenGroupId(null)}
+            role="menuitem"
+          >
+            <span aria-hidden="true">‹</span> {openGroup.label}
+          </button>
+          <div className="score-track-instrument-menu-options">
+            {openGroup.instruments.map((instrument) => (
+              <button
+                key={instrument.program}
+                type="button"
+                className={clsx("score-track-instrument-menu-option", {
+                  selected: instrument.program === gmProgram,
+                })}
+                onClick={() => {
+                  onChange(instrument.program);
+                  setOpen(false);
+                }}
+                role="menuitemradio"
+                aria-checked={instrument.program === gmProgram}
+              >
+                <span>{instrument.label}</span>
+                {instrument.program === gmProgram && <Check size={13} aria-hidden="true" />}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="score-track-instrument-menu-options">
+          {groups.map((group) => (
+            <button
+              key={group.id}
+              type="button"
+              className="score-track-instrument-menu-option score-track-instrument-menu-group"
+              onClick={() => setOpenGroupId(group.id)}
+              role="menuitem"
+            >
+              <span>{group.label}</span>
+              <span className="score-track-instrument-menu-arrow" aria-hidden="true">›</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  return (
+    <div className="score-track-instrument-picker" ref={pickerRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="score-track-instrument-select score-track-instrument-trigger"
+        onClick={() => setOpen((current) => !current)}
+        aria-label={`${label} ${percussion ? "percussion kit" : "instrument sound"}`}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <span>{selectedGroup.label} · {selectedInstrument.label}</span>
+        <ChevronsUpDown size={13} aria-hidden="true" />
+      </button>
+      {typeof document !== "undefined" && pickerMenu && createPortal(pickerMenu, document.body)}
+    </div>
+  );
+};
+
 const FLUID_R3_GM_SOUNDFONT_URL = "/soundfonts/FluidR3_GM.sf2";
 const DEFAULT_INSTRUMENT_TRACK_VOLUME = 0.65;
 let fluidR3SoundFontCachePromise: Promise<SoundFontCache> | null = null;
@@ -250,6 +492,41 @@ const loadFluidR3SoundFontCache = (): Promise<SoundFontCache> => {
     });
   }
   return fluidR3SoundFontCachePromise;
+};
+
+const findActivePerformanceMeasure = (
+  entries: PerformanceMeasureMapEntry[],
+  playbackSeconds: number
+): PerformanceMeasureMapEntry | null => {
+  if (!entries.length || !Number.isFinite(playbackSeconds)) return null;
+  const entry = entries.find(
+    (candidate) =>
+      playbackSeconds >= candidate.start_seconds && playbackSeconds < candidate.end_seconds
+  );
+  return entry ?? entries[entries.length - 1] ?? null;
+};
+
+const scrollScoreMeasureIntoView = (container: HTMLElement, target: HTMLElement) => {
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const margin = 24;
+  let nextLeft = container.scrollLeft;
+  let nextTop = container.scrollTop;
+
+  if (targetRect.left < containerRect.left + margin) {
+    nextLeft += targetRect.left - containerRect.left - margin;
+  } else if (targetRect.right > containerRect.right - margin) {
+    nextLeft += targetRect.right - containerRect.right + margin;
+  }
+  if (targetRect.top < containerRect.top + margin) {
+    nextTop += targetRect.top - containerRect.top - margin;
+  } else if (targetRect.bottom > containerRect.bottom - margin) {
+    nextTop += targetRect.bottom - containerRect.bottom + margin;
+  }
+
+  if (nextLeft !== container.scrollLeft || nextTop !== container.scrollTop) {
+    container.scrollTo({ left: Math.max(0, nextLeft), top: Math.max(0, nextTop), behavior: "smooth" });
+  }
 };
 
 type ScorePlayerPlaybackControls = {
@@ -267,6 +544,7 @@ type ScorePlayerEngineProps = {
   onEngineLoading: () => void;
   onEngineReady: (requestId: number) => void;
   onPlaybackStateChange: (isPlaying: boolean) => void;
+  onPlaybackPositionChange: (seconds: number) => void;
   onError: (message: string | null) => void;
 };
 
@@ -275,14 +553,16 @@ const ScorePlayerEngineBridge = ({
   loading,
   onReady,
   onPlaybackStateChange,
+  onPlaybackPositionChange,
 }: Pick<ScorePlayerEngineProps, "onControlsChange"> & {
   loading: boolean;
   onReady: () => void;
   onPlaybackStateChange: (isPlaying: boolean) => void;
+  onPlaybackPositionChange: (seconds: number) => void;
 }) => {
   const controls = usePlaylistControls();
   const { isReady } = usePlaylistData();
-  const { isPlaying } = usePlaybackAnimation();
+  const { isPlaying, registerFrameCallback, unregisterFrameCallback } = usePlaybackAnimation();
   const liveControlsRef = useRef(controls);
   liveControlsRef.current = controls;
   const stableControlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
@@ -309,6 +589,12 @@ const ScorePlayerEngineBridge = ({
   useEffect(() => {
     onPlaybackStateChange(isPlaying);
   }, [isPlaying, onPlaybackStateChange]);
+  useEffect(() => {
+    if (!isPlaying) return;
+    const callbackId = "sightsinger-score-active-measure";
+    registerFrameCallback(callbackId, ({ time }) => onPlaybackPositionChange(time));
+    return () => unregisterFrameCallback(callbackId);
+  }, [isPlaying, onPlaybackPositionChange, registerFrameCallback, unregisterFrameCallback]);
   return null;
 };
 
@@ -370,6 +656,7 @@ const ScorePlayerEngine = ({
   onEngineLoading,
   onEngineReady,
   onPlaybackStateChange,
+  onPlaybackPositionChange,
   onError,
 }: ScorePlayerEngineProps) => {
   // WaveformPlaylistProvider treats callback identity changes as an engine
@@ -431,7 +718,7 @@ const ScorePlayerEngine = ({
     audioConfigs
   );
   const instrumentalProgramSignature = instrumentalTracks
-    .map((track) => `${track.key}\u0000${track.gmProgram}`)
+    .map((track) => `${track.key}\u0000${track.soundfontBank}\u0000${track.presetKind}\u0000${track.gmProgram}`)
     .join("\u0001");
   const configuredMidiTracks = useMemo(
     () =>
@@ -539,6 +826,7 @@ const ScorePlayerEngine = ({
         loading={midiLoading || audioLoading || soundFontLoading}
         onReady={handleProviderReady}
         onPlaybackStateChange={onPlaybackStateChange}
+        onPlaybackPositionChange={onPlaybackPositionChange}
       />
       <ScorePlayerMixerBridge
         midiTrackCount={midiTracks.length}
@@ -942,20 +1230,14 @@ const ScoreTrackControlsPanel = ({
             </div>
 
             <div className="score-track-card-footer">
-              <div className="score-track-instrument-picker">
-                <select
-                  className="score-track-instrument-select"
-                  value={inst.gmProgram}
-                  onChange={(e) => onUpdateInstrumentalGmProgram(inst.partId, parseInt(e.target.value, 10))}
-                  aria-label={`${inst.label} instrument sound`}
-                >
-                  {GM_INSTRUMENTS.map((item) => (
-                    <option key={item.program} value={item.program}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <GroupedInstrumentPicker
+                label={inst.label}
+                gmProgram={inst.gmProgram}
+                percussion={inst.percussion}
+                soundfontBank={inst.soundfontBank}
+                presetKind={inst.presetKind}
+                onChange={(gmProgram) => onUpdateInstrumentalGmProgram(inst.partId, gmProgram)}
+              />
 
               <div className="score-track-volume-wrapper" title={`Volume: ${Math.round(inst.volume * 100)}%`}>
                 <span className="score-track-volume-icon">
@@ -1081,7 +1363,58 @@ const buildPrintableScoreMarkup = (scoreElement: HTMLElement): string => {
     .join("");
 };
 
-const renderScorePageLayoutForPrint = async (scoreData: string): Promise<string> => {
+const PRINT_PAGE_WIDTH_MM = 210;
+const PRINT_PAGE_HEIGHT_MM = 297;
+
+const applyPageLayoutZoom = (osmd: OpenSheetMusicDisplay, zoomLevel: number): void => {
+  const layoutZoom = Number.isFinite(zoomLevel) ? Math.min(2, Math.max(0.6, zoomLevel)) : 1;
+  if (layoutZoom === 1) {
+    osmd.setPageFormat("A4_P");
+    return;
+  }
+  // Keep the rendered paper at A4 while varying the amount of musical space
+  // that OSMD lays out on that paper. This makes 80% genuinely engrave more
+  // measures per page, rather than shrinking a fixed-page SVG.
+  osmd.setCustomPageFormat(
+    PRINT_PAGE_WIDTH_MM / layoutZoom,
+    PRINT_PAGE_HEIGHT_MM / layoutZoom
+  );
+};
+
+/**
+ * OSMD emits one SVG per page directly into its container. Wrap completed
+ * pages with their measured dimensions so CSS can skip offscreen page paint
+ * and layout without collapsing the preview's scroll geometry. The cursor
+ * remains inside its original SVG, so its coordinate system is unchanged.
+ */
+const enableOffscreenPageContentVisibility = (container: HTMLElement): void => {
+  const pages = Array.from(container.querySelectorAll(":scope > svg"));
+  if (pages.length < 2) return;
+
+  for (const page of pages) {
+    const bounds = page.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) continue;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "score-page-virtualizer";
+    // Explicit dimensions retain the exact scroll geometry while this page is
+    // skipped outside the score-canvas viewport.
+    wrapper.style.width = `${Math.ceil(bounds.width)}px`;
+    wrapper.style.height = `${Math.ceil(bounds.height)}px`;
+    page.replaceWith(wrapper);
+    wrapper.append(page);
+  }
+};
+
+const renderScorePageLayoutForPrint = async (
+  scoreData: string,
+  zoomLevel: number
+): Promise<string> => {
+  // Printing always targets a physical A4 page. To make the preview's zoom
+  // meaningful in print, enlarge or shrink the *layout* page before OSMD
+  // engraves it, then fit that rendered page to A4 in the print stylesheet.
+  // This causes genuine reflow (more or fewer measures per page), rather than
+  // merely scaling an already-laid-out SVG.
   const container = document.createElement("div");
   container.style.position = "absolute";
   container.style.left = "-100000px";
@@ -1101,6 +1434,8 @@ const renderScorePageLayoutForPrint = async (scoreData: string): Promise<string>
       renderSingleHorizontalStaffline: false,
     });
     await osmd.load(scoreData);
+    // Apply the layout to the parsed score immediately before engraving it.
+    applyPageLayoutZoom(osmd, zoomLevel);
     osmd.zoom = 1;
     osmd.render();
     return buildPrintableScoreMarkup(container);
@@ -1349,6 +1684,7 @@ export default function MainApp() {
   const { user, isAuthenticated } = useAuth();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [chatAutoScrollRequest, setChatAutoScrollRequest] = useState(0);
   const [input, setInput] = useState("");
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -1373,6 +1709,7 @@ export default function MainApp() {
   const [splitPct, setSplitPct] = useState(40);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
+  const [scorePreviewWidth, setScorePreviewWidth] = useState(0);
   const [expandRepeats, setExpandRepeats] = useState(true);
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
@@ -1427,6 +1764,15 @@ export default function MainApp() {
   const scorePlayerPlaybackRequestRef = useRef(0);
   const scorePlayerPlayPendingRef = useRef(false);
   const scorePlayerAssetsReadyRef = useRef(false);
+  const scoreCanvasRef = useRef<HTMLDivElement | null>(null);
+  const scoreRef = useRef<HTMLDivElement | null>(null);
+  const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const scorePageFitZoomRef = useRef(1);
+  const activeScoreMeasureRef = useRef<string | null>(null);
+  const performanceMeasureMapRef = useRef(scoreSummary?.performance_measure_map ?? null);
+  performanceMeasureMapRef.current = scoreSummary?.performance_measure_map ?? null;
+  const expandRepeatsRef = useRef(expandRepeats);
+  expandRepeatsRef.current = expandRepeats;
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
@@ -1467,6 +1813,64 @@ export default function MainApp() {
   const handleScorePlayerPlaybackStateChange = useCallback((isPlaying: boolean) => {
     setMultiTrackPlaying((current) => (current === isPlaying ? current : isPlaying));
   }, []);
+
+  const handleScorePlayerPlaybackPositionChange = useCallback((playbackSeconds: number) => {
+    const performanceMeasureMap = performanceMeasureMapRef.current;
+    const entries = expandRepeatsRef.current
+      ? performanceMeasureMap?.expanded ?? []
+      : performanceMeasureMap?.written ?? [];
+    const activeMeasure = findActivePerformanceMeasure(entries, playbackSeconds);
+    if (!activeMeasure) return;
+
+    const activeKey = `${activeMeasure.played_measure_index}:${activeMeasure.source_measure_index}`;
+    if (activeScoreMeasureRef.current === activeKey) return;
+
+    const cursor = osmdRef.current?.cursor;
+    if (!cursor) return;
+    try {
+      cursor.reset();
+      for (let index = 0; index < activeMeasure.source_measure_index; index += 1) {
+        cursor.nextMeasure();
+      }
+      cursor.show();
+      const cursorElement = cursor.cursorElement;
+      cursorElement.classList.add("score-active-measure-highlight");
+      cursorElement.dataset.testid = "active-score-measure";
+      cursorElement.dataset.sourceMeasureIndex = String(activeMeasure.source_measure_index);
+      cursorElement.dataset.playedMeasureIndex = String(activeMeasure.played_measure_index);
+      activeScoreMeasureRef.current = activeKey;
+      window.requestAnimationFrame(() => {
+        const canvas = scoreCanvasRef.current;
+        if (canvas?.isConnected && cursorElement.isConnected) {
+          scrollScoreMeasureIntoView(canvas, cursorElement);
+        }
+      });
+    } catch {
+      // Cursor positioning is visual-only; a score-specific OSMD limitation
+      // must never interrupt the shared audio/MIDI transport.
+    }
+  }, []);
+
+  useEffect(() => {
+    const scoreElement = scoreRef.current;
+    if (!scoreElement) return;
+    const updateWidth = () => {
+      const nextWidth = Math.round(scoreElement.clientWidth);
+      setScorePreviewWidth((current) => (current === nextWidth ? current : nextWidth));
+    };
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(scoreElement);
+    return () => observer.disconnect();
+  }, [score]);
+
+  // The preview is always the original score, but the playback position may
+  // switch between its written and repeat-expanded performance maps while the
+  // transport is running. Force the next frame to position the OSMD cursor
+  // against the newly selected map.
+  useEffect(() => {
+    activeScoreMeasureRef.current = null;
+  }, [expandRepeats]);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -1559,7 +1963,9 @@ export default function MainApp() {
           muted: existing ? existing.muted : false,
           solo: existing ? existing.solo : false,
           volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
-          gmProgram: existing ? existing.gmProgram : (part.midi_program ?? 0),
+          gmProgram: existing ? existing.gmProgram : (part.playback_preset?.program ?? part.midi_program ?? 0),
+          soundfontBank: existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
+          presetKind: existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
           percussion: part.percussion,
         };
       });
@@ -2026,8 +2432,6 @@ export default function MainApp() {
   };
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
-  const scoreRef = useRef<HTMLDivElement | null>(null);
-  const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const scorePreviewTrapActiveRef = useRef(false);
   const scorePreviewTrapTimerRef = useRef<number | null>(null);
   const dragStateRef = useRef<{
@@ -2383,6 +2787,7 @@ export default function MainApp() {
     beginScorePreviewTrap();
     setScoreReady(false);
     setScorePreviewError(null);
+    activeScoreMeasureRef.current = null;
     scoreRef.current.replaceChildren();
     let osmd: OpenSheetMusicDisplay | null = null;
 
@@ -2391,9 +2796,13 @@ export default function MainApp() {
         if (cancelled || !scoreRef.current) return;
 
         osmd = new OpenSheetMusicDisplay(scoreRef.current, {
-          autoResize: true,
+          // The Page layout is fitted below by changing OSMD's own zoom. CSS
+          // scaling of only the SVG would leave the OSMD cursor overlay at its
+          // original dimensions.
+          autoResize: false,
           drawTitle: true,
           followCursor: false,
+          cursorsOptions: [{ type: 3, color: "#8b5cf6", alpha: 0.24, follow: false }],
           pageFormat: scorePreviewLayout === "page" ? "A4_P" : "Endless",
           renderSingleHorizontalStaffline: scorePreviewLayout === "horizontal",
         });
@@ -2403,8 +2812,31 @@ export default function MainApp() {
         if (cancelled) return;
 
         beginScorePreviewTrap();
-        osmd.zoom = zoomLevel;
-        osmd.render();
+        if (scorePreviewLayout === "page") {
+          // Apply the same reflowing page geometry used for print. Render once
+          // at OSMD's native size to obtain the page width, then render again
+          // at the zoom required to fit the preview pane. Both notation and
+          // cursor remain in the same OSMD coordinate space.
+          applyPageLayoutZoom(osmd, zoomLevel);
+          osmd.zoom = 1;
+          osmd.render();
+          const scoreElement = scoreRef.current;
+          const pageWidth = scoreElement?.querySelector("svg")?.getBoundingClientRect().width ?? 0;
+          const styles = scoreElement ? window.getComputedStyle(scoreElement) : null;
+          const horizontalPadding = styles
+            ? Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight)
+            : 0;
+          const availableWidth = Math.max(0, (scorePreviewWidth || scoreElement?.clientWidth || 0) - horizontalPadding);
+          scorePageFitZoomRef.current = pageWidth > 0 && availableWidth > 0 ? availableWidth / pageWidth : 1;
+          osmd.zoom = scorePageFitZoomRef.current;
+          osmd.render();
+          enableOffscreenPageContentVisibility(scoreElement);
+        } else {
+          scorePageFitZoomRef.current = 1;
+          osmd.zoom = zoomLevel;
+          osmd.render();
+        }
+        osmd.cursor.hide();
         setScorePreviewError(null);
         setScoreReady(true);
       } catch {
@@ -2425,18 +2857,19 @@ export default function MainApp() {
         osmdRef.current = null;
       }
     };
-  }, [beginScorePreviewTrap, endScorePreviewTrap, handleScorePreviewFailure, score, scorePreviewLayout]);
+  }, [
+    beginScorePreviewTrap,
+    endScorePreviewTrap,
+    handleScorePreviewFailure,
+    score,
+    scorePreviewLayout,
+    scorePreviewWidth,
+    zoomLevel,
+  ]);
 
-  useEffect(() => {
-    if (!scoreReady || !osmdRef.current) return;
-    try {
-      beginScorePreviewTrap();
-      osmdRef.current.zoom = zoomLevel;
-      osmdRef.current.render();
-    } catch {
-      handleScorePreviewFailure();
-    }
-  }, [beginScorePreviewTrap, handleScorePreviewFailure, zoomLevel, scoreReady]);
+  const requestChatAutoScroll = useCallback(() => {
+    setChatAutoScrollRequest((current) => current + 1);
+  }, []);
 
   useEffect(() => {
     if (!activeProgress) return;
@@ -2455,6 +2888,23 @@ export default function MainApp() {
       return `${trimmedCurrent}\n${trimmedIncoming}`;
     };
 
+    // Progress responses are re-created by each poll, so referential equality
+    // alone would make an unchanged payload look new. Keep the existing
+    // message object when its user-visible and expandable fields are the same;
+    // otherwise every 1.2-second poll makes the chat auto-scroll effect read
+    // scrollHeight and synchronously lay out the score preview.
+    const sameProgressValue = (left: unknown, right: unknown): boolean => {
+      if (Object.is(left, right)) return true;
+      if (!left || !right || typeof left !== "object" || typeof right !== "object") {
+        return false;
+      }
+      try {
+        return JSON.stringify(left) === JSON.stringify(right);
+      } catch {
+        return false;
+      }
+    };
+
     const applyProgress = (payload: ProgressResponse) => {
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
@@ -2469,33 +2919,49 @@ export default function MainApp() {
         payload.status === "error" ||
         payload.status === "action_required";
       const nextAttemptMessages = extractAttemptMessages(payload.details);
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id !== activeProgress.messageId) return msg;
-          const nextContent =
-            payload.job_kind === "preprocess" && payload.status === "running"
-              ? msg.content
-              : appendTerminalPreprocessMessage
-                ? appendPreprocessTerminalMessage(msg.content, nextMessage)
-                : appendProgressToChatBubble
-                  ? appendProgressMessage(msg.content, nextMessage)
-                  : msg.content;
-          return {
-            ...msg,
-            content: nextContent,
-            details: payload.details ?? msg.details,
-            attemptMessages: nextAttemptMessages ?? msg.attemptMessages,
-            progressValue: typeof nextProgress === "number" ? nextProgress : msg.progressValue,
-            // Progress polling returns a newly signed URL each time. Keep the first
-            // one rather than rebuilding the player and re-fetching audio on every poll.
-            audioUrl: msg.audioUrl || nextAudioUrl,
-            audioTrack: payload.audio_track ?? msg.audioTrack,
-            jobId: payload.job_id ?? msg.jobId,
-            feedback: payload.feedback ?? msg.feedback,
-            isProgress: !isTerminalProgress,
-          };
-        })
-      );
+      setMessages((prev) => {
+        const messageIndex = prev.findIndex((msg) => msg.id === activeProgress.messageId);
+        if (messageIndex < 0) return prev;
+
+        const message = prev[messageIndex];
+        const nextContent =
+          payload.job_kind === "preprocess" && payload.status === "running"
+            ? message.content
+            : appendTerminalPreprocessMessage
+              ? appendPreprocessTerminalMessage(message.content, nextMessage)
+              : appendProgressToChatBubble
+                ? appendProgressMessage(message.content, nextMessage)
+                : message.content;
+        const nextMessageState: Message = {
+          ...message,
+          content: nextContent,
+          details: payload.details ?? message.details,
+          attemptMessages: nextAttemptMessages ?? message.attemptMessages,
+          progressValue: typeof nextProgress === "number" ? nextProgress : message.progressValue,
+          // Progress polling returns a newly signed URL each time. Keep the first
+          // one rather than rebuilding the player and re-fetching audio on every poll.
+          audioUrl: message.audioUrl || nextAudioUrl,
+          audioTrack: payload.audio_track ?? message.audioTrack,
+          jobId: payload.job_id ?? message.jobId,
+          feedback: payload.feedback ?? message.feedback,
+          isProgress: !isTerminalProgress,
+        };
+        const changed =
+          nextMessageState.content !== message.content ||
+          nextMessageState.progressValue !== message.progressValue ||
+          nextMessageState.audioUrl !== message.audioUrl ||
+          nextMessageState.jobId !== message.jobId ||
+          nextMessageState.isProgress !== message.isProgress ||
+          !sameProgressValue(nextMessageState.details, message.details) ||
+          !sameProgressValue(nextMessageState.attemptMessages, message.attemptMessages) ||
+          !sameProgressValue(nextMessageState.audioTrack, message.audioTrack) ||
+          !sameProgressValue(nextMessageState.feedback, message.feedback);
+        if (!changed) return prev;
+
+        const next = [...prev];
+        next[messageIndex] = nextMessageState;
+        return next;
+      });
       if (nextAudioUrl) {
         setAudioUrl((current) => current || nextAudioUrl);
         if (payload.job_kind !== "preprocess") {
@@ -2521,10 +2987,12 @@ export default function MainApp() {
           setError(payload.warning);
         }
         if (payload.status === "done") {
+          requestChatAutoScroll();
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
         if (payload.status === "error") {
+          requestChatAutoScroll();
           setActiveProgress(null);
           setChatTurnBusy(false);
           const fallbackError =
@@ -2537,6 +3005,7 @@ export default function MainApp() {
           );
         }
         if (payload.status === "action_required") {
+          requestChatAutoScroll();
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
@@ -2555,14 +3024,14 @@ export default function MainApp() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [activeProgress, addOrReplaceMultiTrackAudio]);
+  }, [activeProgress, addOrReplaceMultiTrackAudio, requestChatAutoScroll]);
 
   useEffect(() => {
     const container = chatStreamRef.current;
     if (!container) return;
     if (!shouldAutoScrollRef.current) return;
     container.scrollTop = container.scrollHeight;
-  }, [messages, status]);
+  }, [chatAutoScrollRequest]);
 
   const handleChatScroll = () => {
     const container = chatStreamRef.current;
@@ -2574,6 +3043,7 @@ export default function MainApp() {
 
   const appendMessage = (message: Message) => {
     setMessages((prev) => [...prev, message]);
+    requestChatAutoScroll();
   };
 
   const toggleThoughtSummary = (messageId: string) => {
@@ -2630,7 +3100,7 @@ export default function MainApp() {
 
     let scoreMarkup: string;
     try {
-      scoreMarkup = await renderScorePageLayoutForPrint(score.data);
+      scoreMarkup = await renderScorePageLayoutForPrint(score.data, zoomLevel);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unable to prepare score print preview.";
       setError(message);
@@ -3951,6 +4421,7 @@ export default function MainApp() {
             onEngineLoading={handleScorePlayerEngineLoading}
             onEngineReady={handleScorePlayerEngineReady}
             onPlaybackStateChange={handleScorePlayerPlaybackStateChange}
+            onPlaybackPositionChange={handleScorePlayerPlaybackPositionChange}
             onError={handleScorePlayerEngineError}
           />
 
@@ -3976,7 +4447,7 @@ export default function MainApp() {
                 )}
               </div>
               <div className="score-expansion-control">
-                <label htmlFor="expand-repeats-toggle">Expand Repeats</label>
+                <label htmlFor="expand-repeats-toggle">With Repeats</label>
                 <input
                   id="expand-repeats-toggle"
                   type="checkbox"
@@ -4119,8 +4590,15 @@ export default function MainApp() {
                 />
               </aside>
             )}
-            <div className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}>
-              <div ref={scoreRef} className="score-surface" data-testid="score-preview-surface" />
+            <div
+              ref={scoreCanvasRef}
+              className={clsx("score-canvas", { "horizontal-layout": scorePreviewLayout === "horizontal" })}
+            >
+              <div
+                ref={scoreRef}
+                className={clsx("score-surface", { "page-layout": scorePreviewLayout === "page" })}
+                data-testid="score-preview-surface"
+              />
               {scorePreviewError ? (
                 <div className="score-placeholder score-error-placeholder">
                   <p>{scorePreviewError}</p>

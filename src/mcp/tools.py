@@ -2005,6 +2005,39 @@ TOOLS: List[Tool] = [
                         "never changed."
                     ),
                 },
+                "instrument_program_assignments": {
+                    "type": "array",
+                    "description": (
+                        "For every ID in score_summary.instrument_program_resolution."
+                        "unresolved_score_instrument_ids, provide the LLM-inferred "
+                        "target FluidR3 playback preset before synthesis. Omit only "
+                        "when that unresolved-ID list is empty."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "score_instrument_id": {"type": "string"},
+                            "playback_preset": {
+                                "type": "object",
+                                "properties": {
+                                    "soundfont_id": {"type": "string", "const": "FluidR3_GM"},
+                                    "bank": {"type": "integer", "minimum": 0, "maximum": 16383},
+                                    "program": {"type": "integer", "minimum": 0, "maximum": 127},
+                                    "kind": {"type": "string", "enum": ["melodic", "percussion_kit"]},
+                                },
+                                "required": ["soundfont_id", "bank", "program", "kind"],
+                                "additionalProperties": False,
+                            },
+                            "source": {"type": "string", "const": "llm_inferred"},
+                            "evidence": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["score_instrument_id", "playback_preset", "source"],
+                        "additionalProperties": False,
+                    },
+                },
             },
             "required": ["score", "language", "lyric_selection", "part_id"],
             "additionalProperties": False,

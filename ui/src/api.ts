@@ -14,7 +14,16 @@ export type InstrumentalPart = {
   label: string;
   eligible: boolean;
   has_lyrics: boolean;
-  midi_program: number;
+  midi_program: number | null;
+  soundfont_bank?: number | null;
+  playback_preset?: {
+    soundfont_id: string;
+    bank: number;
+    program: number;
+    kind: "melodic" | "percussion_kit";
+  } | null;
+  score_instrument_id?: string | null;
+  program_source?: string;
   midi_channel?: number | null;
   percussion: boolean;
   diagnostic?: string | null;
@@ -29,12 +38,27 @@ export type PerformanceMidi = {
   diagnostic?: string | null;
 };
 
+export type PerformanceMeasureMapEntry = {
+  played_measure_index: number;
+  source_measure_index: number;
+  source_measure_number: string;
+  pass_index: number;
+  start_seconds: number;
+  end_seconds: number;
+};
+
+export type PerformanceMeasureMap = {
+  written: PerformanceMeasureMapEntry[];
+  expanded: PerformanceMeasureMapEntry[];
+};
+
 export type ScoreSummary = {
   title?: string | null;
   composer?: string | null;
   lyricist?: string | null;
   duration_seconds?: number;
   expanded_duration_seconds?: number;
+  performance_measure_map?: PerformanceMeasureMap;
   performance_midi?: PerformanceMidi;
   parts?: ScoreSummaryPart[];
   available_verses?: Array<string | number>;

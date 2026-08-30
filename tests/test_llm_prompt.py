@@ -257,6 +257,29 @@ def test_build_system_prompt_tells_llm_to_study_full_parsed_score_json() -> None
     assert "Prefer the full parsed score JSON as the ground truth for note-level planning details" in prompt
 
 
+def test_build_system_prompt_requires_llm_program_assignments_for_unresolved_instruments() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary={
+            "instrument_program_resolution": {
+                "unresolved_score_instrument_ids": ["P1-I1"]
+            }
+        },
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+    assert "unresolved_score_instrument_ids" in prompt
+    assert "instrument_program_assignments" in prompt
+    assert "playback_preset.soundfont_id" in prompt
+    assert "unresolved_nonportable_bank" in prompt
+    assert "source` to exactly `llm_inferred`" in prompt
+
+
 def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() -> None:
     prompt = build_system_prompt(
         tools=[],

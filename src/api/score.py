@@ -24,8 +24,9 @@ except ImportError:
     HAS_RESTRICTED_PYTHON = False
     logger.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
 
-from src.musicxml.parser import parse_musicxml_with_summary
+from src.musicxml.parser import build_performance_measure_map, parse_musicxml_with_summary
 from src.api.voice_parts import analyze_score_voice_parts
+from src.musicxml.instrument_programs import build_instrument_program_summary
 
 
 def parse_score(
@@ -96,6 +97,7 @@ def parse_score(
     # later duration estimation and synthesis to use the same played order
     # without mutating the score preview or reparsing the source file.
     _attach_variant_durations(original_score, expanded_score)
+    _attach_performance_measure_map(original_score, Path(file_path))
     if expand_repeats:
         expanded_score["original_score"] = original_score
         result = expanded_score
@@ -106,6 +108,19 @@ def parse_score(
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("parse_score output=%s", summarize_payload(result))
     return result
+
+
+def _attach_performance_measure_map(score: Dict[str, Any], source_path: Path) -> None:
+    """Expose the played-order-to-notation map used by the OSMD score player."""
+    summary = score.get("score_summary")
+    if not isinstance(summary, dict):
+        return
+    try:
+        summary["performance_measure_map"] = build_performance_measure_map(source_path)
+    except Exception as exc:
+        # This visual aid must never make a valid score unavailable for preview
+        # or synthesis. Playback still works if an unusual score lacks a map.
+        logger.warning("performance_measure_map_failed path=%s error=%s", source_path, exc)
 
 
 def _attach_variant_durations(
@@ -226,6 +241,10 @@ def _parse_score_variant(
         score_dict["requested_part_index"] = part_index
     if isinstance(score_summary, dict):
         score_summary["selected_verse_number"] = selected_verse_number
+        score_summary["instrument_program_resolution"] = build_instrument_program_summary(
+            Path(file_path),
+            score_summary.get("parts") if isinstance(score_summary.get("parts"), list) else [],
+        )
     score_dict["voice_part_signals"] = analyze_score_voice_parts(
         score_dict,
         verse_number=selected_verse_number,

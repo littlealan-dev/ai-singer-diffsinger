@@ -56,6 +56,10 @@ from src.musicxml.performance_midi import (
     PERFORMANCE_MIDI_VERSION,
     build_instrumental_performance_midis,
 )
+from src.musicxml.instrument_programs import (
+    apply_llm_program_assignments,
+    llm_program_assignments_from_summary,
+)
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
 from src.mcp.tools import list_tools
 
@@ -6162,6 +6166,25 @@ class Orchestrator:
                     self._summarize_derived_targets(mapping_context),
                 )
 
+                # Missing GM programs are an LLM-planning concern, never a
+                # backend inference heuristic. Validate the assignments before
+                # any credit reservation or deferred MIDI/audio generation.
+                updated_summary, instrument_precheck = apply_llm_program_assignments(
+                    score_summary if isinstance(score_summary, dict) else {},
+                    synth_args.get("instrument_program_assignments"),
+                )
+                if instrument_precheck is not None:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(instrument_precheck, sort_keys=True),
+                        action_required_payload=instrument_precheck,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                if updated_summary != score_summary:
+                    score_summary = updated_summary
+                    await self._sessions.set_score_summary(session_id, updated_summary)
+
                 # Stateless precheck: block complex raw parts before reserving credits.
                 precheck_part_index = self._resolve_synthesize_part_index(
                     current_score,
@@ -6417,6 +6440,7 @@ class Orchestrator:
                 source_path,
                 original_output_path=written_path,
                 expanded_output_path=expanded_path,
+                instrument_program_assignments=llm_program_assignments_from_summary(summary),
             )
         except Exception as exc:  # MIDI playback must never prevent vocal synthesis.
             self._logger.warning(

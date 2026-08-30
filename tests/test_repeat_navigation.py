@@ -129,6 +129,34 @@ class RepeatNavigationParsingTests(unittest.TestCase):
             handlers._calculate_score_duration(display_score, expand_repeats=False), 2.5
         )
 
+    def test_performance_measure_map_returns_to_source_measures_for_repeats(self) -> None:
+        source_path = FIXTURE_DIRECTORY / "forward_repeat.musicxml"
+        display_score = parse_score(source_path, expand_repeats=False)
+        performance_map = display_score["score_summary"]["performance_measure_map"]
+
+        self.assertEqual(
+            [entry["source_measure_index"] for entry in performance_map["written"]],
+            [0, 1, 2, 3, 4],
+        )
+        self.assertEqual(
+            [entry["source_measure_index"] for entry in performance_map["expanded"]],
+            [0, 1, 0, 1, 2, 3, 4],
+        )
+        self.assertEqual(
+            [entry["pass_index"] for entry in performance_map["expanded"]],
+            [0, 0, 1, 1, 0, 0, 0],
+        )
+
+    def test_performance_measure_map_returns_to_segno_source_measure(self) -> None:
+        source_path = FIXTURE_DIRECTORY / "dal_segno_al_coda.xml"
+        display_score = parse_score(source_path, expand_repeats=False)
+        performance_map = display_score["score_summary"]["performance_measure_map"]
+
+        self.assertEqual(
+            [entry["source_measure_index"] for entry in performance_map["expanded"]],
+            [0, 1, 2, 3, 4, 2, 3, 5],
+        )
+
     def test_synthesize_schema_defaults_repeat_expansion_to_true(self) -> None:
         synthesize_tool = next(
             tool for tool in list_tools() if tool["name"] == "synthesize"

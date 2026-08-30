@@ -10,9 +10,10 @@ from music21 import bar, instrument, repeat, stream, tempo
 
 from src.musicxml.parser import _expand_repeat_navigation
 from src.musicxml.part_reference import load_musicxml_score, map_parser_part_indices_to_raw_part_ids
+from src.musicxml.instrument_programs import instrumental_programs_by_part
 
 
-PERFORMANCE_MIDI_VERSION = 2
+PERFORMANCE_MIDI_VERSION = 4
 
 
 def build_instrumental_performance_midis(
@@ -20,6 +21,7 @@ def build_instrumental_performance_midis(
     *,
     original_output_path: Path,
     expanded_output_path: Path,
+    instrument_program_assignments: Dict[str, Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Write written- and played-order instrumental MIDI files for one score.
 
@@ -28,7 +30,10 @@ def build_instrumental_performance_midis(
     """
     original_score = load_musicxml_score(source_path)
     raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=original_score)
-    parts = _instrumental_part_metadata(original_score, raw_part_ids)
+    programs_by_part = instrumental_programs_by_part(
+        source_path, assignments=instrument_program_assignments
+    )
+    parts = _instrumental_part_metadata(original_score, raw_part_ids, programs_by_part)
     eligible_indices = {part["part_index"] for part in parts if part["eligible"]}
     result: Dict[str, Any] = {
         "version": PERFORMANCE_MIDI_VERSION,
@@ -47,6 +52,7 @@ def build_instrumental_performance_midis(
             output_path=original_output_path,
             eligible_indices=eligible_indices,
             expand_repeats=False,
+            programs_by_part=programs_by_part,
         )
         result["original_midi_available"] = original_output_path.is_file()
         _write_instrumental_midi(
@@ -54,6 +60,7 @@ def build_instrumental_performance_midis(
             output_path=expanded_output_path,
             eligible_indices=eligible_indices,
             expand_repeats=True,
+            programs_by_part=programs_by_part,
         )
         result["expanded_midi_available"] = expanded_output_path.is_file()
     except Exception as exc:  # Keep a MIDI conversion issue isolated from score upload.
@@ -66,7 +73,9 @@ def build_instrumental_performance_midis(
 
 
 def _instrumental_part_metadata(
-    score: stream.Score, raw_part_ids: Dict[int, str]
+    score: stream.Score,
+    raw_part_ids: Dict[int, str],
+    programs_by_part: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for index, part in enumerate(score.parts):
@@ -80,11 +89,16 @@ def _instrumental_part_metadata(
             and not is_vocal
             and (isinstance(program, int) or isinstance(channel, int))
         )
-        eligible = bool(part.recurse().notes) and (
+        source_eligible = bool(part.recurse().notes) and (
             not has_lyrics or has_explicit_non_vocal_instrument
         )
         percussion = channel == 9 or isinstance(score_instrument, instrument.UnpitchedPercussion)
         raw_part_id = raw_part_ids.get(index, str(part.id or ""))
+        program_facts = programs_by_part.get(raw_part_id, {})
+        resolved_program = program_facts.get("resolved_gm_program")
+        playback_preset = program_facts.get("playback_preset")
+        score_instrument_id = program_facts.get("score_instrument_id")
+        eligible = source_eligible and isinstance(resolved_program, int)
         result.append(
             {
                 "part_index": index,
@@ -93,12 +107,21 @@ def _instrumental_part_metadata(
                 "label": str(part.partName or raw_part_id or f"Part {index + 1}"),
                 "eligible": eligible,
                 "has_lyrics": has_lyrics,
-                "midi_program": int(program) if isinstance(program, int) else 0,
+                # ``None`` means the MusicXML supplied no explicit program and
+                # the synthesize caller did not provide an LLM assignment.  Do
+                # not silently report it as piano (GM 0).
+                "midi_program": resolved_program if isinstance(resolved_program, int) else None,
+                "playback_preset": playback_preset if isinstance(playback_preset, dict) else None,
+                "soundfont_bank": playback_preset.get("bank") if isinstance(playback_preset, dict) else None,
+                "score_instrument_id": score_instrument_id,
+                "program_source": program_facts.get("program_source", "unresolved"),
                 "midi_channel": int(channel) if isinstance(channel, int) else None,
                 "percussion": percussion,
                 "diagnostic": (
                     "Part has lyrics and no explicit non-vocal instrument."
                     if has_lyrics and not has_explicit_non_vocal_instrument
+                    else "Part has no resolved General MIDI program."
+                    if source_eligible and not isinstance(resolved_program, int)
                     else None
                 ),
             }
@@ -121,6 +144,7 @@ def _write_instrumental_midi(
     output_path: Path,
     eligible_indices: set[int],
     expand_repeats: bool,
+    programs_by_part: Dict[str, Dict[str, Any]],
 ) -> None:
     score = load_musicxml_score(source_path)
     if expand_repeats:
@@ -128,8 +152,17 @@ def _write_instrumental_midi(
     else:
         _strip_navigation_for_written_order_midi(score)
     instrumental_score = stream.Score()
+    raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=score)
     for index, part in enumerate(score.parts):
         if index in eligible_indices:
+            program_facts = programs_by_part.get(raw_part_ids.get(index, str(part.id or "")))
+            resolved_program = (
+                program_facts.get("resolved_gm_program")
+                if isinstance(program_facts, dict)
+                else None
+            )
+            if isinstance(resolved_program, int):
+                part.getInstrument(returnDefault=True).midiProgram = resolved_program
             instrumental_score.insert(0, deepcopy(part))
     _copy_score_tempos(score, instrumental_score)
     if not instrumental_score.parts:

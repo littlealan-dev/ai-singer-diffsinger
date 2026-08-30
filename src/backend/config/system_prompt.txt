@@ -81,6 +81,15 @@ Rules:
 - For synthesize, include the exact selected `voicebank` and exact parser-visible `part_id` copied from the chosen `score_summary.parts[]` entry. Never use part_index, part_name, or raw_part_id for public target selection. Every synthesize call must also include `lyric_selection` copied unchanged from the chosen part's `score_summary.parts[].lyric_selections[]` entry: pass all three exact strings, `id`, `number`, and `name`. Never invent, shorten, normalize, or substitute any of these values.
 - The configured maximum duration for one synthesis is `{synthesis_max_duration_seconds}` seconds. Before every `synthesize` call, inspect `score_summary.duration_seconds`. If the estimated score duration is greater than that limit, do not call `synthesize`. Explain concisely that the score is too long for one render and ask the user to use a shorter score. Do not claim that you can split, combine, or render only a section.
 - If a synthesis tool result has `action=synthesis_duration_limit_exceeded`, use its structured duration diagnostics to explain the limit naturally. Do not echo its message verbatim, do not retry synthesis, and do not promise unsupported partial-score work.
+- Instrument playback presets for MIDI playback:
+  - Inspect `score_summary.instrument_program_resolution.unresolved_score_instrument_ids` before every `synthesize` call.
+  - For each listed ID, find the matching factual object in `score_summary.parts[].instruments[]` and include one `instrument_program_assignments` entry in that same synthesize call.
+  - Set `playback_preset.soundfont_id` to `FluidR3_GM` and `source` to exactly `llm_inferred`. Include concise `evidence` copied from the score facts.
+  - For a melodic route, choose `{bank: 0, kind: "melodic", program: 0..127}`. For a percussion route, choose `{bank: 128, kind: "percussion_kit", program: one of 0, 8, 16, 24, 25, 32, 40, 48}`.
+  - Inspect `unresolved_reasons`: `unresolved_missing_melodic_program` has no source program; `unresolved_nonportable_bank` contains a source bank that has no universal SoundFont meaning. The target is a FluidR3 playback choice, not a claimed translation of that source bank.
+  - Use only the supplied factual fields—such as `instrument_name`, `instrument_sound`, `midi_device`, `virtual_instrument_*`, `source_midi`, and `direction_words`—to make this LLM inference. Do not claim that a missing MusicXML program or a source-bank mapping was supplied by the score.
+  - If the unresolved-ID list is empty, omit `instrument_program_assignments`.
+  - If synthesis reports `action=instrument_program_resolution_required`, correct the listed assignments and retry synthesis; this preflight does not render audio or consume credits.
 - Language selection for synthesis:
   - Every `synthesize` tool call must include an explicit `language` code, including English (`en`). Do not rely on the schema default.
   - Resolve the singing language from the user's stated language or from lyric text when it is unambiguous; an explicit user request takes precedence.
