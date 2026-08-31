@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from music21 import converter, tempo
+from music21 import converter, midi, tempo
 
 from src.musicxml.performance_midi import build_instrumental_performance_midis
 
@@ -25,6 +25,30 @@ PIANO_REPEAT_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <part id="P2">
     <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>sing</text></lyric></note></measure>
     <measure number="2"><note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>now</text></lyric></note></measure>
+  </part>
+</score-partwise>"""
+
+
+PERCUSSION_ROUTE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Drumset</part-name>
+      <score-instrument id="P1-I36"><instrument-name>Acoustic Bass Drum</instrument-name></score-instrument>
+      <score-instrument id="P1-I38"><instrument-name>Acoustic Snare</instrument-name></score-instrument>
+      <score-instrument id="P1-I42"><instrument-name>Closed Hi-Hat</instrument-name></score-instrument>
+      <midi-instrument id="P1-I36"><midi-channel>10</midi-channel><midi-unpitched>37</midi-unpitched></midi-instrument>
+      <midi-instrument id="P1-I38"><midi-channel>10</midi-channel><midi-unpitched>39</midi-unpitched></midi-instrument>
+      <midi-instrument id="P1-I42"><midi-channel>10</midi-channel><midi-unpitched>43</midi-unpitched></midi-instrument>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><unpitched><display-step>F</display-step><display-octave>4</display-octave></unpitched><duration>1</duration><type>quarter</type><instrument id="P1-I36"/></note>
+      <note><unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched><duration>1</duration><type>quarter</type><instrument id="P1-I38"/></note>
+      <note><unpitched><display-step>G</display-step><display-octave>5</display-octave></unpitched><duration>1</duration><type>quarter</type><instrument id="P1-I42"/></note>
+    </measure>
   </part>
 </score-partwise>"""
 
@@ -58,3 +82,31 @@ def test_builds_written_and_expanded_instrumental_midis() -> None:
         assert piano["midi_program"] == 0
         assert voice["eligible"] is False
         assert "lyrics" in voice["diagnostic"]
+
+
+def test_preserves_per_note_musicxml_percussion_routes() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = root / "drumset.musicxml"
+        source.write_text(PERCUSSION_ROUTE_XML, encoding="utf-8")
+        written = root / "written.mid"
+        build_instrumental_performance_midis(
+            source,
+            original_output_path=written,
+            expanded_output_path=root / "expanded.mid",
+        )
+
+        midi_file = midi.MidiFile()
+        midi_file.open(str(written))
+        midi_file.read()
+        midi_file.close()
+
+    note_pitches = [
+        event.pitch
+        for track in midi_file.tracks
+        for event in track.events
+        if event.type == midi.ChannelVoiceMessages.NOTE_ON
+        and event.velocity > 0
+        and event.channel == 10
+    ]
+    assert note_pitches == [36, 38, 42]

@@ -367,6 +367,26 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(reference.raw_part_id, "P5")
         self.assertEqual(reference.parser_part_index, expanded_index)
 
+    def test_duplicate_part_names_keep_distinct_raw_musicxml_ids(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P10"><part-name>Drumset</part-name></score-part>
+    <score-part id="P11"><part-name>Drumset</part-name></score-part>
+  </part-list>
+  <part id="P10"><measure number="1"><attributes><divisions>1</divisions></attributes><note><unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched><duration>1</duration><type>quarter</type></note></measure></part>
+  <part id="P11"><measure number="1"><attributes><divisions>1</divisions></attributes><note><unpitched><display-step>D</display-step><display-octave>5</display-octave></unpitched><duration>1</duration><type>quarter</type></note></measure></part>
+</score-partwise>"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "duplicate-drumsets.xml"
+            path.write_text(xml, encoding="utf-8")
+            parsed = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(
+            [part.raw_part_id for part in parsed.parts],
+            ["P10", "P11"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

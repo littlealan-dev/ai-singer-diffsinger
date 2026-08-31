@@ -12,7 +12,7 @@ import {
 } from "@waveform-playlist/browser";
 import { useAudioTracks } from "@waveform-playlist/browser/tone";
 import { useMidiTracks } from "@waveform-playlist/midi";
-import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
+import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -158,6 +158,45 @@ export type InstrumentalTrackState = {
   presetKind: "melodic" | "percussion_kit";
   percussion?: boolean;
 };
+
+type InstrumentalBusState = {
+  muted: boolean;
+  solo: boolean;
+  levelDb: number;
+};
+
+const DEFAULT_INSTRUMENTAL_BUS: InstrumentalBusState = {
+  muted: false,
+  solo: false,
+  levelDb: 0,
+};
+
+const INSTRUMENTAL_BUS_MIN_DB = -48;
+const INSTRUMENTAL_BUS_MAX_DB = 6;
+
+const dbToGain = (db: number) => Math.pow(10, db / 20);
+
+const formatDb = (db: number) => `${Number.isInteger(db) ? db : db.toFixed(1)} dB`;
+
+const PageViewIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 10.9231H4.57087C4.25599 10.9231 4 11.1938 4 11.5384C4 11.8831 4.25599 12.1538 4.57087 12.1538H19.4291C19.744 12.1538 20 11.8831 20 11.5384C20 11.1938 19.744 10.9231 19.4291 10.9231Z" />
+    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 7.49449H4.57087C4.25599 7.49449 4 7.76526 4 8.10987C4 8.45449 4.25599 8.72526 4.57087 8.72526H19.4291C19.744 8.72526 20 8.45449 20 8.10987C20 7.76526 19.744 7.49449 19.4291 7.49449Z" />
+    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 14.3516H4.57087C4.25599 14.3516 4 14.6224 4 14.967C4 15.3116 4.25599 15.5824 4.57087 15.5824H19.4291C19.744 15.5824 20 15.3116 20 14.967C20 14.6224 19.744 14.3516 19.4291 14.3516Z" />
+    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 4.06592H4.57087C4.25599 4.06592 4 4.33669 4 4.6813C4 5.02592 4.25599 5.29669 4.57087 5.29669H19.4291C19.744 5.29669 20 5.02592 20 4.6813C20 4.33669 19.744 4.06592 19.4291 4.06592Z" />
+    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 17.7802H4.57087C4.25599 17.7802 4 18.051 4 18.3956C4 18.7402 4.25599 19.011 4.57087 19.011H19.4291C19.744 19.011 20 18.7402 20 18.3956C20 18.051 19.744 17.7802 19.4291 17.7802Z" />
+  </svg>
+);
+
+const HorizontalViewIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M18.7692 4.94205V19.0598C18.7692 19.5784 19.04 20 19.3846 20C19.7292 20 20 19.5784 20 19.0598V4.94205C20 4.42346 19.7292 4 19.3846 4C19.04 4 18.7692 4.42346 18.7692 4.94205ZM13.8462 4.57087L13.8462 19.4291C13.8462 19.744 14.1169 20 14.4615 20C14.8062 20 15.0769 19.744 15.0769 19.4291L15.0769 4.57087C15.0769 4.25598 14.8062 4 14.4615 4C14.1169 4 13.8462 4.25598 13.8462 4.57087ZM8.92308 19.2008C8.92308 19.6416 9.19385 20 9.53846 20C9.88308 20 10.1538 19.6416 10.1538 19.2008V4.7992C10.1538 4.35837 9.88308 4 9.53846 4C9.19385 4 8.92308 4.35837 8.92308 4.7992ZM5.23077 19.4291L5.23077 4.57087C5.23077 4.25598 4.96 4 4.61538 4C4.27077 4 4 4.25598 4 4.57087L4 19.4291C4 19.744 4.27077 20 4.61538 20C4.96 20 5.23077 19.744 5.23077 19.4291Z"
+    />
+  </svg>
+);
 
 const GM_INSTRUMENTS = [
   { program: 0, label: "Acoustic Grand Piano" },
@@ -539,6 +578,7 @@ type ScorePlayerEngineProps = {
   midiUrl: string | null;
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks?: InstrumentalTrackState[];
+  instrumentalBus: InstrumentalBusState;
   playbackRequestId: number;
   onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
   onEngineLoading: () => void;
@@ -602,10 +642,12 @@ const ScorePlayerMixerBridge = ({
   midiTrackCount,
   vocalTracks,
   instrumentalTracks = [],
+  instrumentalBus,
 }: {
   midiTrackCount: number;
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks?: InstrumentalTrackState[];
+  instrumentalBus: InstrumentalBusState;
 }) => {
   const controls = usePlaylistControls();
   const { isReady } = usePlaylistData();
@@ -617,17 +659,21 @@ const ScorePlayerMixerBridge = ({
   const instMixerSignature = instrumentalTracks
     .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
     .join("\u0001");
+  const instrumentalBusSignature = `${instrumentalBus.muted}\u0000${instrumentalBus.solo}\u0000${instrumentalBus.levelDb}`;
 
   useEffect(() => {
     if (!isReady) return;
     const currentControls = controlsRef.current;
 
+    const hasIndividualInstrumentSolo = instrumentalTracks.some((track) => track.solo);
+    const busGain = dbToGain(instrumentalBus.levelDb);
     for (let i = 0; i < midiTrackCount; i++) {
       const track = instrumentalTracks[i] ?? (instrumentalTracks.length === 1 ? instrumentalTracks[0] : null);
       if (track) {
-        currentControls.setTrackMute(i, track.muted);
-        currentControls.setTrackSolo(i, track.solo);
-        currentControls.setTrackVolume(i, track.volume);
+        const effectiveSolo = hasIndividualInstrumentSolo ? track.solo : instrumentalBus.solo;
+        currentControls.setTrackMute(i, instrumentalBus.muted || track.muted);
+        currentControls.setTrackSolo(i, effectiveSolo);
+        currentControls.setTrackVolume(i, track.volume * busGain);
       } else {
         currentControls.setTrackMute(i, false);
         currentControls.setTrackSolo(i, false);
@@ -642,7 +688,16 @@ const ScorePlayerMixerBridge = ({
       currentControls.setTrackSolo(trackIndex, track.solo);
       currentControls.setTrackVolume(trackIndex, track.volume);
     });
-  }, [isReady, midiTrackCount, vocalMixerSignature, instMixerSignature, instrumentalTracks, vocalTracks]);
+  }, [
+    isReady,
+    midiTrackCount,
+    vocalMixerSignature,
+    instMixerSignature,
+    instrumentalBusSignature,
+    instrumentalTracks,
+    instrumentalBus,
+    vocalTracks,
+  ]);
 
   return null;
 };
@@ -651,6 +706,7 @@ const ScorePlayerEngine = ({
   midiUrl,
   vocalTracks,
   instrumentalTracks = [],
+  instrumentalBus,
   playbackRequestId,
   onControlsChange,
   onEngineLoading,
@@ -832,6 +888,7 @@ const ScorePlayerEngine = ({
         midiTrackCount={midiTracks.length}
         vocalTracks={vocalTracks}
         instrumentalTracks={instrumentalTracks}
+        instrumentalBus={instrumentalBus}
       />
     </WaveformPlaylistProvider>
   );
@@ -1058,19 +1115,28 @@ const MultiTrackWaveformLane = ({
 type ScoreTrackControlsPanelProps = {
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks: InstrumentalTrackState[];
+  instrumentalBus: InstrumentalBusState;
+  instrumentalTracksExpanded: boolean;
   onUpdateVocalMute: (key: string, muted: boolean) => void;
   onUpdateVocalSolo: (key: string, solo: boolean) => void;
   onUpdateVocalVolume: (key: string, volume: number) => void;
   onDownloadVocalTrack: (track: MultiTrackAudioTrack) => void;
-  onUpdateInstrumentalMute: (partId: string, muted: boolean) => void;
-  onUpdateInstrumentalSolo: (partId: string, solo: boolean) => void;
-  onUpdateInstrumentalVolume: (partId: string, volume: number) => void;
-  onUpdateInstrumentalGmProgram: (partId: string, gmProgram: number) => void;
+  onUpdateInstrumentalMute: (key: string, muted: boolean) => void;
+  onUpdateInstrumentalSolo: (key: string, solo: boolean) => void;
+  onUpdateInstrumentalVolume: (key: string, volume: number) => void;
+  onUpdateInstrumentalGmProgram: (key: string, gmProgram: number) => void;
+  onUpdateInstrumentalBusMute: (muted: boolean) => void;
+  onUpdateInstrumentalBusSolo: (solo: boolean) => void;
+  onUpdateInstrumentalBusLevel: (levelDb: number) => void;
+  onToggleInstrumentalTracksExpanded: () => void;
+  onCollapse: () => void;
 };
 
 const ScoreTrackControlsPanel = ({
   vocalTracks,
   instrumentalTracks,
+  instrumentalBus,
+  instrumentalTracksExpanded,
   onUpdateVocalMute,
   onUpdateVocalSolo,
   onUpdateVocalVolume,
@@ -1079,6 +1145,11 @@ const ScoreTrackControlsPanel = ({
   onUpdateInstrumentalSolo,
   onUpdateInstrumentalVolume,
   onUpdateInstrumentalGmProgram,
+  onUpdateInstrumentalBusMute,
+  onUpdateInstrumentalBusSolo,
+  onUpdateInstrumentalBusLevel,
+  onToggleInstrumentalTracksExpanded,
+  onCollapse,
 }: ScoreTrackControlsPanelProps) => {
   const totalTracks = vocalTracks.length + instrumentalTracks.length;
   if (totalTracks === 0) return null;
@@ -1090,9 +1161,20 @@ const ScoreTrackControlsPanel = ({
           <Sliders size={14} className="score-tracks-header-icon" />
           <span>Tracks & Stems</span>
         </div>
-        <span className="score-tracks-count-badge">
-          {totalTracks} {totalTracks === 1 ? "track" : "tracks"}
-        </span>
+        <div className="score-tracks-header-actions">
+          <span className="score-tracks-count-badge">
+            {totalTracks} {totalTracks === 1 ? "track" : "tracks"}
+          </span>
+          <button
+            type="button"
+            className="panel-collapse-toggle score-tracks-collapse-toggle"
+            onClick={onCollapse}
+            aria-label="Collapse Tracks & Stems"
+            title="Collapse Tracks & Stems"
+          >
+            <PanelLeftClose size={15} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="score-tracks-list">
@@ -1179,7 +1261,87 @@ const ScoreTrackControlsPanel = ({
           </div>
         ))}
 
-        {/* Instrumental / Accompaniment Tracks - FOLLOWS BELOW */}
+        {/* Instrumental Bus and individual accompaniment tracks */}
+        {instrumentalTracks.length > 0 && (
+          <div
+            className={clsx("score-track-card score-track-row instrumental-bus-track", {
+              "is-muted": instrumentalBus.muted,
+              "is-soloed": instrumentalBus.solo,
+            })}
+            data-testid="score-instrumental-bus"
+          >
+            <div className="score-track-card-header">
+              <div className="score-track-info">
+                <span className="score-track-icon-wrapper instrument" title="Instrumental Bus">
+                  <Sliders size={14} />
+                </span>
+                <div className="score-track-details">
+                  <span className="score-track-title">All Instruments</span>
+                  <div className="score-track-meta">
+                    <span className="score-track-type-tag instrument">Instrumental Bus</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="score-track-transport-btns">
+                <button
+                  type="button"
+                  className={clsx("score-track-solo-btn", { active: instrumentalBus.solo })}
+                  onClick={() => onUpdateInstrumentalBusSolo(!instrumentalBus.solo)}
+                  aria-pressed={instrumentalBus.solo}
+                  title={instrumentalBus.solo ? "Unsolo all instruments" : "Solo all instruments"}
+                >
+                  S
+                </button>
+                <button
+                  type="button"
+                  className={clsx("score-track-mute-btn", { muted: instrumentalBus.muted })}
+                  onClick={() => onUpdateInstrumentalBusMute(!instrumentalBus.muted)}
+                  aria-pressed={instrumentalBus.muted}
+                  title={instrumentalBus.muted ? "Unmute all instruments" : "Mute all instruments"}
+                >
+                  {instrumentalBus.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                </button>
+                <button
+                  type="button"
+                  className="score-track-action-btn score-track-expand-btn"
+                  onClick={onToggleInstrumentalTracksExpanded}
+                  aria-expanded={instrumentalTracksExpanded}
+                  aria-controls="score-individual-instrument-tracks"
+                  title={instrumentalTracksExpanded ? "Hide individual instrument controls" : "Show individual instrument controls"}
+                >
+                  <ListCollapse size={16} aria-hidden="true" />
+                  <span>{instrumentalTracksExpanded ? "Hide" : "Details"}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="score-track-card-footer">
+              <span className="score-track-bus-level-label">Instrumental Level</span>
+              <div className="score-track-volume-wrapper" title={`Instrumental level: ${formatDb(instrumentalBus.levelDb)}`}>
+                <span className="score-track-volume-icon">
+                  <Volume2 size={12} />
+                </span>
+                <input
+                  type="range"
+                  className="score-track-volume-slider score-track-bus-level-slider"
+                  min={INSTRUMENTAL_BUS_MIN_DB}
+                  max={INSTRUMENTAL_BUS_MAX_DB}
+                  step="0.5"
+                  value={instrumentalBus.levelDb}
+                  onChange={(event) => onUpdateInstrumentalBusLevel(Number(event.target.value))}
+                  aria-label="Instrumental Level"
+                />
+                <span className="score-track-volume-label score-track-bus-level-value">
+                  {formatDb(instrumentalBus.levelDb)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {instrumentalTracks.length > 0 && instrumentalTracksExpanded && (
+          <div id="score-individual-instrument-tracks" className="score-individual-instrument-tracks">
         {instrumentalTracks.map((inst) => (
           <div
             key={inst.key}
@@ -1187,7 +1349,7 @@ const ScoreTrackControlsPanel = ({
               "is-muted": inst.muted,
               "is-soloed": inst.solo,
             })}
-            data-testid={`score-inst-track-${inst.partId}`}
+            data-testid={`score-inst-track-${inst.rawPartId || inst.partIndex}`}
           >
             <div className="score-track-card-header">
               <div className="score-track-info">
@@ -1211,7 +1373,7 @@ const ScoreTrackControlsPanel = ({
                 <button
                   type="button"
                   className={clsx("score-track-solo-btn", { active: inst.solo })}
-                  onClick={() => onUpdateInstrumentalSolo(inst.partId, !inst.solo)}
+                  onClick={() => onUpdateInstrumentalSolo(inst.key, !inst.solo)}
                   aria-pressed={inst.solo}
                   title={inst.solo ? "Unsolo track" : "Solo track"}
                 >
@@ -1220,7 +1382,7 @@ const ScoreTrackControlsPanel = ({
                 <button
                   type="button"
                   className={clsx("score-track-mute-btn", { muted: inst.muted })}
-                  onClick={() => onUpdateInstrumentalMute(inst.partId, !inst.muted)}
+                  onClick={() => onUpdateInstrumentalMute(inst.key, !inst.muted)}
                   aria-pressed={inst.muted}
                   title={inst.muted ? "Unmute track" : "Mute track"}
                 >
@@ -1236,7 +1398,7 @@ const ScoreTrackControlsPanel = ({
                 percussion={inst.percussion}
                 soundfontBank={inst.soundfontBank}
                 presetKind={inst.presetKind}
-                onChange={(gmProgram) => onUpdateInstrumentalGmProgram(inst.partId, gmProgram)}
+                onChange={(gmProgram) => onUpdateInstrumentalGmProgram(inst.key, gmProgram)}
               />
 
               <div className="score-track-volume-wrapper" title={`Volume: ${Math.round(inst.volume * 100)}%`}>
@@ -1250,7 +1412,7 @@ const ScoreTrackControlsPanel = ({
                   max="1"
                   step="0.01"
                   value={inst.volume}
-                  onChange={(e) => onUpdateInstrumentalVolume(inst.partId, parseFloat(e.target.value))}
+                  onChange={(e) => onUpdateInstrumentalVolume(inst.key, parseFloat(e.target.value))}
                   aria-label={`${inst.label} volume`}
                 />
                 <span className="score-track-volume-label">{Math.round(inst.volume * 100)}%</span>
@@ -1258,6 +1420,8 @@ const ScoreTrackControlsPanel = ({
             </div>
           </div>
         ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1826,6 +1990,10 @@ export default function MainApp() {
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
   const [performanceMidi, setPerformanceMidi] = useState<PerformanceMidi | null>(null);
   const [instrumentalTracks, setInstrumentalTracks] = useState<InstrumentalTrackState[]>([]);
+  const [instrumentalBus, setInstrumentalBus] = useState<InstrumentalBusState>(
+    DEFAULT_INSTRUMENTAL_BUS
+  );
+  const [instrumentalTracksExpanded, setInstrumentalTracksExpanded] = useState(true);
   const [instrumentalMidiUrl, setInstrumentalMidiUrl] = useState<string | null>(null);
   const [scorePlayerControls, setScorePlayerControls] =
     useState<ScorePlayerPlaybackControls | null>(null);
@@ -1841,6 +2009,8 @@ export default function MainApp() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [splitPct, setSplitPct] = useState(40);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [scoreTracksCollapsed, setScoreTracksCollapsed] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
   const [scorePreviewWidth, setScorePreviewWidth] = useState(0);
@@ -2141,11 +2311,11 @@ export default function MainApp() {
     const eligible = performanceMidi.instrumental_parts.filter((p) => p.eligible);
     setInstrumentalTracks((current) => {
       return eligible.map((part) => {
-        const existing = current.find(
-          (t) => t.partId === part.part_id || t.rawPartId === part.raw_part_id
-        );
+        const existing = part.raw_part_id
+          ? current.find((track) => track.rawPartId === part.raw_part_id)
+          : current.find((track) => track.partId === part.part_id);
         return {
-          key: `inst-${part.part_id || part.part_index}`,
+          key: `inst-${part.raw_part_id || part.part_index}`,
           partId: part.part_id,
           rawPartId: part.raw_part_id,
           partIndex: part.part_index,
@@ -2162,33 +2332,49 @@ export default function MainApp() {
     });
   }, [performanceMidi]);
 
-  const updateInstrumentalTrackMute = useCallback((partId: string, muted: boolean) => {
+  const updateInstrumentalTrackMute = useCallback((key: string, muted: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.partId === partId ? { ...track, muted, solo: muted ? false : track.solo } : track
+        track.key === key ? { ...track, muted, solo: muted ? false : track.solo } : track
       )
     );
   }, []);
 
-  const updateInstrumentalTrackSolo = useCallback((partId: string, solo: boolean) => {
+  const updateInstrumentalTrackSolo = useCallback((key: string, solo: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.partId === partId ? { ...track, solo, muted: solo ? false : track.muted } : track
+        track.key === key ? { ...track, solo, muted: solo ? false : track.muted } : track
       )
     );
   }, []);
 
-  const updateInstrumentalTrackVolume = useCallback((partId: string, volume: number) => {
+  const updateInstrumentalTrackVolume = useCallback((key: string, volume: number) => {
     const normalized = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
     setInstrumentalTracks((current) =>
-      current.map((track) => (track.partId === partId ? { ...track, volume: normalized } : track))
+      current.map((track) => (track.key === key ? { ...track, volume: normalized } : track))
     );
   }, []);
 
-  const updateInstrumentalTrackGmProgram = useCallback((partId: string, gmProgram: number) => {
+  const updateInstrumentalTrackGmProgram = useCallback((key: string, gmProgram: number) => {
     setInstrumentalTracks((current) =>
-      current.map((track) => (track.partId === partId ? { ...track, gmProgram } : track))
+      current.map((track) => (track.key === key ? { ...track, gmProgram } : track))
     );
+  }, []);
+
+  const updateInstrumentalBusMute = useCallback((muted: boolean) => {
+    setInstrumentalBus((current) => ({ ...current, muted }));
+  }, []);
+
+  const updateInstrumentalBusSolo = useCallback((solo: boolean) => {
+    setInstrumentalBus((current) => ({ ...current, solo }));
+  }, []);
+
+  const updateInstrumentalBusLevel = useCallback((levelDb: number) => {
+    const normalized = Math.max(
+      INSTRUMENTAL_BUS_MIN_DB,
+      Math.min(INSTRUMENTAL_BUS_MAX_DB, Number.isFinite(levelDb) ? levelDb : 0)
+    );
+    setInstrumentalBus((current) => ({ ...current, levelDb: normalized }));
   }, []);
 
   useEffect(() => {
@@ -3645,6 +3831,8 @@ export default function MainApp() {
     handleMultiTrackStop();
     setMultiTrackAudioTracks([]);
     setInstrumentalTracks([]);
+    setInstrumentalBus(DEFAULT_INSTRUMENTAL_BUS);
+    setInstrumentalTracksExpanded(true);
     setPerformanceMidi(null);
     setMultiTrackExportProgress(null);
     setMultiTrackExportError(null);
@@ -4055,19 +4243,36 @@ export default function MainApp() {
       />
 
       <main
-        className="split-grid"
+        className={clsx("split-grid", { "chat-collapsed": chatCollapsed })}
         ref={layoutRef}
         style={splitStyle}
       >
         <section
-          className={clsx("chat-panel", isDragging && "drag-active")}
+          className={clsx("chat-panel", isDragging && "drag-active", { collapsed: chatCollapsed })}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
           <div className="chat-header">
-            <h2>Studio Chat</h2>
-            <span className="chat-subtitle">Natural language takes, no DAW edits</span>
+            {!chatCollapsed && (
+              <>
+                <h2>Studio Chat</h2>
+                <span className="chat-subtitle">Natural language takes, no DAW edits</span>
+              </>
+            )}
+            <button
+              type="button"
+              className="panel-collapse-toggle chat-collapse-toggle"
+              onClick={() => setChatCollapsed((current) => !current)}
+              aria-label={chatCollapsed ? "Expand Studio Chat" : "Collapse Studio Chat"}
+              title={chatCollapsed ? "Expand Studio Chat" : "Collapse Studio Chat"}
+            >
+              {chatCollapsed ? (
+                <PanelLeftOpen size={17} aria-hidden="true" />
+              ) : (
+                <PanelLeftClose size={17} aria-hidden="true" />
+              )}
+            </button>
           </div>
           <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatScroll} data-testid="chat-stream">
             {messages.length === 0 && (
@@ -4606,6 +4811,7 @@ export default function MainApp() {
             midiUrl={instrumentalMidiUrl}
             vocalTracks={multiTrackAudioTracks}
             instrumentalTracks={instrumentalTracks}
+            instrumentalBus={instrumentalBus}
             playbackRequestId={scorePlayerPlaybackRequestId}
             onControlsChange={handleScorePlayerControlsChange}
             onEngineLoading={handleScorePlayerEngineLoading}
@@ -4617,13 +4823,13 @@ export default function MainApp() {
 
           <section
             className={clsx("score-panel", isDragging && "drag-active")}
+            aria-label="Score preview"
             data-testid="score-preview"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
           <div className="score-header">
-            <h2>Score Preview</h2>
               <div className="score-controls">
                 <div className="score-subtitles">
                   <span className="chat-subtitle">
@@ -4715,19 +4921,23 @@ export default function MainApp() {
                     type="button"
                     className={clsx("score-layout-option", { selected: scorePreviewLayout === "page" })}
                     aria-pressed={scorePreviewLayout === "page"}
+                    aria-label="Page view"
+                    title="Page view"
                     disabled={!score}
                     onClick={() => setScorePreviewLayout("page")}
                   >
-                    Page
+                    <PageViewIcon />
                   </button>
                   <button
                     type="button"
                     className={clsx("score-layout-option", { selected: scorePreviewLayout === "horizontal" })}
                     aria-pressed={scorePreviewLayout === "horizontal"}
+                    aria-label="Horizontal view"
+                    title="Horizontal view"
                     disabled={!score}
                     onClick={() => setScorePreviewLayout("horizontal")}
                   >
-                    Horizontal
+                    <HorizontalViewIcon />
                   </button>
                 </div>
                 <button
@@ -4765,19 +4975,43 @@ export default function MainApp() {
           )}
           <div className="score-body">
             {hasScorePlayerTracks && (
-              <aside className="score-tracks-sidebar" aria-label="Score multitrack controls sidebar">
-                <ScoreTrackControlsPanel
-                  vocalTracks={multiTrackAudioTracks}
-                  instrumentalTracks={instrumentalTracks}
-                  onUpdateVocalMute={updateMultiTrackMute}
-                  onUpdateVocalSolo={updateMultiTrackSolo}
-                  onUpdateVocalVolume={updateMultiTrackVolume}
-                  onDownloadVocalTrack={handleMultiTrackTrackDownload}
-                  onUpdateInstrumentalMute={updateInstrumentalTrackMute}
-                  onUpdateInstrumentalSolo={updateInstrumentalTrackSolo}
-                  onUpdateInstrumentalVolume={updateInstrumentalTrackVolume}
-                  onUpdateInstrumentalGmProgram={updateInstrumentalTrackGmProgram}
-                />
+              <aside
+                className={clsx("score-tracks-sidebar", { collapsed: scoreTracksCollapsed })}
+                aria-label="Score multitrack controls sidebar"
+              >
+                {scoreTracksCollapsed ? (
+                  <button
+                    type="button"
+                    className="panel-collapse-toggle score-tracks-sidebar-expand"
+                    onClick={() => setScoreTracksCollapsed(false)}
+                    aria-label="Expand Tracks & Stems"
+                    title="Expand Tracks & Stems"
+                  >
+                    <PanelLeftOpen size={17} aria-hidden="true" />
+                  </button>
+                ) : (
+                  <ScoreTrackControlsPanel
+                    vocalTracks={multiTrackAudioTracks}
+                    instrumentalTracks={instrumentalTracks}
+                    instrumentalBus={instrumentalBus}
+                    instrumentalTracksExpanded={instrumentalTracksExpanded}
+                    onUpdateVocalMute={updateMultiTrackMute}
+                    onUpdateVocalSolo={updateMultiTrackSolo}
+                    onUpdateVocalVolume={updateMultiTrackVolume}
+                    onDownloadVocalTrack={handleMultiTrackTrackDownload}
+                    onUpdateInstrumentalMute={updateInstrumentalTrackMute}
+                    onUpdateInstrumentalSolo={updateInstrumentalTrackSolo}
+                    onUpdateInstrumentalVolume={updateInstrumentalTrackVolume}
+                    onUpdateInstrumentalGmProgram={updateInstrumentalTrackGmProgram}
+                    onUpdateInstrumentalBusMute={updateInstrumentalBusMute}
+                    onUpdateInstrumentalBusSolo={updateInstrumentalBusSolo}
+                    onUpdateInstrumentalBusLevel={updateInstrumentalBusLevel}
+                    onToggleInstrumentalTracksExpanded={() =>
+                      setInstrumentalTracksExpanded((current) => !current)
+                    }
+                    onCollapse={() => setScoreTracksCollapsed(true)}
+                  />
+                )}
               </aside>
             )}
             <div
