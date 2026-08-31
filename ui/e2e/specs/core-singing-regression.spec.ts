@@ -35,6 +35,11 @@ test.describe("core singing regression", () => {
   test("initializes a new account's credits without showing the paywall", async ({ page }) => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByText("1000000 Credits", { exact: true })).toBeVisible();
+
+    await page.getByTitle("Collapse Studio Chat").click();
+    await expect(page.locator(".split-grid")).toHaveClass(/chat-collapsed/);
+    await page.getByTitle("Expand Studio Chat").click();
+    await expect(page.locator(".split-grid")).not.toHaveClass(/chat-collapsed/);
   });
 
   test("uploads and synthesizes one voice part, one verse", async ({ page, request }, testInfo) => {
@@ -99,17 +104,42 @@ test.describe("core singing regression", () => {
     });
     expect((await midiResponse).ok()).toBeTruthy();
 
-    // Verify per-track controls panel rendering and order
+    // The vocal track remains first, followed by the Instrumental Bus and its
+    // individual accompaniment rows, which are expanded by default.
     const tracksPanel = page.getByTestId("score-tracks-panel");
     await expect(tracksPanel).toBeVisible();
+    await page.getByTitle("Collapse Tracks & Stems").click();
+    await expect(page.getByTitle("Expand Tracks & Stems")).toBeVisible();
+    await page.getByTitle("Expand Tracks & Stems").click();
+    await expect(tracksPanel).toBeVisible();
     const trackRows = tracksPanel.locator(".score-track-row");
-    await expect(trackRows).toHaveCount(2); // 1 vocal track + 1 accompaniment piano track
+    await expect(trackRows).toHaveCount(3); // 1 vocal + instrumental bus + piano
     await expect(trackRows.nth(0)).toHaveClass(/vocal-track/);
-    await expect(trackRows.nth(1)).toHaveClass(/instrument-track/);
-    await expect(trackRows.nth(1).locator(".score-track-instrument-select")).toBeVisible();
+    await expect(trackRows.nth(1)).toHaveClass(/instrumental-bus-track/);
+    const instrumentalBus = page.getByTestId("score-instrumental-bus");
+    const instrumentalLevel = instrumentalBus.getByLabel("Instrumental Level");
+    await expect(instrumentalLevel).toHaveValue("0");
+    await expect(instrumentalLevel).toHaveAttribute("max", "6");
+    await instrumentalLevel.press("ArrowLeft");
+    await expect(instrumentalLevel).toHaveValue("-0.5");
+    await expect(instrumentalBus).toContainText("-0.5 dB");
+    await expect(tracksPanel.locator(".instrument-track")).toHaveCount(1);
 
-    // Verify mute / solo toggles and volume control
-    const instSoloBtn = trackRows.nth(1).locator(".score-track-solo-btn");
+    await instrumentalBus.getByTitle("Hide individual instrument controls").click();
+    await expect(trackRows).toHaveCount(2);
+    await instrumentalBus.getByTitle("Show individual instrument controls").click();
+    await expect(trackRows).toHaveCount(3);
+    await expect(trackRows.nth(2)).toHaveClass(/instrument-track/);
+    await expect(trackRows.nth(2).locator(".score-track-instrument-select")).toBeVisible();
+
+    // Verify bus and individual solo controls.
+    const busSoloBtn = instrumentalBus.locator(".score-track-solo-btn");
+    await busSoloBtn.click();
+    await expect(busSoloBtn).toHaveClass(/active/);
+    await busSoloBtn.click();
+    await expect(busSoloBtn).not.toHaveClass(/active/);
+
+    const instSoloBtn = trackRows.nth(2).locator(".score-track-solo-btn");
     await expect(instSoloBtn).toHaveText("S");
     await instSoloBtn.click();
     await expect(instSoloBtn).toHaveClass(/active/);

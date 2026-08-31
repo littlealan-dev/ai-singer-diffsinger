@@ -174,14 +174,24 @@ def _map_score_parts_to_raw_part_ids(
             raw_ids_by_name.setdefault(normalized_name, []).append(raw_part.part_id)
 
     result: Dict[int, str] = {}
+    # music21 can discard the raw ID when multiple MusicXML parts have the
+    # same display name (for example, two separate ``Drumset`` parts).  Keep
+    # assignments made by the fallback matcher, so an ambiguous name retains
+    # the source declaration order instead of losing its raw identity.
+    used_raw_part_ids: set[str] = set()
     for index, part in enumerate(score.parts):
         parser_part_id = str(part.id or "").strip()
         parser_part_name = _normalize_part_name(part.partName)
         raw_part_id = parser_part_id if parser_part_id in raw_part_names else ""
         if not raw_part_id:
             candidates = raw_ids_by_name.get(parser_part_name, [])
-            if len(candidates) == 1:
-                raw_part_id = candidates[0]
+            if candidates:
+                unused_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate not in used_raw_part_ids
+                ]
+                raw_part_id = (unused_candidates or candidates)[0]
         if not raw_part_id:
             # music21 may expand a raw multi-staff part into separate parser
             # parts. Their IDs retain the raw ID as a prefix, but the suffix is
@@ -198,6 +208,7 @@ def _map_score_parts_to_raw_part_ids(
                 raw_part_id = max(candidates, key=len)
         if raw_part_id:
             result[index] = raw_part_id
+            used_raw_part_ids.add(raw_part_id)
     return result
 
 

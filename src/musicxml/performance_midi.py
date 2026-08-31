@@ -5,15 +5,17 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
+from xml.etree import ElementTree
 
-from music21 import bar, instrument, repeat, stream, tempo
+from music21 import bar, instrument, note, percussion, repeat, stream, tempo
 
+from src.musicxml.io import read_musicxml_content
 from src.musicxml.parser import _expand_repeat_navigation
 from src.musicxml.part_reference import load_musicxml_score, map_parser_part_indices_to_raw_part_ids
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 
 
-PERFORMANCE_MIDI_VERSION = 4
+PERFORMANCE_MIDI_VERSION = 6
 
 
 def build_instrumental_performance_midis(
@@ -147,6 +149,8 @@ def _write_instrumental_midi(
     programs_by_part: Dict[str, Dict[str, Any]],
 ) -> None:
     score = load_musicxml_score(source_path)
+    written_raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=score)
+    _restore_unpitched_midi_pitches(score, source_path, written_raw_part_ids)
     if expand_repeats:
         score = _expand_repeat_navigation(score, source_path)
     else:
@@ -173,6 +177,126 @@ def _write_instrumental_midi(
         sounding_score = instrumental_score
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sounding_score.write("midi", fp=str(output_path))
+
+
+def _restore_unpitched_midi_pitches(
+    score: stream.Score,
+    source_path: Path,
+    raw_part_ids: Dict[int, str],
+) -> None:
+    """Restore MusicXML's per-note GM drum pitches before MIDI export.
+
+    music21 imports the first declared percussion instrument for an entire
+    part and discards each ``note/instrument`` route. Its MIDI writer then
+    emits that first instrument's pitch for every note (commonly bass drum).
+    MusicXML's ``midi-unpitched`` value is the explicit source fact for every
+    route. It uses the MusicXML 1-128 numbering, so convert it to MIDI's
+    0-127 pitch numbering before attaching it to parsed atomic Unpitched notes
+    ahead of repeat expansion or MIDI writing.
+    """
+    source_pitches_by_part = _unpitched_midi_pitches_by_part(source_path)
+    for index, part in enumerate(score.parts):
+        source_pitches = source_pitches_by_part.get(raw_part_ids.get(index, ""))
+        if not source_pitches:
+            continue
+        parsed_notes = list(_atomic_unpitched_notes(part))
+        # Only apply the source sequence when every source note is represented
+        # by music21. A malformed score must retain its existing fallback
+        # behaviour rather than shifting drum pitches onto later notes.
+        if len(parsed_notes) != len(source_pitches):
+            continue
+        for parsed_note, midi_pitch in zip(parsed_notes, source_pitches):
+            if midi_pitch is None:
+                continue
+            percussion_instrument = instrument.UnpitchedPercussion()
+            percussion_instrument.midiChannel = 9
+            percussion_instrument.percMapPitch = midi_pitch
+            parsed_note.storedInstrument = percussion_instrument
+
+
+def _atomic_unpitched_notes(part: stream.Part) -> List[note.Unpitched]:
+    result: List[note.Unpitched] = []
+    for element in part.recurse().notes:
+        if isinstance(element, percussion.PercussionChord):
+            result.extend(
+                item for item in element.notes if isinstance(item, note.Unpitched)
+            )
+        elif isinstance(element, note.Unpitched):
+            result.append(element)
+    return result
+
+
+def _unpitched_midi_pitches_by_part(source_path: Path) -> Dict[str, List[int | None]]:
+    root = ElementTree.fromstring(read_musicxml_content(source_path))
+    result: Dict[str, List[int | None]] = {}
+    pitches_by_part_and_instrument: Dict[str, Dict[str, int]] = {}
+    for score_part in _children_named(_first_child_named(root, "part-list"), "score-part"):
+        raw_part_id = str(score_part.attrib.get("id") or "")
+        pitches_by_instrument_id: Dict[str, int] = {}
+        for midi_instrument in _children_named(score_part, "midi-instrument"):
+            instrument_id = str(midi_instrument.attrib.get("id") or "")
+            pitch = _valid_midi_unpitched(_child_text(midi_instrument, "midi-unpitched"))
+            if instrument_id and pitch is not None:
+                pitches_by_instrument_id[instrument_id] = pitch
+        if not pitches_by_instrument_id:
+            continue
+        result[raw_part_id] = []
+        pitches_by_part_and_instrument[raw_part_id] = pitches_by_instrument_id
+
+    for raw_part in _children_named(root, "part"):
+        raw_part_id = str(raw_part.attrib.get("id") or "")
+        if raw_part_id not in result:
+            continue
+        for source_note in _descendants_named(raw_part, "note"):
+            if _first_child_named(source_note, "unpitched") is None:
+                continue
+            source_instrument = _first_child_named(source_note, "instrument")
+            instrument_id = (
+                str(source_instrument.attrib.get("id") or "")
+                if source_instrument is not None
+                else ""
+            )
+            result[raw_part_id].append(
+                pitches_by_part_and_instrument[raw_part_id].get(instrument_id)
+            )
+    return result
+
+
+def _valid_midi_unpitched(value: str | None) -> int | None:
+    try:
+        musicxml_pitch = int(value) if value is not None else None
+    except ValueError:
+        return None
+    # Unlike raw MIDI, MusicXML defines midi-unpitched as 1..128. Convert to
+    # the 0..127 value consumed by music21's percussion MIDI writer.
+    if musicxml_pitch is None or not 1 <= musicxml_pitch <= 128:
+        return None
+    return musicxml_pitch - 1
+
+
+def _children_named(element: ElementTree.Element | None, name: str) -> List[ElementTree.Element]:
+    if element is None:
+        return []
+    return [child for child in element if _local_name(child.tag) == name]
+
+
+def _descendants_named(element: ElementTree.Element, name: str) -> List[ElementTree.Element]:
+    return [child for child in element.iter() if _local_name(child.tag) == name]
+
+
+def _first_child_named(element: ElementTree.Element | None, name: str) -> ElementTree.Element | None:
+    if element is None:
+        return None
+    return next((child for child in element if _local_name(child.tag) == name), None)
+
+
+def _child_text(element: ElementTree.Element, name: str) -> str | None:
+    child = _first_child_named(element, name)
+    return (child.text or "").strip() if child is not None else None
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
 
 def _copy_score_tempos(source_score: stream.Score, target_score: stream.Score) -> None:
