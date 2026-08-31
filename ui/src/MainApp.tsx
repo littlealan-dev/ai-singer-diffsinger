@@ -1527,33 +1527,27 @@ const buildPrintableScoreMarkup = (scoreElement: HTMLElement): string => {
     .join("");
 };
 
-const PRINT_PAGE_WIDTH_MM = 210;
-const PRINT_PAGE_HEIGHT_MM = 297;
-
 const applyPageLayoutZoom = (osmd: OpenSheetMusicDisplay, zoomLevel: number): void => {
-  const layoutZoom = Number.isFinite(zoomLevel) ? Math.min(2, Math.max(0.6, zoomLevel)) : 1;
-  if (layoutZoom === 1) {
-    osmd.setPageFormat("A4_P");
-    return;
-  }
-  // Keep the rendered paper at A4 while varying the amount of musical space
-  // that OSMD lays out on that paper. This makes 80% genuinely engrave more
-  // measures per page, rather than shrinking a fixed-page SVG.
-  osmd.setCustomPageFormat(
-    PRINT_PAGE_WIDTH_MM / layoutZoom,
-    PRINT_PAGE_HEIGHT_MM / layoutZoom
-  );
+  // Let OSMD own both engraving scale and system/page breaking. This is the
+  // same native zoom API used by the horizontal renderer; keeping an A4 page
+  // format gives it a fixed printable width in which to recompute measure
+  // wrapping for every zoom level.
+  osmd.setPageFormat("A4_P");
+  osmd.zoom = Number.isFinite(zoomLevel) ? Math.min(2, Math.max(0.6, zoomLevel)) : 1;
 };
 
 /**
- * OSMD emits one SVG per page directly into its container. Wrap completed
- * pages with their measured dimensions so CSS can skip offscreen page paint
- * and layout without collapsing the preview's scroll geometry. The cursor
- * remains inside its original SVG, so its coordinate system is unchanged.
+ * OSMD emits each page as a `div#osmdCanvasPageN` containing its SVG. Wrap
+ * that complete page canvas with its native dimensions so the browser can
+ * scale notation and cursor together without another engraving pass.
  */
-const enableOffscreenPageContentVisibility = (container: HTMLElement): void => {
-  const pages = Array.from(container.querySelectorAll(":scope > svg"));
-  if (pages.length < 2) return;
+const preparePagePreviewWrappers = (container: HTMLElement): void => {
+  const pages = Array.from(container.children).filter(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement &&
+      child.id.startsWith("osmdCanvasPage") &&
+      Boolean(child.querySelector(":scope > svg"))
+  );
 
   for (const page of pages) {
     const bounds = page.getBoundingClientRect();
@@ -1561,12 +1555,67 @@ const enableOffscreenPageContentVisibility = (container: HTMLElement): void => {
 
     const wrapper = document.createElement("div");
     wrapper.className = "score-page-virtualizer";
-    // Explicit dimensions retain the exact scroll geometry while this page is
-    // skipped outside the score-canvas viewport.
+    wrapper.dataset.nativeWidth = String(bounds.width);
+    wrapper.dataset.nativeHeight = String(bounds.height);
     wrapper.style.width = `${Math.ceil(bounds.width)}px`;
     wrapper.style.height = `${Math.ceil(bounds.height)}px`;
     page.replaceWith(wrapper);
     wrapper.append(page);
+  }
+};
+
+/**
+ * A preview-pane resize must not reload and re-engrave the MusicXML. The
+ * wrapper retains the scaled scroll geometry, while an inline transform
+ * scales the whole OSMD SVG (notation and cursor included) together.
+ */
+const fitPagePreviewToContainer = (container: HTMLElement): void => {
+  let wrappers = Array.from(
+    container.querySelectorAll<HTMLElement>(":scope > .score-page-virtualizer")
+  );
+  // During local hot reload an already engraved score may still have OSMD's
+  // native canvases in the container. Adopt them on the next resize instead
+  // of waiting for the user to re-upload or change layouts.
+  if (wrappers.length === 0) {
+    preparePagePreviewWrappers(container);
+    wrappers = Array.from(
+      container.querySelectorAll<HTMLElement>(":scope > .score-page-virtualizer")
+    );
+  }
+  const firstPage = wrappers[0];
+  if (!firstPage) return;
+
+  const nativeWidth = Number(firstPage.dataset.nativeWidth);
+  if (!Number.isFinite(nativeWidth) || nativeWidth <= 0) return;
+
+  const styles = window.getComputedStyle(container);
+  const horizontalPadding =
+    Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight);
+  const availableWidth = Math.max(0, container.clientWidth - horizontalPadding);
+  const scale = availableWidth > 0 ? availableWidth / nativeWidth : 1;
+  if (!Number.isFinite(scale) || scale <= 0) return;
+
+  for (const wrapper of wrappers) {
+    const width = Number(wrapper.dataset.nativeWidth);
+    const height = Number(wrapper.dataset.nativeHeight);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
+    const scaledWidth = Math.ceil(width * scale);
+    const scaledHeight = Math.ceil(height * scale);
+    wrapper.style.width = `${scaledWidth}px`;
+    wrapper.style.height = `${scaledHeight}px`;
+
+    // OSMD's SVG does not consistently expose a viewBox, so changing the SVG
+    // CSS viewport can resize only the sheet and clip its fixed-coordinate
+    // notation. Transform the page canvas instead: this scales every SVG
+    // child in the same coordinate system, including the active-measure
+    // cursor.
+    const page = wrapper.querySelector<HTMLElement>(":scope > [id^='osmdCanvasPage']");
+    if (page) {
+      page.style.width = `${Math.ceil(width)}px`;
+      page.style.height = `${Math.ceil(height)}px`;
+      page.style.transform = `scale(${scale})`;
+      page.style.transformOrigin = "top left";
+    }
   }
 };
 
@@ -1708,11 +1757,8 @@ const renderScorePageLayoutForPrint = async (
   scoreData: string,
   zoomLevel: number
 ): Promise<string> => {
-  // Printing always targets a physical A4 page. To make the preview's zoom
-  // meaningful in print, enlarge or shrink the *layout* page before OSMD
-  // engraves it, then fit that rendered page to A4 in the print stylesheet.
-  // This causes genuine reflow (more or fewer measures per page), rather than
-  // merely scaling an already-laid-out SVG.
+  // Printing uses the same fixed-A4, native-OSMD zoom path as Page preview so
+  // its system and measure wrapping matches what the user sees.
   const container = document.createElement("div");
   container.style.position = "absolute";
   container.style.left = "-100000px";
@@ -1732,9 +1778,8 @@ const renderScorePageLayoutForPrint = async (
       renderSingleHorizontalStaffline: false,
     });
     await osmd.load(scoreData);
-    // Apply the layout to the parsed score immediately before engraving it.
+    // Apply native OSMD zoom immediately before engraving.
     applyPageLayoutZoom(osmd, zoomLevel);
-    osmd.zoom = 1;
     osmd.render();
     return buildPrintableScoreMarkup(container);
   } finally {
@@ -2013,7 +2058,6 @@ export default function MainApp() {
   const [scoreTracksCollapsed, setScoreTracksCollapsed] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
-  const [scorePreviewWidth, setScorePreviewWidth] = useState(0);
   const [horizontalRendererRevision, setHorizontalRendererRevision] = useState(0);
   const [expandRepeats, setExpandRepeats] = useState(true);
   const [scoreReady, setScoreReady] = useState(false);
@@ -2073,7 +2117,6 @@ export default function MainApp() {
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const horizontalScoreRendererRef = useRef<HorizontalScoreRendererHandle | null>(null);
-  const scorePageFitZoomRef = useRef(1);
   const activeScoreMeasureRef = useRef<string | null>(null);
   const activePerformanceMeasureRef = useRef<PerformanceMeasureMapEntry | null>(null);
   const performanceMeasureMapRef = useRef(scoreSummary?.performance_measure_map ?? null);
@@ -2212,17 +2255,25 @@ export default function MainApp() {
   }, [score?.data, scorePreviewLayout]);
 
   useEffect(() => {
+    if (scorePreviewLayout !== "page") return;
     const scoreElement = scoreRef.current;
     if (!scoreElement) return;
-    const updateWidth = () => {
-      const nextWidth = Math.round(scoreElement.clientWidth);
-      setScorePreviewWidth((current) => (current === nextWidth ? current : nextWidth));
+
+    let animationFrame = 0;
+    const updateFit = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(() => {
+        fitPagePreviewToContainer(scoreElement);
+      });
     };
-    updateWidth();
-    const observer = new ResizeObserver(updateWidth);
+    updateFit();
+    const observer = new ResizeObserver(updateFit);
     observer.observe(scoreElement);
-    return () => observer.disconnect();
-  }, [score, scorePreviewLayout]);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+    };
+  }, [score?.data, scorePreviewLayout, zoomLevel]);
 
   // The preview is always the original score, but the playback position may
   // switch between its written and repeat-expanded performance maps while the
@@ -3189,26 +3240,17 @@ export default function MainApp() {
 
         beginScorePreviewTrap();
         if (scorePreviewLayout === "page") {
-          // Apply the same reflowing page geometry used for print. Render once
-          // at OSMD's native size to obtain the page width, then render again
-          // at the zoom required to fit the preview pane. Both notation and
-          // cursor remain in the same OSMD coordinate space.
+          // OSMD performs the zoom-aware engraving and recomputes its systems
+          // for the fixed A4 page. Preview-pane fitting happens only after
+          // engraving and does not participate in the user zoom level.
           applyPageLayoutZoom(osmd, zoomLevel);
-          osmd.zoom = 1;
           osmd.render();
           const scoreElement = scoreRef.current;
-          const pageWidth = scoreElement?.querySelector("svg")?.getBoundingClientRect().width ?? 0;
-          const styles = scoreElement ? window.getComputedStyle(scoreElement) : null;
-          const horizontalPadding = styles
-            ? Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight)
-            : 0;
-          const availableWidth = Math.max(0, (scorePreviewWidth || scoreElement?.clientWidth || 0) - horizontalPadding);
-          scorePageFitZoomRef.current = pageWidth > 0 && availableWidth > 0 ? availableWidth / pageWidth : 1;
-          osmd.zoom = scorePageFitZoomRef.current;
-          osmd.render();
-          enableOffscreenPageContentVisibility(scoreElement);
+          if (scoreElement) {
+            preparePagePreviewWrappers(scoreElement);
+            fitPagePreviewToContainer(scoreElement);
+          }
         } else {
-          scorePageFitZoomRef.current = 1;
           osmd.zoom = zoomLevel;
           osmd.render();
         }
@@ -3239,7 +3281,6 @@ export default function MainApp() {
     handleScorePreviewFailure,
     score,
     scorePreviewLayout,
-    scorePreviewWidth,
     zoomLevel,
   ]);
 

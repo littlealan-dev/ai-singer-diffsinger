@@ -2881,11 +2881,16 @@ img.voice-picker-option-avatar {
   max-width: none;
 }
 
-/* The dimensions are recorded after OSMD's final page render. This skips
- * offscreen page work while keeping the vertical scrollbar stable. */
+/* Each wrapper carries the scaled scroll geometry, while the complete SVG—
+ * including OSMD's active-measure cursor—resizes together without re-engraving
+ * on preview-pane resizes. */
 .score-surface.page-layout .score-page-virtualizer {
   content-visibility: auto;
   contain-intrinsic-size: auto 1120px;
+}
+
+.score-surface.page-layout .score-page-virtualizer > svg {
+  display: block;
 }
 
 @media print {

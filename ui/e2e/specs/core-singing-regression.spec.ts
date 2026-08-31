@@ -52,6 +52,84 @@ test.describe("core singing regression", () => {
     expect(state.synthesis?.lyric_selection?.name).toBe("");
   });
 
+  test("keeps the engraved page preview while the chat split is resized", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const releaseNotesDismiss = page.getByRole("button", { name: "Awesome, let's go!" });
+    await releaseNotesDismiss.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
+    if (await releaseNotesDismiss.isVisible()) await releaseNotesDismiss.click({ force: true });
+    const cookieConsentDismiss = page.getByRole("button", { name: "Decline" });
+    if (await cookieConsentDismiss.isVisible()) await cookieConsentDismiss.click({ force: true });
+    await uploadFixture(page, "basic-one-part.xml");
+    // The Firestore announcement snapshot can arrive after sign-in and after
+    // the file has been selected. Dismiss it again before the pointer drag so
+    // the test validates the splitter, not an overlay intercepting it.
+    await releaseNotesDismiss.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
+    if (await releaseNotesDismiss.isVisible()) await releaseNotesDismiss.click({ force: true });
+    await page.evaluate(() => {
+      const testWindow = window as Window & {
+        __e2ePagePreviewSvg?: SVGSVGElement;
+        __e2ePagePreviewSvgWidth?: number;
+        __e2ePagePreviewGlyph?: SVGElement;
+        __e2ePagePreviewGlyphWidth?: number;
+      };
+      testWindow.__e2ePagePreviewSvg =
+        (document.querySelector("[data-testid='score-preview-surface'] svg") as SVGSVGElement | null) ?? undefined;
+      testWindow.__e2ePagePreviewSvgWidth = testWindow.__e2ePagePreviewSvg?.getBoundingClientRect().width;
+      testWindow.__e2ePagePreviewGlyph = Array.from(
+        testWindow.__e2ePagePreviewSvg?.querySelectorAll<SVGElement>("path") ?? [],
+      ).find((path) => {
+        const bounds = path.getBoundingClientRect();
+        return bounds.width > 10 && bounds.height > 10;
+      });
+      testWindow.__e2ePagePreviewGlyphWidth =
+        testWindow.__e2ePagePreviewGlyph?.getBoundingClientRect().width;
+    });
+
+    const splitHandle = page.getByRole("separator", { name: "Resize panels" });
+    const bounds = await splitHandle.boundingBox();
+    if (!bounds) throw new Error("Split handle is not visible");
+    await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 80);
+    await page.mouse.down();
+    await page.mouse.move(bounds.x + 160, bounds.y + 80, { steps: 6 });
+    await page.mouse.up();
+
+    await expect.poll(() => page.evaluate(() => {
+      const testWindow = window as Window & {
+        __e2ePagePreviewSvg?: SVGSVGElement;
+        __e2ePagePreviewSvgWidth?: number;
+        __e2ePagePreviewGlyph?: SVGElement;
+        __e2ePagePreviewGlyphWidth?: number;
+      };
+      const svg = testWindow.__e2ePagePreviewSvg;
+      const originalWidth = testWindow.__e2ePagePreviewSvgWidth ?? 0;
+      const glyph = testWindow.__e2ePagePreviewGlyph;
+      const originalGlyphWidth = testWindow.__e2ePagePreviewGlyphWidth ?? 0;
+      return Boolean(
+        svg?.isConnected &&
+          glyph?.isConnected &&
+          Math.abs(svg.getBoundingClientRect().width - originalWidth) > 40 &&
+          Math.abs(glyph.getBoundingClientRect().width - originalGlyphWidth) > 1,
+      );
+    })).toBe(true);
+
+    await page.evaluate(() => {
+      const testWindow = window as Window & { __e2ePagePreviewSvgBeforeZoom?: SVGSVGElement };
+      testWindow.__e2ePagePreviewSvgBeforeZoom =
+        (document.querySelector("[data-testid='score-preview-surface'] svg") as SVGSVGElement | null) ?? undefined;
+    });
+    await page.getByRole("button", { name: "Zoom in" }).click();
+    await expect(page.locator(".zoom-value")).toHaveText("110%");
+    await expect.poll(() => page.evaluate(() => {
+      const testWindow = window as Window & { __e2ePagePreviewSvgBeforeZoom?: SVGSVGElement };
+      const currentSvg = document.querySelector("[data-testid='score-preview-surface'] svg");
+      return Boolean(
+        currentSvg &&
+          testWindow.__e2ePagePreviewSvgBeforeZoom &&
+          !testWindow.__e2ePagePreviewSvgBeforeZoom.isConnected,
+      );
+    })).toBe(true);
+  });
+
   test("selects verse 1 from the UI selector and synthesizes it", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "two-verses-one-part.xml");
     await requestScenario(page, "two-verses");
