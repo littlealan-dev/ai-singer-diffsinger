@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence, Tuple
 from xml.etree import ElementTree
 
-from music21 import bar, instrument, note, percussion, repeat, stream, tempo
+from music21 import bar, instrument, midi, note, percussion, repeat, stream, tempo
 
 from src.musicxml.io import read_musicxml_content
 from src.musicxml.parser import _expand_repeat_navigation
@@ -15,7 +15,7 @@ from src.musicxml.part_reference import load_musicxml_score, map_parser_part_ind
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 
 
-PERFORMANCE_MIDI_VERSION = 6
+PERFORMANCE_MIDI_VERSION = 7
 
 
 def build_instrumental_performance_midis(
@@ -177,6 +177,7 @@ def _write_instrumental_midi(
         sounding_score = instrumental_score
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sounding_score.write("midi", fp=str(output_path))
+    _replace_midi_tempo_map(output_path, _canonical_tempo_events(score))
 
 
 def _restore_unpitched_midi_pitches(
@@ -306,12 +307,128 @@ def _copy_score_tempos(source_score: stream.Score, target_score: stream.Score) -
     than an individual instrument part.  A new score containing only copied
     parts otherwise writes MIDI at music21's default 120 quarter-notes/minute.
     """
-    for mark in source_score.recurse().getElementsByClass(tempo.MetronomeMark):
+    for offset, bpm in _canonical_tempo_events(source_score):
+        target_score.insert(offset, tempo.MetronomeMark(number=bpm))
+
+
+def _canonical_tempo_events(score: stream.Score) -> List[Tuple[float, float]]:
+    """Return the score-wide tempo map in played beat offsets.
+
+    A MusicXML tempo direction can belong to a vocal part that is deliberately
+    excluded from instrumental export.  Keep the map score-wide rather than
+    taking timings from just the exported parts.  Identical directions at the
+    same offset (common in multi-part scores) are emitted only once.
+    """
+    events: List[Tuple[float, float]] = []
+    for mark in score.recurse().getElementsByClass(tempo.MetronomeMark):
+        bpm = mark.getQuarterBPM() if hasattr(mark, "getQuarterBPM") else mark.number
+        if bpm is None or float(bpm) <= 0:
+            continue
         try:
-            offset = float(mark.getOffsetInHierarchy(source_score))
+            offset = float(mark.getOffsetInHierarchy(score))
         except Exception:
             offset = float(mark.offset)
-        target_score.insert(offset, deepcopy(mark))
+        events.append((offset, float(bpm)))
+    if not events:
+        return [(0.0, 120.0)]
+    events.sort(key=lambda event: event[0])
+    deduped: List[Tuple[float, float]] = []
+    for event in events:
+        if (
+            deduped
+            and abs(event[0] - deduped[-1][0]) < 1e-9
+            and abs(event[1] - deduped[-1][1]) < 1e-9
+        ):
+            continue
+        deduped.append(event)
+    return deduped
+
+
+def _replace_midi_tempo_map(
+    output_path: Path,
+    tempo_events: Sequence[Tuple[float, float]],
+) -> None:
+    """Write the canonical score tempo map to the MIDI conductor track.
+
+    music21's score writer drops a zero-offset tempo placed on a reconstructed
+    top-level Score when the original owning part is omitted.  MIDI's standard
+    Set Tempo meta event belongs in the conductor track, so rewrite that track
+    after music21 has emitted the notes.  This keeps browser MIDI parsers and
+    the vocal/score time axis on the same tempo map.
+    """
+    midi_file = midi.MidiFile()
+    midi_file.open(str(output_path))
+    midi_file.read()
+    midi_file.close()
+    if not midi_file.tracks:
+        raise ValueError("MIDI export contains no tracks.")
+
+    for track in midi_file.tracks:
+        _remove_track_tempo_events(track)
+
+    conductor = midi_file.tracks[0]
+    absolute_events = _absolute_track_events(conductor)
+    for offset_beats, bpm in tempo_events:
+        tick = max(0, round(offset_beats * midi_file.ticksPerQuarterNote))
+        absolute_events.append((tick, _midi_set_tempo_event(conductor, bpm)))
+    _set_absolute_track_events(conductor, absolute_events)
+
+    midi_file.open(str(output_path), "wb")
+    try:
+        midi_file.write()
+    finally:
+        midi_file.close()
+
+
+def _remove_track_tempo_events(track: midi.MidiTrack) -> None:
+    retained = [
+        (absolute_tick, event)
+        for absolute_tick, event in _absolute_track_events(track)
+        if event.type != midi.MetaEvents.SET_TEMPO
+    ]
+    _set_absolute_track_events(track, retained)
+
+
+def _absolute_track_events(track: midi.MidiTrack) -> List[Tuple[int, midi.MidiEvent]]:
+    """Convert music21's delta-time event pairs to absolute ticks."""
+    result: List[Tuple[int, midi.MidiEvent]] = []
+    absolute_tick = 0
+    for delta, event in zip(track.events[::2], track.events[1::2]):
+        absolute_tick += int(delta.time)
+        result.append((absolute_tick, event))
+    return result
+
+
+def _set_absolute_track_events(
+    track: midi.MidiTrack,
+    absolute_events: Sequence[Tuple[int, midi.MidiEvent]],
+) -> None:
+    """Replace a track's events while preserving their absolute positions."""
+    previous_tick = 0
+    ordered_events = sorted(
+        absolute_events,
+        key=lambda item: (
+            item[0],
+            2 if item[1].type == midi.MetaEvents.END_OF_TRACK else 0,
+        ),
+    )
+    rebuilt: List[midi.DeltaTime | midi.MidiEvent] = []
+    for absolute_tick, event in ordered_events:
+        tick = max(previous_tick, int(absolute_tick))
+        event.track = track
+        rebuilt.append(midi.DeltaTime(track=track, time=tick - previous_tick))
+        rebuilt.append(event)
+        previous_tick = tick
+    track.events = rebuilt
+
+
+def _midi_set_tempo_event(track: midi.MidiTrack, bpm: float) -> midi.MidiEvent:
+    microseconds_per_quarter = round(60_000_000 / bpm)
+    if not 1 <= microseconds_per_quarter <= 0xFFFFFF:
+        raise ValueError(f"Tempo cannot be represented in MIDI: {bpm} BPM.")
+    event = midi.MidiEvent(track=track, type=midi.MetaEvents.SET_TEMPO)
+    event.data = microseconds_per_quarter.to_bytes(3, byteorder="big")
+    return event
 
 
 def _strip_navigation_for_written_order_midi(score: stream.Score) -> None:

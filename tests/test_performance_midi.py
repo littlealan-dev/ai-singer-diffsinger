@@ -29,6 +29,29 @@ PIANO_REPEAT_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </score-partwise>"""
 
 
+VOCAL_TEMPO_MAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano</part-name>
+      <score-instrument id="P1-I1"><instrument-name>Acoustic Grand Piano</instrument-name></score-instrument>
+      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+    </score-part>
+    <score-part id="P2"><part-name>Voice</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure>
+    <measure number="2"><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure>
+    <measure number="3"><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure>
+  </part>
+  <part id="P2">
+    <measure number="1"><attributes><divisions>1</divisions></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>77</per-minute></metronome></direction-type><sound tempo="77"/></direction><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>sing</text></lyric></note></measure>
+    <measure number="2"><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>112</per-minute></metronome></direction-type><sound tempo="112"/></direction><note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>with</text></lyric></note></measure>
+    <measure number="3"><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>165</per-minute></metronome></direction-type><sound tempo="165"/></direction><note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>music</text></lyric></note></measure>
+  </part>
+</score-partwise>"""
+
+
 PERCUSSION_ROUTE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list>
@@ -110,3 +133,32 @@ def test_preserves_per_note_musicxml_percussion_routes() -> None:
         and event.channel == 10
     ]
     assert note_pitches == [36, 38, 42]
+
+
+def test_preserves_vocal_owned_tempo_map_in_instrumental_midi() -> None:
+    """The instrumental export must not fall back to the MIDI 120 BPM default."""
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = root / "vocal-tempo.musicxml"
+        source.write_text(VOCAL_TEMPO_MAP_XML, encoding="utf-8")
+        written = root / "written.mid"
+        build_instrumental_performance_midis(
+            source,
+            original_output_path=written,
+            expanded_output_path=root / "expanded.mid",
+        )
+
+        midi_file = midi.MidiFile()
+        midi_file.open(str(written))
+        midi_file.read()
+        midi_file.close()
+
+    absolute_tick = 0
+    tempo_events = []
+    for delta, event in zip(midi_file.tracks[0].events[::2], midi_file.tracks[0].events[1::2]):
+        absolute_tick += delta.time
+        if event.type == midi.MetaEvents.SET_TEMPO:
+            tempo_events.append(
+                (absolute_tick, round(60_000_000 / int.from_bytes(event.data, byteorder="big")))
+            )
+    assert tempo_events == [(0, 77), (10080, 112), (20160, 165)]
