@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import WaveSurfer from "wavesurfer.js";
-import { SoundFontCache } from "@waveform-playlist/playout";
+import { createToneAdapter, SoundFontCache, type ToneAdapter } from "@waveform-playlist/playout";
 import {
   WaveformPlaylistProvider,
   usePlaybackAnimation,
@@ -12,6 +12,11 @@ import {
 } from "@waveform-playlist/browser";
 import { useAudioTracks } from "@waveform-playlist/browser/tone";
 import { useMidiTracks } from "@waveform-playlist/midi";
+import {
+  MediaRecorder as ExtendableMediaRecorder,
+  register as registerExtendableMediaRecorderEncoder,
+} from "extendable-media-recorder";
+import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
 import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
@@ -73,6 +78,23 @@ import {
 
 const SCORE_PREVIEW_RENDER_ERROR =
   "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
+const BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60;
+const BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav";
+
+const traceBrowserMixBounce = (stage: string, details: Record<string, unknown> = {}) => {
+  if (import.meta.env.DEV) {
+    console.info("[browser-mix-bounce]", stage, details);
+  }
+};
+
+let extendableWavRegistration: Promise<void> | null = null;
+
+const ensureExtendableWavRecorderRegistered = (): Promise<void> => {
+  extendableWavRegistration ??= (async () => {
+    await registerExtendableMediaRecorderEncoder(await connectExtendableWavEncoder());
+  })();
+  return extendableWavRegistration;
+};
 
 const STARTING_CONVERSATIONS = [
   "sing the vocal part, verse 1",
@@ -81,24 +103,6 @@ const STARTING_CONVERSATIONS = [
 ] as const;
 
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
-const MULTITRACK_TUTORIAL_DISMISSED_KEY = "sightsinger.multitrack-tutorial-dismissed";
-const MULTITRACK_TUTORIAL_STEPS = [
-  {
-    target: "player",
-    message: "Generated audio will be added to this multitrack player as separate synchronized tracks.",
-  },
-  {
-    target: "play",
-    message: "Use Play to hear all generated tracks together.",
-  },
-  {
-    target: "export",
-    message: "Use Export to bounce the mix. Export consumes credits at 1 credit per minute.",
-  },
-] as const;
-
-type MultitrackTutorialTarget = (typeof MULTITRACK_TUTORIAL_STEPS)[number]["target"];
-
 type Role = "user" | "assistant";
 
 type Message = {
@@ -574,6 +578,26 @@ type ScorePlayerPlaybackControls = {
   stop: () => void;
 };
 
+type BrowserMixBouncePhase = "idle" | "preparing" | "recording" | "finalizing";
+
+type BrowserMixRecorder = {
+  state: "inactive" | "recording" | "paused";
+  start: () => void;
+  stop: () => void;
+  addEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions) => void;
+  removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
+};
+
+type BrowserMixBounceOperation = {
+  phase: Exclude<BrowserMixBouncePhase, "idle">;
+  adapter: ToneAdapter;
+  destination: MediaStreamAudioDestinationNode;
+  recorder: BrowserMixRecorder;
+  recordingMimeType: string;
+  chunks: Blob[];
+  discarded: boolean;
+};
+
 type ScorePlayerEngineProps = {
   midiUrl: string | null;
   vocalTracks: MultiTrackAudioTrack[];
@@ -585,6 +609,8 @@ type ScorePlayerEngineProps = {
   onEngineReady: (requestId: number) => void;
   onPlaybackStateChange: (isPlaying: boolean) => void;
   onPlaybackPositionChange: (seconds: number) => void;
+  onTimelineDurationChange: (seconds: number) => void;
+  onAdapterChange: (adapter: ToneAdapter | null) => void;
   onError: (message: string | null) => void;
 };
 
@@ -594,14 +620,16 @@ const ScorePlayerEngineBridge = ({
   onReady,
   onPlaybackStateChange,
   onPlaybackPositionChange,
+  onTimelineDurationChange,
 }: Pick<ScorePlayerEngineProps, "onControlsChange"> & {
   loading: boolean;
   onReady: () => void;
   onPlaybackStateChange: (isPlaying: boolean) => void;
   onPlaybackPositionChange: (seconds: number) => void;
+  onTimelineDurationChange: (seconds: number) => void;
 }) => {
   const controls = usePlaylistControls();
-  const { isReady } = usePlaylistData();
+  const { duration, isReady } = usePlaylistData();
   const { isPlaying, registerFrameCallback, unregisterFrameCallback } = usePlaybackAnimation();
   const liveControlsRef = useRef(controls);
   liveControlsRef.current = controls;
@@ -623,6 +651,9 @@ const ScorePlayerEngineBridge = ({
   useEffect(() => {
     if (isReady && !loading) onReady();
   }, [isReady, loading, onReady]);
+  useEffect(() => {
+    onTimelineDurationChange(duration);
+  }, [duration, onTimelineDurationChange]);
   // This is the provider's native playback lifecycle state. In particular, it
   // switches to false when its engine reaches the end of the timeline, which
   // keeps the outer transport icon in sync after natural completion.
@@ -713,14 +744,16 @@ const ScorePlayerEngine = ({
   onEngineReady,
   onPlaybackStateChange,
   onPlaybackPositionChange,
+  onTimelineDurationChange,
+  onAdapterChange,
   onError,
 }: ScorePlayerEngineProps) => {
   // WaveformPlaylistProvider treats callback identity changes as an engine
   // reconfiguration. Keep its callbacks stable so parent state updates (such
   // as setting the Play button to its active state) cannot dispose the MIDI
   // adapter while a note sequence is playing.
-  const callbacksRef = useRef({ playbackRequestId, onEngineReady, onError });
-  callbacksRef.current = { playbackRequestId, onEngineReady, onError };
+  const callbacksRef = useRef({ playbackRequestId, onEngineReady, onError, onAdapterChange });
+  callbacksRef.current = { playbackRequestId, onEngineReady, onError, onAdapterChange };
   const handleProviderReady = useCallback(() => {
     const callbacks = callbacksRef.current;
     callbacks.onEngineReady(callbacks.playbackRequestId);
@@ -728,7 +761,23 @@ const ScorePlayerEngine = ({
   const handleProviderError = useCallback((error: Error) => {
     callbacksRef.current.onError(error.message);
   }, []);
+  const adapterRef = useRef<ToneAdapter | null>(null);
+  const soundFontCacheRef = useRef<SoundFontCache | null>(null);
+  const createScorePlayerAdapter = useCallback(() => {
+    // Match the provider's default factory.  In particular, a provider rebuild
+    // after another vocal is added must create MIDI tracks with the already
+    // loaded SoundFont, rather than silently falling back to PolySynth.
+    const adapter = createToneAdapter({ soundFontCache: soundFontCacheRef.current ?? undefined });
+    adapterRef.current = adapter;
+    callbacksRef.current.onAdapterChange(adapter);
+    return adapter;
+  }, []);
+  useEffect(() => () => {
+    adapterRef.current = null;
+    callbacksRef.current.onAdapterChange(null);
+  }, []);
   const [soundFontCache, setSoundFontCache] = useState<SoundFontCache | null>(null);
+  soundFontCacheRef.current = soundFontCache;
   const [soundFontLoadState, setSoundFontLoadState] = useState<
     "idle" | "loading" | "ready" | "fallback"
   >("idle");
@@ -850,13 +899,24 @@ const ScorePlayerEngine = ({
     onError(midiError ?? audioError);
   }, [audioError, midiError, onError]);
 
+  // `useAudioTracks` and `useMidiTracks` can append decoded sources after the
+  // provider's initial ready event. Keep the outer transport (and bounce
+  // action) disabled for the whole loader lifetime, not only when the source
+  // URL list itself changes. Otherwise a recorder can start just as the
+  // provider disposes/rebuilds its adapter for an incremental track add.
   useEffect(() => {
     onEngineLoading();
   }, [midiUrl, onEngineLoading, vocalSourceSignature]);
 
   useEffect(() => {
-    if (soundFontLoading) onEngineLoading();
-  }, [onEngineLoading, soundFontLoading]);
+    if (midiLoading || audioLoading || soundFontLoading) onEngineLoading();
+  }, [audioLoading, midiLoading, onEngineLoading, soundFontLoading]);
+
+  useEffect(() => {
+    if (tracks.length !== 0 || !adapterRef.current) return;
+    adapterRef.current = null;
+    callbacksRef.current.onAdapterChange(null);
+  }, [tracks.length]);
 
   // The documented integration mounts after the first complete set of sources.
   // Later vocal sources remain attached to the existing provider: its supported
@@ -875,6 +935,7 @@ const ScorePlayerEngine = ({
     <WaveformPlaylistProvider
       tracks={tracks}
       soundFontCache={soundFontCache ?? undefined}
+      createAdapter={createScorePlayerAdapter}
       onError={handleProviderError}
     >
       <ScorePlayerEngineBridge
@@ -883,6 +944,7 @@ const ScorePlayerEngine = ({
         onReady={handleProviderReady}
         onPlaybackStateChange={onPlaybackStateChange}
         onPlaybackPositionChange={onPlaybackPositionChange}
+        onTimelineDurationChange={onTimelineDurationChange}
       />
       <ScorePlayerMixerBridge
         midiTrackCount={midiTracks.length}
@@ -915,6 +977,26 @@ const multiTrackAnalyticsParams = (tracks: MultiTrackAudioTrack[]) => {
     solo_track_count: soloTrackCount,
     muted_track_count: mutedTrackCount,
   };
+};
+
+const hasAudibleScorePlayerMix = (
+  vocalTracks: MultiTrackAudioTrack[],
+  instrumentalTracks: InstrumentalTrackState[],
+  instrumentalBus: InstrumentalBusState
+) => {
+  const hasIndividualInstrumentSolo = instrumentalTracks.some((track) => track.solo);
+  const tracks = [
+    ...instrumentalTracks.map((track) => ({
+      muted: instrumentalBus.muted || track.muted,
+      solo: hasIndividualInstrumentSolo ? track.solo : instrumentalBus.solo,
+    })),
+    ...vocalTracks.map((track) => ({ muted: track.muted, solo: track.solo })),
+  ];
+  if (!tracks.length) return false;
+  const hasSolo = tracks.some((track) => track.solo);
+  return hasSolo
+    ? tracks.some((track) => track.solo && !track.muted)
+    : tracks.some((track) => !track.muted);
 };
 
 const synthesisAudioAnalyticsParams = (message: Message) => ({
@@ -1117,6 +1199,7 @@ type ScoreTrackControlsPanelProps = {
   instrumentalTracks: InstrumentalTrackState[];
   instrumentalBus: InstrumentalBusState;
   instrumentalTracksExpanded: boolean;
+  disabled?: boolean;
   onUpdateVocalMute: (key: string, muted: boolean) => void;
   onUpdateVocalSolo: (key: string, solo: boolean) => void;
   onUpdateVocalVolume: (key: string, volume: number) => void;
@@ -1137,6 +1220,7 @@ const ScoreTrackControlsPanel = ({
   instrumentalTracks,
   instrumentalBus,
   instrumentalTracksExpanded,
+  disabled = false,
   onUpdateVocalMute,
   onUpdateVocalSolo,
   onUpdateVocalVolume,
@@ -1177,7 +1261,7 @@ const ScoreTrackControlsPanel = ({
         </div>
       </div>
 
-      <div className="score-tracks-list">
+      <fieldset className="score-tracks-list score-tracks-list-fieldset" disabled={disabled}>
         {/* Audio / Vocal Tracks - TOP FIRST */}
         {vocalTracks.map((track) => (
           <div
@@ -1422,7 +1506,7 @@ const ScoreTrackControlsPanel = ({
         ))}
           </div>
         )}
-      </div>
+      </fieldset>
     </div>
   );
 };
@@ -2049,6 +2133,13 @@ export default function MainApp() {
   const [multiTrackPlaying, setMultiTrackPlaying] = useState(false);
   const [multiTrackExportProgress, setMultiTrackExportProgress] = useState<number | null>(null);
   const [multiTrackExportError, setMultiTrackExportError] = useState<string | null>(null);
+  const [browserMixBouncePhase, setBrowserMixBouncePhase] = useState<BrowserMixBouncePhase>("idle");
+  const [browserMixBouncePreparation, setBrowserMixBouncePreparation] = useState<string | null>(null);
+  const [browserMixBounceNotice, setBrowserMixBounceNotice] = useState<string | null>(null);
+  const [browserMixBounceError, setBrowserMixBounceError] = useState<string | null>(null);
+  const [scorePlayerTimelineDuration, setScorePlayerTimelineDuration] = useState(0);
+  const [scorePlayerAdapterReady, setScorePlayerAdapterReady] = useState(false);
+  const [scorePlayerAssetsReady, setScorePlayerAssetsReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2077,12 +2168,6 @@ export default function MainApp() {
       typeof window === "undefined" ||
       window.localStorage.getItem(SOLFEGE_GUIDE_DISMISSED_KEY) !== "true"
   );
-  const [showMultitrackTutorial, setShowMultitrackTutorial] = useState(
-    () =>
-      typeof window === "undefined" ||
-      window.localStorage.getItem(MULTITRACK_TUTORIAL_DISMISSED_KEY) !== "true"
-  );
-  const [multitrackTutorialStepIndex, setMultitrackTutorialStepIndex] = useState(0);
   const [solfegeSystem, setSolfegeSystem] = useState<SolfegeSystem>("movable_do");
   const [solfegeMode, setSolfegeMode] = useState<SolfegeMode>("major");
   const [draftSolfegeSystem, setDraftSolfegeSystem] = useState<SolfegeSystem>("movable_do");
@@ -2113,6 +2198,17 @@ export default function MainApp() {
   const scorePlayerPlaybackRequestRef = useRef(0);
   const scorePlayerPlayPendingRef = useRef(false);
   const scorePlayerAssetsReadyRef = useRef(false);
+  const scorePlayerAdapterRef = useRef<ToneAdapter | null>(null);
+  const scorePlayerAudioContextResumeRef = useRef<{
+    adapter: ToneAdapter;
+    promise: Promise<void>;
+  } | null>(null);
+  const browserMixBounceRef = useRef<BrowserMixBounceOperation | null>(null);
+  const browserMixBounceAttemptRef = useRef(0);
+  const browserMixBouncePhaseRef = useRef<BrowserMixBouncePhase>(browserMixBouncePhase);
+  browserMixBouncePhaseRef.current = browserMixBouncePhase;
+  const browserMixBounceFinalizeRef = useRef<(discard: boolean) => void>(() => {});
+  const browserMixBounceCancelRef = useRef<(reason?: string) => void>(() => {});
   const scoreCanvasRef = useRef<HTMLDivElement | null>(null);
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
@@ -2138,6 +2234,8 @@ export default function MainApp() {
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
+
+  const browserMixBounceActive = browserMixBouncePhase !== "idle";
 
   const horizontalScoreMeasuresPerBatch = useMemo(() => {
     const fallbackPartCount = scoreSummary?.parts?.length ?? 1;
@@ -2168,10 +2266,80 @@ export default function MainApp() {
 
   const handleScorePlayerEngineLoading = useCallback(() => {
     scorePlayerAssetsReadyRef.current = false;
+    setScorePlayerAssetsReady(false);
   }, []);
 
   const handleScorePlayerPlaybackStateChange = useCallback((isPlaying: boolean) => {
+    if (browserMixBounceRef.current) {
+      traceBrowserMixBounce("playlist-playback-state", {
+        isPlaying,
+        bouncePhase: browserMixBounceRef.current.phase,
+      });
+    }
     setMultiTrackPlaying((current) => (current === isPlaying ? current : isPlaying));
+    if (!isPlaying && browserMixBounceRef.current?.phase === "recording") {
+      browserMixBounceFinalizeRef.current(false);
+    }
+  }, []);
+
+  const handleScorePlayerTimelineDurationChange = useCallback((seconds: number) => {
+    const normalized = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+    setScorePlayerTimelineDuration((current) =>
+      Math.abs(current - normalized) < 0.001 ? current : normalized
+    );
+  }, []);
+
+  const handleScorePlayerAdapterChange = useCallback((adapter: ToneAdapter | null) => {
+    if (!adapter && browserMixBounceRef.current) {
+      browserMixBounceCancelRef.current("adapter-disposed");
+    }
+    scorePlayerAdapterRef.current = adapter;
+    if (scorePlayerAudioContextResumeRef.current?.adapter !== adapter) {
+      scorePlayerAudioContextResumeRef.current = null;
+    }
+    setScorePlayerAdapterReady(Boolean(adapter?.masterOutputNode));
+  }, []);
+
+  const primeScorePlayerAudioContext = useCallback((): Promise<void> | null => {
+    const adapter = scorePlayerAdapterRef.current;
+    if (!adapter) {
+      traceBrowserMixBounce("audio-resume-unavailable");
+      return null;
+    }
+    if (adapter.audioContext.state === "running") {
+      traceBrowserMixBounce("audio-already-running");
+      return Promise.resolve();
+    }
+    const current = scorePlayerAudioContextResumeRef.current;
+    if (current?.adapter === adapter) {
+      traceBrowserMixBounce("audio-resume-reused", { state: adapter.audioContext.state });
+      return current.promise;
+    }
+
+    // This must be invoked directly from pointer/key activation. Waiting until
+    // React's click handler has started asynchronous work can make Chrome
+    // treat the same user action as no longer eligible to resume Web Audio.
+    traceBrowserMixBounce("audio-resume-requested", { state: adapter.audioContext.state });
+    const promise = adapter.audioContext.resume();
+    scorePlayerAudioContextResumeRef.current = { adapter, promise };
+    void promise.then(
+      () => {
+        traceBrowserMixBounce("audio-resume-complete", { state: adapter.audioContext.state });
+        if (scorePlayerAudioContextResumeRef.current?.promise === promise) {
+          scorePlayerAudioContextResumeRef.current = null;
+        }
+      },
+      (error) => {
+        traceBrowserMixBounce("audio-resume-failed", {
+          state: adapter.audioContext.state,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (scorePlayerAudioContextResumeRef.current?.promise === promise) {
+          scorePlayerAudioContextResumeRef.current = null;
+        }
+      }
+    );
+    return promise;
   }, []);
 
   const positionActiveScoreMeasure = useCallback((activeMeasure: PerformanceMeasureMapEntry) => {
@@ -2345,15 +2513,6 @@ export default function MainApp() {
   const exportMixRequiredCredits = estimateExportMixCredits(
     multiTrackAudioTracks[0]?.durationSeconds
   );
-  const currentMultitrackTutorialStep =
-    MULTITRACK_TUTORIAL_STEPS[
-      Math.min(multitrackTutorialStepIndex, MULTITRACK_TUTORIAL_STEPS.length - 1)
-    ];
-  const multitrackTutorialVisible =
-    showMultitrackTutorial && Boolean(currentMultitrackTutorialStep);
-  const isMultitrackTutorialTarget = (target: MultitrackTutorialTarget) =>
-    multitrackTutorialVisible && currentMultitrackTutorialStep.target === target;
-
   useEffect(() => {
     if (!performanceMidi?.instrumental_parts) {
       setInstrumentalTracks([]);
@@ -2474,23 +2633,6 @@ export default function MainApp() {
     };
   }, [expandRepeats, performanceMidi?.has_instrumental_parts, sessionId]);
 
-  const dismissMultitrackTutorial = useCallback(() => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(MULTITRACK_TUTORIAL_DISMISSED_KEY, "true");
-    }
-    setShowMultitrackTutorial(false);
-  }, []);
-
-  const advanceMultitrackTutorial = useCallback(() => {
-    if (multitrackTutorialStepIndex >= MULTITRACK_TUTORIAL_STEPS.length - 1) {
-      dismissMultitrackTutorial();
-      return;
-    }
-    setMultitrackTutorialStepIndex((current) =>
-      Math.min(current + 1, MULTITRACK_TUTORIAL_STEPS.length - 1)
-    );
-  }, [dismissMultitrackTutorial, multitrackTutorialStepIndex]);
-
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
 
@@ -2577,6 +2719,7 @@ export default function MainApp() {
 
   const handleScorePlayerEngineReady = useCallback((requestId: number) => {
     scorePlayerAssetsReadyRef.current = true;
+    setScorePlayerAssetsReady(true);
     if (
       !scorePlayerPlayPendingRef.current ||
       requestId !== scorePlayerPlaybackRequestRef.current
@@ -2660,6 +2803,264 @@ export default function MainApp() {
     });
     setMultiTrackPlaying(false);
   }, [scorePlayerControls]);
+
+  const finishBrowserMixBounce = useCallback((discard: boolean) => {
+    const operation = browserMixBounceRef.current;
+    if (!operation || operation.phase === "finalizing") return;
+    operation.phase = "finalizing";
+    operation.discarded ||= discard;
+    traceBrowserMixBounce("finalizing", { discard: operation.discarded, chunkCount: operation.chunks.length });
+    setBrowserMixBouncePhase("finalizing");
+
+    const complete = () => {
+      void (async () => {
+        if (browserMixBounceRef.current !== operation) return;
+        try {
+          try {
+            operation.adapter.masterOutputNode?.disconnect(operation.destination);
+          } catch {
+            // The provider may already have disposed the adapter while cancelling.
+          }
+          operation.destination.disconnect();
+
+        if (operation.discarded) {
+          setBrowserMixBounceNotice(null);
+          return;
+        }
+        const recording = new Blob(operation.chunks, { type: operation.recordingMimeType });
+        traceBrowserMixBounce("recording-complete", { bytes: recording.size, type: operation.recordingMimeType });
+        if (!recording.size) {
+          setBrowserMixBounceError("The browser did not produce any mixed audio.");
+          return;
+        }
+        if (operation.discarded || browserMixBounceRef.current !== operation) return;
+        traceBrowserMixBounce("recording-ready-as-wav");
+        const objectUrl = URL.createObjectURL(recording);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = "sightsinger-mix.wav";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.requestAnimationFrame(() => URL.revokeObjectURL(objectUrl));
+        setBrowserMixBounceNotice("Mix downloaded.");
+        logAnalyticsEvent("browser_mix_bounce_completed", {
+          duration_seconds: Math.round(scorePlayerTimelineDuration),
+          file_bytes: recording.size,
+          track_count: instrumentalTracks.length + multiTrackAudioTracks.length,
+        });
+        } catch (error) {
+          traceBrowserMixBounce("finalization-failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (!operation.discarded) {
+            setBrowserMixBounceError(
+              error instanceof Error ? error.message : "The browser could not finalize the recorded WAV mix."
+            );
+          }
+        } finally {
+          if (browserMixBounceRef.current === operation) {
+            browserMixBounceRef.current = null;
+            setBrowserMixBouncePhase("idle");
+            setBrowserMixBouncePreparation(null);
+          }
+        }
+      })();
+    };
+
+    operation.recorder.addEventListener("stop", complete, { once: true });
+    if (operation.recorder.state !== "inactive") {
+      operation.recorder.stop();
+    } else {
+      complete();
+    }
+  }, [instrumentalTracks.length, multiTrackAudioTracks.length, scorePlayerTimelineDuration]);
+
+  browserMixBounceFinalizeRef.current = finishBrowserMixBounce;
+
+  const cancelBrowserMixBounce = useCallback((reason = "user") => {
+    const operation = browserMixBounceRef.current;
+    browserMixBounceAttemptRef.current += 1;
+    traceBrowserMixBounce("cancelled", { reason, hadOperation: Boolean(operation) });
+    if (!operation) {
+      const wasActive = browserMixBouncePhaseRef.current !== "idle";
+      setBrowserMixBouncePhase("idle");
+      setBrowserMixBouncePreparation(null);
+      setBrowserMixBounceNotice(null);
+      if (wasActive) logAnalyticsEvent("browser_mix_bounce_cancelled");
+      return;
+    }
+    operation.discarded = true;
+    scorePlayerPlayPendingRef.current = false;
+    scorePlayerControlsRef.current?.stop();
+    setMultiTrackPlaying(false);
+    finishBrowserMixBounce(true);
+    logAnalyticsEvent("browser_mix_bounce_cancelled");
+  }, [finishBrowserMixBounce]);
+
+  browserMixBounceCancelRef.current = cancelBrowserMixBounce;
+
+  useEffect(() => () => {
+    browserMixBounceCancelRef.current("player-unmount");
+  }, []);
+
+  const handleBrowserMixBounce = useCallback(async () => {
+    if (browserMixBounceRef.current) return;
+    const attempt = browserMixBounceAttemptRef.current + 1;
+    browserMixBounceAttemptRef.current = attempt;
+    const adapter = scorePlayerAdapterRef.current;
+    const controls = scorePlayerControlsRef.current;
+    const timelineDuration = scorePlayerTimelineDuration || estimatedDuration || 0;
+    traceBrowserMixBounce("requested", {
+      hasAdapter: Boolean(adapter),
+      hasControls: Boolean(controls),
+      assetsReady: scorePlayerAssetsReadyRef.current,
+      timelineDuration,
+      audioContextState: adapter?.audioContext.state ?? null,
+    });
+    if (!controls || !adapter?.masterOutputNode || !scorePlayerAssetsReadyRef.current) {
+      setBrowserMixBounceError("The score player is still loading. Please try again in a moment.");
+      return;
+    }
+    if (!timelineDuration || timelineDuration > BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS) {
+      setBrowserMixBounceError("Real-time mix download is available for scores up to 5 minutes.");
+      return;
+    }
+    if (!hasAudibleScorePlayerMix(multiTrackAudioTracks, instrumentalTracks, instrumentalBus)) {
+      setBrowserMixBounceError("No audible tracks are selected.");
+      return;
+    }
+    if (
+      typeof window.MediaStreamAudioDestinationNode === "undefined" ||
+      typeof adapter.audioContext.createMediaStreamDestination !== "function"
+    ) {
+      setBrowserMixBounceError("Real-time WAV download is not supported by this browser.");
+      return;
+    }
+
+    setBrowserMixBounceError(null);
+    setBrowserMixBounceNotice(null);
+    setBrowserMixBouncePhase("preparing");
+    setBrowserMixBouncePreparation("Preparing WAV recorder…");
+    try {
+      const resumeAudioContext = primeScorePlayerAudioContext();
+      if (!resumeAudioContext) {
+        throw new Error("The score player's audio engine is no longer available.");
+      }
+      traceBrowserMixBounce("awaiting-audio-resume");
+      await resumeAudioContext;
+      traceBrowserMixBounce("audio-resume-ready", { state: adapter.audioContext.state });
+      if (adapter.audioContext.state !== "running") {
+        throw new Error("Your browser did not allow audio playback to start for the real-time mix.");
+      }
+      traceBrowserMixBounce("awaiting-extendable-wav-recorder");
+      await ensureExtendableWavRecorderRegistered();
+      traceBrowserMixBounce("extendable-wav-recorder-ready");
+      if (browserMixBounceAttemptRef.current !== attempt) return;
+      if (scorePlayerAdapterRef.current !== adapter) {
+        throw new Error("The score player changed while preparing the mix.");
+      }
+      const destination = adapter.audioContext.createMediaStreamDestination();
+      traceBrowserMixBounce("creating-extendable-wav-recorder", {
+        recordingMimeType: BROWSER_MIX_RECORDING_MIME_TYPE,
+      });
+      const recorder = new ExtendableMediaRecorder(destination.stream, {
+        mimeType: BROWSER_MIX_RECORDING_MIME_TYPE,
+      });
+      const operation: BrowserMixBounceOperation = {
+        phase: "preparing",
+        adapter,
+        destination,
+        recorder,
+        recordingMimeType: BROWSER_MIX_RECORDING_MIME_TYPE,
+        chunks: [],
+        discarded: false,
+      };
+      browserMixBounceRef.current = operation;
+      const onData = (event: Event) => {
+        const data = (event as BlobEvent).data;
+        if (data.size) operation.chunks.push(data);
+      };
+      const onError = (event: Event) => {
+        const recorderError = (event as Event & { error?: DOMException }).error;
+        traceBrowserMixBounce("recorder-error", {
+          error: recorderError?.message ?? "unknown recorder error",
+        });
+        setBrowserMixBounceError("The browser could not record the mixed audio.");
+        operation.discarded = true;
+        finishBrowserMixBounce(true);
+      };
+      recorder.addEventListener("dataavailable", onData);
+      recorder.addEventListener("error", onError, { once: true });
+      adapter.masterOutputNode.connect(destination);
+      traceBrowserMixBounce("recorder-connected", { audioContextState: adapter.audioContext.state });
+
+      scorePlayerPlayPendingRef.current = false;
+      controls.stop();
+      setMultiTrackPlaying(false);
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onStart = () => {
+          if (settled) return;
+          settled = true;
+          traceBrowserMixBounce("recorder-started", { state: recorder.state });
+          resolve();
+        };
+        const onStartError = (event: Event) => {
+          if (settled) return;
+          settled = true;
+          const recorderError = (event as Event & { error?: DOMException }).error;
+          reject(new Error(recorderError?.message ?? "The recorder could not start."));
+        };
+        recorder.addEventListener("start", onStart, { once: true });
+        recorder.addEventListener("error", onStartError, { once: true });
+        traceBrowserMixBounce("recorder-start-requested");
+        recorder.start();
+        traceBrowserMixBounce("recorder-start-returned", {
+          state: recorder.state,
+          audioTrackCount: destination.stream.getAudioTracks().length,
+          audioTrackStates: destination.stream.getAudioTracks().map((track) => track.readyState),
+        });
+        // The MediaRecorder state changes synchronously when recording begins.
+        // Some Chrome environments do not dispatch the redundant `start`
+        // event for an AudioContext-derived MediaStream, so do not allow that
+        // missing notification to stall the shared player.
+        if (recorder.state === "recording") onStart();
+      });
+      if (browserMixBounceRef.current !== operation || operation.discarded) return;
+      traceBrowserMixBounce("player-play-requested");
+      await controls.play(0);
+      // usePlaylistControls intentionally catches its underlying play errors,
+      // so its promise alone is not proof that Tone's transport started. The
+      // adapter is the authoritative state of the shared playback engine.
+      if (!adapter.isPlaying()) {
+        traceBrowserMixBounce("player-play-rejected", { audioContextState: adapter.audioContext.state });
+        throw new Error("The score player could not start playback for the real-time mix.");
+      }
+      traceBrowserMixBounce("player-playing", { audioContextState: adapter.audioContext.state });
+      operation.phase = "recording";
+      setBrowserMixBouncePhase("recording");
+      logAnalyticsEvent("browser_mix_bounce_started", {
+        duration_seconds: Math.round(timelineDuration),
+        track_count: instrumentalTracks.length + multiTrackAudioTracks.length,
+      });
+      setMultiTrackPlaying(true);
+    } catch (err) {
+      if (browserMixBounceAttemptRef.current !== attempt) return;
+      const operation = browserMixBounceRef.current;
+      if (operation) {
+        operation.discarded = true;
+        finishBrowserMixBounce(true);
+      } else {
+        setBrowserMixBouncePhase("idle");
+      }
+      setBrowserMixBouncePreparation(null);
+      const message = err instanceof Error ? err.message : "Unable to start the real-time mix download.";
+      traceBrowserMixBounce("failed", { message, audioContextState: adapter?.audioContext.state ?? null });
+      setBrowserMixBounceError(message);
+      logAnalyticsEvent("browser_mix_bounce_failed", { stage: "preparing" });
+    }
+  }, [estimatedDuration, finishBrowserMixBounce, instrumentalBus, instrumentalTracks, multiTrackAudioTracks, primeScorePlayerAudioContext, scorePlayerTimelineDuration]);
 
   const handleMultiTrackWaveSurferMount = useCallback((trackKey: string, instance: WaveSurfer) => {
     multiTrackWaveSurferRefs.current[trackKey] = instance;
@@ -3857,6 +4258,10 @@ export default function MainApp() {
   };
 
   const handleUpload = async (file: File) => {
+    if (browserMixBounceActive) {
+      setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
+      return;
+    }
     if (creditsLocked) {
       openPaywall("upload_blocked");
       return;
@@ -3921,6 +4326,10 @@ export default function MainApp() {
     voicebankId: string | null = selectedVoicebankId
   ) => {
     if (!content.trim()) return;
+    if (browserMixBounceActive) {
+      setBrowserMixBounceError("Cancel the real-time mix download before starting another synthesis.");
+      return;
+    }
     if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall(selection ? "selection_blocked" : "chat_blocked");
@@ -4097,7 +4506,7 @@ export default function MainApp() {
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (creditsLocked) return;
+    if (creditsLocked || browserMixBounceActive) return;
     if (!isDragging) setIsDragging(true);
   };
 
@@ -4108,6 +4517,10 @@ export default function MainApp() {
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (browserMixBounceActive) {
+      setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
+      return;
+    }
     if (creditsLocked) {
       openPaywall("drag_blocked");
       return;
@@ -4168,11 +4581,7 @@ export default function MainApp() {
   };
 
   return (
-    <div
-      className={clsx("app-shell", {
-        "multitrack-tutorial-active": multitrackTutorialVisible,
-      })}
-    >
+    <div className="app-shell">
       <header className="app-header">
         <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
           <span className="brand-banner-crop" aria-label="SightSinger">
@@ -4476,7 +4885,7 @@ export default function MainApp() {
                         className="selection-send"
                         data-testid="use-selection"
                         onClick={handleSelectionSend}
-                        disabled={!selectedPartKey || !selectedVerse || chatTurnInProgress}
+                  disabled={!selectedPartKey || !selectedVerse || chatTurnInProgress || browserMixBounceActive}
                       >
                         Use selection
                       </button>
@@ -4568,7 +4977,7 @@ export default function MainApp() {
                   key={suggestion}
                   type="button"
                   className="starting-conversation-button"
-                  disabled={creditsLocked}
+                  disabled={creditsLocked || browserMixBounceActive}
                   onClick={() => {
                     setInput(suggestion);
                     composerInputRef.current?.focus();
@@ -4593,14 +5002,14 @@ export default function MainApp() {
                     handleSend();
                   }
                 }}
-                disabled={creditsLocked}
+                disabled={creditsLocked || browserMixBounceActive}
                 rows={2}
               />
               <button
                 onClick={handleSend}
                 className="send-button"
-                disabled={!input.trim() || creditsLocked || chatTurnInProgress}
-                aria-disabled={creditsLocked || chatTurnInProgress}
+                disabled={!input.trim() || creditsLocked || chatTurnInProgress || browserMixBounceActive}
+                aria-disabled={creditsLocked || chatTurnInProgress || browserMixBounceActive}
                 aria-label="Send message"
                 data-testid="send-message"
               >
@@ -4625,7 +5034,7 @@ export default function MainApp() {
                   type="file"
                   data-testid="score-upload-input"
                   accept=".xml,.mxl"
-                  disabled={uploading || creditsLocked}
+                  disabled={uploading || creditsLocked || browserMixBounceActive}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     if (file) handleUpload(file);
@@ -4859,6 +5268,8 @@ export default function MainApp() {
             onEngineReady={handleScorePlayerEngineReady}
             onPlaybackStateChange={handleScorePlayerPlaybackStateChange}
             onPlaybackPositionChange={handleScorePlayerPlaybackPositionChange}
+            onTimelineDurationChange={handleScorePlayerTimelineDurationChange}
+            onAdapterChange={handleScorePlayerAdapterChange}
             onError={handleScorePlayerEngineError}
           />
 
@@ -4890,7 +5301,7 @@ export default function MainApp() {
                   type="checkbox"
                   role="switch"
                   checked={expandRepeats}
-                  disabled={!score}
+                  disabled={!score || browserMixBounceActive}
                   onChange={(event) => setExpandRepeats(event.target.checked)}
                 />
               </div>
@@ -4918,13 +5329,44 @@ export default function MainApp() {
               <div className="score-player-transport" aria-label="Score player transport">
                 <button
                   type="button"
+                  className={clsx("score-action-button", {
+                    "browser-mix-bounce-active": browserMixBounceActive,
+                  })}
+                  onPointerDown={() => {
+                    if (!browserMixBounceActive) primeScorePlayerAudioContext();
+                  }}
+                  onKeyDown={(event) => {
+                    if (!browserMixBounceActive && (event.key === "Enter" || event.key === " ")) {
+                      primeScorePlayerAudioContext();
+                    }
+                  }}
+                  onClick={browserMixBounceActive ? cancelBrowserMixBounce : () => void handleBrowserMixBounce()}
+                  disabled={
+                    !browserMixBounceActive &&
+                    (!hasScorePlayerTracks ||
+                      !scorePlayerControls ||
+                      !scorePlayerAdapterReady ||
+                      !scorePlayerAssetsReady)
+                  }
+                  aria-label={browserMixBounceActive ? "Cancel real-time mix download" : "Download mix in real time"}
+                  title={
+                    browserMixBounceActive
+                      ? "Cancel real-time mix download"
+                      : "Download mix (real-time)"
+                  }
+                >
+                  {browserMixBounceActive ? <X size={16} /> : <Download size={16} />}
+                </button>
+                <button
+                  type="button"
                   className="score-action-button"
                   onClick={handleMultiTrackExport}
                   disabled={
                     !multiTrackAudioTracks.length ||
                     creditsLocked ||
                     exportMixRequiredCredits === null ||
-                    multiTrackExportProgress !== null
+                    multiTrackExportProgress !== null ||
+                    browserMixBounceActive
                   }
                   aria-label="Export vocal mix"
                   title={
@@ -4939,7 +5381,7 @@ export default function MainApp() {
                   type="button"
                   className="score-action-button"
                   onClick={multiTrackPlaying ? handleMultiTrackPause : handleMultiTrackPlay}
-                  disabled={!hasScorePlayerTracks || !scorePlayerControls}
+                  disabled={!hasScorePlayerTracks || !scorePlayerControls || browserMixBounceActive}
                   aria-label={multiTrackPlaying ? "Pause score player" : "Play score player"}
                   title={multiTrackPlaying ? "Pause" : "Play"}
                 >
@@ -4949,7 +5391,7 @@ export default function MainApp() {
                   type="button"
                   className="score-action-button"
                   onClick={handleMultiTrackStop}
-                  disabled={!hasScorePlayerTracks || !scorePlayerControls}
+                  disabled={!hasScorePlayerTracks || !scorePlayerControls || browserMixBounceActive}
                   aria-label="Stop score player"
                   title="Stop"
                 >
@@ -5014,6 +5456,23 @@ export default function MainApp() {
               {multiTrackExportError}
             </div>
           )}
+          {(browserMixBounceActive || browserMixBounceNotice || browserMixBounceError) && (
+            <div
+              className={clsx("score-player-bounce-status", {
+                error: Boolean(browserMixBounceError),
+              })}
+              role={browserMixBounceError ? "alert" : "status"}
+            >
+              {browserMixBounceError ??
+                (browserMixBouncePhase === "preparing"
+                  ? browserMixBouncePreparation ?? "Preparing real-time mix…"
+                  : browserMixBouncePhase === "finalizing"
+                    ? "Finalizing mix…"
+                    : browserMixBounceActive
+                      ? "Bouncing mix… keep this tab open."
+                      : browserMixBounceNotice)}
+            </div>
+          )}
           <div className="score-body">
             {hasScorePlayerTracks && (
               <aside
@@ -5036,6 +5495,7 @@ export default function MainApp() {
                     instrumentalTracks={instrumentalTracks}
                     instrumentalBus={instrumentalBus}
                     instrumentalTracksExpanded={instrumentalTracksExpanded}
+                    disabled={browserMixBounceActive}
                     onUpdateVocalMute={updateMultiTrackMute}
                     onUpdateVocalSolo={updateMultiTrackSolo}
                     onUpdateVocalVolume={updateMultiTrackVolume}
