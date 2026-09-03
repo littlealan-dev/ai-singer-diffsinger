@@ -673,6 +673,18 @@ def test_webmcp_synthesis_translates_public_solfege_flag(client):
 
     async def fake_execute_tool_calls(_session_id, _score, tool_calls, **_kwargs):
         captured.update(tool_calls[0].arguments)
+        await app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "performance_midi": {
+                    "version": 7,
+                    "has_instrumental_parts": True,
+                    "instrumental_parts": [{"part_id": "P4", "label": "Piano"}],
+                    "original_midi_available": True,
+                    "expanded_midi_available": True,
+                }
+            },
+        )
         return ToolExecutionResult(
             score=_score,
             audio_response={
@@ -688,7 +700,6 @@ def test_webmcp_synthesis_translates_public_solfege_flag(client):
         json={
             "part_id": "P1",
             "lyric_selection": {"id": "solfege", "number": "2", "name": "Solfege"},
-            "voicebank": "test-voicebank",
             "language": "en",
             "sing_in_solfege": True,
         },
@@ -698,7 +709,11 @@ def test_webmcp_synthesis_translates_public_solfege_flag(client):
     assert response.json()["ok"] is True
     assert captured["require_solfege_lyrics"] is True
     assert captured["solfege_pronunciation_patch"] is True
+    assert captured["voicebank"] == "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
     assert "sing_in_solfege" not in captured
+    assert response.json()["score_summary"]["performance_midi"]["instrumental_parts"] == [
+        {"part_id": "P4", "label": "Piano"}
+    ]
 
     unsupported = test_client.post(
         f"/sessions/{session_id}/webmcp/synthesize",
@@ -706,6 +721,8 @@ def test_webmcp_synthesis_translates_public_solfege_flag(client):
             "part_id": "P1",
             "lyric_selection": {"id": "lyrics", "number": "1", "name": "Lyrics"},
             "voicebank": "test-voicebank",
+            "voice_id": "1",
+            "voice_part_id": "soprano",
             "require_solfege_lyrics": True,
         },
     )
@@ -728,7 +745,6 @@ def test_webmcp_synthesis_refuses_to_supersede_an_active_synthesis_job(client):
         json={
             "part_id": "P1",
             "lyric_selection": {"id": "lyrics", "number": "1", "name": "Lyrics"},
-            "voicebank": "test-voicebank",
             "language": "en",
             "sing_in_solfege": False,
         },
@@ -743,6 +759,16 @@ def test_webmcp_synthesis_refuses_to_supersede_an_active_synthesis_job(client):
         "active_job_id": "already-running-job",
         "progress_url": f"/sessions/{session_id}/progress?job_id=already-running-job",
     }
+
+
+def test_challenge_voicebank_list_returns_only_liee(client):
+    test_client, _ = client
+    response = test_client.get("/api/voicebanks")
+
+    assert response.status_code == 200
+    assert [entry["id"] for entry in response.json()["voicebanks"]] == [
+        "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
+    ]
 
 
 def test_progress_can_refresh_an_older_job_after_newer_audio_exists(client):

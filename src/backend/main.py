@@ -31,7 +31,11 @@ from src.backend.mcp_client import (
     McpStartupInProgressError,
     McpToolError,
 )
-from src.backend.orchestrator import Orchestrator, WebMcpSynthesisBusyError
+from src.backend.orchestrator import (
+    Orchestrator,
+    WEBMCP_CHALLENGE_VOICEBANK_ID,
+    WebMcpSynthesisBusyError,
+)
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
@@ -183,12 +187,8 @@ class WebMcpSynthesizeRequest(BaseModel):
 
     part_id: str = Field(min_length=1)
     lyric_selection: dict[str, Any]
-    voicebank: str = Field(min_length=1)
     verse_number: str | int | None = None
-    confirmed_voicebank_override: bool | None = None
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(?:-[a-z0-9]+)*$")
-    voice_id: str | None = None
-    voice_part_id: str | None = None
     voice_color: str | None = None
     articulation: float | None = None
     airiness: float | None = None
@@ -1452,6 +1452,7 @@ def create_app() -> FastAPI:
             "status": "queued",
             "job_id": response.get("job_id"),
             "progress_url": response.get("progress_url"),
+            "score_summary": result.get("score_summary"),
         }
 
     @app.get("/sessions/{session_id}/webmcp/voicebanks/{voicebank_id}")
@@ -1462,6 +1463,11 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        if voicebank_id != WEBMCP_CHALLENGE_VOICEBANK_ID:
+            return _webmcp_error(
+                "voicebank_not_available",
+                "This challenge demo uses the fixed LIEE singer.",
+            )
         try:
             info = await asyncio.to_thread(
                 request.app.state.router.call_tool,

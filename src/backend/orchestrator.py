@@ -64,6 +64,7 @@ from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context
 from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+WEBMCP_CHALLENGE_VOICEBANK_ID = "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
 
 
 class WebMcpSynthesisBusyError(RuntimeError):
@@ -2372,6 +2373,8 @@ class Orchestrator:
             current_score = dict(current_score_payload["score"])
             score_summary = snapshot.get("score_summary")
             normalized_arguments = dict(arguments)
+            # WebMCP challenge renders always use the single enabled demo singer.
+            normalized_arguments["voicebank"] = WEBMCP_CHALLENGE_VOICEBANK_ID
             sing_in_solfege = normalized_arguments.pop("sing_in_solfege", False)
             if not isinstance(sing_in_solfege, bool):
                 raise ValueError("sing_in_solfege must be a boolean.")
@@ -2390,9 +2393,16 @@ class Orchestrator:
                 explicit_verse_number=None,
                 expand_repeats=bool(normalized_arguments.get("expand_repeats", True)),
             )
+            # Direct WebMCP synthesis creates the instrumental MIDI artifacts
+            # before the render job is queued. Return the persisted summary so
+            # the browser can use its normal score-refresh path to load those
+            # accompaniment tracks immediately.
+            updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            updated_summary = updated_snapshot.get("score_summary")
             return {
                 "response": result.audio_response,
                 "action_required": result.action_required_payload,
+                "score_summary": updated_summary if isinstance(updated_summary, dict) else None,
             }
 
     async def update_solfege_settings(
