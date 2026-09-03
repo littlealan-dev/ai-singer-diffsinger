@@ -7,16 +7,16 @@ from typing import Any
 
 from google.cloud import firestore
 
+from src.backend.billing_plans import get_free_tier_monthly_allowance
 from src.backend.billing_store import free_billing_payload
 from src.backend.firebase_app import get_firestore_client
-
-FREE_TIER_MONTHLY_ALLOWANCE = 8
 
 
 def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
     now = datetime.now(timezone.utc)
+    free_tier_monthly_allowance = get_free_tier_monthly_allowance()
 
     @firestore.transactional
     def _ensure(transaction):
@@ -29,11 +29,11 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
                     "createdAt": now,
                     "billing": free_billing_payload(now=now, anchor=now),
                     "credits": {
-                        "balance": FREE_TIER_MONTHLY_ALLOWANCE,
+                        "balance": free_tier_monthly_allowance,
                         "reserved": 0,
                         "overdrafted": False,
                         "expiresAt": None,
-                        "monthlyAllowance": FREE_TIER_MONTHLY_ALLOWANCE,
+                        "monthlyAllowance": free_tier_monthly_allowance,
                         "lastGrantType": "grant_free_monthly",
                         "lastGrantAt": now,
                         "lastGrantInvoiceId": None,
@@ -46,8 +46,8 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
                 {
                     "userId": uid,
                     "type": "grant_free_monthly",
-                    "amount": FREE_TIER_MONTHLY_ALLOWANCE,
-                    "balanceAfter": FREE_TIER_MONTHLY_ALLOWANCE,
+                    "amount": free_tier_monthly_allowance,
+                    "balanceAfter": free_tier_monthly_allowance,
                     "createdAt": now,
                     "reason": "bootstrap_free_tier",
                 },
@@ -55,11 +55,11 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
             return {
                 "billing": free_billing_payload(now=now, anchor=now),
                 "credits": {
-                    "balance": FREE_TIER_MONTHLY_ALLOWANCE,
+                    "balance": free_tier_monthly_allowance,
                     "reserved": 0,
                     "overdrafted": False,
                     "expiresAt": None,
-                    "monthlyAllowance": FREE_TIER_MONTHLY_ALLOWANCE,
+                    "monthlyAllowance": free_tier_monthly_allowance,
                     "lastGrantType": "grant_free_monthly",
                     "lastGrantAt": now,
                 },
@@ -69,6 +69,49 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
         billing = data.get("billing")
         credits = data.get("credits") or {}
         if billing and credits:
+            existing_allowance = int(credits.get("monthlyAllowance", 0) or 0)
+            is_free_plan = str(billing.get("activePlanKey") or "free") == "free"
+            has_no_reservation = int(credits.get("reserved", 0) or 0) == 0
+            if (
+                is_free_plan
+                and has_no_reservation
+                and existing_allowance < free_tier_monthly_allowance
+            ):
+                upgraded_balance = max(
+                    int(credits.get("balance", 0) or 0),
+                    free_tier_monthly_allowance,
+                )
+                transaction.update(
+                    user_ref,
+                    {
+                        "credits.balance": upgraded_balance,
+                        "credits.monthlyAllowance": free_tier_monthly_allowance,
+                        "credits.lastGrantType": "grant_free_tier_allowance_upgrade",
+                        "credits.lastGrantAt": now,
+                    },
+                )
+                transaction.set(
+                    db.collection("credit_ledger").document(
+                        f"grant_free_tier_allowance_{free_tier_monthly_allowance}_{uid}"
+                    ),
+                    {
+                        "userId": uid,
+                        "type": "grant_free_tier_allowance_upgrade",
+                        "amount": upgraded_balance - int(credits.get("balance", 0) or 0),
+                        "balanceAfter": upgraded_balance,
+                        "createdAt": now,
+                        "reason": "free_tier_allowance_increase",
+                    },
+                )
+                credits.update(
+                    {
+                        "balance": upgraded_balance,
+                        "monthlyAllowance": free_tier_monthly_allowance,
+                        "lastGrantType": "grant_free_tier_allowance_upgrade",
+                        "lastGrantAt": now,
+                    }
+                )
+                data["credits"] = credits
             return data
 
         created_at = data.get("createdAt") or now
@@ -84,24 +127,24 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
                     "email": email,
                     "billing": merged_billing,
                     "credits": {
-                        "monthlyAllowance": FREE_TIER_MONTHLY_ALLOWANCE,
+                        "monthlyAllowance": free_tier_monthly_allowance,
                     },
                 },
                 merge=True,
             )
             data["billing"] = merged_billing
-            credits["monthlyAllowance"] = FREE_TIER_MONTHLY_ALLOWANCE
+            credits["monthlyAllowance"] = free_tier_monthly_allowance
             data["credits"] = credits
             return data
 
         anchor = now
         converted_billing = free_billing_payload(now=now, anchor=anchor)
         converted_credits = {
-            "balance": FREE_TIER_MONTHLY_ALLOWANCE,
+            "balance": free_tier_monthly_allowance,
             "reserved": int(credits.get("reserved", 0) or 0),
             "overdrafted": False,
             "expiresAt": None,
-            "monthlyAllowance": FREE_TIER_MONTHLY_ALLOWANCE,
+            "monthlyAllowance": free_tier_monthly_allowance,
             "lastGrantType": "grant_free_monthly",
             "lastGrantAt": now,
             "lastGrantInvoiceId": None,
@@ -123,8 +166,8 @@ def ensure_billing_state_for_login(uid: str, email: str) -> dict[str, Any]:
             {
                 "userId": uid,
                 "type": "grant_free_monthly",
-                "amount": FREE_TIER_MONTHLY_ALLOWANCE,
-                "balanceAfter": FREE_TIER_MONTHLY_ALLOWANCE,
+                "amount": free_tier_monthly_allowance,
+                "balanceAfter": free_tier_monthly_allowance,
                 "createdAt": now,
                 "reason": "expired_legacy_trial_conversion",
             },

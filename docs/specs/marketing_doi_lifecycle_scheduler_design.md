@@ -455,8 +455,8 @@ to avoid duplicated configuration.
    the billing deployment configuration to use a 300-second Cloud Run request
    timeout instead of the current 60 seconds.
 3. Build and deploy `sightsinger-billing-api` using
-   `scripts/build_billing_backend_prod.sh` and
-   `scripts/deploy_billing_backend_prod.sh`. Keep
+   `scripts/build_production_billing_backend_image.sh` and
+   `scripts/deploy_production_billing_backend.sh`. Keep
    `MARKETING_DOI_RECONCILE_ENABLED=false` initially.
 4. Create the dedicated Scheduler caller service account and grant it only
    Cloud Run Invoker on `sightsinger-billing-api`.
@@ -473,7 +473,7 @@ to avoid duplicated configuration.
    scheduled runs.
 
 Provide an idempotent deployment script such as
-`scripts/deploy_marketing_doi_reconcile_prod.sh`. It must update the scheduler
+`scripts/deploy_production_marketing_doi_reconcile.sh`. It must update the scheduler
 job after the backend route is deployed, never echo the Brevo API key, and
 support both initial job creation and subsequent updates.
 

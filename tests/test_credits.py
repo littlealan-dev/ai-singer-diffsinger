@@ -57,6 +57,30 @@ def test_free_tier_bootstrap():
     assert not credits.is_expired
 
 
+def test_free_tier_bootstrap_honors_configured_allowance(monkeypatch):
+    monkeypatch.setenv("FREE_TIER_MONTHLY_ALLOWANCE", "100")
+
+    credits = get_or_create_credits("test-user-100", "test-100@example.com")
+
+    assert credits.balance == 100
+    assert credits.monthly_allowance == 100
+
+
+def test_configured_free_tier_allowance_upgrades_existing_free_account(monkeypatch):
+    user_id = "test-user-allowance-upgrade"
+    get_or_create_credits(user_id, "allowance-upgrade@example.com")
+    monkeypatch.setenv("FREE_TIER_MONTHLY_ALLOWANCE", "100")
+
+    credits = get_or_create_credits(user_id, "allowance-upgrade@example.com")
+
+    assert credits.balance == 100
+    assert credits.monthly_allowance == 100
+    ledger = get_firestore_client().collection("credit_ledger").document(
+        f"grant_free_tier_allowance_100_{user_id}"
+    ).get().to_dict() or {}
+    assert ledger["amount"] == 92
+
+
 def test_active_legacy_trial_preserves_balance_on_migration():
     uid = "legacy-active"
     db = get_firestore_client()

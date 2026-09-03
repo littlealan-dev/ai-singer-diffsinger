@@ -11,7 +11,8 @@ import math
 from google.cloud import firestore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.config import Settings
-from src.backend.billing_migration import FREE_TIER_MONTHLY_ALLOWANCE, ensure_billing_state_for_login
+from src.backend.billing_migration import ensure_billing_state_for_login
+from src.backend.billing_plans import get_free_tier_monthly_allowance
 from src.backend.billing_topup import (
     TopupPack,
     consume_reserved_topup_credits_in_transaction,
@@ -30,7 +31,7 @@ logger = get_logger(__name__)
 CREDIT_DURATION_SECONDS = 30
 EXPORT_MIX_CREDIT_DURATION_SECONDS = 60
 _CREDIT_DURATION_PRECISION_SECONDS = 0.001
-FREE_TIER_CREDIT_AMOUNT = FREE_TIER_MONTHLY_ALLOWANCE
+FREE_TIER_CREDIT_AMOUNT = get_free_tier_monthly_allowance()
 TRIAL_CREDIT_AMOUNT = FREE_TIER_CREDIT_AMOUNT
 TRIAL_EXPIRY_DAYS = 30
 DEFAULT_RESERVATION_TTL_SECONDS = 60 * 60

@@ -117,25 +117,25 @@ Build and deploy in this order.
 - [x] Build GPU-enabled main backend image.
 
 ```bash
-scripts/build_backend_prod.sh
+scripts/build_production_backend_image.sh
 ```
 
 - [x] Build lightweight CPU-only billing backend image.
 
 ```bash
-scripts/build_billing_backend_prod.sh
+scripts/build_production_billing_backend_image.sh
 ```
 
 - [x] Deploy GPU-enabled main app backend.
 
 ```bash
-scripts/deploy_backend_prod.sh
+scripts/deploy_production_backend.sh
 ```
 
 - [x] Deploy CPU-only billing backend.
 
 ```bash
-scripts/deploy_billing_backend_prod.sh
+scripts/deploy_production_billing_backend.sh
 ```
 
 - [x] Deploy Firebase Functions billing scheduler.
@@ -149,7 +149,7 @@ npx -y firebase-tools@latest deploy \
 - [x] Deploy app frontend / Firebase Hosting.
 
 ```bash
-scripts/deploy_frontend_prod.sh
+scripts/deploy_production_frontend.sh
 ```
 
 - [x] Confirm Firebase Hosting rewrite for `/billing/**` points to `sightsinger-billing-api`.

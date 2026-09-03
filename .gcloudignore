@@ -9,6 +9,7 @@ venv/
 env/local.env
 env/dev.env
 env/prod.env
+env/webmcp.prod.env
 
 # MacOS
 .DS_Store
@@ -75,3 +76,10 @@ firestore-debug.log
 
 # Git
 .git/
+
+# Required at container runtime: this shared vocoder is not a voicebank and is
+# deliberately bundled into the backend image.
+!bundled_assets/
+!bundled_assets/vocoders/
+!bundled_assets/vocoders/pc_nsf_hifigan_44.1k/
+!bundled_assets/vocoders/pc_nsf_hifigan_44.1k/**

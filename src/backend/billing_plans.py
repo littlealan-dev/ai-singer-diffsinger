@@ -3,6 +3,7 @@ from __future__ import annotations
 """Plan catalog and Stripe price mapping for billing."""
 
 from dataclasses import dataclass
+import os
 
 from src.backend.billing_config import BillingConfig
 from src.backend.billing_types import BillingInterval, PlanFamily, PlanKey
@@ -23,16 +24,39 @@ class PlanDefinition:
         return self.key != "free"
 
 
-FREE_PLAN = PlanDefinition("free", "free", "none", 8, None, None)
+DEFAULT_FREE_TIER_MONTHLY_ALLOWANCE = 8
+
+
+def get_free_tier_monthly_allowance() -> int:
+    """Return the deployment-specific allowance for the free plan.
+
+    The WebMCP challenge backend sets this to 100 in its own environment,
+    without changing the core product's 8-credit default.
+    """
+    raw_value = os.getenv("FREE_TIER_MONTHLY_ALLOWANCE", str(DEFAULT_FREE_TIER_MONTHLY_ALLOWANCE))
+    try:
+        allowance = int(raw_value)
+    except ValueError as exc:
+        raise ValueError("FREE_TIER_MONTHLY_ALLOWANCE must be a positive integer.") from exc
+    if allowance < 1:
+        raise ValueError("FREE_TIER_MONTHLY_ALLOWANCE must be a positive integer.")
+    return allowance
 
 
 def get_free_plan() -> PlanDefinition:
-    return FREE_PLAN
+    return PlanDefinition(
+        "free",
+        "free",
+        "none",
+        get_free_tier_monthly_allowance(),
+        None,
+        None,
+    )
 
 
 def get_plan_catalog(config: BillingConfig) -> dict[PlanKey, PlanDefinition]:
     return {
-        "free": FREE_PLAN,
+        "free": get_free_plan(),
         "solo_monthly": PlanDefinition(
             "solo_monthly",
             "solo",
