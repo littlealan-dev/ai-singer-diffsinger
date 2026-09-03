@@ -645,6 +645,106 @@ def test_create_session_returns_id(client):
     assert len(session_id) > 0
 
 
+def test_webmcp_edit_reparses_and_replaces_the_active_session_score(client):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+
+    replacement = "<score-partwise version='3.1'></score-partwise>"
+    edited = test_client.put(
+        f"/sessions/{session_id}/webmcp/score",
+        json={
+            "musicxml": replacement,
+            "expected_score_version": 1,
+        },
+    )
+    assert edited.status_code == 200
+    edited_payload = edited.json()
+    assert edited_payload["ok"] is True
+    assert edited_payload["score_version"] == 2
+    assert edited_payload["musicxml"] == replacement
+
+
+def test_webmcp_synthesis_translates_public_solfege_flag(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    captured: dict[str, object] = {}
+
+    async def fake_execute_tool_calls(_session_id, _score, tool_calls, **_kwargs):
+        captured.update(tool_calls[0].arguments)
+        return ToolExecutionResult(
+            score=_score,
+            audio_response={
+                "type": "chat_progress",
+                "job_id": "webmcp-solfege-job",
+                "progress_url": "/sessions/test/progress?job_id=webmcp-solfege-job",
+            },
+        )
+
+    app.state.orchestrator._execute_tool_calls = fake_execute_tool_calls
+    response = test_client.post(
+        f"/sessions/{session_id}/webmcp/synthesize",
+        json={
+            "part_id": "P1",
+            "lyric_selection": {"id": "solfege", "number": "2", "name": "Solfege"},
+            "voicebank": "test-voicebank",
+            "language": "en",
+            "sing_in_solfege": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert captured["require_solfege_lyrics"] is True
+    assert captured["solfege_pronunciation_patch"] is True
+    assert "sing_in_solfege" not in captured
+
+    unsupported = test_client.post(
+        f"/sessions/{session_id}/webmcp/synthesize",
+        json={
+            "part_id": "P1",
+            "lyric_selection": {"id": "lyrics", "number": "1", "name": "Lyrics"},
+            "voicebank": "test-voicebank",
+            "require_solfege_lyrics": True,
+        },
+    )
+    assert unsupported.status_code == 422
+
+
+def test_webmcp_synthesis_refuses_to_supersede_an_active_synthesis_job(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+
+    class PendingTask:
+        def done(self) -> bool:
+            return False
+
+    app.state.orchestrator._synthesis_tasks[session_id] = PendingTask()
+    app.state.orchestrator._synthesis_job_ids[session_id] = "already-running-job"
+    response = test_client.post(
+        f"/sessions/{session_id}/webmcp/synthesize",
+        json={
+            "part_id": "P1",
+            "lyric_selection": {"id": "lyrics", "number": "1", "name": "Lyrics"},
+            "voicebank": "test-voicebank",
+            "language": "en",
+            "sing_in_solfege": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "workflow_busy"
+    assert payload["error"]["retryable"] is True
+    assert payload["error"]["details"] == {
+        "active_job_id": "already-running-job",
+        "progress_url": f"/sessions/{session_id}/progress?job_id=already-running-job",
+    }
+
+
 def test_progress_can_refresh_an_older_job_after_newer_audio_exists(client):
     test_client, app = client
     session_id = _create_session(test_client)

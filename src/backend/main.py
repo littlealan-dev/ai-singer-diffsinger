@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 import logging
 
 from src.backend.config import Settings
@@ -31,7 +31,7 @@ from src.backend.mcp_client import (
     McpStartupInProgressError,
     McpToolError,
 )
-from src.backend.orchestrator import Orchestrator
+from src.backend.orchestrator import Orchestrator, WebMcpSynthesisBusyError
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
@@ -166,6 +166,38 @@ class ExportMixRequest(BaseModel):
     tracks: list[ExportMixTrackRequest]
     billing_reference_job_id: str
     format: Literal["wav"] = "wav"
+
+
+class WebMcpEditScoreRequest(BaseModel):
+    musicxml: str = Field(min_length=1)
+    expected_score_version: int = Field(ge=1)
+
+
+class WebMcpAddSolfegeRequest(BaseModel):
+    part_id: str = Field(min_length=1)
+    reason: str | None = None
+
+
+class WebMcpSynthesizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    part_id: str = Field(min_length=1)
+    lyric_selection: dict[str, Any]
+    voicebank: str = Field(min_length=1)
+    verse_number: str | int | None = None
+    confirmed_voicebank_override: bool | None = None
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(?:-[a-z0-9]+)*$")
+    voice_id: str | None = None
+    voice_part_id: str | None = None
+    voice_color: str | None = None
+    articulation: float | None = None
+    airiness: float | None = None
+    intensity: float | None = None
+    clarity: float | None = None
+    gender: float | None = None
+    sing_in_solfege: bool = False
+    expand_repeats: bool = True
+    instrument_program_assignments: list[dict[str, Any]] | None = None
 
 
 class MaintenanceStatusResponse(BaseModel):
@@ -1249,6 +1281,196 @@ def create_app() -> FastAPI:
             media_type="application/xml",
             headers={"Cache-Control": "no-store"},
         )
+
+    def _webmcp_error(
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "ok": False,
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+            },
+        }
+        if details:
+            payload["error"]["details"] = details
+        return payload
+
+    async def _webmcp_active_score(
+        session_id: str,
+        *,
+        user_id: str,
+    ) -> tuple[Dict[str, Any], str, Path]:
+        """Return the authorized active score state without exposing filesystem paths."""
+        sessions: SessionStore = app.state.sessions
+        settings: Settings = app.state.settings
+        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        score_payload_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
+        if score_payload_path is None:
+            files = snapshot.get("files")
+            fallback_path = files.get("musicxml_path") if isinstance(files, dict) else None
+            if not isinstance(fallback_path, str) or not fallback_path.strip():
+                raise HTTPException(status_code=404, detail="Score not found.")
+            score_path = _resolve_allowlisted_score_path(settings, fallback_path)
+        else:
+            try:
+                score_path = await sessions.ensure_active_musicxml(session_id, user_id)
+            except SessionMusicXmlUnavailableError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": exc.code, "message": str(exc)},
+                ) from exc
+        if not score_path.is_file():
+            raise HTTPException(status_code=404, detail="Score file not found.")
+        content = _read_musicxml_content(
+            score_path,
+            max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
+        )
+        return snapshot, content, score_path
+
+    @app.put("/sessions/{session_id}/webmcp/score")
+    async def edit_webmcp_score(
+        session_id: str,
+        request: Request,
+        payload: WebMcpEditScoreRequest,
+    ) -> Dict[str, Any]:
+        user_id = await _get_user_id_or_401(request)
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        try:
+            result = await orchestrator.replace_webmcp_score(
+                session_id,
+                user_id=user_id,
+                musicxml=payload.musicxml,
+                expected_score_version=payload.expected_score_version,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            code = "score_version_conflict" if "changed since" in message else "invalid_musicxml"
+            return _webmcp_error(code, message)
+        except RuntimeError as exc:
+            return _webmcp_error("workflow_busy", str(exc), retryable=True)
+        return {
+            "ok": True,
+            "score_version": result["score_version"],
+            "musicxml": payload.musicxml,
+            "score_summary": result.get("score_summary"),
+            "solfege_settings": (
+                (await request.app.state.sessions.get_snapshot(session_id, user_id)).get(
+                    "solfege_settings"
+                )
+                or _default_solfege_settings_response()
+            ),
+        }
+
+    @app.post("/sessions/{session_id}/webmcp/solfege")
+    async def add_webmcp_solfege_lyric_verse(
+        session_id: str,
+        request: Request,
+        payload: WebMcpAddSolfegeRequest,
+    ) -> Dict[str, Any]:
+        user_id = await _get_user_id_or_401(request)
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        try:
+            result = await orchestrator.add_webmcp_solfege_lyric_verse(
+                session_id, user_id=user_id, part_id=payload.part_id
+            )
+        except ValueError as exc:
+            return _webmcp_error("part_not_found", str(exc))
+        except RuntimeError as exc:
+            return _webmcp_error("workflow_busy", str(exc), retryable=True)
+        if result.get("status") != "ready":
+            tool_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+            return _webmcp_error(
+                str(tool_result.get("code") or tool_result.get("action") or "solfege_failed"),
+                str(tool_result.get("message") or "Unable to add solfege lyrics."),
+                details=tool_result.get("diagnostics")
+                if isinstance(tool_result.get("diagnostics"), dict)
+                else None,
+            )
+        _, musicxml, _ = await _webmcp_active_score(session_id, user_id=user_id)
+        return {
+            "ok": True,
+            "score_version": result["score_version"],
+            "musicxml": musicxml,
+            "score_summary": result.get("score_summary"),
+            "new_verse_number": result.get("new_verse_number"),
+            "lyric_selection": result.get("lyric_selection"),
+            "target": result.get("target"),
+        }
+
+    @app.post("/sessions/{session_id}/webmcp/synthesize")
+    async def synthesize_webmcp(
+        session_id: str,
+        request: Request,
+        payload: WebMcpSynthesizeRequest,
+    ) -> Dict[str, Any]:
+        user_id, user_email = await _get_user_context_or_401(request)
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        try:
+            result = await orchestrator.start_webmcp_synthesis(
+                session_id,
+                user_id=user_id,
+                user_email=user_email,
+                arguments=payload.model_dump(exclude_none=True),
+            )
+        except ValueError as exc:
+            return _webmcp_error("invalid_synthesis_request", str(exc))
+        except WebMcpSynthesisBusyError as exc:
+            details: Dict[str, Any] = {}
+            if exc.job_id:
+                details = {
+                    "active_job_id": exc.job_id,
+                    "progress_url": f"/sessions/{session_id}/progress?job_id={exc.job_id}",
+                }
+            return _webmcp_error("workflow_busy", str(exc), retryable=True, details=details or None)
+        except RuntimeError as exc:
+            return _webmcp_error("workflow_busy", str(exc), retryable=True)
+        action_required = result.get("action_required")
+        if isinstance(action_required, dict):
+            error = action_required.get("error") if isinstance(action_required.get("error"), dict) else {}
+            return _webmcp_error(
+                str(action_required.get("code") or action_required.get("action") or "action_required"),
+                str(error.get("message") or action_required.get("message") or "Synthesis needs attention."),
+                details=action_required,
+            )
+        response = result.get("response") if isinstance(result.get("response"), dict) else {}
+        if response.get("type") != "chat_progress":
+            return _webmcp_error(
+                "synthesis_not_started",
+                str(response.get("message") or "Unable to start synthesis."),
+            )
+        return {
+            "ok": True,
+            "status": "queued",
+            "job_id": response.get("job_id"),
+            "progress_url": response.get("progress_url"),
+        }
+
+    @app.get("/sessions/{session_id}/webmcp/voicebanks/{voicebank_id}")
+    async def get_webmcp_voicebank_info(
+        session_id: str,
+        voicebank_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        user_id = await _get_user_id_or_401(request)
+        await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        try:
+            info = await asyncio.to_thread(
+                request.app.state.router.call_tool,
+                "get_voicebank_info",
+                {"voicebank": voicebank_id},
+            )
+        except Exception as exc:
+            return _webmcp_error("voicebank_not_found", str(exc))
+        return {"ok": True, "voicebank": info}
 
     @app.get("/sessions/{session_id}/instrumental-midi")
     async def get_instrumental_midi(

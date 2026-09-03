@@ -64,6 +64,17 @@ from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context
 from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
+
+
+class WebMcpSynthesisBusyError(RuntimeError):
+    """Raised when a WebMCP render would supersede an active session render."""
+
+    def __init__(self, job_id: str | None) -> None:
+        self.job_id = job_id
+        super().__init__(
+            "A synthesis job is already in progress for this score. Poll its progress until it "
+            "reaches a terminal status before starting the next part."
+        )
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
 PREPROCESS_PLANNING_ERROR_MESSAGE = (
     "Couldn't create a line-preparation plan. Please retry the request."
@@ -164,6 +175,7 @@ class Orchestrator:
         }
         self._llm_tools = self._llm_tools_by_role[LlmRole.DEFAULT]
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
+        self._synthesis_job_ids: Dict[str, str] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
         self._chat_locks_guard = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
@@ -705,9 +717,13 @@ class Orchestrator:
             )
         )
         self._synthesis_tasks[session_id] = task
+        self._synthesis_job_ids[session_id] = job_id
 
-        def _cleanup(_: asyncio.Task) -> None:
-            self._synthesis_tasks.pop(session_id, None)
+        def _cleanup(completed_task: asyncio.Task) -> None:
+            # A cancelled predecessor must not remove a newer task's tracking.
+            if self._synthesis_tasks.get(session_id) is completed_task:
+                self._synthesis_tasks.pop(session_id, None)
+                self._synthesis_job_ids.pop(session_id, None)
 
         task.add_done_callback(_cleanup)
         return {
@@ -2223,6 +2239,161 @@ class Orchestrator:
                 current_score.get("version") if isinstance(current_score, dict) else 0
             ),
         }
+
+    async def replace_webmcp_score(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        musicxml: str,
+        expected_score_version: int,
+    ) -> Dict[str, Any]:
+        """Replace and reparse the active score for a direct WebMCP edit."""
+        if len(musicxml.encode("utf-8")) > self._settings.max_upload_bytes:
+            raise ValueError("The replacement score exceeds the upload size limit.")
+        lock = await self._get_chat_lock(session_id)
+        if lock.locked():
+            raise RuntimeError("Another score operation is still in progress. Please wait and retry.")
+        async with lock:
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_score_payload = snapshot.get("current_score")
+            current_version = (
+                int(current_score_payload.get("version") or 0)
+                if isinstance(current_score_payload, dict)
+                else 0
+            )
+            if current_version != expected_score_version:
+                raise ValueError(
+                    "The score changed since it was read. Call get_score and retry the edit."
+                )
+            output_path = (
+                self._sessions.session_dir(session_id)
+                / f"score-webmcp-{uuid.uuid4().hex}.xml"
+            )
+            await asyncio.to_thread(output_path.write_text, musicxml, encoding="utf-8")
+            parsed = await asyncio.to_thread(
+                self._router.call_tool,
+                "parse_score",
+                {
+                    "file_path": self._mcp_musicxml_path(output_path),
+                    "expand_repeats": False,
+                },
+            )
+            if not isinstance(parsed, dict):
+                raise ValueError("The replacement score could not be parsed.")
+            score_summary = parsed.get("score_summary")
+            score = dict(parsed)
+            score.pop("score_summary", None)
+            score["source_musicxml_path"] = str(output_path)
+            expanded_score = score.get("expanded_score")
+            if isinstance(expanded_score, dict):
+                expanded_score["source_musicxml_path"] = str(output_path)
+            await self._persist_active_musicxml_artifact(session_id, output_path)
+            await self._sessions.set_file(session_id, "musicxml_path", output_path)
+            await self._sessions.set_score_summary(
+                session_id, score_summary if isinstance(score_summary, dict) else None
+            )
+            await self._sessions.set_original_score(session_id, score)
+            version = await self._sessions.set_score(session_id, score)
+            await self._sessions.mark_score_context_updated(session_id)
+            return {
+                "score": score,
+                "score_summary": score_summary,
+                "score_version": version,
+            }
+
+    async def add_webmcp_solfege_lyric_verse(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        part_id: str,
+    ) -> Dict[str, Any]:
+        """Add one generated solfege verse without entering the LLM workflow."""
+        lock = await self._get_chat_lock(session_id)
+        if lock.locked():
+            raise RuntimeError("Another score operation is still in progress. Please wait and retry.")
+        async with lock:
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+            output_path = (
+                self._sessions.session_dir(session_id)
+                / f"score-solfege-{uuid.uuid4().hex}.xml"
+            )
+            result = await asyncio.to_thread(
+                self._router.call_tool,
+                TOOL_ADD_SOLFEGE_VERSE,
+                {
+                    "source_musicxml_path": self._mcp_musicxml_path(source_path),
+                    "output_musicxml_path": str(
+                        output_path.relative_to(self._settings.project_root)
+                    ),
+                    "part_id": part_id,
+                    "settings": dict(snapshot.get("solfege_settings") or {}),
+                },
+            )
+            if not isinstance(result, dict):
+                raise ValueError("Invalid add-solfege tool result.")
+            if result.get("status") != "ready":
+                return {"status": result.get("status") or "error", "result": result}
+            score, summary, version = await self._persist_solfege_result(session_id, result)
+            return {
+                "status": "ready",
+                "score": score,
+                "score_summary": summary,
+                "score_version": version,
+                "new_verse_number": result.get("new_verse_number"),
+                "lyric_selection": result.get("lyric_selection"),
+                "target": result.get("target"),
+            }
+
+    async def start_webmcp_synthesis(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        user_email: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Run the existing direct synthesis workflow without an LLM chat turn."""
+        lock = await self._get_chat_lock(session_id)
+        if lock.locked():
+            raise RuntimeError("Another score operation is still in progress. Please wait and retry.")
+        async with lock:
+            active_task = self._synthesis_tasks.get(session_id)
+            if active_task is not None and not active_task.done():
+                raise WebMcpSynthesisBusyError(self._synthesis_job_ids.get(session_id))
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            current_score_payload = snapshot.get("current_score")
+            if not isinstance(current_score_payload, dict) or not isinstance(
+                current_score_payload.get("score"), dict
+            ):
+                raise ValueError("Upload a score before starting synthesis.")
+            current_score = dict(current_score_payload["score"])
+            score_summary = snapshot.get("score_summary")
+            normalized_arguments = dict(arguments)
+            sing_in_solfege = normalized_arguments.pop("sing_in_solfege", False)
+            if not isinstance(sing_in_solfege, bool):
+                raise ValueError("sing_in_solfege must be a boolean.")
+            if sing_in_solfege:
+                # Keep the public WebMCP contract musician-facing while
+                # retaining the two independent private safeguards.
+                normalized_arguments["require_solfege_lyrics"] = True
+                normalized_arguments["solfege_pronunciation_patch"] = True
+            result = await self._execute_tool_calls(
+                session_id,
+                current_score,
+                [ToolCall(name=TOOL_SYNTHESIZE, arguments=normalized_arguments)],
+                user_id=user_id,
+                user_email=user_email,
+                score_summary=score_summary if isinstance(score_summary, dict) else None,
+                explicit_verse_number=None,
+                expand_repeats=bool(normalized_arguments.get("expand_repeats", True)),
+            )
+            return {
+                "response": result.audio_response,
+                "action_required": result.action_required_payload,
+            }
 
     async def update_solfege_settings(
         self,
