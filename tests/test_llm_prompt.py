@@ -146,6 +146,29 @@ def test_build_system_prompt_declares_full_score_credit_capability_contract() ->
     assert "offer exactly these two next actions: add more credits, or upload another shorter song" in prompt
 
 
+def test_build_system_prompt_requires_a_billable_synthesis_quote_before_rendering() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "Billable synthesis confirmation:" in prompt
+    assert "one credit per started 30 seconds" in prompt
+    assert "part, verse/lyric selection, lyrics or solfege, resolved language, AI voice" in prompt
+    assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
+    assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
+    assert "If any quoted choice, score, or estimate changes, present a new quote" in prompt
+    assert "call `synthesize` directly" not in prompt
+    assert "proceed straight to `synthesize`" not in prompt
+
+
 def test_build_system_prompt_caches_duration_limit_check_before_synthesis() -> None:
     bundle = build_prompt_bundle(
         tools=[],
