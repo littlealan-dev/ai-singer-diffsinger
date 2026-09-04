@@ -366,6 +366,7 @@ class Orchestrator:
                 current_credit_availability=current_credit_availability,
                 selected_voicebank_id=forced_voicebank_id,
                 selected_language=forced_language,
+                expand_repeats=expand_repeats,
             )
             if llm_error:
                 response_message = llm_error
@@ -2114,6 +2115,7 @@ class Orchestrator:
                     current_credit_availability=current_credit_availability,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
+                    expand_repeats=expand_repeats,
                     role=LlmRole.PREPROCESS,
                 )
                 if repair_error:
@@ -2253,6 +2255,7 @@ class Orchestrator:
                     current_credit_availability=current_credit_availability,
                     selected_voicebank_id=forced_voicebank_id,
                     selected_language=forced_language,
+                    expand_repeats=expand_repeats,
                 )
             if followup_error:
                 best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -4933,6 +4936,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
+        expand_repeats: bool = True,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Query the LLM to determine tool calls and response text."""
@@ -4994,6 +4998,7 @@ class Orchestrator:
                     else None
                 ),
                 current_credit_availability=current_credit_availability,
+                expand_repeats=expand_repeats,
                 synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
             )
@@ -5210,6 +5215,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
+        expand_repeats: bool = True,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
@@ -5278,6 +5284,7 @@ class Orchestrator:
                     else None
                 ),
                 current_credit_availability=current_credit_availability,
+                expand_repeats=expand_repeats,
                 synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
             )

@@ -171,6 +171,7 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "call `synthesize` once with the quoted parameters unchanged" in prompt
     assert "do not repeat or restate the quote" in prompt
     assert "ask for separate confirmation of an individual quoted parameter" in prompt
+    assert "whether the render is with repeats or written order" in prompt
     assert "call `synthesize` directly" not in prompt
     assert "proceed straight to `synthesize`" not in prompt
 
@@ -184,8 +185,47 @@ def test_build_system_prompt_caches_duration_limit_check_before_synthesis() -> N
     )
 
     assert "The configured maximum duration for one synthesis is `300` seconds" in bundle.static_prompt_text
-    assert "Before every `synthesize` call, inspect `score_summary.duration_seconds`" in bundle.static_prompt_text
+    assert "use the duration selected by the authoritative Repeat-expansion setting" in bundle.static_prompt_text
     assert "Synthesis duration limit" not in bundle.dynamic_prompt_text
+
+
+def test_build_system_prompt_exposes_authoritative_repeat_expansion_setting() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary={
+            "duration_seconds": 60,
+            "expanded_duration_seconds": 120,
+        },
+        expand_repeats=False,
+    )
+
+    assert '"expand_repeats": false' in bundle.dynamic_prompt_text
+    assert "Use the duration selected by the authoritative Repeat-expansion setting" in bundle.static_prompt_text
+    assert "do not choose or override it" in bundle.dynamic_prompt_text
+
+
+def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration() -> None:
+    summary = {
+        "duration_seconds": 60,
+        "expanded_duration_seconds": 120,
+    }
+
+    with_repeats = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary=summary,
+        expand_repeats=True,
+    )
+    without_repeats = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary=summary,
+        expand_repeats=False,
+    )
+
+    assert '"estimated_credits": 4' in with_repeats.dynamic_prompt_text
+    assert '"estimated_credits": 2' in without_repeats.dynamic_prompt_text
 
 
 def test_build_system_prompt_requires_resolved_compatible_synthesis_language() -> None:
@@ -307,6 +347,8 @@ def test_build_system_prompt_requires_llm_program_assignments_for_unresolved_ins
     assert "playback_preset.soundfont_id" in prompt
     assert "unresolved_nonportable_bank" in prompt
     assert "source` to exactly `llm_inferred`" in prompt
+    assert "present a new billable synthesis quote" in prompt
+    assert "do not retry synthesis immediately" in prompt
 
 
 def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() -> None:

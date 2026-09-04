@@ -71,6 +71,7 @@ def build_prompt_bundle(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
+    expand_repeats: bool = True,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> PromptBundle:
@@ -170,9 +171,16 @@ def build_prompt_bundle(
             current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
         )
     current_synthesis_estimate_text = "unavailable"
-    duration_seconds = (
-        score_summary.get("duration_seconds") if isinstance(score_summary, dict) else None
-    )
+    duration_seconds = None
+    if isinstance(score_summary, dict):
+        duration_seconds = score_summary.get("duration_seconds")
+        expanded_duration_seconds = score_summary.get("expanded_duration_seconds")
+        if (
+            expand_repeats
+            and isinstance(expanded_duration_seconds, (int, float))
+            and expanded_duration_seconds > 0
+        ):
+            duration_seconds = expanded_duration_seconds
     if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:
         from src.backend.credits import CREDIT_DURATION_SECONDS, estimate_credits
 
@@ -183,6 +191,19 @@ def build_prompt_bundle(
         current_synthesis_estimate_text = json.dumps(
             current_synthesis_estimate, indent=2, sort_keys=True, ensure_ascii=False
         )
+    repeat_expansion_text = json.dumps(
+        {
+            "expand_repeats": bool(expand_repeats),
+            "instruction": (
+                "This UI-selected setting is authoritative. The backend applies it to "
+                "every synthesis call; do not choose or override it. Use the matching "
+                "score-summary duration for the billable quote and duration limit."
+            ),
+        },
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    )
     score_context_update_text = "CURRENT SCORE CONTEXT UPDATED.\n" if score_context_updated else ""
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
@@ -229,6 +250,8 @@ def build_prompt_bundle(
         f"{current_credit_availability_text}\n"
         "Current synthesis estimate (authoritative for the current score):\n"
         f"{current_synthesis_estimate_text}\n"
+        "Repeat-expansion setting (authoritative):\n"
+        f"{repeat_expansion_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -252,6 +275,7 @@ def build_system_prompt(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
+    expand_repeats: bool = True,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> str:
@@ -271,6 +295,7 @@ def build_system_prompt(
         score_context_updated=score_context_updated,
         solfege_settings=solfege_settings,
         current_credit_availability=current_credit_availability,
+        expand_repeats=expand_repeats,
         synthesis_max_duration_seconds=synthesis_max_duration_seconds,
         role=role,
     )
