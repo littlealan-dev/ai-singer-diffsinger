@@ -166,6 +166,9 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
     assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
     assert "If any quoted choice, score, or estimate changes, present a new quote" in prompt
+    assert "When the user explicitly confirms the immediately preceding billable quote" in prompt
+    assert "call `synthesize` once with the quoted choices unchanged" in prompt
+    assert "do not repeat or restate the quote" in prompt
     assert "call `synthesize` directly" not in prompt
     assert "proceed straight to `synthesize`" not in prompt
 
