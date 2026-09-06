@@ -160,7 +160,8 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     )
 
     assert "Billable synthesis confirmation:" in prompt
-    assert "one credit per started 30 seconds" in prompt
+    assert "Use `Current synthesis estimate.estimated_credits` exactly" in prompt
+    assert "never calculate, round, or infer the credit amount yourself" in prompt
     assert "part, verse/lyric selection, lyrics or solfege, resolved language, AI voice" in prompt
     assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
     assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
@@ -445,6 +446,7 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
             "monthly_credits_reserved": 0,
             "topup_credits_available": 45,
         },
+        score_summary={"title": "Test", "duration_seconds": 169.0877},
     )
 
     assert "Treat Current credit availability in Dynamic Context" in bundle.static_prompt_text
@@ -453,6 +455,10 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
     )
     assert '"available_credits": 53' in bundle.dynamic_prompt_text
     assert '"topup_credits_available": 45' in bundle.dynamic_prompt_text
+    assert "Current synthesis estimate (authoritative for the current score):" in (
+        bundle.dynamic_prompt_text
+    )
+    assert '"estimated_credits": 6' in bundle.dynamic_prompt_text
 
 
 def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability() -> None:

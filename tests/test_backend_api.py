@@ -1850,12 +1850,12 @@ def test_orchestrator_stores_latest_preprocess_plan_in_prompt_context(client):
     assert '"voice_part_id": "voice part 1"' in prompt
 
 
-def test_orchestrator_injects_live_credit_availability_into_prompt(client, monkeypatch):
+def test_orchestrator_injects_live_credit_availability_and_estimate_into_prompt(client, monkeypatch):
     _, app = client
     orchestrator = app.state.orchestrator
     snapshot = {
         "current_score": {"score": {"source_musicxml_path": "/tmp/original.xml"}},
-        "score_summary": {"title": "Test"},
+        "score_summary": {"title": "Test", "duration_seconds": 169.0877},
         "history": [],
     }
     prompt = None
@@ -1894,6 +1894,8 @@ def test_orchestrator_injects_live_credit_availability_into_prompt(client, monke
     assert prompt is not None
     assert '"available_credits": 53' in prompt
     assert '"topup_credits_available": 45' in prompt
+    assert '"duration_seconds": 169.0877' in prompt
+    assert '"estimated_credits": 6' in prompt
 
 
 @pytest.mark.parametrize("helper_name", [
@@ -1905,7 +1907,7 @@ def test_followup_prompts_receive_request_credit_context(client, helper_name):
     orchestrator = app.state.orchestrator
     snapshot = {
         "current_score": {"score": {"source_musicxml_path": "/tmp/original.xml"}},
-        "score_summary": {"title": "Test"},
+        "score_summary": {"title": "Test", "duration_seconds": 169.0877},
         "history": [],
     }
     prompts = []
@@ -1936,6 +1938,8 @@ def test_followup_prompts_receive_request_credit_context(client, helper_name):
     assert len(prompts) == 1
     assert '"available_credits": 53' in prompts[0]
     assert '"topup_credits_available": 45' in prompts[0]
+    assert '"duration_seconds": 169.0877' in prompts[0]
+    assert '"estimated_credits": 6' in prompts[0]
 
 
 def test_background_action_required_prompt_reads_canonical_credit_context(client, monkeypatch):

@@ -169,6 +169,20 @@ def build_prompt_bundle(
         current_credit_availability_text = json.dumps(
             current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
         )
+    current_synthesis_estimate_text = "unavailable"
+    duration_seconds = (
+        score_summary.get("duration_seconds") if isinstance(score_summary, dict) else None
+    )
+    if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:
+        from src.backend.credits import CREDIT_DURATION_SECONDS, estimate_credits
+
+        current_synthesis_estimate = {
+            "estimated_credits": estimate_credits(float(duration_seconds)),
+            "pricing_unit_seconds": CREDIT_DURATION_SECONDS,
+        }
+        current_synthesis_estimate_text = json.dumps(
+            current_synthesis_estimate, indent=2, sort_keys=True, ensure_ascii=False
+        )
     score_context_update_text = "CURRENT SCORE CONTEXT UPDATED.\n" if score_context_updated else ""
     static_prompt = _load_system_prompt(
         include_preprocess_guidance=_is_preprocess_role(role)
@@ -213,6 +227,8 @@ def build_prompt_bundle(
         f"{solfege_settings_text}\n"
         "Current credit availability (authoritative, refreshed for this request):\n"
         f"{current_credit_availability_text}\n"
+        "Current synthesis estimate (authoritative for the current score):\n"
+        f"{current_synthesis_estimate_text}\n"
         "End Dynamic Context."
     )
     return PromptBundle(
