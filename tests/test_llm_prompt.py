@@ -480,7 +480,9 @@ def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability
     assert "supported_voice_types" in prompt
     assert "supported_gender_presentations" in prompt
     assert "supported_range" in prompt
-    assert "lowest numeric `selection_priority`" in prompt
+    assert "best fits `tessitura_low_note` through `tessitura_high_note`" in prompt
+    assert "takes precedence over `selection_priority`" in prompt
+    assert "lowest numeric `selection_priority` as the final tie-break" in prompt
     assert "Do not infer coverage" in prompt
     assert "confirmed_voicebank_override=true" in prompt
     assert "including a clear acceptance of the assistant's immediately preceding offer" in prompt

@@ -317,11 +317,31 @@ def _summarize_score(
         lyric_samples: Dict[str, List[str]] = {}
         lyric_names: Dict[str, set[str]] = {}
         note_count = 0
+        weighted_pitches: List[tuple[float, float, str]] = []
 
         for element in part.recurse().notes:
             if element.isRest:
                 continue
             note_count += 1
+            try:
+                duration = float(element.duration.quarterLength)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration > 0:
+                pitches = (
+                    element.pitches
+                    if isinstance(element, chord.Chord)
+                    else [element.pitch]
+                )
+                for item in pitches:
+                    if item is None:
+                        continue
+                    try:
+                        weighted_pitches.append(
+                            (float(item.midi), duration, str(item.nameWithOctave))
+                        )
+                    except (TypeError, ValueError):
+                        continue
             for lyric in element.lyrics:
                 text = (lyric.text or "").strip()
                 if not text:
@@ -351,6 +371,7 @@ def _summarize_score(
                 "is_derived_part": _is_derived_part(part),
                 "has_lyrics": bool(lyric_numbers),
                 "note_count": note_count,
+                "pitch_range": _summarize_weighted_pitch_range(weighted_pitches),
                 "lyric_verses": [
                     {
                         "verse_number": verse_number,
@@ -372,6 +393,50 @@ def _summarize_score(
     summary["parts"] = parts_summary
     summary["available_verses"] = sorted(available_verses, key=_lyric_sort_key)
     return summary
+
+
+def _summarize_weighted_pitch_range(
+    weighted_pitches: List[tuple[float, float, str]],
+) -> Optional[Dict[str, Any]]:
+    """Return absolute range and duration-weighted tessitura from collected notes.
+
+    The P10/P50/P90 values describe where the part spends most of its notated
+    duration, so a short outlying note does not dominate voice selection.
+    """
+    if not weighted_pitches:
+        return None
+
+    weighted_pitches.sort(key=lambda item: item[0])
+    total_duration = sum(duration for _, duration, _ in weighted_pitches)
+
+    def weighted_percentile(percentile: float) -> tuple[float, str]:
+        threshold = total_duration * percentile
+        cumulative = 0.0
+        for midi, duration, note_name in weighted_pitches:
+            cumulative += duration
+            if cumulative >= threshold:
+                return midi, note_name
+        midi, _, note_name = weighted_pitches[-1]
+        return midi, note_name
+
+    lowest_midi, _, lowest_note = weighted_pitches[0]
+    highest_midi, _, highest_note = weighted_pitches[-1]
+    tessitura_low_midi, tessitura_low_note = weighted_percentile(0.10)
+    tessitura_center_midi, tessitura_center_note = weighted_percentile(0.50)
+    tessitura_high_midi, tessitura_high_note = weighted_percentile(0.90)
+    return {
+        "lowest_midi": lowest_midi,
+        "highest_midi": highest_midi,
+        "lowest_note": lowest_note,
+        "highest_note": highest_note,
+        "tessitura_low_midi": tessitura_low_midi,
+        "tessitura_center_midi": tessitura_center_midi,
+        "tessitura_high_midi": tessitura_high_midi,
+        "tessitura_low_note": tessitura_low_note,
+        "tessitura_center_note": tessitura_center_note,
+        "tessitura_high_note": tessitura_high_note,
+        "method": "duration_weighted_p10_p50_p90_quarter_length",
+    }
 
 
 def _is_derived_part(part: stream.Part) -> bool:

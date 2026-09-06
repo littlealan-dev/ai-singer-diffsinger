@@ -66,6 +66,9 @@ def test_parse_score_schema_describes_per_part_lyric_verse_samples() -> None:
     assert verse_schema["required"] == ["verse_number", "sample"]
     assert verse_schema["properties"]["sample"]["maxItems"] == 20
     assert "First 20" in verse_schema["properties"]["sample"]["description"]
+    pitch_range_schema = part_schema["properties"]["pitch_range"]
+    assert pitch_range_schema["type"] == ["object", "null"]
+    assert "duration-weighted P10/P50/P90 tessitura" in pitch_range_schema["description"]
 
 
 def test_solfege_tools_expose_add_and_modify_contracts() -> None:

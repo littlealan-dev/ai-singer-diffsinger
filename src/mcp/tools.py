@@ -151,6 +151,40 @@ _SCORE_SUMMARY_PART_SCHEMA: Dict[str, Any] = {
         "part_name": {"type": ["string", "null"], "description": "MusicXML part name."},
         "has_lyrics": {"type": "boolean", "description": "Whether the part has lyric text."},
         "note_count": {"type": "integer", "description": "Count of non-rest notes."},
+        "pitch_range": {
+            "type": ["object", "null"],
+            "description": (
+                "Absolute pitch range plus duration-weighted P10/P50/P90 tessitura. "
+                "Null when the part has no pitched sounding notes."
+            ),
+            "properties": {
+                "lowest_midi": {"type": "number"},
+                "highest_midi": {"type": "number"},
+                "lowest_note": {"type": "string"},
+                "highest_note": {"type": "string"},
+                "tessitura_low_midi": {"type": "number"},
+                "tessitura_center_midi": {"type": "number"},
+                "tessitura_high_midi": {"type": "number"},
+                "tessitura_low_note": {"type": "string"},
+                "tessitura_center_note": {"type": "string"},
+                "tessitura_high_note": {"type": "string"},
+                "method": {"type": "string"},
+            },
+            "required": [
+                "lowest_midi",
+                "highest_midi",
+                "lowest_note",
+                "highest_note",
+                "tessitura_low_midi",
+                "tessitura_center_midi",
+                "tessitura_high_midi",
+                "tessitura_low_note",
+                "tessitura_center_note",
+                "tessitura_high_note",
+                "method",
+            ],
+            "additionalProperties": False,
+        },
         "lyric_verses": {
             "type": "array",
             "description": "Available lyric verses and their bounded initial samples.",
@@ -169,6 +203,7 @@ _SCORE_SUMMARY_PART_SCHEMA: Dict[str, Any] = {
         "part_name",
         "has_lyrics",
         "note_count",
+        "pitch_range",
         "lyric_verses",
         "lyric_selections",
     ],

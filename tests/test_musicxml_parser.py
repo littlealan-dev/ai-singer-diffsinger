@@ -30,6 +30,41 @@ TEST_SOLFEGE_MXL = (
 
 
 class MusicXmlParserTests(unittest.TestCase):
+    def test_summary_includes_duration_weighted_part_pitch_range(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Part 1</part-name></score-part></part-list>
+  <part id="P1"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    <note><pitch><step>E</step><octave>4</octave></pitch><duration>6</duration><type>whole</type><dot/></note>
+    <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+  </measure></part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "weighted-range.xml"
+            path.write_text(xml, encoding="utf-8")
+            _, summary = parse_musicxml_with_summary(path)
+
+        pitch_range = summary["parts"][0]["pitch_range"]
+        self.assertEqual(
+            pitch_range,
+            {
+                "lowest_midi": 60.0,
+                "highest_midi": 67.0,
+                "lowest_note": "C4",
+                "highest_note": "G4",
+                "tessitura_low_midi": 60.0,
+                "tessitura_center_midi": 64.0,
+                "tessitura_high_midi": 67.0,
+                "tessitura_low_note": "C4",
+                "tessitura_center_note": "E4",
+                "tessitura_high_note": "G4",
+                "method": "duration_weighted_p10_p50_p90_quarter_length",
+            },
+        )
+
     def test_summary_includes_bounded_lyric_samples_per_part_and_verse(self) -> None:
         _, summary = parse_musicxml_with_summary(TEST_SOLFEGE_MXL)
         soprano = next(part for part in summary["parts"] if part["part_id"] == "Soprano")

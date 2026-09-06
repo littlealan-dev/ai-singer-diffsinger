@@ -78,6 +78,7 @@
       "hop_size": 512,
       "use_lang_id": false,
       "profile_gender": "male",
+      "supported_range": "C3 - C5 (tenor)",
       "supported_voice_types": ["tenor"],
       "supported_gender_presentations": ["male"],
       "selection_priority": 20
@@ -158,6 +159,7 @@
       "hop_size": 512,
       "use_lang_id": false,
       "profile_gender": "male",
+      "supported_range": "C3 - C5 (tenor)",
       "supported_voice_types": ["tenor"],
       "supported_gender_presentations": ["male"],
       "selection_priority": 20
@@ -218,6 +220,7 @@
       "hop_size": 512,
       "use_lang_id": true,
       "profile_gender": "female",
+      "optimal_range": "C4 - C6 (soprano)",
       "supported_voice_types": ["soprano"],
       "supported_gender_presentations": ["female"],
       "selection_priority": 10
