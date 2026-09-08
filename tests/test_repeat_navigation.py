@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 from src.api.score import expanded_score_for_synthesis, parse_score
 from src.mcp import handlers
 from src.mcp.tools import list_tools
+from src.musicxml.parser import build_performance_measure_map
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "repeat_navigation"
 FIXTURE_FILENAMES = {
@@ -156,6 +157,32 @@ class RepeatNavigationParsingTests(unittest.TestCase):
             [entry["source_measure_index"] for entry in performance_map["expanded"]],
             [0, 1, 2, 3, 4, 2, 3, 5],
         )
+
+    def test_performance_measure_map_uses_actual_pickup_duration(self) -> None:
+        """A partial opening bar must not consume its full nominal meter."""
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome></direction-type><sound tempo="120"/></direction>
+      <note><rest/><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="1"><note><rest/><duration>4</duration><type>whole</type></note></measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "pickup.musicxml"
+            source_path.write_text(xml, encoding="utf-8")
+            entries = build_performance_measure_map(source_path)["written"]
+
+        self.assertEqual(len(entries), 2)
+        self.assertAlmostEqual(entries[0]["start_seconds"], 0.0)
+        self.assertAlmostEqual(entries[0]["end_seconds"], 1.0)
+        self.assertAlmostEqual(entries[1]["start_seconds"], 1.0)
+        self.assertAlmostEqual(entries[1]["end_seconds"], 3.0)
 
     def test_synthesize_schema_defaults_repeat_expansion_to_true(self) -> None:
         synthesize_tool = next(

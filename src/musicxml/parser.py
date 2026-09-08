@@ -211,7 +211,15 @@ def _build_measure_timing_entries(
     performance_score: stream.Score,
     source_score: stream.Score,
 ) -> List[Dict[str, Any]]:
-    """Build one linear timing entry per measure from the first score part."""
+    """Build one linear timing entry per measure from the canonical score part.
+
+    The OSMD cursor currently advances through the canonical (first) part's
+    measures, so retain that source for its written-measure index.  Crucially,
+    use music21's existing measure-level seconds map rather than rebuilding a
+    clock from ``barDuration``.  A pickup can be written in 4/4 while containing
+    only two beats; ``barDuration`` is still four, whereas the seconds map
+    reports the two beats that playback actually consumes.
+    """
     if not source_score.parts or not performance_score.parts:
         return []
 
@@ -227,10 +235,9 @@ def _build_measure_timing_entries(
         (measure.number, measure.numberSuffix): index
         for index, measure in enumerate(source_measures)
     }
-    tempo_events = _extract_tempos(performance_score)
+    seconds_by_measure_id = _measure_seconds_by_id(performance_score.parts[0])
     passed_counts: Dict[int, int] = {}
     entries: List[Dict[str, Any]] = []
-    cursor_beats = 0.0
 
     for played_index, measure in enumerate(performance_measures):
         origin = getattr(getattr(measure, "derivation", None), "origin", None)
@@ -246,9 +253,15 @@ def _build_measure_timing_entries(
             # unavailable.
             source_index = min(played_index, len(source_measures) - 1)
 
-        duration_beats = _measure_duration_beats(measure)
-        start_seconds = _seconds_at_beat(cursor_beats, tempo_events)
-        end_seconds = _seconds_at_beat(cursor_beats + duration_beats, tempo_events)
+        seconds = seconds_by_measure_id.get(id(measure))
+        if seconds is None:
+            # A missing measure entry is unusual, but do not make a valid score
+            # unavailable solely because its visual playback map is incomplete.
+            # The next known entry still gives us a monotonic cursor position.
+            start_seconds = entries[-1]["end_seconds"] if entries else 0.0
+            end_seconds = start_seconds
+        else:
+            start_seconds, end_seconds = seconds
         pass_index = passed_counts.get(source_index, 0)
         passed_counts[source_index] = pass_index + 1
         entries.append(
@@ -261,38 +274,28 @@ def _build_measure_timing_entries(
                 "end_seconds": end_seconds,
             }
         )
-        cursor_beats += duration_beats
-
     return entries
 
 
-def _measure_duration_beats(measure: stream.Measure) -> float:
-    """Return a stable linear duration, including empty but timed measures."""
-    try:
-        duration = float(measure.barDuration.quarterLength)
-    except (AttributeError, TypeError, ValueError):
-        duration = float(measure.duration.quarterLength)
-    return max(0.0, duration)
+def _measure_seconds_by_id(part: stream.Part) -> Dict[int, tuple[float, float]]:
+    """Return start/end seconds for measures already timed by music21.
 
-
-def _seconds_at_beat(beat: float, tempo_events: Sequence[TempoEvent]) -> float:
-    """Match score_duration_seconds' default-tempo behaviour in beat space."""
-    target = max(0.0, float(beat))
-    current_beat = 0.0
-    current_bpm = 120.0
-    total_seconds = 0.0
-    for event in tempo_events:
-        event_beat = max(0.0, float(event.offset_beats))
-        if event_beat > current_beat:
-            segment_end = min(event_beat, target)
-            total_seconds += (segment_end - current_beat) * (60.0 / current_bpm)
-            current_beat = segment_end
-        if current_beat >= target:
-            return total_seconds
-        current_bpm = float(event.bpm)
-    if current_beat < target:
-        total_seconds += (target - current_beat) * (60.0 / current_bpm)
-    return total_seconds
+    ``Part.secondsMap`` is music21's authoritative timing result and contains
+    entries for measures as well as their child events.  We retain only measure
+    rows, so constructing the player map does not add its own note-event walk.
+    """
+    result: Dict[int, tuple[float, float]] = {}
+    for entry in part.secondsMap:
+        measure = entry.get("element")
+        if not isinstance(measure, stream.Measure):
+            continue
+        try:
+            start_seconds = max(0.0, float(entry["offsetSeconds"]))
+            duration_seconds = max(0.0, float(entry["durationSeconds"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        result[id(measure)] = (start_seconds, start_seconds + duration_seconds)
+    return result
 
 
 def _parse_score(
@@ -457,11 +460,16 @@ def _summarize_score(
             except (TypeError, ValueError):
                 duration = 0.0
             if duration > 0:
-                pitches = (
-                    element.pitches
-                    if isinstance(element, chord.Chord)
-                    else [element.pitch]
-                )
+                # ``note.Unpitched`` represents percussion notation. It has
+                # neither a scalar ``pitch`` nor a meaningful pitched range,
+                # so retain it in the parsed score but exclude it from the
+                # vocal tessitura metadata.
+                if isinstance(element, chord.Chord):
+                    pitches = element.pitches
+                elif isinstance(element, note.Note):
+                    pitches = [element.pitch]
+                else:
+                    pitches = ()
                 for item in pitches:
                     if item is None:
                         continue

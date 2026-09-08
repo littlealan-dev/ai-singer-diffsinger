@@ -65,6 +65,24 @@ class MusicXmlParserTests(unittest.TestCase):
             },
         )
 
+    def test_summary_allows_unpitched_percussion_without_pitch_range(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Drumset</part-name></score-part></part-list>
+  <part id="P1"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes>
+    <note><unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched><duration>1</duration><type>quarter</type></note>
+  </measure></part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "unpitched-percussion.xml"
+            path.write_text(xml, encoding="utf-8")
+            _, summary = parse_musicxml_with_summary(path)
+
+        self.assertEqual(summary["parts"][0]["note_count"], 1)
+        self.assertIsNone(summary["parts"][0]["pitch_range"])
+
     def test_summary_includes_bounded_lyric_samples_per_part_and_verse(self) -> None:
         _, summary = parse_musicxml_with_summary(TEST_SOLFEGE_MXL)
         soprano = next(part for part in summary["parts"] if part["part_id"] == "Soprano")

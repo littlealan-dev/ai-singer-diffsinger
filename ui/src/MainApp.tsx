@@ -589,7 +589,11 @@ const findActivePerformanceMeasure = (
   return entry ?? entries[entries.length - 1] ?? null;
 };
 
-const scrollScoreMeasureIntoView = (container: HTMLElement, target: HTMLElement) => {
+const scrollScoreMeasureIntoView = (
+  container: HTMLElement,
+  target: HTMLElement,
+  layout: ScorePreviewLayout,
+) => {
   const containerRect = container.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
   const margin = 24;
@@ -599,12 +603,22 @@ const scrollScoreMeasureIntoView = (container: HTMLElement, target: HTMLElement)
   if (targetRect.left < containerRect.left + margin) {
     nextLeft += targetRect.left - containerRect.left - margin;
   } else if (targetRect.right > containerRect.right - margin) {
-    nextLeft += targetRect.right - containerRect.right + margin;
+    // Align the arriving measure to the reading origin instead of merely
+    // exposing its right edge. This keeps following measures in view for both
+    // page and horizontal reading, avoiding a scroll on nearly every measure.
+    nextLeft += targetRect.left - containerRect.left - margin;
   }
-  if (targetRect.top < containerRect.top + margin) {
-    nextTop += targetRect.top - containerRect.top - margin;
-  } else if (targetRect.bottom > containerRect.bottom - margin) {
-    nextTop += targetRect.bottom - containerRect.bottom + margin;
+  // Horizontal engraving is one left-to-right score. Following its cursor
+  // vertically makes the preview bounce even though the playback position has
+  // not moved into a new vertical reading region.
+  if (layout === "page") {
+    if (targetRect.top < containerRect.top + margin) {
+      nextTop += targetRect.top - containerRect.top - margin;
+    } else if (targetRect.bottom > containerRect.bottom - margin) {
+      // As above, place the newly followed system at the top of the readable
+      // viewport rather than only making its bottom edge barely visible.
+      nextTop += targetRect.top - containerRect.top - margin;
+    }
   }
 
   if (nextLeft !== container.scrollLeft || nextTop !== container.scrollTop) {
@@ -2606,7 +2620,7 @@ export default function MainApp() {
       window.requestAnimationFrame(() => {
         const canvas = scoreCanvasRef.current;
         if (canvas?.isConnected && cursorElement.isConnected) {
-          scrollScoreMeasureIntoView(canvas, cursorElement);
+          scrollScoreMeasureIntoView(canvas, cursorElement, scorePreviewLayoutRef.current);
         }
       });
     } catch {
