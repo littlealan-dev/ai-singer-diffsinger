@@ -162,6 +162,10 @@ type MultiTrackAudioTrack = {
   verseNumber?: string | number | null;
   durationSeconds?: number | null;
   jobId?: string;
+  // The completed job whose asset is currently decoded by the player. This is
+  // distinct from jobId so a historical UI state cannot pair a newer label/job
+  // with an older rendition's audio source.
+  sourceJobId?: string;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -899,24 +903,36 @@ const ScorePlayerEngine = ({
     [midiTracks, instrumentalProgramSignature]
   );
   // useAudioTracks reloads its complete declarative source list when a new
-  // vocal arrives. Retain the already-decoded ClipTrack object for every
-  // unchanged source so WaveformPlaylistProvider recognizes the new vocal as
-  // an incremental append and uses PlaylistEngine.addTrack(), rather than
-  // rebuilding the running playout engine.
+  // vocal arrives. Retain decoded ClipTrack objects only for unchanged source
+  // URLs so WaveformPlaylistProvider can incrementally append a new vocal.
+  // Do not cache the hook's previous result under a changed URL: between a
+  // config change and its decode completing, useAudioTracks still exposes the
+  // old ClipTrack at the same array index.
   const stableAudioTracksRef = useRef(new Map<string, (typeof audioTracks)[number]>());
+  const previousVocalSourceKeysRef = useRef(new Map<string, string>());
   const stableAudioTracks = useMemo(() => {
     const next = new Map<string, (typeof audioTracks)[number]>();
+    const nextSourceKeys = new Map<string, string>();
     const normalized = audioTracks.map((track, index) => {
       const sourceKey = vocalSources[index]?.key;
       if (!sourceKey) return track;
+      const trackKey = vocalTracks[index]?.key ?? sourceKey;
+      const sourceChanged = previousVocalSourceKeysRef.current.get(trackKey) !== sourceKey;
       const existing = stableAudioTracksRef.current.get(sourceKey);
       const resolved = existing ?? track;
-      next.set(sourceKey, resolved);
+      // While a changed source is loading, ``track`` still describes the old
+      // audio. Leave it uncached. On the render after decoding finishes,
+      // audioLoading is false and the hook's track is the newly decoded source.
+      if (!sourceChanged && !audioLoading) {
+        next.set(sourceKey, resolved);
+      }
+      nextSourceKeys.set(trackKey, sourceKey);
       return resolved;
     });
     stableAudioTracksRef.current = next;
+    previousVocalSourceKeysRef.current = nextSourceKeys;
     return normalized;
-  }, [audioTracks, vocalSources]);
+  }, [audioLoading, audioTracks, vocalSources, vocalTracks]);
   const tracks = useMemo(
     () => [...configuredMidiTracks, ...stableAudioTracks],
     [configuredMidiTracks, stableAudioTracks]
@@ -2940,11 +2956,21 @@ export default function MainApp() {
           typeof durationSeconds === "number" &&
           Number.isFinite(durationSeconds) &&
           durationSeconds > 0;
-        const nextAudioUrl = existing && !replaceExistingUrl ? existing.audioUrl : audioUrl;
+        // A track represents the latest completed take for one score part. A
+        // different source job is therefore a new take (for example, solfege
+        // then lyrics) and its source, label, and job metadata must change
+        // together.
+        // Repeated progress polls for the same job can carry freshly signed
+        // URLs for the same asset; retain the already decoded source in that
+        // case until an on-demand expiry refresh explicitly replaces it.
+        const isNewTake = Boolean(jobId && jobId !== existing?.sourceJobId);
+        const shouldReplaceAudioUrl = replaceExistingUrl || isNewTake;
+        const nextAudioUrl = existing && !shouldReplaceAudioUrl ? existing.audioUrl : audioUrl;
         const nextTrack: MultiTrackAudioTrack = {
           ...identity,
           audioUrl: nextAudioUrl,
           jobId: jobId ?? existing?.jobId,
+          sourceJobId: shouldReplaceAudioUrl ? (jobId ?? existing?.sourceJobId) : existing?.sourceJobId,
           durationSeconds: hasBackendDuration
             ? durationSeconds
             : existing?.audioUrl === nextAudioUrl
@@ -2958,6 +2984,7 @@ export default function MainApp() {
           if (
             existing.audioUrl === nextTrack.audioUrl &&
             existing.jobId === nextTrack.jobId &&
+            existing.sourceJobId === nextTrack.sourceJobId &&
             existing.durationSeconds === nextTrack.durationSeconds &&
             existing.label === nextTrack.label &&
             existing.partId === nextTrack.partId &&
@@ -4623,7 +4650,9 @@ export default function MainApp() {
         assistantMessage.audioUrl = response.audio_url;
         assistantMessage.audioTrack = response.audio_track;
         setAudioUrl(response.audio_url);
-        addOrReplaceMultiTrackAudio(response.audio_url, response.audio_track);
+        // A synchronous audio response is already a completed new take, so it
+        // replaces any previous rendition of the same score part.
+        addOrReplaceMultiTrackAudio(response.audio_url, response.audio_track, undefined, undefined, true);
         if (pendingSelection) {
           setPendingSelection(false);
         }
