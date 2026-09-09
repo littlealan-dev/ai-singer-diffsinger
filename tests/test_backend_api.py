@@ -889,6 +889,9 @@ def test_upload_resets_previous_score_specific_state(client):
     assert first_upload.status_code == 200
 
     asyncio.run(app.state.sessions.append_history(session_id, "user", "old message"))
+    original_history = asyncio.run(
+        app.state.sessions.get_snapshot(session_id, "test-user")
+    )["history"]
     asyncio.run(
         app.state.sessions.append_preprocess_plan(session_id, {"attempt": 1, "song": "old"})
     )
@@ -921,7 +924,7 @@ def test_upload_resets_previous_score_specific_state(client):
     assert second_upload.status_code == 200
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    assert snapshot["history"] == [{"role": "user", "content": "old message"}]
+    assert snapshot["history"] == original_history
     assert snapshot["score_context_updated"] is True
     assert snapshot["preprocess_plan_history"] == []
     assert snapshot["preprocess_attempt_history"] == []
@@ -1020,6 +1023,9 @@ def test_upload_rejects_invalid_extension_without_resetting_session(client):
     assert first_upload.status_code == 200
 
     asyncio.run(app.state.sessions.append_history(session_id, "user", "keep this"))
+    original_history = asyncio.run(
+        app.state.sessions.get_snapshot(session_id, "test-user")
+    )["history"]
     app.state.job_store.create_job(
         job_id="existing-job",
         user_id="test-user",
@@ -1035,7 +1041,7 @@ def test_upload_rejects_invalid_extension_without_resetting_session(client):
     assert response.json()["detail"] == "Only .xml or .mxl files are supported."
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    assert snapshot["history"] == [{"role": "user", "content": "keep this"}]
+    assert snapshot["history"] == original_history
     assert snapshot["current_score"]["version"] == 1
     assert snapshot["files"]["musicxml_name"] == "score.xml"
 

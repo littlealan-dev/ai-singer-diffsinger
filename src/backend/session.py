@@ -34,6 +34,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _new_history_entry(role: str, content: str) -> Dict[str, str]:
+    # Distinct turns must remain distinct under Firestore ArrayUnion equality.
+    return {
+        "id": uuid.uuid4().hex,
+        "role": role,
+        "content": content,
+        "timestamp": _utcnow().isoformat(),
+    }
+
+
 @dataclass
 class SessionState:
     """In-memory representation of a user session."""
@@ -175,7 +185,7 @@ class SessionStore:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            state.history.append({"role": role, "content": content})
+            state.history.append(_new_history_entry(role, content))
             state.last_active_at = _utcnow()
 
     async def set_file(self, session_id: str, key: str, path: Path) -> None:
@@ -598,7 +608,7 @@ class FirestoreSessionStore:
     async def append_history(self, session_id: str, role: str, content: str) -> None:
         """Append a chat entry to Firestore history."""
         async with self._lock:
-            entry = {"role": role, "content": content}
+            entry = _new_history_entry(role, content)
             self._doc_ref(session_id).update(
                 {
                     "history": firestore.ArrayUnion([entry]),

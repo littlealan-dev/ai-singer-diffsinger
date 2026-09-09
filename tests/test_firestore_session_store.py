@@ -1,4 +1,7 @@
 import asyncio
+from datetime import datetime, timezone
+
+import pytest
 
 import src.backend.session as session_module
 
@@ -42,7 +45,9 @@ class _FakeDocRef:
         for key, value in fields.items():
             if isinstance(value, _FakeArrayUnion):
                 doc.setdefault(key, [])
-                doc[key].extend(value.values)
+                for entry in value.values:
+                    if entry not in doc[key]:
+                        doc[key].append(entry)
                 continue
             if isinstance(value, _FakeServerTimestamp):
                 doc[key] = "server-ts"
@@ -103,3 +108,71 @@ def test_firestore_session_store_roundtrip(monkeypatch, tmp_path):
     asyncio.run(sessions.acknowledge_score_context_updated(session.id))
     acknowledged_snapshot = asyncio.run(sessions.get_snapshot(session.id, user_id="user-1"))
     assert acknowledged_snapshot["score_context_updated"] is False
+
+
+@pytest.mark.parametrize("use_firestore", [False, True])
+def test_history_preserves_repeated_turns_with_ids_and_utc_timestamps(
+    monkeypatch, tmp_path, use_firestore
+):
+    store = {}
+    monkeypatch.setattr(session_module, "get_firestore_client", lambda: _FakeClient(store))
+    monkeypatch.setattr(session_module.firestore, "ArrayUnion", _FakeArrayUnion)
+    monkeypatch.setattr(session_module.firestore, "SERVER_TIMESTAMP", _FakeServerTimestamp())
+    now = datetime(2026, 9, 9, 6, 0, 0, 123456, tzinfo=timezone.utc)
+    monkeypatch.setattr(session_module, "_utcnow", lambda: now)
+    store_type = (
+        session_module.FirestoreSessionStore if use_firestore else session_module.SessionStore
+    )
+    sessions = store_type(
+        project_root=tmp_path,
+        sessions_dir=tmp_path / "sessions",
+        ttl_seconds=3600,
+        max_sessions=100,
+    )
+    turns = [
+        ("assistant", "Confirm this take?"),
+        ("user", "Yes"),
+        ("assistant", "Confirm this take?"),
+        ("user", "Yes"),
+    ]
+
+    async def run():
+        session = await sessions.create_session(user_id="user-1")
+        for role, content in turns:
+            await sessions.append_history(session.id, role, content)
+        return await sessions.get_snapshot(session.id, "user-1")
+
+    history = asyncio.run(run())["history"]
+    assert [(entry["role"], entry["content"]) for entry in history] == turns
+    assert len({entry["id"] for entry in history}) == len(turns)
+    assert all(datetime.fromisoformat(entry["timestamp"]) == now for entry in history)
+    assert all(entry["timestamp"].endswith("+00:00") for entry in history)
+
+
+def test_firestore_history_keeps_legacy_entries_when_same_text_is_submitted(
+    monkeypatch, tmp_path
+):
+    store = {}
+    monkeypatch.setattr(session_module, "get_firestore_client", lambda: _FakeClient(store))
+    monkeypatch.setattr(session_module.firestore, "ArrayUnion", _FakeArrayUnion)
+    monkeypatch.setattr(session_module.firestore, "SERVER_TIMESTAMP", _FakeServerTimestamp())
+    sessions = session_module.FirestoreSessionStore(
+        project_root=tmp_path,
+        sessions_dir=tmp_path / "sessions",
+        ttl_seconds=3600,
+        max_sessions=100,
+    )
+    legacy_entry = {"role": "user", "content": "Yes"}
+
+    async def run():
+        session = await sessions.create_session(user_id="user-1")
+        store[session.id]["history"] = [legacy_entry.copy()]
+        await sessions.append_history(session.id, "user", "Yes")
+        return await sessions.get_snapshot(session.id, "user-1")
+
+    history = asyncio.run(run())["history"]
+    assert len(history) == 2
+    assert history[0] == legacy_entry
+    assert history[1]["content"] == "Yes"
+    assert history[1]["id"]
+    assert datetime.fromisoformat(history[1]["timestamp"]).tzinfo is not None
