@@ -7,6 +7,7 @@ from typing import Any
 
 from google.cloud import firestore
 
+from src.backend.billing_plans import get_free_plan
 from src.backend.billing_refresh import compute_next_monthly_refresh
 from src.backend.billing_types import BillingState, PlanKey
 from src.backend.firebase_app import get_firestore_client
@@ -128,18 +129,75 @@ def revert_subscription_to_free(
     *,
     now: datetime,
     preserve_anchor: datetime | None,
+    stripe_customer_id: str | None = None,
+    reason: str = "subscription_ended",
+    preserve_checkout_session: bool = False,
 ) -> None:
-    anchor = preserve_anchor or now
-    payload = free_billing_payload(now=now, anchor=anchor)
-    payload.update(
-        {
-            "stripeSubscriptionId": None,
-            "stripeCheckoutSessionId": None,
-            "currentPeriodStart": None,
-            "currentPeriodEnd": None,
-        }
-    )
-    get_firestore_client().collection("users").document(uid).set({"billing": payload}, merge=True)
+    db = get_firestore_client()
+    user_ref = db.collection("users").document(uid)
+    transition_time = _to_utc(now)
+
+    @firestore.transactional
+    def _transaction(transaction):
+        snapshot = user_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return
+        data = snapshot.to_dict() or {}
+        billing = data.get("billing") if isinstance(data.get("billing"), dict) else {}
+        previous_plan_key = str(billing.get("activePlanKey") or "free")
+        already_free = previous_plan_key == "free"
+        anchor_source = (
+            billing.get("creditRefreshAnchor")
+            if already_free
+            else preserve_anchor or billing.get("creditRefreshAnchor")
+        )
+        anchor = _to_utc(anchor_source or transition_time)
+        payload = free_billing_payload(now=transition_time, anchor=anchor)
+        previous_refresh_at = billing.get("lastCreditRefreshAt")
+        if previous_refresh_at is None:
+            payload.pop("lastCreditRefreshAt", None)
+        else:
+            payload["lastCreditRefreshAt"] = previous_refresh_at
+        payload.update(
+            {
+                "stripeCustomerId": billing.get("stripeCustomerId") or stripe_customer_id,
+                "stripeSubscriptionId": None,
+                "stripeCheckoutSessionId": billing.get("stripeCheckoutSessionId")
+                if preserve_checkout_session
+                else None,
+                "currentPeriodStart": None,
+                "currentPeriodEnd": None,
+                "freeTierActivatedAt": billing.get("freeTierActivatedAt") or transition_time,
+                "planChangedAt": billing.get("planChangedAt") if already_free else transition_time,
+                "lastPlanTransition": billing.get("lastPlanTransition")
+                if already_free and billing.get("lastPlanTransition")
+                else {
+                    "fromPlanKey": previous_plan_key,
+                    "toPlanKey": "free",
+                    "effectiveAt": transition_time,
+                    "reason": reason,
+                },
+            }
+        )
+        transaction.set(
+            user_ref,
+            {
+                "billing": payload,
+                "credits": {
+                    # Paid-plan credits remain spendable until the next scheduled reset.
+                    "monthlyAllowance": get_free_plan().monthly_allowance,
+                },
+            },
+            merge=True,
+        )
+
+    _transaction(db.transaction())
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def upsert_stripe_customer_id(uid: str, stripe_customer_id: str) -> None:

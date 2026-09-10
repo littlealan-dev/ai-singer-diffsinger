@@ -376,6 +376,7 @@ def test_webhook_subscription_deleted_route_reverts_to_free_and_preserves_anchor
                         "object": "subscription",
                         "customer": "cus_backend_123",
                         "status": "canceled",
+                        "current_period_end": int(next_refresh.timestamp()),
                         "metadata": {"firebaseUserId": "stripe-test-user"},
                     }
                 },
@@ -387,4 +388,8 @@ def test_webhook_subscription_deleted_route_reverts_to_free_and_preserves_anchor
         assert billing["activePlanKey"] == "free"
         assert billing["billingInterval"] == "none"
         assert billing["stripeSubscriptionId"] is None
-        assert billing["creditRefreshAnchor"] == anchor
+        assert billing["creditRefreshAnchor"] == next_refresh
+        assert billing["lastCreditRefreshAt"] == anchor
+        assert user["credits"]["balance"] == 30
+        assert user["credits"]["reserved"] == 0
+        assert user["credits"]["monthlyAllowance"] == 8

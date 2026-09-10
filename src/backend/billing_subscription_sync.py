@@ -36,7 +36,7 @@ def sync_current_subscription(
 
     status = _get_string(subscription, "status")
     if status in FREE_STATUSES:
-        _revert_to_free(uid, billing)
+        _revert_to_free(uid, billing, subscription=subscription)
         return {"synced": True, "status": status, "activePlanKey": "free"}
     if status not in SYNCABLE_PAID_STATUSES:
         raise BillingHttpError(409, "Stripe subscription status is not supported.")
@@ -102,9 +102,25 @@ def _subscription_sort_key(subscription: dict[str, Any]) -> tuple[float, str]:
     return float(timestamp), str(subscription.get("id") or "")
 
 
-def _revert_to_free(uid: str, billing: dict[str, Any]) -> None:
-    anchor = _timestamp_to_datetime(billing.get("creditRefreshAnchor")) or datetime.now(timezone.utc)
-    revert_subscription_to_free(uid, now=datetime.now(timezone.utc), preserve_anchor=anchor)
+def _revert_to_free(
+    uid: str,
+    billing: dict[str, Any],
+    *,
+    subscription: dict[str, Any] | None = None,
+) -> None:
+    period_end = (
+        _subscription_period_datetime(subscription, "current_period_end")
+        if subscription is not None
+        else None
+    )
+    anchor = period_end or _timestamp_to_datetime(billing.get("creditRefreshAnchor"))
+    revert_subscription_to_free(
+        uid,
+        now=datetime.now(timezone.utc),
+        preserve_anchor=anchor,
+        stripe_customer_id=_get_string(subscription or {}, "customer"),
+        reason="subscription_sync_terminal",
+    )
 
 
 def _plan_key_from_subscription(subscription: dict[str, Any], config: BillingConfig) -> str | None:

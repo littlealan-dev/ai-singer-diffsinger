@@ -12,7 +12,7 @@ from src.backend.billing_config import get_billing_config, get_stripe_client
 from src.backend.billing_migration import ensure_billing_state_for_login
 from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh, run_credit_refresh
-from src.backend.billing_store import get_billing_state
+from src.backend.billing_store import get_billing_state, revert_subscription_to_free
 from src.backend.billing_subscription_sync import sync_current_subscription
 from src.backend.billing_topup import (
     cancel_topup_checkout_session,
@@ -1006,6 +1006,12 @@ def test_subscription_sync_reverts_to_free_after_immediate_portal_cancel():
                 "family": "solo",
                 "billingInterval": "month",
                 "creditRefreshAnchor": anchor,
+                "lastCreditRefreshAt": anchor,
+            },
+            "credits": {
+                "balance": 23,
+                "reserved": 2,
+                "monthlyAllowance": 30,
             }
         },
         merge=True,
@@ -1027,6 +1033,10 @@ def test_subscription_sync_reverts_to_free_after_immediate_portal_cancel():
     assert user["billing"]["activePlanKey"] == "free"
     assert user["billing"]["stripeSubscriptionId"] is None
     assert user["billing"]["creditRefreshAnchor"] == anchor
+    assert user["billing"]["lastCreditRefreshAt"] == anchor
+    assert user["credits"]["balance"] == 23
+    assert user["credits"]["reserved"] == 2
+    assert user["credits"]["monthlyAllowance"] == 8
 
 
 @pytest.mark.parametrize("terminal_status", ["canceled", "incomplete_expired"])
@@ -1046,7 +1056,13 @@ def test_subscription_updated_terminal_status_reverts_to_free(terminal_status):
                 "family": "solo",
                 "billingInterval": "month",
                 "creditRefreshAnchor": anchor,
+                "lastCreditRefreshAt": anchor,
                 "nextCreditRefreshAt": datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            },
+            "credits": {
+                "balance": 23,
+                "reserved": 2,
+                "monthlyAllowance": 30,
             }
         },
         merge=True,
@@ -1079,6 +1095,67 @@ def test_subscription_updated_terminal_status_reverts_to_free(terminal_status):
     assert billing["stripeCheckoutSessionId"] == "cs_terminal"
     assert billing["creditRefreshAnchor"] == anchor
     assert billing["nextCreditRefreshAt"] > anchor
+    assert billing["lastCreditRefreshAt"] == anchor
+    assert billing["lastPlanTransition"]["fromPlanKey"] == "solo_monthly"
+    assert billing["lastPlanTransition"]["toPlanKey"] == "free"
+    assert user["credits"]["balance"] == 23
+    assert user["credits"]["reserved"] == 2
+    assert user["credits"]["monthlyAllowance"] == 8
+
+
+def test_free_transition_preserves_balance_until_next_monthly_refresh():
+    uid = "user-downgrade-carryover"
+    get_or_create_credits(uid, "downgrade-carryover@example.com")
+    db = get_firestore_client()
+    paid_refresh_at = datetime(2026, 7, 23, 16, 25, 17, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 23, 16, 25, 17, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "choir_monthly",
+                "family": "choir",
+                "billingInterval": "month",
+                "stripeSubscriptionId": "sub_carryover",
+                "creditRefreshAnchor": paid_refresh_at,
+                "lastCreditRefreshAt": paid_refresh_at,
+                "nextCreditRefreshAt": period_end,
+            },
+            "credits": {
+                "balance": 115,
+                "reserved": 0,
+                "monthlyAllowance": 120,
+            },
+        },
+        merge=True,
+    )
+
+    revert_subscription_to_free(
+        uid,
+        now=period_end,
+        preserve_anchor=period_end,
+        stripe_customer_id="cus_carryover",
+    )
+
+    downgraded = db.collection("users").document(uid).get().to_dict() or {}
+    assert downgraded["billing"]["creditRefreshAnchor"] == period_end
+    assert downgraded["billing"]["lastCreditRefreshAt"] == paid_refresh_at
+    assert downgraded["billing"]["nextCreditRefreshAt"] == datetime(
+        2026, 9, 23, 16, 25, 17, tzinfo=timezone.utc
+    )
+    assert downgraded["credits"]["balance"] == 115
+    assert downgraded["credits"]["monthlyAllowance"] == 8
+
+    outcome = apply_due_refresh(
+        uid,
+        now=datetime(2026, 9, 23, 16, 25, 18, tzinfo=timezone.utc),
+        run_id="refresh_after_downgrade",
+    )
+
+    assert outcome == "applied"
+    refreshed = db.collection("users").document(uid).get().to_dict() or {}
+    assert refreshed["credits"]["balance"] == 8
+    assert refreshed["credits"]["monthlyAllowance"] == 8
+    assert refreshed["credits"]["lastGrantType"] == "grant_free_monthly"
 
 
 def test_invoice_paid_immediately_grants_monthly_plan_and_reanchors():

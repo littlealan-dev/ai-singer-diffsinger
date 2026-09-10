@@ -13,8 +13,8 @@ from src.backend.billing_refresh import compute_next_monthly_refresh
 from src.backend.billing_store import (
     create_or_update_stripe_event_audit,
     find_user_id_by_customer_id,
-    free_billing_payload,
     mark_stripe_event_processed,
+    revert_subscription_to_free,
     stripe_event_already_processed,
     sync_paid_subscription_state,
 )
@@ -214,21 +214,15 @@ def _handle_subscription_deleted(payload: dict[str, Any]) -> None:
 
 
 def _transition_subscription_to_free(uid: str, payload: dict[str, Any]) -> None:
-    db = get_firestore_client()
-    user_ref = db.collection("users").document(uid)
-    snapshot = user_ref.get()
-    data = snapshot.to_dict() or {}
-    billing = data.get("billing") or {}
-    anchor = billing.get("creditRefreshAnchor") or datetime.now(timezone.utc)
-    free_payload = free_billing_payload(now=datetime.now(timezone.utc), anchor=_to_utc(anchor))
-    free_payload.update(
-        {
-            "stripeCustomerId": billing.get("stripeCustomerId") or _get_string(payload, "customer"),
-            "stripeSubscriptionId": None,
-            "stripeCheckoutSessionId": billing.get("stripeCheckoutSessionId"),
-        }
+    period_end = _subscription_period_datetime(payload, "current_period_end")
+    revert_subscription_to_free(
+        uid,
+        now=datetime.now(timezone.utc),
+        preserve_anchor=period_end,
+        stripe_customer_id=_get_string(payload, "customer"),
+        reason="stripe_subscription_terminal",
+        preserve_checkout_session=True,
     )
-    user_ref.set({"billing": free_payload}, merge=True)
 
 
 def _handle_dispute_event(event_type: str, payload: dict[str, Any]) -> None:
