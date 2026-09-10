@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Score playback regression</title></head>
+  <body>
+    <div id="score" style="width: 900px; position: relative"></div>
+    <script type="module">
+      import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
+      import * as playback from "../../src/scorePlayback";
+      window.scorePlaybackTest = { OpenSheetMusicDisplay, ...playback };
+    </script>
+  </body>
+</html>

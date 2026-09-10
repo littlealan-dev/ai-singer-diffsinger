@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
+import { createPerformanceMeasureLookup, positionNativeScoreCursor } from "./scorePlayback";
 import WaveSurfer from "wavesurfer.js";
 import { createToneAdapter, SoundFontCache, type ToneAdapter } from "@waveform-playlist/playout";
 import {
@@ -581,18 +582,6 @@ const loadFluidR3SoundFontCache = (): Promise<SoundFontCache> => {
   return fluidR3SoundFontCachePromise;
 };
 
-const findActivePerformanceMeasure = (
-  entries: PerformanceMeasureMapEntry[],
-  playbackSeconds: number
-): PerformanceMeasureMapEntry | null => {
-  if (!entries.length || !Number.isFinite(playbackSeconds)) return null;
-  const entry = entries.find(
-    (candidate) =>
-      playbackSeconds >= candidate.start_seconds && playbackSeconds < candidate.end_seconds
-  );
-  return entry ?? entries[entries.length - 1] ?? null;
-};
-
 const scrollScoreMeasureIntoView = (
   container: HTMLElement,
   target: HTMLElement,
@@ -721,7 +710,7 @@ const ScorePlayerEngineBridge = ({
   useEffect(() => {
     if (!isPlaying) return;
     const callbackId = "sightsinger-score-active-measure";
-    registerFrameCallback(callbackId, ({ time }) => onPlaybackPositionChange(time));
+    registerFrameCallback(callbackId, ({ visualTime }) => onPlaybackPositionChange(visualTime));
     return () => unregisterFrameCallback(callbackId);
   }, [isPlaying, onPlaybackPositionChange, registerFrameCallback, unregisterFrameCallback]);
   return null;
@@ -2474,7 +2463,9 @@ export default function MainApp() {
   const scoreRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const horizontalScoreRendererRef = useRef<HorizontalScoreRendererHandle | null>(null);
-  const activeScoreMeasureRef = useRef<string | null>(null);
+  const activeScoreMeasureRef = useRef<{ osmd: OpenSheetMusicDisplay; key: string } | null>(null);
+  const performanceMeasureLookupRef = useRef(createPerformanceMeasureLookup());
+  const scoreFollowFrameRef = useRef<number | null>(null);
   const activePerformanceMeasureRef = useRef<PerformanceMeasureMapEntry | null>(null);
   const performanceMeasureMapRef = useRef(scoreSummary?.performance_measure_map ?? null);
   performanceMeasureMapRef.current = scoreSummary?.performance_measure_map ?? null;
@@ -2607,33 +2598,26 @@ export default function MainApp() {
 
   const positionActiveScoreMeasure = useCallback((activeMeasure: PerformanceMeasureMapEntry) => {
     const activeKey = `${activeMeasure.played_measure_index}:${activeMeasure.source_measure_index}`;
-    let osmd: OpenSheetMusicDisplay | null = null;
-
-    if (scorePreviewLayoutRef.current === "horizontal") {
-      const renderer = horizontalScoreRendererRef.current;
-      if (!renderer) return;
-      renderer.ensureSourceMeasureRendered(activeMeasure.source_measure_index);
-      osmd = renderer.osmd;
-      if (!osmd) return;
-    } else {
-      osmd = osmdRef.current;
-    }
-
-    if (!osmd || activeScoreMeasureRef.current === activeKey) return;
+    const horizontal = scorePreviewLayoutRef.current === "horizontal";
+    const renderer = horizontal ? horizontalScoreRendererRef.current : null;
+    const osmd = horizontal ? renderer?.osmd : osmdRef.current;
+    if (!osmd) return;
+    if (activeScoreMeasureRef.current?.osmd === osmd && activeScoreMeasureRef.current.key === activeKey) return;
     try {
+      // Native scroll rendering normally supplies upcoming notation. Only
+      // check the fallback on a new measure (e.g. an undrawn Coda destination).
+      renderer?.ensureSourceMeasureRendered(activeMeasure.source_measure_index);
+      if (!positionNativeScoreCursor(osmd, activeMeasure.source_measure_index)) return;
       const cursor = osmd.cursor;
-      cursor.reset();
-      for (let index = 0; index < activeMeasure.source_measure_index; index += 1) {
-        cursor.nextMeasure();
-      }
-      cursor.show();
       const cursorElement = cursor.cursorElement;
       cursorElement.classList.add("score-active-measure-highlight");
       cursorElement.dataset.testid = "active-score-measure";
       cursorElement.dataset.sourceMeasureIndex = String(activeMeasure.source_measure_index);
       cursorElement.dataset.playedMeasureIndex = String(activeMeasure.played_measure_index);
-      activeScoreMeasureRef.current = activeKey;
-      window.requestAnimationFrame(() => {
+      activeScoreMeasureRef.current = { osmd, key: activeKey };
+      if (scoreFollowFrameRef.current !== null) window.cancelAnimationFrame(scoreFollowFrameRef.current);
+      scoreFollowFrameRef.current = window.requestAnimationFrame(() => {
+        scoreFollowFrameRef.current = null;
         const canvas = scoreCanvasRef.current;
         if (canvas?.isConnected && cursorElement.isConnected) {
           scrollScoreMeasureIntoView(canvas, cursorElement, scorePreviewLayoutRef.current);
@@ -2647,6 +2631,7 @@ export default function MainApp() {
 
   const handleHorizontalScoreRendererChange = useCallback(
     (renderer: HorizontalScoreRendererHandle | null) => {
+      activeScoreMeasureRef.current = null;
       horizontalScoreRendererRef.current = renderer;
       setHorizontalRendererRevision((current) => current + 1);
     },
@@ -2661,9 +2646,9 @@ export default function MainApp() {
   const handleScorePlayerPlaybackPositionChange = useCallback((playbackSeconds: number) => {
     const performanceMeasureMap = performanceMeasureMapRef.current;
     const entries = expandRepeatsRef.current
-      ? performanceMeasureMap?.expanded ?? []
-      : performanceMeasureMap?.written ?? [];
-    const activeMeasure = findActivePerformanceMeasure(entries, playbackSeconds);
+      ? performanceMeasureMap?.expanded
+      : performanceMeasureMap?.written;
+    const activeMeasure = performanceMeasureLookupRef.current(entries, playbackSeconds);
     if (!activeMeasure) return;
     activePerformanceMeasureRef.current = activeMeasure;
     positionActiveScoreMeasure(activeMeasure);
@@ -2684,6 +2669,13 @@ export default function MainApp() {
       setScorePreviewError(null);
     }
   }, [score?.data, scorePreviewLayout]);
+
+  useEffect(() => () => {
+    if (scoreFollowFrameRef.current !== null) {
+      window.cancelAnimationFrame(scoreFollowFrameRef.current);
+      scoreFollowFrameRef.current = null;
+    }
+  }, [score?.data, scorePreviewLayout, zoomLevel]);
 
   useEffect(() => {
     if (scorePreviewLayout !== "page") return;
