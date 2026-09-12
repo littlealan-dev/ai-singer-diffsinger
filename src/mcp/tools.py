@@ -1900,10 +1900,10 @@ TOOLS: List[Tool] = [
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "Set true only with the user's explicit confirmation to use this "
-                        "voicebank for this synthesis despite a different voicebank "
-                        "currently selected in the UI, including a clear acceptance of "
-                        "the assistant's immediately preceding offer. The backend then permits this "
+                        "Set true only when the user explicitly confirms the current "
+                        "billable synthesis quote and that quote names this voicebank "
+                        "despite a different voicebank currently selected in the UI. "
+                        "The backend then permits this "
                         "one synthesis to use `voicebank` after verifying that it is "
                         "available and supports the resolved language. This does not "
                         "change the UI selection or persist a new default. Omit or set "

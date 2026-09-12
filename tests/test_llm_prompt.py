@@ -166,9 +166,11 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
     assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
     assert "If any quoted choice, score, or estimate changes, present a new quote" in prompt
-    assert "When the user explicitly confirms the immediately preceding billable quote" in prompt
-    assert "call `synthesize` once with the quoted choices unchanged" in prompt
+    assert "A billable quote is the complete, authoritative summary of one synthesis take" in prompt
+    assert "authorizes every quoted choice, and only those choices" in prompt
+    assert "call `synthesize` once with the quoted parameters unchanged" in prompt
     assert "do not repeat or restate the quote" in prompt
+    assert "ask for separate confirmation of an individual quoted parameter" in prompt
     assert "call `synthesize` directly" not in prompt
     assert "proceed straight to `synthesize`" not in prompt
 
@@ -488,7 +490,7 @@ def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability
     assert "lowest numeric `selection_priority` as the final tie-break" in prompt
     assert "Do not infer coverage" in prompt
     assert "confirmed_voicebank_override=true" in prompt
-    assert "including a clear acceptance of the assistant's immediately preceding offer" in prompt
+    assert "include it in the billable quote" in prompt
     assert "does not change the UI selection" in prompt
     assert "list every language-compatible voicebank" in prompt
     assert "try one of those voices or sing in solfege" in prompt
