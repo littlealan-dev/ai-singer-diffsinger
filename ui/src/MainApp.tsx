@@ -532,7 +532,6 @@ function RecoverableAudioPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
   const failedUrlRef = useRef<string | null>(null);
-  const pendingAutoplayUrlRef = useRef<string | null>(null);
   const resumeTimeRef = useRef(0);
   const expiredWhilePlayingRef = useRef(false);
   const [replacementUrl, setReplacementUrl] = useState<string | null>(null);
@@ -578,33 +577,6 @@ function RecoverableAudioPlayer({
     };
   }, [effectiveAudioUrl]);
 
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (
-      stale ||
-      recovering ||
-      !audio ||
-      pendingAutoplayUrlRef.current !== effectiveAudioUrl
-    ) {
-      return;
-    }
-    const startPlayback = () => {
-      pendingAutoplayUrlRef.current = null;
-      const resumeAt = resumeTimeRef.current;
-      resumeTimeRef.current = 0;
-      if (resumeAt > 0 && Number.isFinite(resumeAt)) {
-        audio.currentTime = resumeAt;
-      }
-      void audio.play().catch(() => undefined);
-    };
-    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
-      startPlayback();
-      return;
-    }
-    audio.addEventListener("loadedmetadata", startPlayback, { once: true });
-    return () => audio.removeEventListener("loadedmetadata", startPlayback);
-  }, [effectiveAudioUrl, recovering, stale]);
-
   const recover = async (autoplay: boolean) => {
     if (refreshPromiseRef.current) return refreshPromiseRef.current;
     const audio = audioRef.current;
@@ -623,9 +595,28 @@ function RecoverableAudioPlayer({
         return null;
       }
       failedUrlRef.current = null;
-      pendingAutoplayUrlRef.current = autoplay ? nextAudioUrl : null;
       setReplacementUrl(nextAudioUrl);
       setStale(false);
+      if (audio) {
+        const resumeAt = resumeTimeRef.current;
+        resumeTimeRef.current = 0;
+        const startPlayback = () => {
+          if (resumeAt > 0 && Number.isFinite(resumeAt)) {
+            audio.currentTime = resumeAt;
+          }
+          if (!autoplay) return;
+          void audio.play().catch((error) => {
+            console.error("Recovered audio autoplay failed", error);
+          });
+        };
+        audio.addEventListener("canplay", startPlayback, { once: true });
+        audio.src = nextAudioUrl;
+        audio.load();
+        if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+          audio.removeEventListener("canplay", startPlayback);
+          startPlayback();
+        }
+      }
       return nextAudioUrl;
     } catch (error) {
       onRecoveryError(
@@ -651,6 +642,31 @@ function RecoverableAudioPlayer({
 
   return (
     <div className="audio-actions">
+      <audio
+        ref={audioRef}
+        className="audio-player"
+        data-testid="synthesis-audio"
+        controls
+        hidden={stale || recovering}
+        src={stale || recovering ? undefined : effectiveAudioUrl}
+        onPlay={(event) => {
+          if (isPlaybackTokenStale(effectiveAudioUrl)) {
+            event.currentTarget.pause();
+            void recover(true);
+            return;
+          }
+          onPlayback();
+        }}
+        onPause={(event) => {
+          if (expiredWhilePlayingRef.current || isPlaybackTokenStale(effectiveAudioUrl)) {
+            if (Number.isFinite(event.currentTarget.currentTime)) {
+              resumeTimeRef.current = event.currentTarget.currentTime;
+            }
+            setStale(true);
+          }
+        }}
+        onError={handlePlaybackError}
+      />
       {stale || recovering ? (
         <button
           type="button"
@@ -662,32 +678,7 @@ function RecoverableAudioPlayer({
           <Play size={16} aria-hidden="true" />
           <span>{recovering ? "Loading audio..." : "Play audio"}</span>
         </button>
-      ) : (
-        <audio
-          ref={audioRef}
-          className="audio-player"
-          data-testid="synthesis-audio"
-          controls
-          src={effectiveAudioUrl}
-          onPlay={(event) => {
-            if (isPlaybackTokenStale(effectiveAudioUrl)) {
-              event.currentTarget.pause();
-              void recover(true);
-              return;
-            }
-            onPlayback();
-          }}
-          onPause={(event) => {
-            if (expiredWhilePlayingRef.current || isPlaybackTokenStale(effectiveAudioUrl)) {
-              if (Number.isFinite(event.currentTarget.currentTime)) {
-                resumeTimeRef.current = event.currentTarget.currentTime;
-              }
-              setStale(true);
-            }
-          }}
-          onError={handlePlaybackError}
-        />
-      )}
+      ) : null}
       <button
         type="button"
         className="audio-download-button"
@@ -977,7 +968,6 @@ export default function MainApp() {
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
   const multiTrackWaveSurferRefs = useRef<Record<string, WaveSurfer | null>>({});
-  const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
@@ -2082,56 +2072,13 @@ export default function MainApp() {
     }
   };
 
-  const refreshMessageAudioUrl = async (
-    messageId: string,
+  const fetchFreshAudioUrl = async (
     progressUrl?: string,
     jobId?: string
   ): Promise<string | null> => {
     if (!progressUrl) return null;
-    const refreshUrl = progressUrlForJob(progressUrl, jobId);
-    const pending = audioRefreshPromisesRef.current[messageId];
-    if (pending) {
-      return pending;
-    }
-    const refreshPromise = (async () => {
-      const payload = await fetchProgress(refreshUrl);
-      const nextAudioUrl = payload.audio_url;
-      if (!nextAudioUrl) return null;
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === messageId
-            ? {
-                ...msg,
-                audioUrl: nextAudioUrl,
-                audioTrack: payload.audio_track ?? msg.audioTrack,
-                progressUrl: refreshUrl,
-                jobId: payload.job_id ?? msg.jobId,
-                feedback: payload.feedback ?? msg.feedback,
-              }
-            : msg
-        )
-      );
-      const belongsToWorkspace = !suppressedMultiTrackMessageIdsRef.current.has(messageId)
-        && (!payload.score_id || payload.score_id === activeScoreIdRef.current);
-      if (belongsToWorkspace) {
-        setAudioUrl((current) => (current ? nextAudioUrl : current));
-      }
-      if (belongsToWorkspace && payload.job_kind !== "preprocess") {
-        addOrReplaceMultiTrackAudio(
-          nextAudioUrl,
-          payload.audio_track,
-          payload.job_id,
-          payload.actual_duration_seconds
-        );
-      }
-      return nextAudioUrl;
-    })();
-    audioRefreshPromisesRef.current[messageId] = refreshPromise;
-    try {
-      return await refreshPromise;
-    } finally {
-      delete audioRefreshPromisesRef.current[messageId];
-    }
+    const payload = await fetchProgress(progressUrlForJob(progressUrl, jobId));
+    return payload.audio_url || null;
   };
 
   const shouldOpenFeedbackPrompt = (message: Message): boolean =>
@@ -2843,7 +2790,7 @@ export default function MainApp() {
                   <RecoverableAudioPlayer
                     audioUrl={msg.audioUrl}
                     onRefresh={() =>
-                      refreshMessageAudioUrl(msg.id, msg.progressUrl, msg.jobId)
+                      fetchFreshAudioUrl(msg.progressUrl, msg.jobId)
                     }
                     onPlayback={() => {
                       logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));
