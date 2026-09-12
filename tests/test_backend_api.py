@@ -408,6 +408,7 @@ def _prepare_app(monkeypatch, overrides=None):
         render_type: str | None = None,
         voicebank_metadata: dict | None = None,
         audio_track: dict | None = None,
+        provenance: dict | None = None,
     ) -> None:
         payload = {
             "userId": user_id,
@@ -423,6 +424,8 @@ def _prepare_app(monkeypatch, overrides=None):
             payload.update(voicebank_metadata)
         if audio_track:
             payload["audioTrack"] = audio_track
+        if provenance:
+            payload.update(provenance)
         fake_jobs[job_id] = payload
 
     def _fake_update_job(self, job_id: str, **fields) -> None:
@@ -448,15 +451,6 @@ def _prepare_app(monkeypatch, overrides=None):
             return None
         return job_id, payload
 
-    def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
-        to_delete = [
-            job_id
-            for job_id, payload in fake_jobs.items()
-            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
-        ]
-        for job_id in to_delete:
-            fake_jobs.pop(job_id, None)
-
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
     monkeypatch.setattr(
@@ -464,10 +458,6 @@ def _prepare_app(monkeypatch, overrides=None):
         _fake_get_latest_job_by_session,
     )
     monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
-    monkeypatch.setattr(
-        "src.backend.job_store.JobStore.clear_jobs_for_session",
-        _fake_clear_jobs_for_session,
-    )
 
     def _fake_complete_and_settle(
         user_id: str,
@@ -678,8 +668,7 @@ def test_progress_can_refresh_an_older_job_after_newer_audio_exists(client):
     latest_response = test_client.get(f"/sessions/{session_id}/progress")
     assert latest_response.status_code == 200
     latest_payload = latest_response.json()
-    assert latest_payload["job_id"] == "second-job"
-    assert "file=second.wav" in latest_payload["audio_url"]
+    assert latest_payload == {"status": "idle"}
 
     first_response = test_client.get(f"/sessions/{session_id}/progress?job_id=first-job")
     assert first_response.status_code == 200
@@ -875,7 +864,7 @@ def test_upload_musicxml_parses_and_saves(client):
     current_score = payload["current_score"]
     assert current_score["version"] == 1
     assert "score" in current_score
-    score_path = app.state.settings.data_dir / "sessions" / session_id / "score.xml"
+    score_path = app.state.settings.sessions_dir / session_id / "scores" / payload["score_id"] / "upload" / "score.xml"
     assert score_path.exists()
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"] == current_score["score"]
@@ -938,16 +927,56 @@ def test_upload_resets_previous_score_specific_state(client):
         "musicxml_name",
     }
 
-    assert not derived_path.exists()
-    assert not audio_path.exists()
-    assert not progress_path.exists()
-    assert (session_dir / "score.xml").exists()
+    assert derived_path.exists()
+    assert audio_path.exists()
+    assert progress_path.exists()
+    assert (app.state.settings.project_root / snapshot["files"]["musicxml_path"]).exists()
+    assert second_upload.json()["score_id"] != first_upload.json()["score_id"]
+    assert snapshot["current_job_id"] is None
+    assert test_client.get(f"/sessions/{session_id}/progress").json() == {"status": "idle"}
 
     latest = app.state.job_store.get_latest_job_by_session(
         user_id="test-user",
         session_id=session_id,
     )
-    assert latest is None
+    assert latest[0] == "old-job"
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "false"}, {"BACKEND_USE_STORAGE": "true"}], indirect=True)
+@pytest.mark.parametrize("filename", ["score.xml", "different.xml"])
+def test_reupload_preserves_expired_chat_audio_exact_job(client_with_env, monkeypatch, filename):
+    test_client, app = client_with_env
+    sid = _create_session(test_client)
+    first = _upload_score(test_client, sid).json()
+    path = app.state.sessions.session_dir(sid) / "historical.wav"
+    path.write_bytes(b"historical audio bytes")
+    output = (f"sessions/test-user/{sid}/jobs/retained/output.wav"
+              if app.state.settings.backend_use_storage else str(path.relative_to(app.state.settings.project_root)))
+    app.state.job_store.create_job(job_id="retained", user_id="test-user", session_id=sid,
+                                  status="completed", provenance={"scoreId": first["score_id"], "scoreVersionNo": 1})
+    app.state.job_store.update_job("retained", audioUrl=f"/sessions/{sid}/audio?file={path.name}",
+                                   outputPath=output, consumedCredits=2)
+    now = [1000]
+    monkeypatch.setattr("src.backend.playback_tokens.time.time", lambda: now[0])
+    old_url = test_client.get(f"/sessions/{sid}/progress?job_id=retained").json()["audio_url"]
+    original = test_client.get(old_url)
+    assert original.status_code == 200
+    second = _upload_score(test_client, sid, filename=filename)
+    assert second.status_code == 200
+    assert second.json()["score_id"] != first["score_id"]
+    assert test_client.get(f"/sessions/{sid}/progress").json() == {"status": "idle"}
+    if app.state.settings.backend_use_storage:
+        path.unlink()
+    now[0] += app.state.settings.playback_token_ttl_seconds + 1
+    assert test_client.get(old_url).status_code == 401
+    renewed = test_client.get(f"/sessions/{sid}/progress?job_id=retained").json()
+    assert renewed["score_id"] == first["score_id"]
+    assert renewed["consumed_credits"] == 2
+    assert test_client.get(renewed["audio_url"]).content == original.content
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(sid, "test-user"))
+    assert snapshot["score_id"] == second.json()["score_id"]
+    assert snapshot["current_audio"] is None
+    assert snapshot["current_job_id"] is None
 
 
 def test_upload_score_context_update_marker_is_delivered_once(client):
@@ -1641,7 +1670,9 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"]["source_musicxml_path"] == str(original_path)
     assert snapshot["current_score"]["score"]["source_musicxml_path"] == str(derived_path)
-    assert Path(snapshot["files"]["musicxml_path"]).resolve() == derived_path.resolve()
+    active_path = Path(snapshot["files"]["musicxml_path"]).resolve()
+    assert active_path.read_bytes() == derived_path.read_bytes()
+    assert f"/scores/{snapshot['score_id']}/versions/" in str(active_path)
     assert snapshot["score_summary"]["parts"][0]["part_id"] == "P_DERIVED"
     assert len(snapshot["preprocess_plan_history"]) == 0
     assert snapshot["last_preprocess_plan"] is not None
@@ -4304,7 +4335,7 @@ def test_upload_parses_zipped_musicxml(client):
     assert payload["parsed"] is True
     current_score = payload["current_score"]["score"]
     assert current_score["parts"]
-    session_dir = app.state.settings.data_dir / "sessions" / session_id
+    session_dir = app.state.settings.sessions_dir / session_id / "scores" / payload["score_id"] / "upload"
     assert (session_dir / "score.mxl").exists()
     canonical_path = session_dir / "score.xml"
     assert canonical_path.exists()
@@ -6751,7 +6782,7 @@ def test_settle_failure_releases_reservation_and_fails_job_without_audio(client,
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -6857,7 +6888,7 @@ def test_synthesize_action_required_marks_job_action_required_not_failed(
     assert action_required["message"] in llm_client.last_internal_prompt
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -6971,7 +7002,7 @@ def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7078,7 +7109,7 @@ def test_unsupported_lyric_language_action_required_logs_error_for_triage(
     assert not any("synthesis_failed" in record.message for record in caplog.records)
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7149,7 +7180,7 @@ def test_settle_failure_with_release_failure_marks_reservation_for_ops_but_fails
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7229,7 +7260,7 @@ def test_run_synthesis_job_retries_settle_before_success(client, monkeypatch):
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7308,7 +7339,7 @@ def test_run_synthesis_job_retries_atomic_complete_and_settle(client, monkeypatc
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7499,7 +7530,7 @@ def test_run_synthesis_job_can_inject_two_settle_failures_before_success(client,
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200
@@ -7573,7 +7604,7 @@ def test_run_synthesis_job_can_inject_three_release_failures_before_ops_failure(
     )
 
     progress = test_client.get(
-        f"/sessions/{session_id}/progress",
+        f"/sessions/{session_id}/progress?job_id={job_id}",
         headers=_auth_headers(),
     )
     assert progress.status_code == 200

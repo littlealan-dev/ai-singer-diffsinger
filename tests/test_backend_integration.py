@@ -222,15 +222,6 @@ def integration_client(monkeypatch):
             return None
         return job_id, payload
 
-    def _fake_clear_jobs_for_session(self, *, user_id: str, session_id: str):
-        to_delete = [
-            job_id
-            for job_id, payload in fake_jobs.items()
-            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
-        ]
-        for job_id in to_delete:
-            fake_jobs.pop(job_id, None)
-
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
     monkeypatch.setattr(
@@ -238,10 +229,6 @@ def integration_client(monkeypatch):
         _fake_get_latest_job_by_session,
     )
     monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
-    monkeypatch.setattr(
-        "src.backend.job_store.JobStore.clear_jobs_for_session",
-        _fake_clear_jobs_for_session,
-    )
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
     llm_client = StaticLlmClient(

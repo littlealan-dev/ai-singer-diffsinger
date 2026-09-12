@@ -35,7 +35,7 @@ class _FakeDocRef:
         else:
             self._store[self._doc_id].update(payload)
 
-    def get(self):
+    def get(self, transaction=None):
         return _FakeDocSnapshot(self._store.get(self._doc_id))
 
     def update(self, fields):
@@ -74,6 +74,22 @@ class _FakeClient:
 
     def collection(self, _name):
         return _FakeCollection(self._store)
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeTransaction:
+    def update(self, ref, fields):
+        ref.update(fields)
+
+    def set(self, ref, fields):
+        ref.set(fields)
+
+
+@pytest.fixture(autouse=True)
+def fake_transactions(monkeypatch):
+    monkeypatch.setattr(session_module.firestore, "transactional", lambda func: func)
 
 
 def test_firestore_session_store_roundtrip(monkeypatch, tmp_path):

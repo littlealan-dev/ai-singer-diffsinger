@@ -240,6 +240,7 @@ def create_app() -> FastAPI:
             router.stop()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
+
     logger = get_logger("backend.api")
     logger.setLevel(logging.DEBUG)
     app.state.settings = settings
@@ -313,6 +314,8 @@ def create_app() -> FastAPI:
         current_score = snapshot.get("current_score")
         return {
             "score_version": current_score.get("version") if isinstance(current_score, dict) else None,
+            "score_id": snapshot.get("score_id"),
+            "current_job_id": snapshot.get("current_job_id"),
             "history_length": len(snapshot.get("history") or []),
             "files": snapshot.get("files"),
             "current_score": current_score,
@@ -503,14 +506,8 @@ def create_app() -> FastAPI:
                 uploaded_bytes,
             )
 
-            await sessions.reset_for_new_upload(session_id)
-            await asyncio.to_thread(
-                job_store.clear_jobs_for_session,
-                user_id=user_id,
-                session_id=session_id,
-            )
-
-            session_dir = sessions.session_dir(session_id)
+            score_id = uuid.uuid4().hex
+            session_dir = sessions.session_dir(session_id) / "scores" / score_id / "upload"
             session_dir.mkdir(parents=True, exist_ok=True)
             target_path = session_dir / f"score{suffix}"
             temp_upload_path.replace(target_path)
@@ -519,24 +516,25 @@ def create_app() -> FastAPI:
                 canonical_musicxml_path = session_dir / "score.xml"
                 temp_canonical_path.replace(canonical_musicxml_path)
 
-            await sessions.set_file(session_id, "musicxml_path", canonical_musicxml_path)
-            await sessions.set_file(session_id, "uploaded_musicxml_path", target_path)
-            if original_name:
-                await sessions.set_metadata(session_id, "musicxml_name", original_name)
+            files = {
+                "musicxml_path": str(canonical_musicxml_path.relative_to(settings.project_root)),
+                "uploaded_musicxml_path": str(target_path.relative_to(settings.project_root)),
+                "musicxml_name": original_name,
+            }
             if settings.backend_use_storage:
                 # Persist the uploaded file in object storage when configured.
                 storage_path = _session_input_storage_path(
-                    user_id, session_id, target_path.suffix
+                    user_id, session_id, target_path.suffix, score_id
                 )
                 content_type = file.content_type or "application/octet-stream"
                 await asyncio.to_thread(
                     upload_file, settings.storage_bucket, target_path, storage_path, content_type
                 )
-                await sessions.set_metadata(session_id, "musicxml_storage_path", storage_path)
+                files["musicxml_storage_path"] = storage_path
                 active_storage_path = storage_path
                 if canonical_musicxml_path != target_path:
                     active_storage_path = _session_active_musicxml_storage_path(
-                        user_id, session_id, canonical_musicxml_path.suffix
+                        user_id, session_id, canonical_musicxml_path.suffix, score_id
                     )
                     await asyncio.to_thread(
                         upload_file,
@@ -545,9 +543,7 @@ def create_app() -> FastAPI:
                         active_storage_path,
                         "application/vnd.recordare.musicxml+xml",
                     )
-                await sessions.set_metadata(
-                    session_id, "active_musicxml_storage_path", active_storage_path
-                )
+                files["active_musicxml_storage_path"] = active_storage_path
             if isinstance(score, dict):
                 score = dict(score)
                 score["source_musicxml_path"] = str(canonical_musicxml_path)
@@ -558,11 +554,12 @@ def create_app() -> FastAPI:
         if isinstance(score, dict):
             score = dict(score)
             score.pop("score_summary", None)
-        await sessions.set_score_summary(session_id, score_summary)
-        await sessions.set_original_score(session_id, score)
-        version = await sessions.set_score(session_id, score)
+        version = await sessions.commit_uploaded_score(
+            session_id, score_id=score_id, score=score, summary=score_summary, files=files
+        )
         return {
             "session_id": session_id,
+            "score_id": score_id,
             "parsed": True,
             "current_score": {"score": score, "version": version},
             "score_summary": score_summary,
@@ -673,10 +670,7 @@ def create_app() -> FastAPI:
         claims = _get_playback_claims_or_401(request, settings, session_id, file)
         user_id = claims.user_id
         await _get_session_or_404(sessions, session_id, user_id)
-        snapshot = None
         if file:
-            snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
-            current_audio = snapshot.get("current_audio") if snapshot else None
             session_dir = sessions.session_dir(session_id)
             file_name = Path(file).name
             if file_name != file:
@@ -734,6 +728,13 @@ def create_app() -> FastAPI:
         job_store: JobStore = request.app.state.job_store
         user_id = await _get_user_id_or_401(request)
         requested_job_id = str(request.query_params.get("job_id") or "").strip()
+        state = await _get_session_or_404(request.app.state.sessions, session_id, user_id)
+        snapshot = state.snapshot()
+        explicit_job = bool(requested_job_id)
+        if not requested_job_id and snapshot.get("job_history_schema_version", 1) >= 2:
+            requested_job_id = snapshot.get("current_job_id") or ""
+            if not requested_job_id:
+                return {"status": "idle"}
         if requested_job_id:
             job = await asyncio.to_thread(
                 job_store.get_job_by_id,
@@ -748,8 +749,13 @@ def create_app() -> FastAPI:
                 session_id=session_id,
             )
         if job is None:
+            if requested_job_id and not explicit_job:
+                logger.error("current_job_missing session_id=%s job_id=%s", session_id, requested_job_id)
+                raise HTTPException(status_code=409, detail={"code": "current_job_missing"})
             return {"status": "idle"}
         job_id, data = job
+        if not explicit_job and snapshot.get("score_id") != data.get("scoreId"):
+            raise HTTPException(status_code=409, detail={"code": "current_job_score_mismatch"})
         payload = build_progress_payload(job_id, data)
         return _sign_audio_payload_urls(
             request,
@@ -785,6 +791,7 @@ def create_app() -> FastAPI:
         from src.backend.credits import get_or_create_credits, reserve_credits
 
         user_credits = await asyncio.to_thread(get_or_create_credits, user_id, user_email)
+        score_snapshot = await sessions.get_snapshot(session_id, user_id)
         reserve_result = await retry_credit_op(
             reserve_credits,
             user_id,
@@ -793,6 +800,8 @@ def create_app() -> FastAPI:
             settings.session_ttl_seconds,
             session_id=session_id,
             job_kind="export_mix",
+            score_id=score_snapshot.get("score_id"),
+            score_version_no=(score_snapshot.get("current_score") or {}).get("version"),
             pricing="export_mix_v1",
             pricing_unit_seconds=60,
             billable_duration_seconds=billing_context["billable_duration_seconds"],
@@ -820,13 +829,18 @@ def create_app() -> FastAPI:
         if reserve_result.status not in {"reserved", "reservation_exists"}:
             raise HTTPException(status_code=503, detail=backend_message("billing.setup_failed_retry"))
         try:
-            await asyncio.to_thread(
-                job_store.create_job,
+            snapshot = await sessions.get_snapshot(session_id, user_id)
+            await sessions.create_current_job(
+                session_id, job_store,
                 job_id=job_id,
                 user_id=user_id,
-                session_id=session_id,
                 status="queued",
                 render_type="export_mix",
+                provenance={
+                    "scoreId": snapshot.get("score_id"),
+                    "scoreVersionNo": (snapshot.get("current_score") or {}).get("version"),
+                    "provenanceStatus": "captured",
+                },
             )
             await asyncio.to_thread(
                 job_store.update_job,
@@ -846,7 +860,7 @@ def create_app() -> FastAPI:
                 mix={
                     "format": payload.format,
                     "trackCount": len(selected_tracks),
-                    "tracks": [_export_mix_track_metadata(track) for track in selected_tracks],
+                    "tracks": billing_context["source_tracks"],
                 },
             )
         except Exception as exc:
@@ -868,6 +882,7 @@ def create_app() -> FastAPI:
                 job_id=job_id,
                 tracks=selected_tracks,
                 billable_duration_seconds=billing_context["billable_duration_seconds"],
+                source_tracks=billing_context["source_tracks"],
             )
         )
         request.app.state.export_mix_tasks[job_id] = task
@@ -1340,6 +1355,7 @@ async def _build_export_mix_billing_context(
             requested_part_id=reference_track.part_id.strip(),
         )
         selected_durations: dict[str, float] = {}
+        source_tracks = []
         for track in selected_tracks:
             source_job_id = track.job_id.strip()
             source_job = await asyncio.to_thread(
@@ -1354,6 +1370,12 @@ async def _build_export_mix_billing_context(
                     detail=f"Source synthesis job not found: {source_job_id}",
                 )
             _source_id, source_data = source_job
+            source_tracks.append({
+                **_export_mix_track_metadata(track),
+                "scoreId": source_data.get("scoreId"),
+                "scoreVersionNo": source_data.get("scoreVersionNo"),
+                "inputPath": source_data.get("inputPath"),
+            })
             selected_durations[source_job_id] = await _export_mix_job_duration_seconds(
                 settings=settings,
                 sessions=sessions,
@@ -1379,6 +1401,7 @@ async def _build_export_mix_billing_context(
             "billing_reference_job_id": reference_job_id,
             "billable_duration_seconds": reference_duration,
             "required_credits": required_credits,
+            "source_tracks": source_tracks,
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1481,6 +1504,7 @@ async def _run_export_mix_job(
     job_id: str,
     tracks: list[ExportMixTrackRequest],
     billable_duration_seconds: float,
+    source_tracks: list[dict[str, Any]] | None = None,
 ) -> None:
     log = get_logger("backend.api")
     set_log_context(session_id=session_id, user_id=user_id, job_id=job_id)
@@ -1583,7 +1607,7 @@ async def _run_export_mix_job(
             **mix_metadata,
             "format": "wav",
             "trackCount": len(sources),
-            "tracks": [_export_mix_track_metadata(track) for track in tracks],
+            "tracks": source_tracks or [_export_mix_track_metadata(track) for track in tracks],
         }
         from src.backend.credits import settle_export_mix_credits_and_complete_job
 
@@ -2123,16 +2147,16 @@ def _playback_resource_path(payload: Dict[str, Any]) -> str | None:
     return None
 
 
-def _session_input_storage_path(user_id: str, session_id: str, suffix: str) -> str:
+def _session_input_storage_path(user_id: str, session_id: str, suffix: str, score_id: str) -> str:
     """Build the storage object path for a session upload."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
-    return f"sessions/{user_id}/{session_id}/input{safe_suffix}"
+    return f"sessions/{user_id}/{session_id}/scores/{score_id}/upload/original{safe_suffix}"
 
 
-def _session_active_musicxml_storage_path(user_id: str, session_id: str, suffix: str) -> str:
+def _session_active_musicxml_storage_path(user_id: str, session_id: str, suffix: str, score_id: str) -> str:
     """Build the storage object path for the canonical active upload artifact."""
     safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
-    return f"sessions/{user_id}/{session_id}/musicxml/active/original{safe_suffix}"
+    return f"sessions/{user_id}/{session_id}/scores/{score_id}/upload/input{safe_suffix}"
 
 
 def _audio_media_type(storage_path: str) -> str:

@@ -628,7 +628,8 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     db = get_firestore_client()
 
     get_or_create_credits(uid, email)
-    reserve_credits(uid, job_id, 2)
+    reserve_credits(uid, job_id, 2, session_id=session_id, job_kind="synthesis",
+                    score_id="score-A", score_version_no=3)
     db.collection("jobs").document(job_id).set(
         {
             "userId": uid,
@@ -669,6 +670,9 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
         .stream()
     )
     assert len(ledger) == 1
+    assert ledger[0].to_dict()["scoreId"] == "score-A"
+    assert ledger[0].to_dict()["scoreVersionNo"] == 3
+    completed_at = job["completedAt"]
 
     retry_result = settle_credits_and_complete_job(
         uid,
@@ -680,6 +684,7 @@ def test_settle_credits_and_complete_job_is_atomic_and_idempotent():
     )
 
     assert retry_result.status == "already_completed_and_settled"
+    assert db.collection("jobs").document(job_id).get().to_dict()["completedAt"] == completed_at
 
 
 def test_settle_export_mix_credits_and_complete_job_uses_minute_rate():

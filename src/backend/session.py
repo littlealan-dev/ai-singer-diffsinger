@@ -10,11 +10,14 @@ import asyncio
 import json
 import shutil
 import uuid
+import copy
 
 from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
 from src.backend.storage_client import download_bytes, upload_bytes
+
+_UNCHANGED = object()
 
 
 class SessionMusicXmlUnavailableError(RuntimeError):
@@ -65,11 +68,17 @@ class SessionState:
     score_summary: Optional[Dict[str, Any]] = None
     solfege_settings: Dict[str, Any] = field(default_factory=_default_solfege_settings)
     current_audio: Optional[Dict[str, Any]] = None
+    score_id: Optional[str] = None
+    current_job_id: Optional[str] = None
+    job_history_schema_version: int = 2
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a JSON-serializable snapshot of session state."""
         return {
             "id": self.id,
+            "score_id": self.score_id,
+            "current_job_id": self.current_job_id,
+            "job_history_schema_version": self.job_history_schema_version,
             "user_id": self.user_id,
             "created_at": self.created_at.isoformat(),
             "last_active_at": self.last_active_at.isoformat(),
@@ -97,7 +106,111 @@ class SessionState:
         return {"score": self.current_score, "version": self.current_score_version}
 
 
-class SessionStore:
+class WorkspacePersistence:
+    """Shared score and current-job persistence helpers."""
+
+    async def create_current_job(self, session_id: str, job_store, **fields) -> None:
+        fields["session_id"] = session_id
+        def create(data):
+            return {"currentJobId": fields["job_id"]}, ("create", job_store, fields)
+        await self._change_workspace(session_id, create)
+
+    def _stage_score(self, session_id, user_id, score_id, version, score):
+        directory = self.session_dir(session_id) / "scores" / str(score_id) / "versions" / str(version)
+        directory.mkdir(parents=True, exist_ok=True)
+        json_path = directory / "score.json"
+        json_path.write_bytes(_serialize_score(score))
+        source = score.get("source_musicxml_path")
+        source_path = Path(source) if isinstance(source, str) else None
+        if source_path and not source_path.is_absolute():
+            source_path = self._project_root / source_path
+        if source_path and source_path.is_file():
+            xml_path = directory / "input.xml"
+            shutil.copyfile(source_path, xml_path)
+        else:
+            if score_id:
+                raise SessionMusicXmlUnavailableError("The score version has no recoverable MusicXML artifact.")
+            xml_path = None
+        storage_path = None
+        if self._backend_use_storage:
+            storage_path = _current_score_storage_path(user_id, session_id, version, score_id)
+            _store_score_to_storage(self._storage_bucket, storage_path, score)
+            if xml_path:
+                upload_bytes(self._storage_bucket, xml_path.read_bytes(),
+                             storage_path.rsplit("/", 1)[0] + "/input.xml", "application/xml")
+        return storage_path
+
+    async def commit_uploaded_score(self, session_id, *, score_id, score, summary, files):
+        snapshot = await self.get_snapshot(session_id, None)
+        path = self._stage_score(session_id, snapshot["user_id"], score_id, 1, score)
+        def commit(data):
+            return {
+                "jobHistorySchemaVersion": 2,
+                "scoreId": score_id, "currentScoreVersion": 1,
+                "currentScore": copy.deepcopy(score), "currentScorePath": path,
+                "originalScore": copy.deepcopy(score), "originalScorePath": path,
+                "scoreSummary": summary, "files": files, "currentAudio": None,
+                "currentJobId": None, "scoreContextUpdated": True,
+                "preprocessPlanHistory": [], "preprocessAttemptHistory": [],
+                "lastPreprocessPlan": None, "lastSuccessfulPreprocessPlan": None,
+                "solfegeSettings": _default_solfege_settings(),
+            }, None
+        await self._change_workspace(session_id, commit)
+        return 1
+
+    async def _save_score(self, session_id, score, *, summary=_UNCHANGED,
+                          baseline=False, solfege_settings=None):
+        snapshot = await self.get_snapshot(session_id, None)
+        score_id = snapshot.get("score_id")
+        previous = (snapshot.get("current_score") or {}).get("version", 0)
+        version = previous + 1
+        source = score.get("source_musicxml_path")
+        source_path = Path(source) if isinstance(source, str) else None
+        if source_path and not source_path.is_absolute():
+            source_path = self._project_root / source_path
+        if score_id and (source_path is None or not source_path.is_file()):
+            previous_score = (snapshot.get("current_score") or {}).get("score") or {}
+            if source and source != previous_score.get("source_musicxml_path"):
+                raise SessionMusicXmlUnavailableError("The transformed MusicXML artifact is missing.")
+            score = copy.deepcopy(score)
+            score["source_musicxml_path"] = str(await self.ensure_active_musicxml(session_id, None))
+        path = self._stage_score(session_id, snapshot["user_id"], score_id, version, score)
+        files = dict(snapshot.get("files") or {})
+        xml_path = self.session_dir(session_id) / "scores" / str(score_id) / "versions" / str(version) / "input.xml"
+        if xml_path.is_file():
+            files["musicxml_path"] = self._relative_path(xml_path)
+            if path:
+                files["active_musicxml_storage_path"] = path.rsplit("/", 1)[0] + "/input.xml"
+        def publish(data):
+            updates = {"currentScore": copy.deepcopy(score), "currentScorePath": path,
+                       "currentScoreVersion": version, "files": files}
+            if summary is not _UNCHANGED:
+                updates["scoreSummary"] = copy.deepcopy(summary)
+            if baseline:
+                updates.update(originalScore=copy.deepcopy(score), originalScorePath=path)
+            if solfege_settings is not None:
+                updates["solfegeSettings"] = {
+                    "system": solfege_settings["system"], "mode": solfege_settings["mode"],
+                    "revision": int((data.get("solfegeSettings") or {}).get("revision") or 1) + 1,
+                }
+            return updates, None
+        await self._change_workspace(session_id, publish)
+        return version
+
+
+_WORKSPACE_FIELDS = {
+    "jobHistorySchemaVersion": "job_history_schema_version",
+    "scoreId": "score_id", "currentJobId": "current_job_id",
+    "currentScoreVersion": "current_score_version", "currentScore": "current_score",
+    "currentScorePath": "current_score_path", "originalScore": "original_score",
+    "originalScorePath": "original_score_path", "scoreSummary": "score_summary",
+    "files": "files", "currentAudio": "current_audio", "scoreContextUpdated": "score_context_updated",
+    "preprocessPlanHistory": "preprocess_plan_history", "preprocessAttemptHistory": "preprocess_attempt_history",
+    "lastPreprocessPlan": "last_preprocess_plan", "solfegeSettings": "solfege_settings",
+}
+
+
+class SessionStore(WorkspacePersistence):
     """Filesystem-backed in-memory session store."""
     def __init__(
         self,
@@ -118,6 +231,18 @@ class SessionStore:
         self._storage_bucket = storage_bucket
         self._sessions: Dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
+
+    async def _change_workspace(self, session_id, change):
+        async with self._lock:
+            state = self._sessions[session_id]
+            data = {key: copy.deepcopy(getattr(state, attr)) for key, attr in _WORKSPACE_FIELDS.items()}
+            updates, job = change(data)
+            if job and job[0] == "create":
+                job[1].create_job(**job[2])
+            for key, value in updates.items():
+                if key in _WORKSPACE_FIELDS:
+                    setattr(state, _WORKSPACE_FIELDS[key], value)
+            state.last_active_at = _utcnow()
 
     def session_dir(self, session_id: str) -> Path:
         """Return the session directory for a session ID."""
@@ -229,24 +354,12 @@ class SessionStore:
             state.last_active_at = _utcnow()
             return path
 
-    async def set_score(self, session_id: str, score: Dict[str, Any]) -> int:
+    async def set_score(self, session_id: str, score: Dict[str, Any], *,
+                        summary: Any = _UNCHANGED, baseline: bool = False,
+                        solfege_settings: Optional[Dict[str, Any]] = None) -> int:
         """Update the current score and increment its version."""
-        async with self._lock:
-            state = self._sessions.get(session_id)
-            if state is None:
-                raise KeyError(session_id)
-            state.current_score_version += 1
-            if self._backend_use_storage:
-                storage_path = _current_score_storage_path(
-                    state.user_id,
-                    session_id,
-                    state.current_score_version,
-                )
-                _store_score_to_storage(self._storage_bucket, storage_path, score)
-                state.current_score_path = storage_path
-            state.current_score = score
-            state.last_active_at = _utcnow()
-            return state.current_score_version
+        return await self._save_score(session_id, score, summary=summary,
+                                      baseline=baseline, solfege_settings=solfege_settings)
 
     async def mark_score_context_updated(self, session_id: str) -> None:
         """Mark that the next LLM decision must re-evaluate score-derived context."""
@@ -273,7 +386,7 @@ class SessionStore:
             if state is None:
                 raise KeyError(session_id)
             if self._backend_use_storage:
-                storage_path = _original_score_storage_path(state.user_id, session_id)
+                storage_path = _original_score_storage_path(state.user_id, session_id, state.score_id)
                 _store_score_to_storage(self._storage_bucket, storage_path, score)
                 state.original_score_path = storage_path
             state.original_score = score
@@ -356,31 +469,6 @@ class SessionStore:
                 state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
 
-    async def reset_for_new_upload(self, session_id: str) -> None:
-        """Clear score-specific session state and remove prior derived artifacts."""
-        async with self._lock:
-            state = self._sessions.get(session_id)
-            if state is None:
-                raise KeyError(session_id)
-            state.files = {}
-            state.original_score = None
-            state.original_score_path = None
-            state.preprocess_plan_history = []
-            state.preprocess_attempt_history = []
-            state.last_preprocess_plan = None
-            state.current_score = None
-            state.current_score_path = None
-            state.current_score_version = 0
-            state.score_context_updated = True
-            state.score_summary = None
-            state.solfege_settings = _default_solfege_settings()
-            state.current_audio = None
-            state.last_active_at = _utcnow()
-            session_dir = self.session_dir(session_id)
-            if session_dir.exists():
-                shutil.rmtree(session_dir, ignore_errors=True)
-            session_dir.mkdir(parents=True, exist_ok=True)
-
     async def evict_expired(self) -> None:
         """Evict any sessions that have expired in memory."""
         async with self._lock:
@@ -461,7 +549,7 @@ class SessionStore:
             )
 
 
-class FirestoreSessionStore:
+class FirestoreSessionStore(WorkspacePersistence):
     """Firestore-backed session store."""
     def __init__(
         self,
@@ -500,6 +588,32 @@ class FirestoreSessionStore:
         """Return the Firestore document reference for a session."""
         return self._client.collection(self._collection).document(session_id)
 
+    async def _change_workspace(self, session_id, change):
+        def run():
+            doc_ref = self._doc_ref(session_id)
+            @firestore.transactional
+            def commit(txn):
+                snapshot = doc_ref.get(transaction=txn)
+                if not snapshot.exists:
+                    raise KeyError(session_id)
+                updates, job = change(snapshot.to_dict() or {})
+                job_ref = None
+                if job and job[0] == "create":
+                    fields = job[2]
+                    job_ref = self._client.collection(job[1].collection).document(fields["job_id"])
+                    if job_ref.get(transaction=txn).exists:
+                        raise ValueError("The job ID has already been used.")
+                if self._backend_use_storage:
+                    for field in ("currentScore", "originalScore"):
+                        if updates.get(field) is not None:
+                            updates[field] = firestore.DELETE_FIELD
+                if updates:
+                    txn.update(doc_ref, {**updates, "lastActiveAt": firestore.SERVER_TIMESTAMP})
+                if job and job[0] == "create":
+                    txn.set(job_ref, job[1].build_job_payload(**job[2]))
+            commit(self._client.transaction())
+        await asyncio.to_thread(run)
+
     def _state_from_doc(self, session_id: str, data: Dict[str, Any]) -> SessionState:
         """Convert Firestore document data into SessionState."""
         created_at = data.get("createdAt")
@@ -535,6 +649,9 @@ class FirestoreSessionStore:
             score_summary=data.get("scoreSummary"),
             solfege_settings=dict(data.get("solfegeSettings") or _default_solfege_settings()),
             current_audio=data.get("currentAudio"),
+            score_id=data.get("scoreId"),
+            current_job_id=data.get("currentJobId"),
+            job_history_schema_version=int(data.get("jobHistorySchemaVersion") or 1),
         )
 
     async def create_session(self, user_id: Optional[str]) -> SessionState:
@@ -544,6 +661,9 @@ class FirestoreSessionStore:
             now = _utcnow()
             payload = {
                 "userId": user_id,
+                "jobHistorySchemaVersion": 2,
+                "scoreId": None,
+                "currentJobId": None,
                 "createdAt": firestore.SERVER_TIMESTAMP,
                 "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 "history": [],
@@ -661,38 +781,12 @@ class FirestoreSessionStore:
             doc_ref.update(updates)
             return path
 
-    async def set_score(self, session_id: str, score: Dict[str, Any]) -> int:
+    async def set_score(self, session_id: str, score: Dict[str, Any], *,
+                        summary: Any = _UNCHANGED, baseline: bool = False,
+                        solfege_settings: Optional[Dict[str, Any]] = None) -> int:
         """Update the score and increment its version in Firestore."""
-        async with self._lock:
-            doc_ref = self._doc_ref(session_id)
-            if self._backend_use_storage:
-                version = self._reserve_next_score_version(doc_ref)
-                user_id = self._require_user_id(doc_ref.get().to_dict() or {}, session_id)
-                storage_path = _current_score_storage_path(user_id, session_id, version)
-                _store_score_to_storage(self._storage_bucket, storage_path, score)
-                doc_ref.update(
-                    {
-                        "currentScorePath": storage_path,
-                        "currentScoreStorage": "gcs",
-                        "currentScoreByteSize": len(_serialize_score(score)),
-                        "currentScore": firestore.DELETE_FIELD,
-                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                    }
-                )
-            else:
-                doc = doc_ref.get()
-                if not doc.exists:
-                    raise KeyError(session_id)
-                data = doc.to_dict() or {}
-                version = int(data.get("currentScoreVersion") or 0) + 1
-                doc_ref.update(
-                    {
-                        "currentScore": score,
-                        "currentScoreVersion": version,
-                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                    }
-                )
-            return version
+        return await self._save_score(session_id, score, summary=summary,
+                                      baseline=baseline, solfege_settings=solfege_settings)
 
     async def mark_score_context_updated(self, session_id: str) -> None:
         """Mark that the next LLM decision must re-evaluate score-derived context."""
@@ -721,7 +815,7 @@ class FirestoreSessionStore:
             if self._backend_use_storage:
                 data = doc_ref.get().to_dict() or {}
                 user_id = self._require_user_id(data, session_id)
-                storage_path = _original_score_storage_path(user_id, session_id)
+                storage_path = _original_score_storage_path(user_id, session_id, data.get("scoreId"))
                 _store_score_to_storage(self._storage_bucket, storage_path, score)
                 doc_ref.update(
                     {
@@ -828,33 +922,6 @@ class FirestoreSessionStore:
                 {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
             )
 
-    async def reset_for_new_upload(self, session_id: str) -> None:
-        """Clear score-specific Firestore session state and local derived artifacts."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "files": {},
-                    "originalScore": None,
-                    "originalScorePath": None,
-                    "preprocessPlanHistory": [],
-                    "preprocessAttemptHistory": [],
-                    "lastPreprocessPlan": None,
-                    "lastSuccessfulPreprocessPlan": None,
-                    "currentScore": None,
-                    "currentScorePath": None,
-                    "currentScoreVersion": 0,
-                    "scoreContextUpdated": True,
-                    "scoreSummary": None,
-                    "solfegeSettings": _default_solfege_settings(),
-                    "currentAudio": None,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
-            session_dir = self.session_dir(session_id)
-            if session_dir.exists():
-                shutil.rmtree(session_dir, ignore_errors=True)
-            session_dir.mkdir(parents=True, exist_ok=True)
-
     async def evict_expired(self) -> None:
         """Firestore-backed sessions rely on TTL policies; no-op here."""
         return
@@ -862,28 +929,6 @@ class FirestoreSessionStore:
     async def cleanup_expired_on_disk(self) -> int:
         """No-op for Firestore-backed sessions."""
         return 0
-
-    def _reserve_next_score_version(self, doc_ref) -> int:
-        """Atomically reserve the next current-score version."""
-        transaction = self._client.transaction()
-
-        @firestore.transactional
-        def _reserve(txn):
-            snapshot = doc_ref.get(transaction=txn)
-            if not snapshot.exists:
-                raise KeyError(doc_ref.id)
-            data = snapshot.to_dict() or {}
-            version = int(data.get("currentScoreVersion") or 0) + 1
-            txn.update(
-                doc_ref,
-                {
-                    "currentScoreVersion": version,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                },
-            )
-            return version
-
-        return _reserve(transaction)
 
     def _require_user_id(self, data: Dict[str, Any], session_id: str) -> str:
         """Return the session user id or fail loudly."""
@@ -914,17 +959,21 @@ def _store_score_to_storage(bucket_name: str, path: str, score: Dict[str, Any]) 
     return len(payload)
 
 
-def _original_score_storage_path(user_id: Optional[str], session_id: str) -> str:
+def _original_score_storage_path(user_id: Optional[str], session_id: str, score_id: Optional[str] = None) -> str:
     """Build the storage path for the original parsed score."""
     if not user_id:
         raise ValueError(f"Missing userId for storage-backed session {session_id}.")
+    if score_id:
+        return f"sessions/{user_id}/{session_id}/scores/{score_id}/baselines/{uuid.uuid4().hex}.json"
     return f"sessions/{user_id}/{session_id}/scores/original.json"
 
 
-def _current_score_storage_path(user_id: Optional[str], session_id: str, version: int) -> str:
+def _current_score_storage_path(user_id: Optional[str], session_id: str, version: int, score_id: Optional[str] = None) -> str:
     """Build the storage path for the current score version."""
     if not user_id:
         raise ValueError(f"Missing userId for storage-backed session {session_id}.")
+    if score_id:
+        return f"sessions/{user_id}/{session_id}/scores/{score_id}/versions/{version}/score.json"
     return f"sessions/{user_id}/{session_id}/scores/current.v{version}.json"
 
 

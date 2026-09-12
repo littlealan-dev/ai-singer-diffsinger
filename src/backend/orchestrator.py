@@ -624,6 +624,30 @@ class Orchestrator:
             json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
         )
 
+    async def _capture_job_input(self, session_id, user_id, job_id):
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        if not snapshot.get("score_id") or not (snapshot.get("current_score") or {}).get("version"):
+            raise ValueError("Upload a score before starting a new job.")
+        files = snapshot.get("files") or {}
+        source = await self._sessions.ensure_active_musicxml(session_id, user_id)
+        content = source.read_bytes()
+        target = self._sessions.session_dir(session_id) / "jobs" / job_id / "input.xml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        storage_path = None
+        if self._settings.backend_use_storage:
+            storage_path = _job_storage_input_path(user_id, session_id, job_id, ".xml")
+            await asyncio.to_thread(upload_file, self._settings.storage_bucket, target,
+                                    storage_path, "application/xml")
+        return str(target.relative_to(self._settings.project_root)), storage_path, {
+            "scoreId": snapshot.get("score_id"),
+            "scoreVersionNo": (snapshot.get("current_score") or {}).get("version"),
+            "inputSha256": hashlib.sha256(content).hexdigest(),
+            "inputFileName": files.get("musicxml_name"),
+            "scoreTitle": (snapshot.get("score_summary") or {}).get("title"),
+            "provenanceStatus": "captured",
+        }
+
     async def _start_synthesis_job(
         self,
         session_id: str,
@@ -639,38 +663,27 @@ class Orchestrator:
             existing.cancel()
         if job_id is None:
             job_id = uuid.uuid4().hex
-        snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        files = snapshot.get("files") or {}
-        input_path, storage_input_path = _resolve_job_input_snapshot_paths(
-            score,
-            files if isinstance(files, dict) else {},
-            self._settings.project_root,
-        )
         render_type = arguments.get("render_type")
         output_storage_path = None
-        job_input_storage_path = None
         if self._settings.backend_use_storage:
-            suffix = ".musicxml"
-            if isinstance(input_path, str) and input_path:
-                suffix = Path(input_path).suffix or suffix
-            job_input_storage_path = _job_storage_input_path(
-                user_id, session_id, job_id, suffix
-            )
             output_storage_path = _job_storage_output_path(
                 user_id, session_id, job_id, self._settings.audio_format
             )
         voicebank_metadata = await self._build_synthesis_voicebank_metadata(arguments)
         audio_track = self._build_synthesis_audio_track_metadata(score, arguments)
-        await asyncio.to_thread(
-            self._job_store.create_job,
+        input_path, job_input_storage_path, provenance = await self._capture_job_input(
+            session_id, user_id, job_id
+        )
+        await self._sessions.create_current_job(
+            session_id, self._job_store,
             job_id=job_id,
             user_id=user_id,
-            session_id=session_id,
             status="queued",
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
             voicebank_metadata=voicebank_metadata,
             audio_track=audio_track,
+            provenance=provenance,
         )
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -688,7 +701,7 @@ class Orchestrator:
                 job_id,
                 user_id,
                 input_path=input_path,
-                storage_input_path=storage_input_path,
+                storage_input_path=job_input_storage_path,
                 job_input_storage_path=job_input_storage_path,
                 output_storage_path=output_storage_path,
             )
@@ -729,13 +742,17 @@ class Orchestrator:
                 ),
             }
         job_id = uuid.uuid4().hex
-        await asyncio.to_thread(
-            self._job_store.create_job,
+        input_path, storage_path, provenance = await self._capture_job_input(
+            session_id, user_id, job_id
+        )
+        await self._sessions.create_current_job(
+            session_id, self._job_store,
             job_id=job_id,
             user_id=user_id,
-            session_id=session_id,
             status="queued",
             render_type="preprocess",
+            input_path=storage_path or input_path,
+            provenance=provenance,
         )
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -997,6 +1014,7 @@ class Orchestrator:
                     audioUrl=response.get("audio_url"),
                     losslessOutputPath=lossless_output_path,
                     actualDurationSeconds=duration_seconds,
+                    completedAt=datetime.now(timezone.utc),
                 )
                 return
             settle_result = await retry_credit_op(
@@ -1379,6 +1397,7 @@ class Orchestrator:
                     actionRequired=response.get("action_required"),
                     details=response.get("details"),
                     warningMessage=warning_message,
+                    completedAt=datetime.now(timezone.utc),
                 )
         except Exception as exc:
             if isinstance(exc, PreprocessPlanningError):
@@ -2322,49 +2341,12 @@ class Orchestrator:
         if not isinstance(path_value, str) or not path_value:
             raise ValueError("Solfege transform did not return an output path.")
         path = Path(path_value).resolve()
-        await self._persist_active_musicxml_artifact(session_id, path)
-        await self._sessions.set_file(session_id, "musicxml_path", path)
-        await self._sessions.set_score_summary(
-            session_id, summary if isinstance(summary, dict) else None
+        score["source_musicxml_path"] = str(path)
+        version = await self._sessions.set_score(
+            session_id, score, summary=summary if isinstance(summary, dict) else None,
+            baseline=True, solfege_settings=update_settings,
         )
-        await self._sessions.set_original_score(session_id, score)
-        version = await self._sessions.set_score(session_id, score)
-        if update_settings is not None:
-            await self._sessions.set_solfege_settings(session_id, update_settings)
         return score, summary if isinstance(summary, dict) else None, version
-
-    async def _persist_active_musicxml_artifact(self, session_id: str, path: Path) -> None:
-        """Persist the exact active MusicXML artifact before publishing its session path."""
-        if not self._settings.backend_use_storage:
-            return
-        resolved = path.resolve()
-        session_dir = self._sessions.session_dir(session_id).resolve()
-        try:
-            resolved.relative_to(session_dir)
-        except ValueError as exc:
-            raise ValueError("Active MusicXML path is outside the session directory.") from exc
-        if not resolved.is_file():
-            raise ValueError("Active MusicXML artifact is missing.")
-        suffix = resolved.suffix.lower()
-        if suffix not in {".xml", ".mxl"}:
-            raise ValueError("Active MusicXML artifact has an unsupported extension.")
-        snapshot = await self._sessions.get_snapshot(session_id, user_id=None)
-        user_id = str(snapshot.get("user_id") or "").strip()
-        if not user_id:
-            raise ValueError("Session is missing its user identity for MusicXML storage.")
-        storage_path = _active_musicxml_storage_path(
-            user_id, session_id, artifact_id=uuid.uuid4().hex, suffix=suffix
-        )
-        await asyncio.to_thread(
-            upload_file,
-            self._settings.storage_bucket,
-            resolved,
-            storage_path,
-            "application/vnd.recordare.musicxml+xml",
-        )
-        await self._sessions.set_metadata(
-            session_id, "active_musicxml_storage_path", storage_path
-        )
 
     def _mcp_musicxml_path(self, path: Path) -> str:
         """Return a project-relative path when possible for an MCP file request."""
@@ -3465,12 +3447,9 @@ class Orchestrator:
                 exc,
             )
 
-        await self._persist_active_musicxml_artifact(session_id, path)
-        await self._sessions.set_file(session_id, "musicxml_path", path)
-        await self._sessions.set_score_summary(
-            session_id, summary if isinstance(summary, dict) else None
+        await self._sessions.set_score(
+            session_id, score, summary=summary if isinstance(summary, dict) else None
         )
-        await self._sessions.set_score(session_id, score)
 
     async def _render_selected_candidate_response(
         self,
@@ -4257,11 +4236,10 @@ class Orchestrator:
         score_summary = result.get("score_summary") if isinstance(result, dict) else None
         score = dict(result)
         score.pop("score_summary", None)
-        await self._sessions.set_score_summary(
-            session_id, score_summary if isinstance(score_summary, dict) else None
+        await self._sessions.set_score(
+            session_id, score, summary=score_summary if isinstance(score_summary, dict) else None,
+            baseline=True,
         )
-        await self._sessions.set_original_score(session_id, score)
-        await self._sessions.set_score(session_id, score)
         await self._sessions.mark_score_context_updated(session_id)
         return score
 
@@ -6192,6 +6170,7 @@ class Orchestrator:
                     if not isinstance(duration_seconds, (int, float)) or duration_seconds <= 0:
                         duration_seconds = _calculate_score_duration(current_score)
                     est_credits = estimate_credits(float(duration_seconds))
+                    billing_snapshot = await self._sessions.get_snapshot(session_id, user_id)
                     reserve_result = await retry_credit_op(
                         reserve_credits,
                         user_id,
@@ -6199,6 +6178,9 @@ class Orchestrator:
                         est_credits,
                         self._settings.session_ttl_seconds,
                         session_id=session_id,
+                        job_kind="synthesis",
+                        score_id=billing_snapshot.get("score_id"),
+                        score_version_no=(billing_snapshot.get("current_score") or {}).get("version"),
                         max_attempts=self._settings.credit_retry_max_attempts,
                         base_delay=self._settings.credit_retry_base_delay_seconds,
                     )
@@ -6877,14 +6859,6 @@ def _job_storage_output_path(
 def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str) -> str:
     """Build the storage path for a lossless job output used by mixdown."""
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
-
-
-def _active_musicxml_storage_path(
-    user_id: str, session_id: str, *, artifact_id: str, suffix: str
-) -> str:
-    """Build an immutable storage path for an active MusicXML artifact."""
-    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
-    return f"sessions/{user_id}/{session_id}/musicxml/active/{artifact_id}{safe_suffix}"
 
 
 def _job_progress_url(session_id: str, job_id: str) -> str:

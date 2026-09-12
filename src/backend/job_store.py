@@ -21,8 +21,8 @@ class JobStore:
         if self._client is None:
             self._client = get_firestore_client()
 
-    def create_job(
-        self,
+    @staticmethod
+    def build_job_payload(
         *,
         job_id: str,
         user_id: str,
@@ -32,7 +32,8 @@ class JobStore:
         render_type: Optional[str] = None,
         voicebank_metadata: Optional[Dict[str, Any]] = None,
         audio_track: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Create a new job record with initial metadata."""
         payload: Dict[str, Any] = {
             "userId": user_id,
@@ -49,12 +50,21 @@ class JobStore:
             payload.update(voicebank_metadata)
         if audio_track:
             payload["audioTrack"] = audio_track
+        if provenance:
+            payload.update(provenance)
+        return payload
+
+    def create_job(self, **fields: Any) -> None:
+        payload = self.build_job_payload(**fields)
         self._ensure_client()
-        self._client.collection(self.collection).document(job_id).set(payload)
+        self._client.collection(self.collection).document(fields["job_id"]).create(payload)
 
     def update_job(self, job_id: str, **fields: Any) -> None:
         """Update a job record with new fields and a fresh timestamp."""
         payload = dict(fields)
+        immutable = {"userId", "sessionId", "inputPath", "scoreId", "scoreVersionNo", "inputSha256", "inputFileName", "scoreTitle", "provenanceStatus"}
+        if immutable.intersection(payload):
+            raise ValueError("Job input provenance may only be set at creation.")
         payload["updatedAt"] = firestore.SERVER_TIMESTAMP
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload, merge=True)
@@ -106,18 +116,6 @@ class JobStore:
         doc = docs[0]
         return doc.id, doc.to_dict() or {}
 
-    def clear_jobs_for_session(self, *, user_id: str, session_id: str) -> None:
-        """Delete all stored jobs for a user/session pair."""
-        self._ensure_client()
-        query = (
-            self._client.collection(self.collection)
-            .where("userId", "==", user_id)
-            .where("sessionId", "==", session_id)
-        )
-        for doc in query.stream():
-            doc.reference.delete()
-
-
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize job data into a progress payload for clients."""
     raw_status = data.get("status", "idle")
@@ -136,6 +134,9 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "error": data.get("errorMessage"),
         "warning": data.get("warningMessage"),
         "job_id": job_id,
+        "score_id": data.get("scoreId"),
+        "score_version_no": data.get("scoreVersionNo"),
+        "result_score_ref": data.get("resultScoreRef"),
         "job_kind": data.get("jobKind"),
         "review_required": data.get("reviewRequired"),
         "action_required": data.get("actionRequired"),

@@ -34,6 +34,7 @@ export type VoicebankOption = {
 
 export type UploadResponse = {
   session_id: string;
+  score_id?: string;
   parsed: boolean;
   current_score?: unknown;
   score_summary?: ScoreSummary | null;
@@ -99,6 +100,9 @@ export type ChatResponse =
   | { type: "chat_error"; message: string; details?: unknown };
 
 export type ProgressResponse = {
+  score_id?: string;
+  score_version_no?: number;
+  result_score_ref?: { scoreId: string; scoreVersionNo: number };
   status: "idle" | "queued" | "running" | "done" | "error" | "action_required";
   message?: string;
   step?: string;

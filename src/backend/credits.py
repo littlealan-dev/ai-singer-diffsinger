@@ -277,8 +277,12 @@ def _billing_metadata_fields(
     pricing_unit_seconds: Optional[int] = None,
     billable_duration_seconds: Optional[float] = None,
     billing_reference_job_id: Optional[str] = None,
+    score_id: Optional[str] = None,
+    score_version_no: Optional[int] = None,
 ) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
+    if score_id:
+        fields.update(scoreId=score_id, scoreVersionNo=score_version_no)
     if session_id:
         fields["sessionId"] = session_id
     if job_kind:
@@ -440,6 +444,8 @@ def reserve_credits(
     pricing_unit_seconds: Optional[int] = None,
     billable_duration_seconds: Optional[float] = None,
     billing_reference_job_id: Optional[str] = None,
+    score_id: Optional[str] = None,
+    score_version_no: Optional[int] = None,
 ) -> ReserveCreditsResult:
     """
     Atomically reserve credits for a job.
@@ -557,6 +563,8 @@ def reserve_credits(
         metadata_fields = _billing_metadata_fields(
             session_id=session_id,
             job_kind=job_kind,
+            score_id=score_id,
+            score_version_no=score_version_no,
             pricing=pricing,
             pricing_unit_seconds=pricing_unit_seconds,
             billable_duration_seconds=billable_duration_seconds,
@@ -715,6 +723,10 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Set
                 "userId": uid,
                 "type": "settle",
                 "jobId": job_id,
+                **_billing_metadata_fields(
+                    job_kind=res_data.get("jobKind"), score_id=res_data.get("scoreId"),
+                    score_version_no=res_data.get("scoreVersionNo"),
+                ),
                 "amount": -actual_credits,
                 "reservedDelta": -estimated_credits,
                 "reservedAfter": accounting.new_reserved,
@@ -887,6 +899,10 @@ def settle_credits_and_complete_job(
                 "sessionId": session_id,
                 "type": "settle",
                 "jobId": job_id,
+                **_billing_metadata_fields(
+                    job_kind=res_data.get("jobKind"), score_id=res_data.get("scoreId"),
+                    score_version_no=res_data.get("scoreVersionNo"),
+                ),
                 "amount": -actual_credits,
                 "reservedDelta": -estimated_credits,
                 "reservedAfter": accounting.new_reserved,
@@ -902,6 +918,7 @@ def settle_credits_and_complete_job(
         )
         job_payload: Dict[str, Any] = {
             "status": "completed",
+            "completedAt": now,
             "step": "done",
             "message": message,
             "progress": 1.0,
@@ -1046,6 +1063,8 @@ def settle_export_mix_credits_and_complete_job(
         metadata_fields = _billing_metadata_fields(
             session_id=session_id,
             job_kind="export_mix",
+            score_id=res_data.get("scoreId"),
+            score_version_no=res_data.get("scoreVersionNo"),
             pricing=pricing,
             pricing_unit_seconds=pricing_unit_seconds,
             billable_duration_seconds=billable_duration,
@@ -1103,6 +1122,7 @@ def settle_export_mix_credits_and_complete_job(
         }
         job_payload: Dict[str, Any] = {
             "status": "completed",
+            "completedAt": now,
             "step": "done",
             "progress": 1.0,
             "jobKind": "export_mix",
@@ -1216,6 +1236,8 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
         metadata_fields = _billing_metadata_fields(
             session_id=res_data.get("sessionId"),
             job_kind=res_data.get("jobKind"),
+            score_id=res_data.get("scoreId"),
+            score_version_no=res_data.get("scoreVersionNo"),
             pricing=res_data.get("pricing"),
             pricing_unit_seconds=res_data.get("pricingUnitSeconds"),
             billable_duration_seconds=res_data.get("billableDurationSeconds"),

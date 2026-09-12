@@ -774,6 +774,9 @@ export default function MainApp() {
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
+  const activeScoreIdRef = useRef<string | null>(null);
+  const workspaceGenerationRef = useRef(0);
+  const audioRetryingRef = useRef<Set<string>>(new Set());
 
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
@@ -1461,6 +1464,8 @@ export default function MainApp() {
     if (!score) return;
 
     const handleWindowError = (event: ErrorEvent) => {
+      // Media load failures belong to their player's token-refresh handler.
+      if (event.target instanceof HTMLMediaElement) return;
       if (!scorePreviewTrapActiveRef.current) {
         return;
       }
@@ -1583,6 +1588,7 @@ export default function MainApp() {
   useEffect(() => {
     if (!activeProgress) return;
     let cancelled = false;
+    const generation = workspaceGenerationRef.current;
 
     const appendProgressMessage = (current: string, incoming?: string | null): string => {
       if (!incoming) return current;
@@ -1598,6 +1604,8 @@ export default function MainApp() {
     };
 
     const applyProgress = (payload: ProgressResponse) => {
+      if (cancelled || generation !== workspaceGenerationRef.current) return;
+      if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return;
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
@@ -1652,11 +1660,13 @@ export default function MainApp() {
     const poll = async () => {
       try {
         const payload = await fetchProgress(activeProgress.url);
-        if (cancelled) return;
+        if (cancelled || generation !== workspaceGenerationRef.current) return;
+        if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return;
         applyProgress(payload);
         if (payload.status === "done" && payload.review_required) {
           await refreshScorePreview();
         }
+        if (cancelled || generation !== workspaceGenerationRef.current) return;
         if (payload.warning) {
           setError(payload.warning);
         }
@@ -1681,7 +1691,7 @@ export default function MainApp() {
           setChatTurnBusy(false);
         }
       } catch (err: any) {
-        if (!cancelled) {
+        if (!cancelled && generation === workspaceGenerationRef.current) {
           setError(err?.message || "Failed to fetch synthesis progress.");
           setActiveProgress(null);
           setChatTurnBusy(false);
@@ -1732,7 +1742,9 @@ export default function MainApp() {
 
   const refreshScorePreview = async () => {
     if (!sessionId || !score) return;
+    const generation = workspaceGenerationRef.current;
     const data = await fetchScoreXml(sessionId);
+    if (generation !== workspaceGenerationRef.current) return;
     setScore({ name: score.name, data });
   };
 
@@ -1881,8 +1893,12 @@ export default function MainApp() {
             : msg
         )
       );
-      setAudioUrl((current) => (current ? nextAudioUrl : current));
-      if (payload.job_kind !== "preprocess") {
+      const belongsToWorkspace = !suppressedMultiTrackMessageIdsRef.current.has(messageId)
+        && (!payload.score_id || payload.score_id === activeScoreIdRef.current);
+      if (belongsToWorkspace) {
+        setAudioUrl((current) => (current ? nextAudioUrl : current));
+      }
+      if (belongsToWorkspace && payload.job_kind !== "preprocess") {
         addOrReplaceMultiTrackAudio(
           nextAudioUrl,
           payload.audio_track,
@@ -1905,6 +1921,11 @@ export default function MainApp() {
     progressUrl?: string,
     jobId?: string
   ) => {
+    if (audioRetryingRef.current.has(messageId)) {
+      setError("This audio is currently unavailable.");
+      return;
+    }
+    audioRetryingRef.current.add(messageId);
     try {
       const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl, jobId);
       if (!nextAudioUrl) {
@@ -1915,6 +1936,7 @@ export default function MainApp() {
       if (audio) {
         const currentTime = audio.currentTime;
         const retryPlayback = () => {
+          audioRetryingRef.current.delete(messageId);
           audio.removeEventListener("canplay", retryPlayback);
           if (currentTime > 0 && Number.isFinite(currentTime)) {
             try {
@@ -2047,19 +2069,19 @@ export default function MainApp() {
     setUploading(true);
     setError(null);
     setScorePreviewError(null);
-    messages.forEach((message) => {
-      if (message.audioUrl) {
-        suppressedMultiTrackMessageIdsRef.current.add(message.id);
-      }
-    });
-    handleMultiTrackStop();
-    setMultiTrackAudioTracks([]);
-    setMultiTrackExportProgress(null);
-    setMultiTrackExportError(null);
-    multiTrackWaveSurferRefs.current = {};
     try {
       const activeSessionId = sessionId ?? await ensureSession();
       const uploadResponse = await uploadScore(activeSessionId, file);
+      activeScoreIdRef.current = uploadResponse.score_id ?? null;
+      workspaceGenerationRef.current += 1;
+      messages.forEach((message) => {
+        suppressedMultiTrackMessageIdsRef.current.add(message.id);
+      });
+      handleMultiTrackStop();
+      setMultiTrackAudioTracks([]);
+      setMultiTrackExportProgress(null);
+      setMultiTrackExportError(null);
+      multiTrackWaveSurferRefs.current = {};
       // A replacement upload starts a new score workflow while retaining the chat transcript.
       setAudioUrl(null);
       setActiveProgress(null);
