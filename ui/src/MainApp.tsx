@@ -68,6 +68,7 @@ const STARTING_CONVERSATIONS = [
 
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const MULTITRACK_TUTORIAL_DISMISSED_KEY = "sightsinger.multitrack-tutorial-dismissed";
+const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 const MULTITRACK_TUTORIAL_STEPS = [
   {
     target: "player",
@@ -79,7 +80,7 @@ const MULTITRACK_TUTORIAL_STEPS = [
   },
   {
     target: "export",
-    message: "Use Export to bounce the mix. Export consumes credits at 1 credit per minute.",
+    message: "Export downloads a single track for free. Mixing multiple tracks consumes credits at 1 credit per minute.",
   },
 ] as const;
 
@@ -130,12 +131,44 @@ type MultiTrackAudioTrack = {
   volume: number;
 };
 
+const playbackTokenExpiresAt = (audioUrl: string): number | null => {
+  try {
+    const token = new URL(audioUrl, window.location.origin).searchParams.get("playback_token");
+    const payloadPart = token?.split(".", 1)[0];
+    if (!payloadPart) return null;
+    const base64 = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = `${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`;
+    const payload = JSON.parse(window.atob(padded)) as { exp?: unknown };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp)
+      ? payload.exp * 1_000
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const isPlaybackTokenStale = (audioUrl: string): boolean => {
+  const expiresAt = playbackTokenExpiresAt(audioUrl);
+  return expiresAt !== null && expiresAt <= Date.now() + PLAYBACK_TOKEN_REFRESH_MARGIN_MS;
+};
+
 const shouldMuteMultiTrackForPlayback = (
   track: MultiTrackAudioTrack,
   tracks: MultiTrackAudioTrack[]
 ): boolean => {
   const hasSolo = tracks.some((candidate) => candidate.solo);
   return hasSolo ? !track.solo : track.muted;
+};
+
+const selectAudibleMultiTrackTracks = (
+  tracks: MultiTrackAudioTrack[]
+): MultiTrackAudioTrack[] => {
+  const hasSolo = tracks.some((track) => track.solo);
+  return hasSolo ? tracks.filter((track) => track.solo) : tracks.filter((track) => !track.muted);
+};
+
+const isNoOpSingleTrackExport = (tracks: MultiTrackAudioTrack[]): boolean => {
+  return tracks.length === 1;
 };
 
 const multiTrackAnalyticsParams = (tracks: MultiTrackAudioTrack[]) => {
@@ -483,6 +516,191 @@ const voiceImageUrl = (voice: VoicebankOption): string | null => {
   return `/voicebanks/${encodeURIComponent(filename)}`;
 };
 
+function RecoverableAudioPlayer({
+  audioUrl,
+  onRefresh,
+  onPlayback,
+  onDownload,
+  onRecoveryError,
+}: {
+  audioUrl: string;
+  onRefresh: () => Promise<string | null>;
+  onPlayback: () => void;
+  onDownload: () => void;
+  onRecoveryError: (message: string) => void;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
+  const failedUrlRef = useRef<string | null>(null);
+  const pendingAutoplayUrlRef = useRef<string | null>(null);
+  const resumeTimeRef = useRef(0);
+  const expiredWhilePlayingRef = useRef(false);
+  const [replacementUrl, setReplacementUrl] = useState<string | null>(null);
+  const [stale, setStale] = useState(() => isPlaybackTokenStale(audioUrl));
+  const [recovering, setRecovering] = useState(false);
+  const effectiveAudioUrl = replacementUrl ?? audioUrl;
+
+  useEffect(() => {
+    if (replacementUrl && replacementUrl === audioUrl) {
+      setReplacementUrl(null);
+    }
+  }, [audioUrl, replacementUrl]);
+
+  useEffect(() => {
+    expiredWhilePlayingRef.current = false;
+    setStale(isPlaybackTokenStale(effectiveAudioUrl));
+
+    const expiresAt = playbackTokenExpiresAt(effectiveAudioUrl);
+    if (expiresAt === null) return;
+
+    const markStale = () => {
+      if (!isPlaybackTokenStale(effectiveAudioUrl)) return;
+      const audio = audioRef.current;
+      if (audio && !audio.paused && !audio.ended) {
+        expiredWhilePlayingRef.current = true;
+        return;
+      }
+      if (audio && Number.isFinite(audio.currentTime)) {
+        resumeTimeRef.current = audio.currentTime;
+      }
+      setStale(true);
+    };
+    const timeout = window.setTimeout(
+      markStale,
+      Math.max(0, expiresAt - Date.now() - PLAYBACK_TOKEN_REFRESH_MARGIN_MS)
+    );
+    window.addEventListener("focus", markStale);
+    document.addEventListener("visibilitychange", markStale);
+    return () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("focus", markStale);
+      document.removeEventListener("visibilitychange", markStale);
+    };
+  }, [effectiveAudioUrl]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (
+      stale ||
+      recovering ||
+      !audio ||
+      pendingAutoplayUrlRef.current !== effectiveAudioUrl
+    ) {
+      return;
+    }
+    const startPlayback = () => {
+      pendingAutoplayUrlRef.current = null;
+      const resumeAt = resumeTimeRef.current;
+      resumeTimeRef.current = 0;
+      if (resumeAt > 0 && Number.isFinite(resumeAt)) {
+        audio.currentTime = resumeAt;
+      }
+      void audio.play().catch(() => undefined);
+    };
+    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      startPlayback();
+      return;
+    }
+    audio.addEventListener("loadedmetadata", startPlayback, { once: true });
+    return () => audio.removeEventListener("loadedmetadata", startPlayback);
+  }, [effectiveAudioUrl, recovering, stale]);
+
+  const recover = async (autoplay: boolean) => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+    const audio = audioRef.current;
+    if (audio) {
+      resumeTimeRef.current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      audio.pause();
+    }
+    setRecovering(true);
+    setStale(true);
+    const refreshPromise = onRefresh();
+    refreshPromiseRef.current = refreshPromise;
+    try {
+      const nextAudioUrl = await refreshPromise;
+      if (!nextAudioUrl || isPlaybackTokenStale(nextAudioUrl)) {
+        onRecoveryError("Audio link expired. Please try again.");
+        return null;
+      }
+      failedUrlRef.current = null;
+      pendingAutoplayUrlRef.current = autoplay ? nextAudioUrl : null;
+      setReplacementUrl(nextAudioUrl);
+      setStale(false);
+      return nextAudioUrl;
+    } catch (error) {
+      onRecoveryError(
+        error instanceof Error ? error.message : "Failed to refresh audio playback."
+      );
+      return null;
+    } finally {
+      refreshPromiseRef.current = null;
+      setRecovering(false);
+    }
+  };
+
+  const handlePlaybackError = () => {
+    if (refreshPromiseRef.current) return;
+    if (failedUrlRef.current === effectiveAudioUrl) {
+      setStale(true);
+      onRecoveryError("This audio is currently unavailable.");
+      return;
+    }
+    failedUrlRef.current = effectiveAudioUrl;
+    void recover(true);
+  };
+
+  return (
+    <div className="audio-actions">
+      {stale || recovering ? (
+        <button
+          type="button"
+          className="audio-recovery-button"
+          data-testid="synthesis-audio-recover"
+          onClick={() => void recover(true)}
+          disabled={recovering}
+        >
+          <Play size={16} aria-hidden="true" />
+          <span>{recovering ? "Loading audio..." : "Play audio"}</span>
+        </button>
+      ) : (
+        <audio
+          ref={audioRef}
+          className="audio-player"
+          data-testid="synthesis-audio"
+          controls
+          src={effectiveAudioUrl}
+          onPlay={(event) => {
+            if (isPlaybackTokenStale(effectiveAudioUrl)) {
+              event.currentTarget.pause();
+              void recover(true);
+              return;
+            }
+            onPlayback();
+          }}
+          onPause={(event) => {
+            if (expiredWhilePlayingRef.current || isPlaybackTokenStale(effectiveAudioUrl)) {
+              if (Number.isFinite(event.currentTarget.currentTime)) {
+                resumeTimeRef.current = event.currentTarget.currentTime;
+              }
+              setStale(true);
+            }
+          }}
+          onError={handlePlaybackError}
+        />
+      )}
+      <button
+        type="button"
+        className="audio-download-button"
+        aria-label="Download audio"
+        title="Download audio"
+        onClick={onDownload}
+      >
+        <Download size={16} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
 function FeedbackPrototypeBubble({
   minimized,
   onClose,
@@ -758,7 +976,6 @@ export default function MainApp() {
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
-  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const multiTrackWaveSurferRefs = useRef<Record<string, WaveSurfer | null>>({});
   const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
@@ -776,7 +993,6 @@ export default function MainApp() {
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
   const activeScoreIdRef = useRef<string | null>(null);
   const workspaceGenerationRef = useRef(0);
-  const audioRetryingRef = useRef<Set<string>>(new Set());
 
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
@@ -842,6 +1058,7 @@ export default function MainApp() {
   const exportMixRequiredCredits = estimateExportMixCredits(
     multiTrackAudioTracks[0]?.durationSeconds
   );
+  const noOpSingleTrackExport = isNoOpSingleTrackExport(multiTrackAudioTracks);
   const currentMultitrackTutorialStep =
     MULTITRACK_TUTORIAL_STEPS[
       Math.min(multitrackTutorialStepIndex, MULTITRACK_TUTORIAL_STEPS.length - 1)
@@ -1031,25 +1248,53 @@ export default function MainApp() {
     );
   }, []);
 
+  const handleMultiTrackTrackDownload = useCallback(
+    async (track: MultiTrackAudioTrack) => {
+      try {
+        let nextAudioUrl = track.audioUrl;
+        if (sessionId && track.jobId) {
+          const payload = await fetchProgress(
+            `/sessions/${sessionId}/progress?job_id=${encodeURIComponent(track.jobId)}`
+          );
+          nextAudioUrl = payload.audio_url || nextAudioUrl;
+        }
+        if (!nextAudioUrl) {
+          setError("No audio available to download.");
+          return;
+        }
+        logAnalyticsEvent("multitrack_track_download", {
+          ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+          has_part_id: Boolean(track.partId),
+          has_verse_number: Boolean(track.verseNumber),
+        });
+        downloadAudioUrl(nextAudioUrl, "");
+      } catch (err: any) {
+        setError(err?.message || "Failed to refresh audio download.");
+      }
+    },
+    [multiTrackAudioTracks, sessionId]
+  );
+
   const handleMultiTrackExport = useCallback(async () => {
     if (!sessionId || multiTrackExportProgress !== null) return;
+    setMultiTrackExportError(null);
+    setError(null);
+    if (isNoOpSingleTrackExport(multiTrackAudioTracks)) {
+      await handleMultiTrackTrackDownload(multiTrackAudioTracks[0]);
+      return;
+    }
+    const audibleTracks = selectAudibleMultiTrackTracks(multiTrackAudioTracks);
+    if (!audibleTracks.length) {
+      setMultiTrackExportError("No audible tracks selected.");
+      return;
+    }
     if (creditsLocked) {
       openPaywall("insufficient_credits");
       return;
     }
-    setMultiTrackExportError(null);
-    setError(null);
     const billingReferenceTrack = multiTrackAudioTracks[0];
     if (!billingReferenceTrack?.jobId || exportMixRequiredCredits === null) {
       setMultiTrackExportError("Export credits are still being calculated.");
-      return;
-    }
-    const hasSolo = multiTrackAudioTracks.some((track) => track.solo);
-    const audibleTracks = hasSolo
-      ? multiTrackAudioTracks.filter((track) => track.solo)
-      : multiTrackAudioTracks.filter((track) => !track.muted);
-    if (!audibleTracks.length) {
-      setMultiTrackExportError("No audible tracks selected.");
       return;
     }
     const missingMetadata = audibleTracks.find((track) => !track.jobId || !track.partId);
@@ -1104,34 +1349,7 @@ export default function MainApp() {
     } finally {
       setMultiTrackExportProgress(null);
     }
-  }, [creditsLocked, exportMixRequiredCredits, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
-
-  const handleMultiTrackTrackDownload = useCallback(
-    async (track: MultiTrackAudioTrack) => {
-      try {
-        let nextAudioUrl = track.audioUrl;
-        if (sessionId && track.jobId) {
-          const payload = await fetchProgress(
-            `/sessions/${sessionId}/progress?job_id=${encodeURIComponent(track.jobId)}`
-          );
-          nextAudioUrl = payload.audio_url || nextAudioUrl;
-        }
-        if (!nextAudioUrl) {
-          setError("No audio available to download.");
-          return;
-        }
-        logAnalyticsEvent("multitrack_track_download", {
-          ...multiTrackAnalyticsParams(multiTrackAudioTracks),
-          has_part_id: Boolean(track.partId),
-          has_verse_number: Boolean(track.verseNumber),
-        });
-        downloadAudioUrl(nextAudioUrl, "");
-      } catch (err: any) {
-        setError(err?.message || "Failed to refresh audio download.");
-      }
-    },
-    [multiTrackAudioTracks, sessionId]
-  );
+  }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
   useEffect(() => {
     multiTrackAudioTracks.forEach((track) => {
@@ -1916,46 +2134,6 @@ export default function MainApp() {
     }
   };
 
-  const handleAudioPlaybackError = async (
-    messageId: string,
-    progressUrl?: string,
-    jobId?: string
-  ) => {
-    if (audioRetryingRef.current.has(messageId)) {
-      setError("This audio is currently unavailable.");
-      return;
-    }
-    audioRetryingRef.current.add(messageId);
-    try {
-      const nextAudioUrl = await refreshMessageAudioUrl(messageId, progressUrl, jobId);
-      if (!nextAudioUrl) {
-        setError("Audio link expired. Please try again.");
-        return;
-      }
-      const audio = audioRefs.current[messageId];
-      if (audio) {
-        const currentTime = audio.currentTime;
-        const retryPlayback = () => {
-          audioRetryingRef.current.delete(messageId);
-          audio.removeEventListener("canplay", retryPlayback);
-          if (currentTime > 0 && Number.isFinite(currentTime)) {
-            try {
-              audio.currentTime = currentTime;
-            } catch {
-              // Ignore seek failures on freshly loaded media.
-            }
-          }
-          void audio.play().catch(() => undefined);
-        };
-        audio.addEventListener("canplay", retryPlayback, { once: true });
-        audio.src = nextAudioUrl;
-        audio.load();
-      }
-    } catch (err: any) {
-      setError(err?.message || "Failed to refresh audio playback.");
-    }
-  };
-
   const shouldOpenFeedbackPrompt = (message: Message): boolean =>
     Boolean(
       message.jobId &&
@@ -2036,8 +2214,11 @@ export default function MainApp() {
     jobId?: string
   ) => {
     try {
-      const nextAudioUrl =
-        (await refreshMessageAudioUrl(messageId, progressUrl, jobId)) || audioUrl;
+      let nextAudioUrl = audioUrl;
+      if (progressUrl) {
+        const payload = await fetchProgress(progressUrlForJob(progressUrl, jobId));
+        nextAudioUrl = payload.audio_url || nextAudioUrl;
+      }
       if (!nextAudioUrl) {
         setError("No audio available to download.");
         return;
@@ -2659,44 +2840,25 @@ export default function MainApp() {
                   </div>
                 )}
                 {msg.audioUrl && (
-                  <div className="audio-actions">
-                    <audio
-                      ref={(element) => {
-                        if (element) {
-                          audioRefs.current[msg.id] = element;
-                        } else {
-                          delete audioRefs.current[msg.id];
-                        }
-                      }}
-                      className="audio-player"
-                      data-testid="synthesis-audio"
-                      controls
-                      src={msg.audioUrl}
-                      onPlay={() => {
-                        logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));
-                        openFeedbackPrompt(msg, "audio_played");
-                      }}
-                      onError={() => {
-                        void handleAudioPlaybackError(msg.id, msg.progressUrl, msg.jobId);
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="audio-download-button"
-                      aria-label="Download audio"
-                      title="Download audio"
-                      onClick={() => {
-                        void handleAudioDownload(
-                          msg.id,
-                          msg.audioUrl,
-                          msg.progressUrl,
-                          msg.jobId
-                        );
-                      }}
-                    >
-                      <Download size={16} aria-hidden="true" />
-                    </button>
-                  </div>
+                  <RecoverableAudioPlayer
+                    audioUrl={msg.audioUrl}
+                    onRefresh={() =>
+                      refreshMessageAudioUrl(msg.id, msg.progressUrl, msg.jobId)
+                    }
+                    onPlayback={() => {
+                      logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));
+                      openFeedbackPrompt(msg, "audio_played");
+                    }}
+                    onDownload={() => {
+                      void handleAudioDownload(
+                        msg.id,
+                        msg.audioUrl,
+                        msg.progressUrl,
+                        msg.jobId
+                      );
+                    }}
+                    onRecoveryError={setError}
+                  />
                 )}
               </div>
               {feedbackPrompts[msg.id] && (
@@ -3066,11 +3228,6 @@ export default function MainApp() {
                   {multiTrackAudioTracks.length
                     ? "Generated parts are added here as separate synchronized tracks."
                     : "Generated vocal parts will appear here after synthesis."}
-                  {multiTrackAudioTracks.length > 0 && (
-                    <span className="multitrack-export-credit-estimate">
-                      Export: {exportMixRequiredCredits ?? "--"} credits
-                    </span>
-                  )}
                 </p>
               </div>
               <div className="multitrack-transport">
@@ -3078,19 +3235,37 @@ export default function MainApp() {
                   type="button"
                   className={clsx("multitrack-transport-button", "multitrack-export-button", {
                     exporting: multiTrackExportProgress !== null,
+                    "with-credit": !noOpSingleTrackExport,
                     "multitrack-tutorial-target": isMultitrackTutorialTarget("export"),
                   })}
                   onClick={handleMultiTrackExport}
                   disabled={
                     !multiTrackAudioTracks.length ||
-                    creditsLocked ||
-                    exportMixRequiredCredits === null ||
+                    (!noOpSingleTrackExport &&
+                      (creditsLocked || exportMixRequiredCredits === null)) ||
                     multiTrackExportProgress !== null
                   }
-                  aria-label="Export mix"
-                  title="Export mix"
+                  aria-label={
+                    noOpSingleTrackExport
+                      ? "Download track"
+                      : `Export mix, ${exportMixRequiredCredits ?? "unknown"} ${exportMixRequiredCredits === 1 ? "credit" : "credits"}`
+                  }
+                  title={noOpSingleTrackExport ? "Download track" : "Export mix"}
                 >
-                  {multiTrackExportPercent ?? <Upload size={16} />}
+                  {multiTrackExportPercent ?? (
+                    noOpSingleTrackExport ? (
+                      <Download size={16} />
+                    ) : (
+                      <>
+                        <Upload size={16} />
+                        <span className="multitrack-export-divider" aria-hidden="true" />
+                        <span className="multitrack-export-credit-label">
+                          {exportMixRequiredCredits ?? "--"}{" "}
+                          {exportMixRequiredCredits === 1 ? "credit" : "credits"}
+                        </span>
+                      </>
+                    )
+                  )}
                 </button>
                 <button
                   type="button"

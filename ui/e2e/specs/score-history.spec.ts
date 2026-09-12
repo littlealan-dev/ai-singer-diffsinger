@@ -7,7 +7,10 @@ import { LATEST_ANNOUNCEMENT_ID } from "../../src/announcements";
 // Auth/Firestore are local emulators; render responses and media are deterministic.
 test("re-upload preserves chat playback without restoring old mixer tracks", async ({ page }, testInfo) => {
   const seed = await fetch("http://127.0.0.1:8080/v1/projects/demo-sightsinger-e2e/databases/(default)/documents/users/e2e-score-history", {
-    method: "PATCH", headers: { "Content-Type": "application/json" },
+    method: "PATCH", headers: {
+      Authorization: "Bearer owner",
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ fields: { metadata: { mapValue: { fields: {
       lastSeenAnnouncementId: { stringValue: LATEST_ANNOUNCEMENT_ID },
     } } } } }),
@@ -28,6 +31,13 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   let renewals = 0;
   let expired = false;
   let expiredRequests = 0;
+  let downloadRefresh = false;
+  let downloadOnlyPlaybackRequests = 0;
+  let exportMixRequests = 0;
+  let progressRequests = 0;
+  const originalExpiresAt = Math.floor(Date.now() / 1000) + 60;
+  const playbackToken = (expiresAt: number) =>
+    `${Buffer.from(JSON.stringify({ exp: expiresAt })).toString("base64url")}.test-signature`;
   await page.route("http://127.0.0.1:8000/**", async route => {
     const url = new URL(route.request().url());
     const json = (body: unknown) => route.fulfill({ json: body });
@@ -49,21 +59,37 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
       return json({ type: "chat_progress", message: "Preparing take", job_id: "J1", progress_url: "/sessions/history/progress?job_id=J1" });
     }
     if (url.pathname.endsWith("/progress")) {
+      progressRequests++;
       if (expired) renewals++;
+      const generation = expired ? "renewed" : downloadRefresh ? "download-only" : "original";
       return json({ status: "done", job_id: "J1", score_id: "A", score_version_no: 1,
-        audio_url: `/sessions/history/audio?file=J1.wav&token=${expired ? "renewed" : "original"}`,
+        audio_url: `/sessions/history/audio?file=J1.wav&generation=${generation}&playback_token=${playbackToken(originalExpiresAt + (expired ? 3600 : 0))}`,
         audio_track: { key: "id:solo", label: "Solo", part_id: "solo", part_index: 0 }, actual_duration_seconds: 1 });
     }
+    if (url.pathname.endsWith("/export-mix")) {
+      exportMixRequests++;
+      return json({ status: "queued", progress_url: "/unexpected-export" });
+    }
     if (url.pathname.endsWith("/audio")) {
-      if (expired && url.searchParams.get("token") === "original") {
+      if (url.searchParams.get("generation") === "download-only" && !url.searchParams.has("download")) {
+        downloadOnlyPlaybackRequests++;
+      }
+      if (expired && url.searchParams.get("generation") === "original") {
         expiredRequests++;
         return route.fulfill({ status: 401 });
       }
-      return route.fulfill({ contentType: "audio/wav", body: wav, headers: { "Cache-Control": "no-store" } });
+      const downloadHeaders = route.request().resourceType() === "document"
+        ? { "Content-Disposition": "attachment; filename=J1.wav" }
+        : {};
+      return route.fulfill({ contentType: "audio/wav", body: wav, headers: {
+        "Cache-Control": "no-store",
+        ...downloadHeaders,
+      } });
     }
     return json({});
   });
   await signInAsE2EUser(page, "score-history");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
   const upload = () => page.getByTestId("score-upload-input").setInputFiles({ name: "score.xml", mimeType: "application/xml", buffer: xml });
   await upload();
   await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
@@ -72,6 +98,29 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   const audio = page.getByTestId("synthesis-audio");
   await expect(audio).toHaveCount(1);
   await expect(page.locator(".multitrack-lanes")).toContainText("Solo");
+  await page.getByRole("slider", { name: "Solo volume" }).evaluate((element: HTMLInputElement) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(element, "0");
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.getByRole("button", { name: "Mute Solo", exact: true }).evaluate((element: HTMLButtonElement) => element.click());
+  const playerUrlBeforeDownload = await audio.getAttribute("src");
+  const progressRequestsBeforeMessageDownload = progressRequests;
+  downloadRefresh = true;
+  const messageDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download audio" }).click();
+  await messageDownload;
+  expect(progressRequests).toBe(progressRequestsBeforeMessageDownload + 1);
+  await expect(audio).toHaveAttribute("src", playerUrlBeforeDownload as string);
+  await page.waitForTimeout(250);
+  expect(downloadOnlyPlaybackRequests).toBe(0);
+  downloadRefresh = false;
+  const progressRequestsBeforeDownload = progressRequests;
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download track" }).evaluate((element: HTMLButtonElement) => element.click());
+  await download;
+  expect(progressRequests).toBe(progressRequestsBeforeDownload + 1);
+  expect(exportMixRequests).toBe(0);
   rejectUpload = true;
   await upload();
   await expect(page.getByText("Invalid score", { exact: true })).toBeVisible();
@@ -81,19 +130,20 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   await expect(page.locator(".multitrack-lanes")).toContainText("No tracks yet");
   await expect(audio).toHaveCount(1);
   expired = true;
-  // Discard buffered media and change the request URL without changing its expired token.
-  await audio.evaluate((element: HTMLAudioElement) => {
-    const expiredUrl = `${element.src}&fresh=1`;
-    element.removeAttribute("src"); element.load();
-    element.src = expiredUrl; element.load();
-    void element.play().catch(() => undefined);
-  });
-  await expect(audio).toHaveAttribute("src", /token=renewed/);
+  await page.evaluate((expiresAt) => {
+    Date.now = () => (expiresAt + 1) * 1000;
+    window.dispatchEvent(new Event("focus"));
+  }, originalExpiresAt);
+  const recover = page.getByTestId("synthesis-audio-recover");
+  await expect(recover).toBeVisible();
+  expect(expiredRequests).toBe(0);
+  await recover.click();
+  await expect(audio).toHaveAttribute("src", /generation=renewed/);
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.readyState)).toBeGreaterThanOrEqual(2);
   await expect(page.locator(".multitrack-lanes")).toContainText("No tracks yet");
   expect(renders).toBe(1);
   expect(renewals).toBe(1);
-  expect(expiredRequests).toBeGreaterThan(0);
+  expect(expiredRequests).toBe(0);
   expect(scoreId).toBe("B");
   await page.screenshot({ path: testInfo.outputPath("retained-chat-audio.png"), fullPage: true });
 });

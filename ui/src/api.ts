@@ -672,7 +672,10 @@ export async function chat(
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithTimeout(withApiBase(progressUrl), { headers });
+  const response = await fetchWithTimeout(withApiBase(progressUrl), {
+    headers,
+    cache: "no-store",
+  });
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }

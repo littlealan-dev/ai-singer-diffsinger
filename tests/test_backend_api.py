@@ -16,7 +16,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.api.score import parse_score
-from src.backend.main import _require_app_check, _resolve_export_mix_source_path, create_app
+from src.backend.main import (
+    ExportMixTrackRequest,
+    _is_noop_single_track_export,
+    _require_app_check,
+    _resolve_export_mix_source_path,
+    create_app,
+)
 from src.backend.llm_client import LlmRole, StaticLlmClient
 from src.backend.mcp_client import McpRequestTimeoutError, McpToolError
 from src.backend.orchestrator import (
@@ -706,6 +712,56 @@ def test_export_mix_source_resolver_prefers_lossless_output_path(client, tmp_pat
     )
 
     assert resolved == wav_path.resolve()
+
+
+def test_single_track_export_uses_total_track_count_only():
+    unity_track = ExportMixTrackRequest(job_id="job-1", part_id="part-1")
+    adjusted_track = ExportMixTrackRequest(
+        job_id="job-1",
+        part_id="part-1",
+        volume=0.8,
+    )
+
+    assert _is_noop_single_track_export([unity_track]) is True
+    assert _is_noop_single_track_export([adjusted_track]) is True
+    assert _is_noop_single_track_export([
+        ExportMixTrackRequest(job_id="job-1", part_id="part-1", muted=True, volume=0)
+    ]) is True
+    assert _is_noop_single_track_export([unity_track, unity_track]) is False
+
+
+@pytest.mark.parametrize("volume,muted,solo", [(1, False, False), (0.8, False, True), (0, True, False)])
+def test_export_mix_rejects_noop_before_credit_reservation(client, monkeypatch, volume, muted, solo):
+    test_client, _app = client
+    session_id = _create_session(test_client)
+    reserve_called = False
+
+    def fail_if_reserved(*_args, **_kwargs):
+        nonlocal reserve_called
+        reserve_called = True
+        raise AssertionError("No-op export must not reserve credits.")
+
+    monkeypatch.setattr("src.backend.credits.reserve_credits", fail_if_reserved)
+    response = test_client.post(
+        f"/sessions/{session_id}/export-mix",
+        json={
+            "format": "wav",
+            "billing_reference_job_id": "job-1",
+            "tracks": [
+                {
+                    "job_id": "job-1",
+                    "part_id": "part-1",
+                    "volume": volume,
+                    "muted": muted,
+                    "solo": solo,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "single_track_export_not_required"
+    assert reserve_called is False
 
 
 def test_missing_auth_header_returns_401(monkeypatch):

@@ -776,6 +776,14 @@ def create_app() -> FastAPI:
         job_store: JobStore = request.app.state.job_store
         user_id, user_email = await _get_user_context_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
+        if _is_noop_single_track_export(payload.tracks):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "single_track_export_not_required",
+                    "message": "Download the unchanged source track directly.",
+                },
+            )
         selected_tracks = _select_export_mix_tracks(payload.tracks)
         job_id = uuid.uuid4().hex
         billing_context = await _build_export_mix_billing_context(
@@ -1288,6 +1296,10 @@ def _select_export_mix_tracks(
         if not 0 <= float(track.volume) <= 1:
             raise HTTPException(status_code=400, detail="Track volume must be between 0 and 1.")
     return selected
+
+
+def _is_noop_single_track_export(tracks: list[ExportMixTrackRequest]) -> bool:
+    return len(tracks) == 1
 
 
 def _export_mix_track_metadata(track: ExportMixTrackRequest) -> dict[str, Any]:
