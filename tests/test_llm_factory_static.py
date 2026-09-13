@@ -67,22 +67,34 @@ def test_static_llm_accepts_role_keyword(monkeypatch):
     assert payload is not None
 
 
-def test_regression_llm_plans_the_selected_basic_take(monkeypatch):
+def test_regression_llm_requires_confirmation_before_the_selected_basic_take(monkeypatch):
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("BACKEND_E2E_TEST_MODE", "1")
     monkeypatch.setenv("LLM_PROVIDER", "regression")
     client = create_llm_client(Settings.from_env())
 
     assert client is not None
+    quote = parse_llm_response(
+        client.generate(
+            "",
+            [
+                {"role": "user", "content": "[e2e:basic] prepare this fixture"},
+                {"role": "user", "content": "Please sing the Solo part, verse 1."},
+            ],
+        )
+    )
     response = client.generate(
         "",
         [
             {"role": "user", "content": "[e2e:basic] prepare this fixture"},
             {"role": "user", "content": "Please sing the Solo part, verse 1."},
+            {"role": "user", "content": "[e2e:confirm] Start the quoted synthesis."},
         ],
     )
     payload = parse_llm_response(response)
 
+    assert quote is not None
+    assert quote.tool_calls == []
     assert payload is not None
     assert payload.tool_calls[0].name == "synthesize"
     assert payload.tool_calls[0].arguments["part_index"] == 0
@@ -104,7 +116,7 @@ def test_regression_llm_uses_the_display_part_id_for_solfege(monkeypatch):
     assert payload.tool_calls[0].arguments["part_id"] == "Solo"
 
 
-def test_regression_llm_waits_for_two_verse_selection_then_synthesizes_verse_one(monkeypatch):
+def test_regression_llm_waits_for_two_verse_selection_and_confirmation(monkeypatch):
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("BACKEND_E2E_TEST_MODE", "1")
     monkeypatch.setenv("LLM_PROVIDER", "regression")
@@ -123,9 +135,21 @@ def test_regression_llm_waits_for_two_verse_selection_then_synthesizes_verse_one
             ],
         )
     )
+    confirmed = parse_llm_response(
+        client.generate(
+            "",
+            [
+                {"role": "user", "content": "[e2e:two-verses] prepare this fixture"},
+                {"role": "user", "content": "Please sing the Solo part, verse 1."},
+                {"role": "user", "content": "[e2e:confirm] Start the quoted synthesis."},
+            ],
+        )
+    )
 
     assert initial is not None
     assert initial.tool_calls == []
     assert selected is not None
-    assert selected.tool_calls[0].name == "synthesize"
-    assert selected.tool_calls[0].arguments["lyric_selection"]["number"] == "1"
+    assert selected.tool_calls == []
+    assert confirmed is not None
+    assert confirmed.tool_calls[0].name == "synthesize"
+    assert confirmed.tool_calls[0].arguments["lyric_selection"]["number"] == "1"

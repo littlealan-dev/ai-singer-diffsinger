@@ -15,7 +15,7 @@ from src.musicxml.part_reference import load_musicxml_score, map_parser_part_ind
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 
 
-PERFORMANCE_MIDI_VERSION = 7
+PERFORMANCE_MIDI_VERSION = 8
 
 
 def build_instrumental_performance_midis(
@@ -33,7 +33,7 @@ def build_instrumental_performance_midis(
     original_score = load_musicxml_score(source_path)
     raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=original_score)
     programs_by_part = instrumental_programs_by_part(
-        source_path, assignments=instrument_program_assignments
+        source_path, assignments=instrument_program_assignments, include_ineligible=True
     )
     parts = _instrumental_part_metadata(original_score, raw_part_ids, programs_by_part)
     eligible_indices = {part["part_index"] for part in parts if part["eligible"]}
@@ -81,6 +81,9 @@ def _instrumental_part_metadata(
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for index, part in enumerate(score.parts):
+        raw_part_id = raw_part_ids.get(index, str(part.id or ""))
+        program_facts = programs_by_part.get(raw_part_id, {})
+        is_explicit_vocal = bool(program_facts.get("is_explicit_vocal"))
         score_instrument = part.getInstrument(returnDefault=False)
         has_lyrics = _part_has_lyrics(part)
         is_vocal = isinstance(score_instrument, instrument.Vocalist)
@@ -91,16 +94,18 @@ def _instrumental_part_metadata(
             and not is_vocal
             and (isinstance(program, int) or isinstance(channel, int))
         )
-        source_eligible = bool(part.recurse().notes) and (
+        source_eligible = not is_explicit_vocal and bool(part.recurse().notes) and (
             not has_lyrics or has_explicit_non_vocal_instrument
         )
         percussion = channel == 9 or isinstance(score_instrument, instrument.UnpitchedPercussion)
-        raw_part_id = raw_part_ids.get(index, str(part.id or ""))
-        program_facts = programs_by_part.get(raw_part_id, {})
         resolved_program = program_facts.get("resolved_gm_program")
         playback_preset = program_facts.get("playback_preset")
         score_instrument_id = program_facts.get("score_instrument_id")
-        eligible = source_eligible and isinstance(resolved_program, int)
+        eligible = (
+            source_eligible
+            and bool(program_facts.get("eligible_for_instrumental_midi"))
+            and isinstance(resolved_program, int)
+        )
         result.append(
             {
                 "part_index": index,
@@ -120,7 +125,9 @@ def _instrumental_part_metadata(
                 "midi_channel": int(channel) if isinstance(channel, int) else None,
                 "percussion": percussion,
                 "diagnostic": (
-                    "Part has lyrics and no explicit non-vocal instrument."
+                    "MusicXML instrument-sound explicitly declares a vocal part."
+                    if is_explicit_vocal
+                    else "Part has lyrics and no explicit non-vocal instrument."
                     if has_lyrics and not has_explicit_non_vocal_instrument
                     else "Part has no resolved General MIDI program."
                     if source_eligible and not isinstance(resolved_program, int)

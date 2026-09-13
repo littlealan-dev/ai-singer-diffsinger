@@ -899,7 +899,6 @@ body.legal-active #root {
 
 .score-header .score-controls {
   width: 100%;
-  justify-content: flex-end;
 }
 
 .chat-header h2,
@@ -917,17 +916,25 @@ body.legal-active #root {
 }
 
 .score-controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content max-content max-content;
+  grid-template-areas:
+    "subtitles expansion zoom transport actions"
+    "subtitles seek seek seek seek";
   align-items: center;
-  gap: 16px;
+  column-gap: 16px;
+  row-gap: 8px;
   min-width: 0;
 }
 
 .score-subtitles {
+  grid-area: subtitles;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-right: auto;
+  min-width: 0;
+  align-self: stretch;
+  justify-content: flex-start;
 }
 
 .score-estimate {
@@ -938,6 +945,7 @@ body.legal-active #root {
 }
 
 .score-expansion-control {
+  grid-area: expansion;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -995,9 +1003,52 @@ body.legal-active #root {
 }
 
 .score-player-transport {
+  grid-area: transport;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.score-player-seek-host {
+  grid-area: seek;
+  min-width: 0;
+}
+
+.score-player-seek-host:empty {
+  display: none;
+}
+
+.score-player-seek {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.score-player-seek-slider {
+  width: 100%;
+  min-width: 0;
+  accent-color: #a78bfa;
+  cursor: pointer;
+}
+
+.score-player-seek-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.score-player-seek-time {
+  min-width: 88px;
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .score-player-error {
@@ -1010,6 +1061,7 @@ body.legal-active #root {
 }
 
 .zoom-controls {
+  grid-area: zoom;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -1050,6 +1102,7 @@ body.legal-active #root {
 }
 
 .score-action-controls {
+  grid-area: actions;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -3143,9 +3196,9 @@ img.voice-picker-option-avatar {
   }
 
   .score-controls {
-    flex-wrap: nowrap;
-    justify-content: flex-end;
-    gap: 8px;
+    justify-content: stretch;
+    column-gap: 8px;
+    row-gap: 8px;
   }
 
   .multitrack-toolbar {
@@ -3805,6 +3858,11 @@ img.voice-picker-option-avatar {
   color: var(--text-muted, #94a3b8);
   width: 28px;
   text-align: right;
+}
+
+.vocal-track .score-track-volume-label {
+  width: 34px;
+  white-space: nowrap;
 }
 
 .score-track-bus-level-label {

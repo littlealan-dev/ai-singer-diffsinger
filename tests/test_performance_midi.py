@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from music21 import converter, midi, tempo
 
 from src.musicxml.performance_midi import build_instrumental_performance_midis
@@ -74,6 +75,45 @@ PERCUSSION_ROUTE_XML = """<?xml version="1.0" encoding="UTF-8"?>
     </measure>
   </part>
 </score-partwise>"""
+
+
+@pytest.mark.parametrize("has_lyrics", [True, False])
+def test_vocal_role_overrides_oboe_preset_in_both_midi_orders(tmp_path: Path, has_lyrics: bool) -> None:
+    xml = PIANO_REPEAT_XML.replace(
+        '<score-part id="P2"><part-name>Voice</part-name></score-part>',
+        '''<score-part id="P2"><part-name>Voice</part-name>
+        <score-instrument id="P2-I1"><instrument-name>Stimme</instrument-name>
+        <instrument-sound>voice.vocals</instrument-sound></score-instrument>
+        <midi-instrument id="P2-I1"><midi-channel>2</midi-channel>
+        <midi-program>69</midi-program></midi-instrument></score-part>''',
+    )
+    if not has_lyrics:
+        xml = xml.replace('<lyric><text>sing</text></lyric>', '').replace('<lyric><text>now</text></lyric>', '')
+    source = tmp_path / "vocal-oboe.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    written, expanded = tmp_path / "written.mid", tmp_path / "expanded.mid"
+    result = build_instrumental_performance_midis(
+        source, original_output_path=written, expanded_output_path=expanded,
+    )
+    piano, vocal = result["instrumental_parts"]
+    assert piano["eligible"] is True
+    assert vocal["eligible"] is False
+    assert vocal["midi_program"] == 68  # Preserve preset facts; do not rewrite source.
+    assert "explicitly declares a vocal part" in vocal["diagnostic"]
+    assert source.read_text(encoding="utf-8") == xml
+    # The source notes/lyrics remain available to vocal synthesis.
+    original = converter.parse(str(source))
+    assert len(original.parts[1].recurse().notes) == 2
+    assert bool(original.parts[1].recurse().notes[0].lyrics) is has_lyrics
+    for path, expected_notes in [(written, 2), (expanded, 4)]:
+        mf = midi.MidiFile()
+        mf.open(str(path))
+        mf.read()
+        mf.close()
+        assert [event.data for track in mf.tracks for event in track.events
+                if event.type == midi.MetaEvents.SEQUENCE_TRACK_NAME] == [b"Piano"]
+        assert sum(1 for track in mf.tracks for event in track.events
+                   if event.type == midi.ChannelVoiceMessages.NOTE_ON and event.velocity > 0) == expected_notes
 
 
 def test_builds_written_and_expanded_instrumental_midis() -> None:

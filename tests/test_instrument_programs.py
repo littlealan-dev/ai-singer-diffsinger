@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from music21 import midi
 
 from src.api.score import parse_score
-from src.musicxml.instrument_programs import apply_llm_program_assignments
+from src.musicxml.instrument_programs import apply_llm_program_assignments, instrumental_programs_by_part
 from src.musicxml.performance_midi import build_instrumental_performance_midis
 
 
@@ -272,3 +273,57 @@ def test_synthetic_undeclared_drum_route_does_not_block_synthesis() -> None:
     assert drum["eligible_for_instrumental_midi"] is False
     assert summary["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
     assert summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] == []
+
+
+@pytest.mark.parametrize("sound_id", ["voice.vocals", "voice.female", "voice.male"])
+@pytest.mark.parametrize("has_lyrics", [True, False])
+@pytest.mark.parametrize("midi_fields", [
+    "<midi-channel>1</midi-channel><midi-program>69</midi-program>",
+    "<midi-channel>1</midi-channel>",
+    "<midi-channel>1</midi-channel><midi-bank>2</midi-bank><midi-program>69</midi-program>",
+])
+def test_explicit_vocal_role_excluded_from_program_preflight(
+    tmp_path: Path, sound_id: str, has_lyrics: bool, midi_fields: str,
+) -> None:
+    xml = MISSING_PROGRAM_XML.replace(
+        '<score-part id="P2"><part-name>Voice</part-name></score-part>',
+        f'''<score-part id="P2"><part-name>Uninformative name</part-name>
+        <score-instrument id="P2-I1"><instrument-name>Stimme</instrument-name>
+        <instrument-sound>{sound_id}</instrument-sound></score-instrument>
+        <midi-instrument id="P2-I1">{midi_fields}</midi-instrument></score-part>''',
+    )
+    if not has_lyrics:
+        xml = xml.replace('<lyric><text>sing</text></lyric>', '')
+    source = tmp_path / "vocal-preset.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+    vocal = summary["parts"][1]["instruments"][0]
+    assert vocal["is_explicit_vocal"] is True
+    assert vocal["eligible_for_instrumental_midi"] is False
+    resolution = summary["instrument_program_resolution"]
+    assert resolution["instrumental_score_instrument_ids"] == ["P1-I1"]
+    assert resolution["unresolved_score_instrument_ids"] == ["P1-I1"]
+    assert "P2" not in instrumental_programs_by_part(source)
+    # An old/stale assignment cannot turn an explicitly vocal route into MIDI.
+    facts = instrumental_programs_by_part(
+        source, assignments={"P2-I1": fluidr3_preset()}, include_ineligible=True,
+    )["P2"]
+    assert facts["eligible_for_instrumental_midi"] is False
+    assert facts["program_source"] != "llm_inferred"
+
+
+def test_vocal_sounding_part_name_does_not_override_instrument_facts(tmp_path: Path) -> None:
+    xml = MISSING_PROGRAM_XML.replace("Lead Guitar", "Voice").replace(
+        "</score-instrument>",
+        '</score-instrument><midi-instrument id="P1-I1"><midi-program>25</midi-program></midi-instrument>',
+        1,
+    ).replace(
+        '<type>quarter</type></note>',
+        '<type>quarter</type><lyric><text>chord</text></lyric></note>', 1,
+    )
+    source = tmp_path / "instrument-with-text.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    facts = instrumental_programs_by_part(source)["P1"]
+    assert facts["is_explicit_vocal"] is False
+    assert facts["eligible_for_instrumental_midi"] is True
+    assert facts["resolved_gm_program"] == 24

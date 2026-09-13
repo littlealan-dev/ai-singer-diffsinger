@@ -72,11 +72,13 @@ def instrumental_programs_by_part(
     source_path: Path,
     *,
     assignments: Mapping[str, Any] | None = None,
+    include_ineligible: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the factual/validated program choice for each MIDI-eligible part.
 
     This is used at MIDI-export time.  The caller must already have validated
-    ``assignments``; values in the mapping are never guessed here.
+    ``assignments``; values in the mapping are never guessed here. Export
+    metadata can include ineligible routes to retain their exclusion evidence.
     """
     declarations = _read_part_declarations(source_path)
     result: Dict[str, Dict[str, Any]] = {}
@@ -88,15 +90,19 @@ def instrumental_programs_by_part(
             note_count=1,
         )
         eligible = [item for item in instruments if item["eligible_for_instrumental_midi"]]
-        if not eligible:
+        if not eligible and (not include_ineligible or not instruments):
             continue
         # The existing MIDI exporter emits one track per score part.  MusicXML
         # files with in-score instrument changes retain all declarations in the
         # parse summary, but their event-level routing is outside this first
         # per-part playback implementation.
-        primary = eligible[0]
+        primary = eligible[0] if eligible else instruments[0]
         instrument_id = primary["score_instrument_id"]
-        override = _normalise_preset(assignments.get(instrument_id)) if assignments else None
+        override = (
+            _normalise_preset(assignments.get(instrument_id))
+            if assignments and primary["eligible_for_instrumental_midi"]
+            else None
+        )
         preset = override or primary.get("playback_preset")
         program = preset.get("program") if isinstance(preset, dict) else None
         result[raw_part_id] = {
@@ -339,7 +345,13 @@ def _part_instruments(
         # A synthetic placeholder cannot be targeted by the MIDI exporter and
         # must never make synthesis wait for an LLM assignment.
         has_explicit_midi = isinstance(native_program, int) or isinstance(native_channel, int)
-        eligible = not synthetic and (not has_lyrics or has_explicit_midi)
+        # MusicXML's standard sound IDs use the voice.* family for vocal
+        # sounds, independently of the MIDI playback preset. Do not infer
+        # this role from names, lyric words, or GM program numbers.
+        # https://www.w3.org/2021/06/musicxml40/listings/sounds.xml/
+        sound_id = source.get("instrument_sound")
+        is_explicit_vocal = isinstance(sound_id, str) and sound_id.startswith("voice.")
+        eligible = not synthetic and not is_explicit_vocal and (not has_lyrics or has_explicit_midi)
         preset, program_source = _portable_preset(
             channel=native_channel, bank=native_bank, program=native_program
         )
@@ -371,6 +383,7 @@ def _part_instruments(
                 "program_evidence": ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
                 "direction_words": list(declaration.get("direction_words") or []),
                 "eligible_for_instrumental_midi": eligible,
+                "is_explicit_vocal": is_explicit_vocal,
                 "is_percussion": percussion,
                 "synthetic": synthetic,
             }

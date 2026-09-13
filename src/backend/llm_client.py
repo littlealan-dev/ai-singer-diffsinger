@@ -186,56 +186,66 @@ class RegressionLlmClient:
         if scenario is None:
             return self._response("Choose a part and verse to continue.")
 
-        if latest.startswith("[e2e:render-solfege]"):
-            return self._response(
-                "Starting the solfege take.",
-                "synthesize",
-                {
-                    "part_index": 0,
-                    "lyric_selection": self._solfege_verse_one,
-                    "require_solfege_lyrics": True,
-                },
-            )
-        if latest.startswith("[e2e:render-derived]"):
-            lyric_selection = (
-                self._staff_derived_verse_one
-                if scenario == "split-staff"
-                else self._chord_derived_verse_one
-            )
-            return self._response(
-                "Starting the derived-part take.",
-                "synthesize",
-                {"part_index": 1, "lyric_selection": lyric_selection},
-            )
-        if scenario == "two-verses":
-            if latest.startswith("[e2e:"):
-                return self._response("Choose the displayed part and verse.")
-            if "Please sing" in latest:
+        if latest.startswith("[e2e:confirm]"):
+            if "[e2e:render-solfege]" in transcript:
                 return self._response(
-                    "Starting the selected verse.",
+                    "Starting the confirmed solfege take.",
+                    "synthesize",
+                    {
+                        "part_index": 0,
+                        "lyric_selection": self._solfege_verse_one,
+                        "require_solfege_lyrics": True,
+                    },
+                )
+            if "[e2e:render-derived]" in transcript:
+                lyric_selection = (
+                    self._staff_derived_verse_one
+                    if scenario == "split-staff"
+                    else self._chord_derived_verse_one
+                )
+                return self._response(
+                    "Starting the confirmed derived-part take.",
+                    "synthesize",
+                    {"part_index": 1, "lyric_selection": lyric_selection},
+                )
+            if scenario == "two-verses":
+                return self._response(
+                    "Starting the confirmed selected verse.",
                     "synthesize",
                     {"part_index": 0, "lyric_selection": self._verse_one},
                 )
-        if latest.startswith("[e2e:"):
-            if scenario in {"basic", "repeat-piano"}:
+            if scenario in {"basic", "repeat-piano", "active-measure-written", "active-measure-repeat"}:
                 return self._response(
-                    "Starting the take.",
+                    "Starting the confirmed take.",
                     "synthesize",
                     {
-                        "part_index": 1 if scenario == "repeat-piano" else 0,
+                        "part_index": (
+                            1
+                            if scenario in {"repeat-piano", "active-measure-written", "active-measure-repeat"}
+                            else 0
+                        ),
                         "lyric_selection": (
                             self._repeat_piano_verse_one
-                            if scenario == "repeat-piano"
+                            if scenario in {"repeat-piano", "active-measure-written", "active-measure-repeat"}
                             else self._verse_one
                         ),
                     },
                 )
+
+        if latest.startswith("[e2e:render-solfege]"):
+            return self._response("The solfege take is ready to quote. Please confirm to start it.")
+        if latest.startswith("[e2e:render-derived]"):
+            return self._response("The derived-part take is ready to quote. Please confirm to start it.")
+        if scenario == "two-verses":
+            if latest.startswith("[e2e:"):
+                return self._response("Choose the displayed part and verse.")
+            if "Please sing" in latest:
+                return self._response("The selected verse is ready to quote. Please confirm to start it.")
+        if latest.startswith("[e2e:"):
+            if scenario in {"basic", "repeat-piano"}:
+                return self._response("The take is ready to quote. Please confirm to start it.")
             if scenario in {"active-measure-written", "active-measure-repeat"}:
-                return self._response(
-                    "Starting the take.",
-                    "synthesize",
-                    {"part_index": 1, "lyric_selection": self._repeat_piano_verse_one},
-                )
+                return self._response("The take is ready to quote. Please confirm to start it.")
             if scenario == "solfege":
                 return self._response(
                     "Adding solfege to the active score.",
@@ -249,9 +259,7 @@ class RegressionLlmClient:
         if "Please sing" not in latest:
             return self._response("Choose the displayed part and verse.")
         if scenario == "basic":
-            return self._response(
-                "Starting the take.", "synthesize", {"part_index": 0, "lyric_selection": self._verse_one}
-            )
+            return self._response("The take is ready to quote. Please confirm to start it.")
         if scenario == "solfege":
             return self._response(
                 "Adding solfege to the active score.",

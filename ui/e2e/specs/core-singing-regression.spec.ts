@@ -30,6 +30,7 @@ test.describe("core singing regression", () => {
     }
     await signInAsE2EUser(page, test.info().title.replaceAll(" ", "-"));
     await expect(page.getByTestId("chat-input")).toBeEnabled();
+    await dismissNonPaywallOverlays(page);
   });
 
   test("initializes a new account's credits without showing the paywall", async ({ page }) => {
@@ -65,6 +66,7 @@ test.describe("core singing regression", () => {
     // the test validates the splitter, not an overlay intercepting it.
     await releaseNotesDismiss.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
     if (await releaseNotesDismiss.isVisible()) await releaseNotesDismiss.click({ force: true });
+    await dismissNonPaywallOverlays(page);
     await page.evaluate(() => {
       const testWindow = window as Window & {
         __e2ePagePreviewSvg?: SVGSVGElement;
@@ -132,12 +134,14 @@ test.describe("core singing regression", () => {
 
   test("selects verse 1 from the UI selector and synthesizes it", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "two-verses-one-part.xml");
-    await requestScenario(page, "two-verses");
+    await requestScenario(page, "two-verses", { confirmSynthesis: false });
 
     await expect(page.getByTestId("part-selection").locator("option:checked")).toHaveText("Solo");
     await expect(page.getByTestId("verse-selection").locator("option")).toHaveText(["Verse 1", "Verse 2"]);
     await page.getByTestId("verse-selection").selectOption("1");
-    const renderResponse = await clickUseSelection(page);
+    const quoteResponse = await clickUseSelection(page);
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const renderResponse = await confirmSynthesis(page);
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const state = await waitForAudio(page, request, testInfo);
 
@@ -148,10 +152,12 @@ test.describe("core singing regression", () => {
 
   test("synthesizes verse 1 when the request is typed in chat", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "two-verses-one-part.xml");
-    await requestScenario(page, "two-verses");
+    await requestScenario(page, "two-verses", { confirmSynthesis: false });
 
     await expect(page.getByTestId("verse-selection").locator("option")).toHaveText(["Verse 1", "Verse 2"]);
-    const renderResponse = await sendMessage(page, "Please sing the Solo part, verse 1.");
+    const quoteResponse = await sendMessage(page, "Please sing the Solo part, verse 1.");
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const renderResponse = await confirmSynthesis(page);
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const state = await waitForAudio(page, request, testInfo);
 
@@ -238,10 +244,12 @@ test.describe("core singing regression", () => {
       timeout: 15_000,
     }).toBeGreaterThan(0);
     // The expanded written order is 1-2-1-2-3, so the piano must schedule
-    // multiple notes. A one-note MIDI failure cannot satisfy this assertion.
-    await expect.poll(async () => page.evaluate(() => (window as any).__e2ePlayback.oscillatorStarts), {
+    // five notes. With FluidR3 loaded, the MIDI provider renders notes through
+    // AudioBufferSourceNode (not OscillatorNode); the vocal source adds one
+    // more buffer start. A one-note MIDI failure therefore cannot reach six.
+    await expect.poll(async () => page.evaluate(() => (window as any).__e2ePlayback.audioBufferStarts), {
       timeout: 15_000,
-    }).toBeGreaterThanOrEqual(5);
+    }).toBeGreaterThanOrEqual(6);
     expect(updateDepthWarnings).toEqual([]);
   });
 
@@ -259,7 +267,15 @@ test.describe("core singing regression", () => {
     await page.keyboard.press("Escape");
     await installActiveMeasureObserver(page);
     const canvas = page.locator(".score-canvas");
-    await canvas.evaluate((element) => element.scrollTo({ top: 0, left: 0 }));
+    // Constrain both axes so the test exercises page-follow alignment rather
+    // than passing merely because the full page happens to fit the viewport.
+    await canvas.evaluate((element) => {
+      element.style.flex = "0 0 320px";
+      element.style.width = "320px";
+      element.style.minHeight = "0";
+      element.style.height = "220px";
+      element.scrollTo({ top: 0, left: 0 });
+    });
     await page.getByRole("button", { name: "Play score player" }).click();
 
     await expect.poll(
@@ -267,6 +283,10 @@ test.describe("core singing regression", () => {
       { timeout: 15_000 },
     ).toBe(true);
     await expect.poll(() => canvas.evaluate((element) => element.scrollTop), { timeout: 15_000 }).toBeGreaterThan(0);
+    await expect.poll(
+      () => canvas.evaluate(isActiveMeasureAtPageReadingOrigin),
+      { timeout: 15_000 },
+    ).toBe(true);
 
     await page.getByRole("button", { name: "Stop score player" }).click();
     // Make the full staffline wider than the constrained horizontal viewport.
@@ -287,8 +307,14 @@ test.describe("core singing regression", () => {
     await canvas.evaluate((element) => {
       element.style.flex = "0 0 220px";
       element.style.width = "220px";
+      element.style.minHeight = "0";
+      element.style.height = "160px";
     });
-    await canvas.evaluate((element) => element.scrollTo({ top: 0, left: 0 }));
+    const initialHorizontalScrollTop = await canvas.evaluate((element) => {
+      element.scrollTo({ top: 48, left: 0 });
+      return element.scrollTop;
+    });
+    expect(initialHorizontalScrollTop).toBeGreaterThan(0);
     await clearActiveMeasureHistory(page);
     await page.getByRole("button", { name: "Play score player" }).click();
 
@@ -297,6 +323,8 @@ test.describe("core singing regression", () => {
       { timeout: 15_000 },
     ).toBe(true);
     await expect.poll(() => canvas.evaluate((element) => element.scrollLeft), { timeout: 15_000 }).toBeGreaterThan(0);
+    await expect.poll(() => canvas.evaluate((element) => element.scrollTop), { timeout: 15_000 })
+      .toBe(initialHorizontalScrollTop);
   });
 
   test("returns the active highlight to repeated source measures", async ({ page, request }, testInfo) => {
@@ -333,7 +361,7 @@ test.describe("core singing regression", () => {
 
   test("adds solfege, rehydrates the active artifact, then synthesizes it", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "solfege-source.xml");
-    await requestScenario(page, "solfege");
+    await requestScenario(page, "solfege", { confirmSynthesis: false });
     await waitForDerivedScore(page, request);
 
     const transformed = await getE2EState(page, request, sessionId);
@@ -341,7 +369,9 @@ test.describe("core singing regression", () => {
     expect(String(transformed.files?.active_musicxml_storage_path ?? "")).not.toBe("");
 
     await clearLocalArtifacts(page, request, sessionId);
-    const renderResponse = await sendMessage(page, "[e2e:render-solfege]");
+    const quoteResponse = await sendMessage(page, "[e2e:render-solfege]");
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const renderResponse = await confirmSynthesis(page);
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const state = await waitForAudio(page, request, testInfo);
 
@@ -353,9 +383,11 @@ test.describe("core singing regression", () => {
 
   test("splits two voices on one staff and synthesizes a derived part", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "two-voices-one-staff.xml");
-    await requestScenario(page, "split-staff");
+    await requestScenario(page, "split-staff", { confirmSynthesis: false });
     await waitForDerivedScore(page, request, { requirePreprocessJob: true });
-    const renderResponse = await sendMessage(page, "[e2e:render-derived]");
+    const quoteResponse = await sendMessage(page, "[e2e:render-derived]");
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const renderResponse = await confirmSynthesis(page);
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const state = await waitForAudio(page, request, testInfo);
 
@@ -365,9 +397,11 @@ test.describe("core singing regression", () => {
 
   test("splits chord lanes from one part and synthesizes a derived part", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "chord-one-part.xml");
-    await requestScenario(page, "split-chords");
+    await requestScenario(page, "split-chords", { confirmSynthesis: false });
     await waitForDerivedScore(page, request, { requirePreprocessJob: true });
-    const renderResponse = await sendMessage(page, "[e2e:render-derived]");
+    const quoteResponse = await sendMessage(page, "[e2e:render-derived]");
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const renderResponse = await confirmSynthesis(page);
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const state = await waitForAudio(page, request, testInfo);
 
@@ -394,6 +428,24 @@ test.describe("core singing regression", () => {
   });
 });
 
+async function dismissNonPaywallOverlays(page: Page): Promise<void> {
+  // These overlays are independent of account credit state. Clear them in the
+  // shared setup so the credit regression specifically detects a paywall.
+  const cookieConsentDismiss = page.getByRole("button", { name: "Decline" });
+  if (await cookieConsentDismiss.isVisible()) await cookieConsentDismiss.click({ force: true });
+
+  const releaseNotesDismiss = page.getByRole("button", { name: "Awesome, let's go!" });
+  await releaseNotesDismiss.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
+  if (await releaseNotesDismiss.isVisible()) await releaseNotesDismiss.click({ force: true });
+
+  // The first-sign-in "Get Updates" guide opens the account menu after a
+  // short delay. It is not a paywall, but its tooltip can cover score-header
+  // controls, so close the expanded menu before each independent scenario.
+  const openUserMenu = page.locator(".user-menu-button[aria-expanded='true']");
+  if (await openUserMenu.isVisible()) await openUserMenu.click({ force: true });
+  await expect(page.locator(".user-menu-update-bubble")).toHaveCount(0);
+}
+
 async function uploadFixture(page: Page, filename: string): Promise<void> {
   const uploadResponse = page.waitForResponse((response) => {
     const request = response.request();
@@ -407,8 +459,38 @@ async function uploadFixture(page: Page, filename: string): Promise<void> {
   await expect(page.getByTestId("chat-input")).toBeEnabled();
 }
 
-async function requestScenario(page: Page, scenario: string): Promise<void> {
-  await sendMessage(page, `[e2e:${scenario}] prepare this fixture`);
+async function requestScenario(
+  page: Page,
+  scenario: string,
+  { confirmSynthesis = true }: { confirmSynthesis?: boolean } = {},
+): Promise<void> {
+  const response = await sendMessage(page, `[e2e:${scenario}] prepare this fixture`);
+  if (!confirmSynthesis) return;
+  expect(response.type, JSON.stringify(response)).toBe("chat_text");
+  const renderResponse = await confirmSynthesisForScenario(page);
+  expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
+}
+
+async function confirmSynthesis(page: Page): Promise<Record<string, unknown>> {
+  return sendMessage(page, "[e2e:confirm] Start the quoted synthesis.");
+}
+
+async function confirmSynthesisForScenario(page: Page): Promise<Record<string, unknown>> {
+  return confirmSynthesis(page);
+}
+
+function isActiveMeasureAtPageReadingOrigin(canvas: HTMLElement): boolean {
+  const cursor = canvas.querySelector<HTMLElement>("[data-testid='active-score-measure']");
+  if (!cursor) return false;
+
+  const canvasRect = canvas.getBoundingClientRect();
+  const cursorRect = cursor.getBoundingClientRect();
+  const margin = 64;
+  const atLeftEdge = cursorRect.left - canvasRect.left <= margin;
+  const atTopEdge = cursorRect.top - canvasRect.top <= margin;
+  const atHorizontalEnd = canvas.scrollLeft >= canvas.scrollWidth - canvas.clientWidth - 1;
+  const atVerticalEnd = canvas.scrollTop >= canvas.scrollHeight - canvas.clientHeight - 1;
+  return (atLeftEdge || atHorizontalEnd) && (atTopEdge || atVerticalEnd);
 }
 
 type ActiveMeasureHistoryEntry = {
