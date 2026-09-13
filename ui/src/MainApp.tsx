@@ -650,7 +650,8 @@ function RecoverableAudioPlayer({
         hidden={stale || recovering}
         src={stale || recovering ? undefined : effectiveAudioUrl}
         onPlay={(event) => {
-          if (isPlaybackTokenStale(effectiveAudioUrl)) {
+          const playingUrl = event.currentTarget.currentSrc || event.currentTarget.src;
+          if (isPlaybackTokenStale(playingUrl)) {
             event.currentTarget.pause();
             void recover(true);
             return;
@@ -664,6 +665,10 @@ function RecoverableAudioPlayer({
             }
             setStale(true);
           }
+        }}
+        onEnded={(event) => {
+          event.currentTarget.currentTime = 0;
+          resumeTimeRef.current = 0;
         }}
         onError={handlePlaybackError}
       />
@@ -968,6 +973,7 @@ export default function MainApp() {
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
   const multiTrackWaveSurferRefs = useRef<Record<string, WaveSurfer | null>>({});
+  const audioRefreshPromisesRef = useRef<Record<string, Promise<string | null> | undefined>>({});
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
@@ -2072,13 +2078,56 @@ export default function MainApp() {
     }
   };
 
-  const fetchFreshAudioUrl = async (
+  const refreshMessageAudioUrl = async (
+    messageId: string,
     progressUrl?: string,
     jobId?: string
   ): Promise<string | null> => {
     if (!progressUrl) return null;
-    const payload = await fetchProgress(progressUrlForJob(progressUrl, jobId));
-    return payload.audio_url || null;
+    const refreshUrl = progressUrlForJob(progressUrl, jobId);
+    const pending = audioRefreshPromisesRef.current[messageId];
+    if (pending) {
+      return pending;
+    }
+    const refreshPromise = (async () => {
+      const payload = await fetchProgress(refreshUrl);
+      const nextAudioUrl = payload.audio_url;
+      if (!nextAudioUrl) return null;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? {
+                ...msg,
+                audioUrl: nextAudioUrl,
+                audioTrack: payload.audio_track ?? msg.audioTrack,
+                progressUrl: refreshUrl,
+                jobId: payload.job_id ?? msg.jobId,
+                feedback: payload.feedback ?? msg.feedback,
+              }
+            : msg
+        )
+      );
+      const belongsToWorkspace = !suppressedMultiTrackMessageIdsRef.current.has(messageId)
+        && (!payload.score_id || payload.score_id === activeScoreIdRef.current);
+      if (belongsToWorkspace) {
+        setAudioUrl((current) => (current ? nextAudioUrl : current));
+      }
+      if (belongsToWorkspace && payload.job_kind !== "preprocess") {
+        addOrReplaceMultiTrackAudio(
+          nextAudioUrl,
+          payload.audio_track,
+          payload.job_id,
+          payload.actual_duration_seconds
+        );
+      }
+      return nextAudioUrl;
+    })();
+    audioRefreshPromisesRef.current[messageId] = refreshPromise;
+    try {
+      return await refreshPromise;
+    } finally {
+      delete audioRefreshPromisesRef.current[messageId];
+    }
   };
 
   const shouldOpenFeedbackPrompt = (message: Message): boolean =>
@@ -2790,7 +2839,7 @@ export default function MainApp() {
                   <RecoverableAudioPlayer
                     audioUrl={msg.audioUrl}
                     onRefresh={() =>
-                      fetchFreshAudioUrl(msg.progressUrl, msg.jobId)
+                      refreshMessageAudioUrl(msg.id, msg.progressUrl, msg.jobId)
                     }
                     onPlayback={() => {
                       logAnalyticsEvent("synthesis_audio_play", synthesisAudioAnalyticsParams(msg));

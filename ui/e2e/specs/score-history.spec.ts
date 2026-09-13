@@ -131,10 +131,11 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   await expect(audio).toBeVisible();
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.paused)).toBe(false);
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBeGreaterThan(0);
-  await audio.evaluate((element: HTMLAudioElement) => {
-    element.pause();
-    element.currentTime = 0;
-  });
+  await audio.evaluate(
+    (element: HTMLAudioElement) =>
+      new Promise<void>((resolve) => element.addEventListener("ended", () => resolve(), { once: true }))
+  );
+  await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBe(0);
   expiredRequests = 0;
   await expect(page.locator(".multitrack-lanes")).toContainText("Solo");
   await page.getByRole("slider", { name: "Solo volume" }).evaluate((element: HTMLInputElement) => {
@@ -173,7 +174,7 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   const currentScorePlaybackTime = await audio.evaluate((element: HTMLAudioElement) => element.currentTime);
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBeGreaterThan(currentScorePlaybackTime);
   await page.waitForTimeout(250);
-  expect(currentScoreRecoveryWaveformRequests).toBe(0);
+  expect(currentScoreRecoveryWaveformRequests).toBeGreaterThan(0);
   expect(autoplayErrors).toEqual([]);
   await audio.evaluate((element: HTMLAudioElement) => {
     element.pause();
