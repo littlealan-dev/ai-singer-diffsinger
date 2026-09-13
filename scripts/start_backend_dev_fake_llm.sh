@@ -85,7 +85,7 @@ export LLM_STATIC_LOOP
 export PYTHONPATH="${ROOT_DIR}"
 
 cd "${ROOT_DIR}"
-nohup "${PYTHON_BIN}" -m uvicorn src.backend.main:app \
+nohup "${PYTHON_BIN}" -m src.backend.server \
   --host "${BACKEND_HOST}" \
   --port "${BACKEND_PORT}" \
   --log-level "${BACKEND_LOG_LEVEL}" \

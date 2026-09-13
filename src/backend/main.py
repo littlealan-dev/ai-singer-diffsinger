@@ -24,12 +24,15 @@ import logging
 from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.llm_factory import create_llm_client
+from src.backend.lifecycle import ShutdownCoordinator
 from src.backend.mcp_client import (
     McpRouter,
+    McpShuttingDownError,
     McpError,
     McpRequestTimeoutError,
     McpStartupInProgressError,
     McpToolError,
+    McpWorkerUnavailableError,
 )
 from src.backend.orchestrator import Orchestrator
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
@@ -219,25 +222,34 @@ def create_app() -> FastAPI:
     router = McpRouter(settings)
     llm_client = create_llm_client(settings)
     orchestrator = Orchestrator(router, sessions, settings, llm_client)
+    export_mix_tasks: Dict[str, asyncio.Task[Any]] = {}
+    shutdown_coordinator = ShutdownCoordinator(
+        router=router,
+        orchestrator=orchestrator,
+        export_tasks=export_mix_tasks,
+        settings=settings,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Start/stop shared services and handle cleanup."""
-        settings.sessions_dir.mkdir(parents=True, exist_ok=True)
-        if settings.mcp_startup_blocking:
-            router.start()
-            _log_onnx_providers()
-        else:
-            logger.info("mcp_start_deferred")
-            router.start_background()
-            asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
+        shutdown_coordinator.initialize()
         try:
+            settings.sessions_dir.mkdir(parents=True, exist_ok=True)
+            startup = router.start_background()
+            if settings.mcp_startup_blocking:
+                await asyncio.wrap_future(startup)
+                asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
+            else:
+                logger.info("mcp_start_deferred")
+                asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
             yield
         finally:
-            removed = await sessions.cleanup_expired_on_disk()
-            if removed:
-                get_logger("backend.api").info("session_cleanup_removed count=%s", removed)
-            router.stop()
+            shutdown_coordinator.http_drain_finished()
+            try:
+                await shutdown_coordinator.finish()
+            finally:
+                shutdown_coordinator.close()
 
     app = FastAPI(title="SVS Backend", version="0.1.0", lifespan=lifespan)
 
@@ -249,7 +261,8 @@ def create_app() -> FastAPI:
     app.state.router = router
     app.state.llm_client = llm_client
     app.state.orchestrator = orchestrator
-    app.state.export_mix_tasks = {}
+    app.state.export_mix_tasks = export_mix_tasks
+    app.state.shutdown_coordinator = shutdown_coordinator
 
     cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
     if cors_env:
@@ -281,16 +294,17 @@ def create_app() -> FastAPI:
         return {"status": "ok", "build": settings.backend_build_id}
 
     @app.get("/readyz")
-    async def readyz(request: Request) -> Dict[str, Any]:
+    async def readyz(request: Request) -> JSONResponse:
         """Return app readiness diagnostics without requiring MCP tool calls."""
         router: McpRouter = request.app.state.router
         mcp = router.readiness()
-        return {
-            "status": "ready" if mcp["ready"] else "starting",
+        payload = {
+            "status": mcp["status"],
             "ready": bool(mcp["ready"]),
             "build": settings.backend_build_id,
             "mcp": mcp,
         }
+        return JSONResponse(status_code=200 if mcp["ready"] else 503, content=payload)
 
     @app.get("/_e2e/sessions/{session_id}/state")
     async def e2e_session_state(session_id: str, request: Request) -> Dict[str, Any]:
@@ -451,7 +465,11 @@ def create_app() -> FastAPI:
                     {"file_path": rel_path, "expand_repeats": False},
                 )
                 parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
-            except McpStartupInProgressError as exc:
+            except (
+                McpStartupInProgressError,
+                McpShuttingDownError,
+                McpWorkerUnavailableError,
+            ) as exc:
                 raise _backend_starting_http_exception(exc) from exc
             except McpRequestTimeoutError as exc:
                 parse_score_ms = (time.monotonic() - parse_score_start) * 1000.0
@@ -587,7 +605,11 @@ def create_app() -> FastAPI:
                 selected_language=payload.selected_language,
             )
             return _sign_audio_payload_urls(request, response, user_id=user_id)
-        except McpStartupInProgressError as exc:
+        except (
+            McpStartupInProgressError,
+            McpShuttingDownError,
+            McpWorkerUnavailableError,
+        ) as exc:
             raise _backend_starting_http_exception(exc) from exc
         except SessionMusicXmlUnavailableError as exc:
             raise HTTPException(
@@ -1997,8 +2019,14 @@ def _client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
-def _backend_starting_http_exception(exc: McpStartupInProgressError) -> HTTPException:
-    """Return the typed backend warmup response used by clients."""
+def _backend_starting_http_exception(
+    exc: (
+        McpStartupInProgressError
+        | McpShuttingDownError
+        | McpWorkerUnavailableError
+    ),
+) -> HTTPException:
+    """Return a typed temporary-unavailability response used by clients."""
     return HTTPException(
         status_code=503,
         detail={

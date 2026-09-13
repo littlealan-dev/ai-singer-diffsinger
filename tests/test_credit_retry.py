@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 import asyncio
+import time
+
+import pytest
 
 from src.backend.credit_retry import retry_credit_op
 
@@ -93,3 +96,25 @@ def test_retry_credit_op_bypasses_non_retryable_status(monkeypatch):
     assert result.status == "already_settled"
     assert calls["count"] == 1
     assert sleeps == []
+
+
+def test_retry_credit_op_does_not_start_retry_after_shutdown_deadline():
+    calls = {"count": 0}
+    deadline = {"value": None}
+
+    def op():
+        calls["count"] += 1
+        deadline["value"] = time.monotonic() - 1.0
+        return _Result(status="infra_error")
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            retry_credit_op(
+                op,
+                max_attempts=3,
+                base_delay=0.5,
+                deadline_getter=lambda: deadline["value"],
+            )
+        )
+
+    assert calls["count"] == 1

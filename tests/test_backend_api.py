@@ -1,8 +1,10 @@
 import asyncio
+from concurrent.futures import Future
 import copy
 import io
 import os
 import shutil
+import threading
 import time
 import uuid
 import json
@@ -24,12 +26,20 @@ from src.backend.main import (
     create_app,
 )
 from src.backend.llm_client import LlmRole, StaticLlmClient
-from src.backend.mcp_client import McpRequestTimeoutError, McpToolError
+from src.backend.lifecycle import ShutdownCoordinator
+from src.backend.message_catalog import backend_message
+from src.backend.mcp_client import (
+    McpRequestTimeoutError,
+    McpShuttingDownError,
+    McpToolError,
+    McpWorkerUnavailableError,
+)
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
     TOOL_RESULT_PREFIX,
     ToolExecutionResult,
     WorkflowCandidate,
+    SynthesisActionRequired,
     _format_synthesis_error,
     _ensure_job_input_storage,
     _resolve_job_input_snapshot_paths,
@@ -361,8 +371,19 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
     import src.backend.main as backend_main
     backend_main._PLAYBACK_SECRET_CACHE.clear()
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    def _completed_start(self):
+        future = Future()
+        future.set_result(None)
+        return future
+
+    monkeypatch.setattr(
+        "src.backend.mcp_client.McpRouter.start_background",
+        _completed_start,
+    )
+    monkeypatch.setattr(
+        "src.backend.mcp_client.McpRouter.stop",
+        lambda self, **kwargs: None,
+    )
     monkeypatch.setattr(
         "src.backend.main.verify_id_token_claims",
         lambda token: {"uid": "test-user", "email": "test@example.com"},
@@ -381,9 +402,21 @@ def _prepare_app(monkeypatch, overrides=None):
         "src.backend.credits.reserve_credits",
         lambda *_, **__: ReserveCreditsResult(status="reserved", estimated_credits=1),
     )
+    def _fake_release_credits(
+        _user_id,
+        job_id,
+        *,
+        terminal_job_fields=None,
+    ):
+        if terminal_job_fields:
+            payload = fake_jobs.setdefault(job_id, {})
+            payload.update(terminal_job_fields)
+            payload["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        return ReleaseCreditsResult(status="released")
+
     monkeypatch.setattr(
         "src.backend.credits.release_credits",
-        lambda *_, **__: ReleaseCreditsResult(status="released"),
+        _fake_release_credits,
     )
     monkeypatch.setattr("src.backend.main.upload_file", lambda *_, **__: None)
     monkeypatch.setattr(
@@ -558,10 +591,72 @@ def test_readyz_reports_mcp_readiness(client):
 
     response = test_client.get("/readyz")
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     payload = response.json()
     assert payload["ready"] is False
     assert payload["mcp"]["status"] == "not_started"
+
+
+def test_readyz_requires_both_workers_and_rejects_draining_instance(client, monkeypatch):
+    test_client, app = client
+    router = app.state.router
+    workers = {"cpu": True, "gpu": False}
+    monkeypatch.setattr(router._cpu, "is_ready", lambda: workers["cpu"])
+    monkeypatch.setattr(router._gpu, "is_ready", lambda: workers["gpu"])
+    router._startup_ready.set()
+
+    response = test_client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+
+    workers["gpu"] = True
+    response = test_client.get("/readyz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["ready"] is True
+    assert payload["mcp"]["workers"] == {"cpu": True, "gpu": True}
+
+    router.begin_shutdown()
+    response = test_client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "draining"
+
+
+def test_upload_interrupted_by_shutdown_returns_temporary_unavailability(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    def interrupted_call(name, arguments):
+        raise McpShuttingDownError("MCP router is shutting down.")
+
+    monkeypatch.setattr(app.state.router, "call_tool", interrupted_call)
+    response = _upload_score(test_client, session_id)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "backend_shutting_down"
+    assert response.headers["Retry-After"] == "10"
+
+
+def test_upload_waiting_for_worker_returns_temporary_unavailability(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    def unavailable_call(name, arguments):
+        raise McpWorkerUnavailableError(McpWorkerUnavailableError.user_message)
+
+    monkeypatch.setattr(app.state.router, "call_tool", unavailable_call)
+    response = _upload_score(test_client, session_id)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "backend_unavailable",
+        "message": McpWorkerUnavailableError.user_message,
+    }
+    assert response.headers["Retry-After"] == "10"
 
 
 def _upload_score(test_client, session_id, filename="score.xml"):
@@ -6801,8 +6896,13 @@ def test_settle_failure_releases_reservation_and_fails_job_without_audio(client,
         ),
     )
 
-    def fake_release(*_args, **_kwargs):
+    def fake_release(_user_id, released_job_id, *, terminal_job_fields=None):
         release_calls["count"] += 1
+        if terminal_job_fields:
+            app.state.job_store.update_job(
+                released_job_id,
+                **terminal_job_fields,
+            )
         return ReleaseCreditsResult(status="released")
 
     monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
@@ -6849,6 +6949,255 @@ def test_settle_failure_releases_reservation_and_fails_job_without_audio(client,
     assert release_calls["count"] == 1
 
 
+@pytest.mark.parametrize("failure_source", ["worker", "settlement"])
+def test_shutdown_waits_for_inflight_synthesis_billing_finalization(
+    client,
+    monkeypatch,
+    failure_source,
+):
+    _test_client, app = client
+    session_id = "session-shutdown-billing-finalization"
+    job_id = "job-shutdown-billing-finalization"
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    release_calls = {"count": 0}
+
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def fake_synthesize(*_args, **_kwargs):
+        if failure_source == "settlement":
+            return {"duration_seconds": 1.0, "output_path": "audio.wav"}
+        raise RuntimeError("MCP worker stopped during synthesis")
+
+    monkeypatch.setattr(
+        "src.backend.credits.settle_credits_and_complete_job",
+        lambda *args, **kwargs: CompleteJobAndSettleCreditsResult(
+            status="reconciliation_required", actual_credits=1, overdrafted=False,
+        ),
+    )
+
+    def blocking_release(
+        _user_id,
+        released_job_id,
+        *,
+        terminal_job_fields=None,
+    ):
+        release_calls["count"] += 1
+        release_started.set()
+        assert allow_release.wait(timeout=1.0)
+        if terminal_job_fields:
+            app.state.job_store.update_job(
+                released_job_id,
+                **terminal_job_fields,
+            )
+        return ReleaseCreditsResult(status="released")
+
+    app.state.orchestrator._synthesize = fake_synthesize
+    monkeypatch.setattr("src.backend.credits.release_credits", blocking_release)
+
+    async def scenario():
+        synthesis_task = asyncio.create_task(
+            app.state.orchestrator._run_synthesis_job(
+                session_id,
+                {},
+                {},
+                job_id,
+                "test-user",
+                input_path=None,
+                storage_input_path=None,
+                job_input_storage_path=None,
+                output_storage_path=None,
+            )
+        )
+        app.state.orchestrator._synthesis_tasks[job_id] = synthesis_task
+        try:
+            assert await asyncio.to_thread(release_started.wait, 1.0)
+            shutdown_task = asyncio.create_task(
+                app.state.orchestrator.shutdown_tasks(time.monotonic() + 1.0)
+            )
+            await asyncio.sleep(0)
+            assert not shutdown_task.done()
+
+            allow_release.set()
+            assert await shutdown_task is True
+            assert synthesis_task.cancelled()
+        finally:
+            allow_release.set()
+            if not synthesis_task.done():
+                synthesis_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await synthesis_task
+
+    asyncio.run(scenario())
+
+    assert release_calls["count"] == 1
+    assert app.state.orchestrator._billing_finalization_tasks == {}
+    latest = app.state.job_store.get_job_by_id(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+    )
+    assert latest is not None
+    _, job_data = latest
+    assert job_data["status"] == "failed"
+    assert job_data["step"] == "error"
+    assert job_data["progress"] == 1.0
+
+
+def test_failed_release_during_worker_stop_makes_shutdown_incomplete(
+    client, monkeypatch, caplog,
+):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = "session-worker-stop-release-failure"
+    job_id = "job-worker-stop-release-failure"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued",
+    )
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 1)
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda *args, **kwargs: ReleaseCreditsResult(status="infra_error"),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.mark_reservation_reconciliation_required",
+        lambda *args, **kwargs: True,
+    )
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        synthesis_started = asyncio.Event()
+        worker_stopped = asyncio.Event()
+        allow_stop_return = threading.Event()
+
+        async def synthesize(*args, **kwargs):
+            synthesis_started.set()
+            await worker_stopped.wait()
+            raise McpShuttingDownError("MCP worker stopped")
+
+        class Router:
+            def begin_shutdown(self, *, deadline):
+                assert orchestrator._shutdown_deadline == deadline
+
+            def stop(self, *, deadline):
+                loop.call_soon_threadsafe(worker_stopped.set)
+                assert allow_stop_return.wait(3.0)
+
+        monkeypatch.setattr(orchestrator, "_synthesize", synthesize)
+        coordinator = ShutdownCoordinator(
+            router=Router(), orchestrator=orchestrator,
+            export_tasks={}, settings=app.state.settings,
+        )
+        task = asyncio.create_task(orchestrator._run_synthesis_job(
+            session_id, {}, {}, job_id, "test-user", input_path=None,
+            storage_input_path=None, job_input_storage_path=None,
+            output_storage_path=None,
+        ))
+        orchestrator._synthesis_tasks[session_id] = task
+        task.add_done_callback(lambda _: orchestrator._synthesis_tasks.pop(session_id, None))
+        try:
+            await asyncio.wait_for(synthesis_started.wait(), 2.0)
+            deadline = coordinator.request_shutdown(serving=False)
+            assert coordinator.request_shutdown(serving=False) == deadline
+            await asyncio.wait_for(task, 2.0)
+            assert job_id in orchestrator._shutdown_finalization_failures
+            assert not orchestrator._billing_finalization_tasks
+            assert not allow_stop_return.is_set()
+            allow_stop_return.set()
+            await asyncio.wait_for(coordinator.finish(), 2.0)
+            assert "backend_shutdown_incomplete" in caplog.text
+            assert "backend_shutdown_complete" not in caplog.text
+        finally:
+            allow_stop_return.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await coordinator.finish()
+            coordinator.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stop_during_render", [False, True])
+def test_action_required_publishes_readable_message_with_terminal_status(
+    client, monkeypatch, stop_during_render,
+):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = _create_session(test_client)
+    job_id = "job-action-required-message-publication"
+    raw_message = "phoneme count exceeds available anchor frames"
+    readable_message = "Please simplify the lyrics or give them more note time."
+    payload = {"action": "infeasible_anchor_budget", "message": raw_message}
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued",
+    )
+    releases = []
+
+    def release(uid, released_job_id, *, terminal_job_fields):
+        releases.append(dict(terminal_job_fields))
+        app.state.job_store.update_job(released_job_id, **terminal_job_fields)
+        return ReleaseCreditsResult(status="released")
+
+    async def scenario():
+        renderer_started = asyncio.Event()
+        allow_render = asyncio.Event()
+        renderer_stopped = asyncio.Event()
+
+        async def synthesize(*args, **kwargs):
+            raise SynthesisActionRequired(payload)
+
+        async def render(*args, **kwargs):
+            renderer_started.set()
+            try:
+                await allow_render.wait()
+                return readable_message
+            finally:
+                renderer_stopped.set()
+
+        monkeypatch.setattr(orchestrator, "_synthesize", synthesize)
+        monkeypatch.setattr(orchestrator, "_render_synthesis_action_required_message", render)
+        monkeypatch.setattr("src.backend.credits.release_credits", release)
+        task = asyncio.create_task(orchestrator._run_synthesis_job(
+            session_id, {}, {}, job_id, "test-user", input_path=None,
+            storage_input_path=None, job_input_storage_path=None,
+            output_storage_path=None,
+        ))
+        orchestrator._synthesis_tasks[session_id] = task
+        try:
+            await asyncio.wait_for(renderer_started.wait(), 2.0)
+            response = test_client.get(f"/sessions/{session_id}/progress?job_id={job_id}")
+            assert response.status_code == 200
+            assert response.json()["status"] == "running"
+            assert releases == []
+            if stop_during_render:
+                assert await orchestrator.shutdown_tasks(time.monotonic() + 2.0)
+                assert task.cancelled()
+            else:
+                allow_render.set()
+                await asyncio.wait_for(task, 2.0)
+            assert renderer_stopped.is_set()
+        finally:
+            allow_render.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    expected = (
+        backend_message("job.synthesis_action_required")
+        if stop_during_render else readable_message
+    )
+    response = test_client.get(f"/sessions/{session_id}/progress?job_id={job_id}")
+    assert response.json()["status"] == "action_required"
+    assert response.json()["message"] == expected
+    assert len(releases) == 1
+    assert releases[0]["message"] == expected
+    assert releases[0]["actionRequired"] == payload
+    assert not orchestrator._billing_finalization_tasks
+
+
 def test_synthesize_action_required_marks_job_action_required_not_failed(
     client, monkeypatch, caplog
 ):
@@ -6857,8 +7206,13 @@ def test_synthesize_action_required_marks_job_action_required_not_failed(
     job_id = "job-synthesize-action-required"
     release_calls = {"count": 0}
 
-    def fake_release(*_args, **_kwargs):
+    def fake_release(_user_id, released_job_id, *, terminal_job_fields=None):
         release_calls["count"] += 1
+        if terminal_job_fields:
+            app.state.job_store.update_job(
+                released_job_id,
+                **terminal_job_fields,
+            )
         return ReleaseCreditsResult(status="released")
 
     monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
@@ -6963,8 +7317,13 @@ def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
     job_id = "job-synthesize-action-required-message-only"
     release_calls = {"count": 0}
 
-    def fake_release(*_args, **_kwargs):
+    def fake_release(_user_id, released_job_id, *, terminal_job_fields=None):
         release_calls["count"] += 1
+        if terminal_job_fields:
+            app.state.job_store.update_job(
+                released_job_id,
+                **terminal_job_fields,
+            )
         return ReleaseCreditsResult(status="released")
 
     monkeypatch.setattr("src.backend.credits.release_credits", fake_release)
@@ -7077,8 +7436,13 @@ def test_unsupported_lyric_language_action_required_logs_error_for_triage(
     job_id = "job-unsupported-lyric-language"
     release_calls = {"count": 0}
 
-    def fake_release(*_args, **_kwargs):
+    def fake_release(_user_id, released_job_id, *, terminal_job_fields=None):
         release_calls["count"] += 1
+        if terminal_job_fields:
+            app.state.job_store.update_job(
+                released_job_id,
+                **terminal_job_fields,
+            )
         return ReleaseCreditsResult(status="released")
 
     monkeypatch.setattr("src.backend.credits.release_credits", fake_release)

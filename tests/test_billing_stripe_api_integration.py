@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future
 import os
 from pathlib import Path
 import time
@@ -97,8 +98,13 @@ def cleanup_firestore(monkeypatch):
         value = os.getenv(name)
         if value:
             monkeypatch.setenv(name, value)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    startup = Future()
+    startup.set_result(None)
+    monkeypatch.setattr(
+        "src.backend.mcp_client.McpRouter.start_background",
+        lambda self: startup,
+    )
+    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self, **kwargs: None)
     monkeypatch.setattr("src.backend.main.verify_id_token_claims", lambda token: {"uid": "stripe-test-user", "email": "stripe-test@example.com"})
     monkeypatch.setattr("src.backend.main.verify_id_token", lambda token: "stripe-test-user")
     get_billing_config.cache_clear()

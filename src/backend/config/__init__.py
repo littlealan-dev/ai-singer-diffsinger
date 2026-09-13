@@ -117,6 +117,9 @@ class Settings:
     mcp_startup_timeout_seconds: float
     mcp_startup_blocking: bool
     backend_ready_timeout_seconds: float
+    backend_shutdown_total_seconds: float
+    backend_shutdown_request_seconds: float
+    backend_shutdown_worker_seconds: float
     mcp_debug: bool
     backend_auth_disabled: bool
     dev_user_id: str
@@ -282,6 +285,30 @@ class Settings:
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         backend_ready_timeout_seconds = _env_float("BACKEND_READY_TIMEOUT_SECONDS", 240.0)
+        backend_shutdown_total_seconds = _env_float(
+            "BACKEND_SHUTDOWN_TOTAL_SECONDS",
+            9.0,
+        )
+        backend_shutdown_request_seconds = _env_float(
+            "BACKEND_SHUTDOWN_REQUEST_SECONDS",
+            3.0,
+        )
+        backend_shutdown_worker_seconds = _env_float(
+            "BACKEND_SHUTDOWN_WORKER_SECONDS",
+            4.0,
+        )
+        for name, value in (
+            ("BACKEND_SHUTDOWN_TOTAL_SECONDS", backend_shutdown_total_seconds),
+            ("BACKEND_SHUTDOWN_REQUEST_SECONDS", backend_shutdown_request_seconds),
+            ("BACKEND_SHUTDOWN_WORKER_SECONDS", backend_shutdown_worker_seconds),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than zero.")
+        if backend_shutdown_request_seconds >= backend_shutdown_total_seconds:
+            raise ValueError(
+                "BACKEND_SHUTDOWN_REQUEST_SECONDS must be less than "
+                "BACKEND_SHUTDOWN_TOTAL_SECONDS."
+            )
         mcp_startup_blocking = _env_bool(
             "MCP_STARTUP_BLOCKING",
             app_env_lower in {"dev", "development", "local", "test"},
@@ -453,6 +480,9 @@ class Settings:
             mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
             mcp_startup_blocking=mcp_startup_blocking,
             backend_ready_timeout_seconds=backend_ready_timeout_seconds,
+            backend_shutdown_total_seconds=backend_shutdown_total_seconds,
+            backend_shutdown_request_seconds=backend_shutdown_request_seconds,
+            backend_shutdown_worker_seconds=backend_shutdown_worker_seconds,
             mcp_debug=mcp_debug,
             backend_auth_disabled=backend_auth_disabled,
             dev_user_id=dev_user_id,

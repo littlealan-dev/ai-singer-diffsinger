@@ -498,6 +498,74 @@ def test_release_credits():
     assert credits.balance == TRIAL_CREDIT_AMOUNT
 
 
+def test_release_credits_atomically_marks_job_terminal():
+    uid = "test-user-terminal-release"
+    job_id = "job-terminal-release"
+    get_or_create_credits(uid, "terminal-release@example.com")
+    db = get_firestore_client()
+    db.collection("jobs").document(job_id).set(
+        {
+            "userId": uid,
+            "sessionId": "session-terminal-release",
+            "status": "running",
+        }
+    )
+    reserve_credits(uid, job_id, 4)
+
+    result = release_credits(
+        uid,
+        job_id,
+        terminal_job_fields={
+            "status": "cancelled",
+            "step": "cancelled",
+            "message": "Generation cancelled.",
+            "progress": 1.0,
+        },
+    )
+
+    assert result.status == "released"
+    credits = get_or_create_credits(uid, "terminal-release@example.com")
+    assert credits.reserved == 0
+    reservation = (
+        db.collection("credit_reservations").document(job_id).get().to_dict()
+        or {}
+    )
+    assert reservation["status"] == "released"
+    assert db.collection("credit_ledger").document(f"release_{job_id}").get().exists
+    job = db.collection("jobs").document(job_id).get().to_dict() or {}
+    assert job["status"] == "cancelled"
+    assert job["step"] == "cancelled"
+    assert job["progress"] == 1.0
+
+
+def test_release_credits_rolls_back_if_terminal_job_update_fails():
+    uid = "test-user-missing-terminal-job"
+    job_id = "job-missing-terminal-job"
+    get_or_create_credits(uid, "missing-terminal-job@example.com")
+    db = get_firestore_client()
+    reserve_credits(uid, job_id, 4)
+
+    result = release_credits(
+        uid,
+        job_id,
+        terminal_job_fields={
+            "status": "cancelled",
+            "step": "cancelled",
+            "progress": 1.0,
+        },
+    )
+
+    assert result.status == "infra_error"
+    credits = get_or_create_credits(uid, "missing-terminal-job@example.com")
+    assert credits.reserved == 4
+    reservation = (
+        db.collection("credit_reservations").document(job_id).get().to_dict()
+        or {}
+    )
+    assert reservation["status"] == "pending"
+    assert not db.collection("credit_ledger").document(f"release_{job_id}").get().exists
+
+
 def test_release_credits_releases_reserved_topup_packs():
     uid = "test-topup-release"
     get_or_create_credits(uid, "topup-release@example.com")

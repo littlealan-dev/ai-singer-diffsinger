@@ -14,6 +14,7 @@ import copy
 import json
 import os
 import re
+import time
 import uuid
 
 from src.backend.config import Settings
@@ -126,6 +127,12 @@ class SynthesisActionRequired(RuntimeError):
         self.message = message or "Synthesis needs user action."
 
 
+@dataclass(frozen=True)
+class _BillingFinalizationResult:
+    release_status: str
+    complete: bool
+
+
 class PreprocessPlanningError(RuntimeError):
     """Raised when the preprocess planner cannot produce a valid initial plan."""
 
@@ -157,10 +164,97 @@ class Orchestrator:
         self._llm_tools = self._llm_tools_by_role[LlmRole.DEFAULT]
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
+        self._billing_finalization_tasks: Dict[
+            str, asyncio.Task[_BillingFinalizationResult]
+        ] = {}
+        self._shutdown_finalization_failures: set[str] = set()
+        self._shutdown_deadline: float | None = None
+        self._shutdown_requested = asyncio.Event()
         self._chat_locks_guard = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
         self._settle_fault_injection_remaining: Dict[str, int] = {}
         self._release_fault_injection_remaining: Dict[str, int] = {}
+
+    def begin_shutdown(self, deadline: float) -> None:
+        """Publish shutdown to billing work before worker teardown can wake it."""
+        if self._shutdown_deadline is None:
+            self._shutdown_deadline = deadline
+        self._shutdown_requested.set()
+
+    async def shutdown_tasks(self, deadline: float) -> bool:
+        """Cancel tracked background jobs and wait within the shared deadline."""
+        self.begin_shutdown(deadline)
+        assert self._shutdown_deadline is not None
+        deadline = self._shutdown_deadline
+        tasks = [
+            task
+            for task in (
+                list(self._synthesis_tasks.values())
+                + list(self._preprocess_tasks.values())
+            )
+            if not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        remaining = max(0.0, deadline - time.monotonic())
+        if tasks and remaining <= 0:
+            self._logger.warning(
+                "orchestrator_shutdown_tasks_incomplete count=%s",
+                len(tasks),
+            )
+            return False
+        done, pending = (
+            await asyncio.wait(tasks, timeout=remaining) if tasks else (set(), set())
+        )
+        complete = not pending
+        if pending:
+            self._logger.warning(
+                "orchestrator_shutdown_tasks_incomplete count=%s",
+                len(pending),
+            )
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                complete = False
+                self._logger.error(
+                    "orchestrator_shutdown_task_failed error=%r",
+                    task.exception(),
+                )
+
+        finalizations = list(self._billing_finalization_tasks.items())
+        if finalizations:
+            remaining = max(0.0, deadline - time.monotonic())
+            finalizer_done, finalizer_pending = await asyncio.wait(
+                [task for _, task in finalizations],
+                timeout=remaining,
+            )
+            if finalizer_pending:
+                complete = False
+                pending_ids = sorted(
+                    job_id
+                    for job_id, task in finalizations
+                    if task in finalizer_pending
+                )
+                self._logger.warning(
+                    "orchestrator_shutdown_finalizations_incomplete jobs=%s",
+                    pending_ids,
+                )
+            for job_id, task in finalizations:
+                if task not in finalizer_done:
+                    continue
+                if (
+                    task.cancelled()
+                    or task.exception() is not None
+                    or not task.result().complete
+                ):
+                    complete = False
+                    self._shutdown_finalization_failures.add(job_id)
+        if self._shutdown_finalization_failures:
+            complete = False
+            self._logger.error(
+                "orchestrator_shutdown_finalizations_failed jobs=%s",
+                sorted(self._shutdown_finalization_failures),
+            )
+        return complete
 
     async def handle_chat(
         self,
@@ -795,33 +889,6 @@ class Orchestrator:
     def _release_result_allows_terminal_status(status: str) -> bool:
         return status in {"released", "already_released", "reservation_missing"}
 
-    async def _mark_job_terminal_billing_state(
-        self,
-        *,
-        job_id: str,
-        status: str,
-        step: str,
-        message: str,
-        error_message: str,
-        output_path: Optional[str] = None,
-        error_fields: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        fields: Dict[str, Any] = {
-            "status": status,
-            "step": step,
-            "message": message,
-            "progress": 1.0,
-            "outputPath": output_path,
-            "errorMessage": error_message,
-        }
-        if error_fields:
-            fields.update(error_fields)
-        await asyncio.to_thread(
-            self._job_store.update_job,
-            job_id,
-            **fields,
-        )
-
     async def _mark_reservation_reconciliation_required(
         self,
         *,
@@ -838,6 +905,147 @@ class Orchestrator:
             job_id,
             last_error=reservation_error,
             last_error_message=reservation_error_message,
+        )
+
+    def _credit_cleanup_deadline(self) -> float | None:
+        return self._shutdown_deadline
+
+    async def _await_billing_finalization(
+        self,
+        job_id: str,
+        operation: Callable[[], Awaitable[_BillingFinalizationResult]],
+    ) -> _BillingFinalizationResult:
+        """Run one job finalizer to completion even if synthesis is cancelled."""
+        task = self._billing_finalization_tasks.get(job_id)
+        if task is None:
+            task = asyncio.create_task(
+                operation(),
+                name=f"billing-finalize-{job_id}",
+            )
+            self._billing_finalization_tasks[job_id] = task
+
+        cancellation_requested = False
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancellation_requested = True
+            result = task.result()
+            if not result.complete and self._shutdown_deadline is not None:
+                self._shutdown_finalization_failures.add(job_id)
+        except BaseException:
+            if self._shutdown_deadline is not None:
+                self._shutdown_finalization_failures.add(job_id)
+            raise
+        if cancellation_requested:
+            raise asyncio.CancelledError
+        return result
+
+    async def _release_and_finalize_synthesis_job(
+        self,
+        *,
+        user_id: str,
+        job_id: str,
+        terminal_fields: Dict[str, Any],
+        reconciliation_fields: Callable[[str], Dict[str, Any]],
+        reservation_error: str,
+        reservation_error_message: Callable[[str], str],
+    ) -> _BillingFinalizationResult:
+        """Release a reservation and close its job as one tracked operation."""
+        release_result = await retry_credit_op(
+            self._release_credits_with_retry_fault_injection,
+            user_id,
+            job_id,
+            terminal_job_fields=terminal_fields,
+            max_attempts=self._settings.credit_retry_max_attempts,
+            base_delay=self._settings.credit_retry_base_delay_seconds,
+            deadline_getter=self._credit_cleanup_deadline,
+        )
+        self._release_fault_injection_remaining.pop(job_id, None)
+        if self._release_result_allows_terminal_status(release_result.status):
+            return _BillingFinalizationResult(
+                release_status=release_result.status,
+                complete=True,
+            )
+        error_message = reservation_error_message(release_result.status)
+        await self._mark_reservation_reconciliation_required(
+            user_id=user_id,
+            job_id=job_id,
+            reservation_error=reservation_error,
+            reservation_error_message=error_message,
+        )
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            **reconciliation_fields(release_result.status),
+        )
+        return _BillingFinalizationResult(
+            release_status=release_result.status,
+            complete=False,
+        )
+
+    async def _finalize_synthesis_action_required(
+        self,
+        session_id: str,
+        user_id: str,
+        score: Dict[str, Any],
+        job_id: str,
+        payload: Dict[str, Any],
+    ) -> _BillingFinalizationResult:
+        """Choose the final explanation before the atomic terminal publication."""
+        message = backend_message("job.synthesis_action_required")
+        if not self._shutdown_requested.is_set():
+            render = asyncio.create_task(
+                self._render_synthesis_action_required_message(
+                    session_id,
+                    user_id,
+                    score,
+                    payload,
+                    fallback_message=message,
+                )
+            )
+            shutdown = asyncio.create_task(self._shutdown_requested.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {render, shutdown},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if render in done:
+                    message = render.result()
+            except Exception:
+                self._logger.exception(
+                    "synthesis_action_required_message_failed job=%s", job_id,
+                )
+            finally:
+                render.cancel()
+                shutdown.cancel()
+                await asyncio.gather(render, shutdown, return_exceptions=True)
+
+        return await self._release_and_finalize_synthesis_job(
+            user_id=user_id,
+            job_id=job_id,
+            terminal_fields={
+                "status": "action_required",
+                "step": "action_required",
+                "message": message,
+                "progress": 1.0,
+                "actionRequired": payload,
+            },
+            reconciliation_fields=lambda release_status: {
+                "status": "credit_reconciliation_required",
+                "step": "action_required",
+                "message": backend_message(
+                    "job.audio_generation_and_billing_rollback_failed"
+                ),
+                "progress": 1.0,
+                "errorMessage": f"{message} | billing_rollback_status={release_status}",
+                "actionRequired": payload,
+            },
+            reservation_error="release_failed_after_synthesis_action_required",
+            reservation_error_message=lambda release_status: (
+                f"{message} | billing_rollback_status={release_status}"
+            ),
         )
 
     def _complete_job_and_settle_credits_with_retry_fault_injection(
@@ -893,6 +1101,8 @@ class Orchestrator:
         self,
         user_id: str,
         job_id: str,
+        *,
+        terminal_job_fields: Optional[Dict[str, Any]] = None,
     ):
         from src.backend.credits import ReleaseCreditsResult, release_credits
 
@@ -914,7 +1124,13 @@ class Orchestrator:
                 )
                 return ReleaseCreditsResult(status="infra_error")
             self._release_fault_injection_remaining.pop(job_id, None)
-        return release_credits(user_id, job_id)
+        if terminal_job_fields is None:
+            return release_credits(user_id, job_id)
+        return release_credits(
+            user_id,
+            job_id,
+            terminal_job_fields=terminal_job_fields,
+        )
 
     def _is_e2e_credit_bypass_enabled(self) -> bool:
         """Keep browser regression runs independent from emulator billing state."""
@@ -1041,50 +1257,49 @@ class Orchestrator:
                 job_id,
                 settle_result.status,
             )
-            release_result = await retry_credit_op(
-                self._release_credits_with_retry_fault_injection,
-                user_id,
+            await self._await_billing_finalization(
                 job_id,
-                max_attempts=self._settings.credit_retry_max_attempts,
-                base_delay=self._settings.credit_retry_base_delay_seconds,
-            )
-            self._release_fault_injection_remaining.pop(job_id, None)
-            if self._release_result_allows_terminal_status(release_result.status):
-                await self._mark_job_terminal_billing_state(
+                lambda: self._release_and_finalize_synthesis_job(
+                    user_id=user_id,
                     job_id=job_id,
-                    status="failed",
-                    step="error",
-                    message=backend_message("job.audio_generated_billing_failed_no_charge"),
-                    error_message=(
-                        "Billing finalization failed after audio generation. "
+                    terminal_fields={
+                        "status": "failed",
+                        "step": "error",
+                        "message": backend_message(
+                            "job.audio_generated_billing_failed_no_charge"
+                        ),
+                        "progress": 1.0,
+                        "outputPath": output_path,
+                        "errorMessage": (
+                            "Billing finalization failed after audio generation. "
+                            f"settle_status={settle_result.status}; reservation released."
+                        ),
+                    },
+                    reconciliation_fields=lambda release_status: {
+                        "status": "failed",
+                        "step": "error",
+                        "message": backend_message(
+                            "job.audio_generated_billing_rollback_failed"
+                        ),
+                        "progress": 1.0,
+                        "outputPath": output_path,
+                        "errorMessage": (
+                            "Billing finalization failed after audio generation and "
+                            "billing rollback did not complete. "
+                            f"settle_status={settle_result.status} "
+                            f"release_status={release_status}"
+                        ),
+                    },
+                    reservation_error="settle_release_failed",
+                    reservation_error_message=lambda release_status: (
+                        "Billing finalization failed after audio generation and "
+                        "reservation rollback could not be completed. "
                         f"settle_status={settle_result.status} "
-                        f"release_status={release_result.status}"
+                        f"release_status={release_status}"
                     ),
-                    output_path=output_path,
-                )
-                return
-            await self._mark_reservation_reconciliation_required(
-                user_id=user_id,
-                job_id=job_id,
-                reservation_error="settle_release_failed",
-                reservation_error_message=(
-                    "Billing finalization failed after audio generation and reservation rollback "
-                    f"could not be completed. settle_status={settle_result.status} "
-                    f"release_status={release_result.status}"
                 ),
             )
-            await self._mark_job_terminal_billing_state(
-                job_id=job_id,
-                status="failed",
-                step="error",
-                message=backend_message("job.audio_generated_billing_rollback_failed"),
-                error_message=(
-                    "Billing finalization failed after audio generation and billing rollback "
-                    f"did not complete. settle_status={settle_result.status} "
-                    f"release_status={release_result.status}"
-                ),
-                output_path=output_path,
-            )
+            return
         except asyncio.CancelledError:
             if self._is_e2e_credit_bypass_enabled():
                 await asyncio.to_thread(
@@ -1096,44 +1311,36 @@ class Orchestrator:
                     progress=1.0,
                 )
                 raise
-            # Release credits
-            release_result = await retry_credit_op(
-                self._release_credits_with_retry_fault_injection,
-                user_id,
+            await self._await_billing_finalization(
                 job_id,
-                max_attempts=self._settings.credit_retry_max_attempts,
-                base_delay=self._settings.credit_retry_base_delay_seconds,
-            )
-            self._release_fault_injection_remaining.pop(job_id, None)
-            if self._release_result_allows_terminal_status(release_result.status):
-                await asyncio.to_thread(
-                    self._job_store.update_job,
-                    job_id,
-                    status="cancelled",
-                    step="cancelled",
-                    message=backend_message("job.cancelled"),
-                    progress=1.0,
-                )
-            else:
-                await self._mark_reservation_reconciliation_required(
+                lambda: self._release_and_finalize_synthesis_job(
                     user_id=user_id,
                     job_id=job_id,
+                    terminal_fields={
+                        "status": "cancelled",
+                        "step": "cancelled",
+                        "message": backend_message("job.cancelled"),
+                        "progress": 1.0,
+                    },
+                    reconciliation_fields=lambda release_status: {
+                        "status": "cancelled",
+                        "step": "cancelled",
+                        "message": backend_message(
+                            "job.cancelled_billing_rollback_failed"
+                        ),
+                        "progress": 1.0,
+                        "errorMessage": (
+                            "Billing rollback failed after cancellation. "
+                            f"status={release_status}"
+                        ),
+                    },
                     reservation_error="release_failed_after_cancel",
-                    reservation_error_message=(
+                    reservation_error_message=lambda release_status: (
                         "Billing rollback failed after cancellation. "
-                        f"status={release_result.status}"
+                        f"status={release_status}"
                     ),
-                )
-                await self._mark_job_terminal_billing_state(
-                    job_id=job_id,
-                    status="cancelled",
-                    step="cancelled",
-                    message=backend_message("job.cancelled_billing_rollback_failed"),
-                    error_message=(
-                        "Billing rollback failed after cancellation. "
-                        f"status={release_result.status}"
-                    ),
-                )
+                ),
+            )
             raise
         except SynthesisActionRequired as exc:
             if self._is_e2e_credit_bypass_enabled():
@@ -1154,14 +1361,12 @@ class Orchestrator:
                     actionRequired=exc.payload,
                 )
                 return
-            release_result = await retry_credit_op(
-                self._release_credits_with_retry_fault_injection,
-                user_id,
+            finalization = await self._await_billing_finalization(
                 job_id,
-                max_attempts=self._settings.credit_retry_max_attempts,
-                base_delay=self._settings.credit_retry_base_delay_seconds,
+                lambda: self._finalize_synthesis_action_required(
+                    session_id, user_id, score, job_id, exc.payload,
+                ),
             )
-            self._release_fault_injection_remaining.pop(job_id, None)
             action_code = str(
                 exc.payload.get("code") or exc.payload.get("action") or ""
             ).strip()
@@ -1177,7 +1382,7 @@ class Orchestrator:
                     "token=%s script=%s message=%s",
                     session_id,
                     job_id,
-                    release_result.status,
+                    finalization.release_status,
                     exc.payload.get("action"),
                     exc.payload.get("reason"),
                     diagnostics.get("token"),
@@ -1189,47 +1394,9 @@ class Orchestrator:
                     "synthesis_action_required session=%s job=%s release_status=%s action=%s message=%s",
                     session_id,
                     job_id,
-                    release_result.status,
+                    finalization.release_status,
                     exc.payload.get("action"),
                     exc.message,
-                )
-            user_message = await self._render_synthesis_action_required_message(
-                session_id,
-                user_id,
-                score,
-                exc.payload,
-                fallback_message=exc.message,
-            )
-            if self._release_result_allows_terminal_status(release_result.status):
-                await asyncio.to_thread(
-                    self._job_store.update_job,
-                    job_id,
-                    status="action_required",
-                    step="action_required",
-                    message=user_message,
-                    progress=1.0,
-                    actionRequired=exc.payload,
-                )
-            else:
-                await self._mark_reservation_reconciliation_required(
-                    user_id=user_id,
-                    job_id=job_id,
-                    reservation_error="release_failed_after_synthesis_action_required",
-                    reservation_error_message=(
-                        f"{user_message} | billing_rollback_status={release_result.status}"
-                    ),
-                )
-                await asyncio.to_thread(
-                    self._job_store.update_job,
-                    job_id,
-                    status="credit_reconciliation_required",
-                    step="action_required",
-                    message=backend_message("job.audio_generation_and_billing_rollback_failed"),
-                    progress=1.0,
-                    errorMessage=(
-                        f"{user_message} | billing_rollback_status={release_result.status}"
-                    ),
-                    actionRequired=exc.payload,
                 )
         except Exception as exc:
             if self._is_e2e_credit_bypass_enabled():
@@ -1246,50 +1413,49 @@ class Orchestrator:
                     **_synthesis_error_job_fields(exc),
                 )
                 return
-            # Release credits
-            release_result = await retry_credit_op(
-                self._release_credits_with_retry_fault_injection,
-                user_id,
-                job_id,
-                max_attempts=self._settings.credit_retry_max_attempts,
-                base_delay=self._settings.credit_retry_base_delay_seconds,
-            )
-            self._release_fault_injection_remaining.pop(job_id, None)
             self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
             error_message = _format_synthesis_error(exc)
             error_fields = _synthesis_error_job_fields(exc)
             job_message = _synthesis_failure_job_message(exc)
-            if self._release_result_allows_terminal_status(release_result.status):
-                await asyncio.to_thread(
-                    self._job_store.update_job,
-                    job_id,
-                    status="failed",
-                    step="error",
-                    message=job_message,
-                    progress=1.0,
-                    errorMessage=error_message,
-                    **error_fields,
-                )
-            else:
-                await self._mark_reservation_reconciliation_required(
+            await self._await_billing_finalization(
+                job_id,
+                lambda: self._release_and_finalize_synthesis_job(
                     user_id=user_id,
                     job_id=job_id,
+                    terminal_fields={
+                        "status": "failed",
+                        "step": "error",
+                        "message": job_message,
+                        "progress": 1.0,
+                        "errorMessage": error_message,
+                        **error_fields,
+                    },
+                    reconciliation_fields=lambda release_status: {
+                        "status": "failed",
+                        "step": "error",
+                        "message": backend_message(
+                            "job.audio_generation_and_billing_rollback_failed"
+                        ),
+                        "progress": 1.0,
+                        "errorMessage": (
+                            f"{error_message} | "
+                            f"billing_rollback_status={release_status}"
+                        ),
+                        **error_fields,
+                    },
                     reservation_error="release_failed_after_synthesis_error",
-                    reservation_error_message=(
-                        f"{error_message} | billing_rollback_status={release_result.status}"
+                    reservation_error_message=lambda release_status: (
+                        f"{error_message} | "
+                        f"billing_rollback_status={release_status}"
                     ),
-                )
-                await self._mark_job_terminal_billing_state(
-                    job_id=job_id,
-                    status="failed",
-                    step="error",
-                    message=backend_message("job.audio_generation_and_billing_rollback_failed"),
-                    error_message=(
-                        f"{error_message} | billing_rollback_status={release_result.status}"
-                    ),
-                    error_fields=error_fields,
-                )
+                ),
+            )
         finally:
+            # Keep the finalizer through exception-handler re-entry. Only the
+            # owning synthesis job may discard its completed outcome.
+            finalizer = self._billing_finalization_tasks.get(job_id)
+            if finalizer is not None and finalizer.done():
+                self._billing_finalization_tasks.pop(job_id, None)
             clear_log_context()
 
     async def _run_preprocess_job(

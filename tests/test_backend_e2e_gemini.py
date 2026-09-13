@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import Future
 import os
 import shutil
 import subprocess
@@ -523,8 +524,13 @@ def emulator_client(monkeypatch):
     monkeypatch.setenv("BACKEND_USE_STORAGE", "true")
     monkeypatch.setenv("STORAGE_EMULATOR_HOST", f"http://{storage_host}")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    startup = Future()
+    startup.set_result(None)
+    monkeypatch.setattr(
+        "src.backend.mcp_client.McpRouter.start_background",
+        lambda self: startup,
+    )
+    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self, **kwargs: None)
 
     def call_tool(name, arguments):
         if name == "parse_score":

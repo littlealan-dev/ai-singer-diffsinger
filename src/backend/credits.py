@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Mapping, Optional
 import logging
 import math
 
@@ -1165,23 +1165,38 @@ def settle_export_mix_credits_and_complete_job(
         )
 
 
-def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
+def release_credits(
+    uid: str,
+    job_id: str,
+    *,
+    terminal_job_fields: Optional[Mapping[str, Any]] = None,
+) -> ReleaseCreditsResult:
     """
     Atomically release reserved credits for a failed or cancelled job.
     """
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
     res_ref = db.collection("credit_reservations").document(job_id)
-    
+    job_ref = db.collection("jobs").document(job_id)
+
+    def update_terminal_job(transaction) -> None:
+        if terminal_job_fields is None:
+            return
+        payload = dict(terminal_job_fields)
+        payload["updatedAt"] = firestore.SERVER_TIMESTAMP
+        transaction.update(job_ref, payload)
+
     @firestore.transactional
     def _transactional_release(transaction):
         res_snapshot = res_ref.get(transaction=transaction)
         if not res_snapshot.exists:
+            update_terminal_job(transaction)
             return ReleaseCreditsResult(status="reservation_missing")
-            
+
         res_data = res_snapshot.to_dict() or {}
         reservation_status = str(res_data.get("status") or "")
         if reservation_status == "released":
+            update_terminal_job(transaction)
             return ReleaseCreditsResult(status="already_released")
         if reservation_status == "settled":
             return ReleaseCreditsResult(status="already_settled")
@@ -1221,15 +1236,21 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
             topup_state.active_packs,
         )
         
-        transaction.update(user_ref, {
-            "credits.reserved": max(0, reserved - reserved_monthly_credits),
-            **topup_aggregate_fields(active_topup_after),
-        })
-        
-        transaction.update(res_ref, {
-            "status": "released",
-            "releasedAt": now,
-        })
+        transaction.update(
+            user_ref,
+            {
+                "credits.reserved": max(0, reserved - reserved_monthly_credits),
+                **topup_aggregate_fields(active_topup_after),
+            },
+        )
+
+        transaction.update(
+            res_ref,
+            {
+                "status": "released",
+                "releasedAt": now,
+            },
+        )
 
         # Log to ledger for audit trail.
         ledger_ref = db.collection("credit_ledger").document(f"release_{job_id}")
@@ -1243,23 +1264,31 @@ def release_credits(uid: str, job_id: str) -> ReleaseCreditsResult:
             billable_duration_seconds=res_data.get("billableDurationSeconds"),
             billing_reference_job_id=res_data.get("billingReferenceJobId"),
         )
-        transaction.set(ledger_ref, {
-            "userId": uid,
-            "type": "release",
-            "jobId": job_id,
-            "amount": 0,
-            "reservedDelta": -reserved_monthly_credits,
-            "reservedAfter": max(0, reserved - reserved_monthly_credits),
-            "monthlyReservedDelta": -reserved_monthly_credits,
-            "monthlyReservedAfter": max(0, reserved - reserved_monthly_credits),
-            "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
-            "topupReservedAfter": sum(pack.credits_reserved for pack in active_topup_after),
-            "reservedTopupPacks": reserved_topup_packs,
-            "balanceAfter": credits.get("balance", 0),
-            "createdAt": now,
-            **metadata_fields,
-        })
-        
+        transaction.set(
+            ledger_ref,
+            {
+                "userId": uid,
+                "type": "release",
+                "jobId": job_id,
+                "amount": 0,
+                "reservedDelta": -reserved_monthly_credits,
+                "reservedAfter": max(0, reserved - reserved_monthly_credits),
+                "monthlyReservedDelta": -reserved_monthly_credits,
+                "monthlyReservedAfter": max(0, reserved - reserved_monthly_credits),
+                "topupReservedDelta": -int(
+                    res_data.get("reservedTopupCredits", 0) or 0
+                ),
+                "topupReservedAfter": sum(
+                    pack.credits_reserved for pack in active_topup_after
+                ),
+                "reservedTopupPacks": reserved_topup_packs,
+                "balanceAfter": credits.get("balance", 0),
+                "createdAt": now,
+                **metadata_fields,
+            },
+        )
+        update_terminal_job(transaction)
+
         return ReleaseCreditsResult(status="released")
 
     transaction = db.transaction()

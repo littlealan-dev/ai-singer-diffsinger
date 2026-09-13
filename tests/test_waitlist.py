@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import Future
 import uuid
 from pathlib import Path
 
@@ -19,8 +20,13 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("BACKEND_USE_STORAGE", "false")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "true")
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.start", lambda self: None)
-    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self: None)
+    startup = Future()
+    startup.set_result(None)
+    monkeypatch.setattr(
+        "src.backend.mcp_client.McpRouter.start_background",
+        lambda self: startup,
+    )
+    monkeypatch.setattr("src.backend.mcp_client.McpRouter.stop", lambda self, **kwargs: None)
     async def _noop_app_check(_request):
         return None
 

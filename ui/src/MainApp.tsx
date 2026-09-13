@@ -1906,7 +1906,11 @@ export default function MainApp() {
         }
       } catch (err: any) {
         if (!cancelled && generation === workspaceGenerationRef.current) {
-          setError(err?.message || "Failed to fetch synthesis progress.");
+          setError(
+            err?.message === "Failed to fetch"
+              ? "Connection lost. Reconnecting to check your take"
+              : err?.message || "Failed to fetch synthesis progress."
+          );
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
