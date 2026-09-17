@@ -13,7 +13,7 @@ import time
 import unicodedata
 import numpy as np
 
-from src.api.phonemize import _find_dictionary, phonemize
+from src.api.phonemize import _resolve_dictionary_path, phonemize
 import src.api.syllable_alignment as syllable_alignment
 from src.api.inference import (
     predict_durations,
@@ -1097,7 +1097,7 @@ def _init_phonemizer(
     config = load_voicebank_config(voicebank_path)
     phonemes_path = (voicebank_path / config.get("phonemes", "phonemes.json")).resolve()
     languages_path = resolve_phonemizer_languages_path(voicebank_path, config)
-    dictionary_path = _find_dictionary(voicebank_path, language=language)
+    dictionary_path = _resolve_dictionary_path(voicebank_path, language=language)
     return Phonemizer(
         phonemes_path=phonemes_path,
         dictionary_path=dictionary_path,

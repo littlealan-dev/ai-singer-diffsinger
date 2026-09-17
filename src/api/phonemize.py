@@ -12,6 +12,7 @@ from src.phonemizer.phonemizer import Phonemizer
 from src.api.voicebank import load_voicebank_config, resolve_phonemizer_languages_path
 from src.api.voicebank_cache import (
     resolve_manifest_japanese_dictionary_form,
+    resolve_manifest_phonemizer_dictionary,
     resolve_manifest_pronunciation_adapters,
 )
 from src.mcp.logging_utils import get_logger, summarize_payload
@@ -116,7 +117,7 @@ def phonemize(
     languages_path = resolve_phonemizer_languages_path(voicebank_path, config)
     
     # Find dictionary for token-to-phoneme lookup.
-    dictionary_path = _find_dictionary(voicebank_path, language=language)
+    dictionary_path = _resolve_dictionary_path(voicebank_path, language=language)
     
     # Build phonemizer with fallback G2P enabled.
     phonemizer = Phonemizer(
@@ -244,3 +245,11 @@ def _find_dictionary(voicebank_path: Path, language: str = "en") -> Path:
     raise FileNotFoundError(
         f"Could not find phoneme dictionary for language '{language}' in {voicebank_path}"
     )
+
+
+def _resolve_dictionary_path(voicebank_path: Path, language: str = "en") -> Path:
+    """Use a complete manifest mapping, falling back only when none is declared."""
+    configured = resolve_manifest_phonemizer_dictionary(voicebank_path, language)
+    if configured is not None:
+        return configured
+    return _find_dictionary(voicebank_path, language=language)

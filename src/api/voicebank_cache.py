@@ -117,6 +117,65 @@ def _load_voicebank_manifest_for_path(manifest_path: str) -> Dict[str, Any]:
                 f"Voicebank manifest entry {voicebank_id} japanese_dictionary_form "
                 "must be 'kana' or 'romaji' when present"
             )
+        phonemizer_dictionaries = entry.get("phonemizer_dictionaries")
+        if phonemizer_dictionaries is not None:
+            languages = entry.get("languages")
+            if (
+                not isinstance(languages, list)
+                or not languages
+                or not all(
+                    isinstance(language, str)
+                    and language
+                    and language == language.strip().lower()
+                    for language in languages
+                )
+                or len(set(languages)) != len(languages)
+            ):
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} languages must contain "
+                    "unique normalized language codes when phonemizer_dictionaries is present"
+                )
+            if not isinstance(phonemizer_dictionaries, dict) or not phonemizer_dictionaries:
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} phonemizer_dictionaries "
+                    "must be a non-empty object"
+                )
+            configured_languages = set(phonemizer_dictionaries)
+            declared_languages = set(languages)
+            if configured_languages != declared_languages:
+                missing = sorted(declared_languages - configured_languages)
+                extra = sorted(configured_languages - declared_languages)
+                details = []
+                if missing:
+                    details.append(f"missing: {', '.join(missing)}")
+                if extra:
+                    details.append(f"extra: {', '.join(extra)}")
+                raise ValueError(
+                    f"Voicebank manifest entry {voicebank_id} phonemizer_dictionaries "
+                    f"must exactly match languages ({'; '.join(details)})"
+                )
+            for language, dictionary_ref in phonemizer_dictionaries.items():
+                if not isinstance(language, str) or language != language.strip().lower():
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} phonemizer dictionary "
+                        "language keys must be normalized strings"
+                    )
+                if not isinstance(dictionary_ref, str) or not dictionary_ref.strip():
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} "
+                        f"phonemizer_dictionaries.{language} must be a non-empty relative path"
+                    )
+                relative_path = Path(dictionary_ref)
+                if (
+                    dictionary_ref != dictionary_ref.strip()
+                    or relative_path.is_absolute()
+                    or ".." in relative_path.parts
+                    or "\\" in dictionary_ref
+                ):
+                    raise ValueError(
+                        f"Voicebank manifest entry {voicebank_id} "
+                        f"phonemizer_dictionaries.{language} must stay within the voicebank root"
+                    )
         control_defaults = entry.get("synthesis_control_defaults")
         if control_defaults is not None:
             if not isinstance(control_defaults, dict):
@@ -450,6 +509,42 @@ def resolve_manifest_japanese_dictionary_form(voicebank: str | Path) -> Optional
         return None
     form = get_manifest_voicebank_metadata(voicebank_id).get("japanese_dictionary_form")
     return form if form in {"kana", "romaji"} else None
+
+
+def resolve_manifest_phonemizer_dictionary(
+    voicebank: str | Path,
+    language: str,
+) -> Optional[Path]:
+    """Return a trusted manifest dictionary path, or None for legacy discovery."""
+    voicebank_id = resolve_manifest_voicebank_id(voicebank)
+    if voicebank_id is None:
+        return None
+    configured = get_manifest_voicebank_metadata(voicebank_id).get(
+        "phonemizer_dictionaries"
+    )
+    if configured is None:
+        return None
+    normalized_language = str(language or "").strip().lower()
+    dictionary_ref = configured.get(normalized_language)
+    if not isinstance(dictionary_ref, str) or not dictionary_ref:
+        raise ValueError(
+            f"Voicebank manifest entry {voicebank_id} has no phonemizer dictionary "
+            f"for declared language '{normalized_language}'"
+        )
+
+    voicebank_root = Path(voicebank).resolve()
+    dictionary_path = (voicebank_root / dictionary_ref).resolve()
+    try:
+        dictionary_path.relative_to(voicebank_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Voicebank manifest dictionary path escapes the voicebank root: {dictionary_ref}"
+        ) from exc
+    if not dictionary_path.is_file():
+        raise FileNotFoundError(
+            f"Manifest-declared phoneme dictionary not found at {dictionary_path}"
+        )
+    return dictionary_path
 
 
 def discover_voicebank_root(base_dir: Path) -> Optional[Path]:

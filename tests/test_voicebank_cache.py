@@ -6,7 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from src.api.voicebank_cache import resolve_voicebank_path
+from src.api.voicebank_cache import (
+    _load_voicebank_manifest_for_path,
+    resolve_manifest_phonemizer_dictionary,
+    resolve_voicebank_path,
+)
 
 
 class FakeBlob:
@@ -244,6 +248,117 @@ class TestVoicebankCache(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "Voicebank manifest not found"):
                     resolve_voicebank_path("TestBank")
+
+    def test_manifest_requires_complete_phonemizer_dictionary_mapping(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            manifest_path = Path(tmp_dir) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "voicebanks": [
+                            {
+                                "id": "TestBank",
+                                "enabled": True,
+                                "languages": ["en", "ja"],
+                                "phonemizer_dictionaries": {
+                                    "en": "dsdur/dsdict-en.yaml"
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing: ja"):
+                _load_voicebank_manifest_for_path(str(manifest_path))
+
+    def test_manifest_rejects_phonemizer_dictionary_path_traversal(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            manifest_path = Path(tmp_dir) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "voicebanks": [
+                            {
+                                "id": "TestBank",
+                                "enabled": True,
+                                "languages": ["en"],
+                                "phonemizer_dictionaries": {"en": "../dsdict-en.yaml"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "must stay within the voicebank root"):
+                _load_voicebank_manifest_for_path(str(manifest_path))
+
+    def test_resolve_manifest_phonemizer_dictionary_returns_declared_file(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            voicebank_root = Path(tmp_dir) / "TestBank"
+            dictionary_path = voicebank_root / "dsdur" / "dsdict-en.yaml"
+            dictionary_path.parent.mkdir(parents=True)
+            dictionary_path.write_text("entries: []\n", encoding="utf-8")
+            metadata = {
+                "phonemizer_dictionaries": {"en": "dsdur/dsdict-en.yaml"}
+            }
+
+            with mock.patch(
+                "src.api.voicebank_cache.resolve_manifest_voicebank_id",
+                return_value="TestBank",
+            ), mock.patch(
+                "src.api.voicebank_cache.get_manifest_voicebank_metadata",
+                return_value=metadata,
+            ):
+                resolved = resolve_manifest_phonemizer_dictionary(
+                    voicebank_root,
+                    "en",
+                )
+
+            self.assertEqual(resolved, dictionary_path.resolve())
+
+    def test_resolve_manifest_phonemizer_dictionary_returns_none_when_undeclared(self) -> None:
+        with mock.patch(
+            "src.api.voicebank_cache.resolve_manifest_voicebank_id",
+            return_value="LegacyBank",
+        ), mock.patch(
+            "src.api.voicebank_cache.get_manifest_voicebank_metadata",
+            return_value={},
+        ):
+            resolved = resolve_manifest_phonemizer_dictionary(
+                Path("/tmp/LegacyBank"),
+                "en",
+            )
+
+        self.assertIsNone(resolved)
+
+    def test_enabled_voicebanks_have_complete_existing_dictionary_mappings(self) -> None:
+        expected_ids = {
+            "PM-31_Commercial_Indigo",
+            "PM-31_Commercial_Scarlet",
+            "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+            "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
+        }
+        for environment in ("dev", "prod"):
+            manifest_path = self.root_dir / "env" / f"voicebank_manifest.{environment}.json"
+            manifest = _load_voicebank_manifest_for_path(str(manifest_path.resolve()))
+            enabled = [entry for entry in manifest["voicebanks"] if entry["enabled"]]
+            self.assertEqual({entry["id"] for entry in enabled}, expected_ids)
+            for entry in enabled:
+                self.assertEqual(
+                    set(entry["phonemizer_dictionaries"]),
+                    set(entry["languages"]),
+                )
+                voicebank_root = (
+                    self.root_dir / "assets" / "voicebanks" / entry["path_hint"]
+                )
+                for dictionary_ref in entry["phonemizer_dictionaries"].values():
+                    self.assertTrue(
+                        (voicebank_root / dictionary_ref).is_file(),
+                        f"Missing dictionary for {entry['id']}: {dictionary_ref}",
+                    )
 
 
 if __name__ == "__main__":

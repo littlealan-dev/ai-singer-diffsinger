@@ -22,7 +22,7 @@ from src.api import (
     get_voicebank_info,
     save_audio,
 )
-from src.api.phonemize import _find_dictionary
+from src.api.phonemize import _find_dictionary, _resolve_dictionary_path
 from src.api.inference import _load_stage_language_map
 from src.api.voicebank import resolve_vocoder_model_path
 from src.api.voicebank_cache import get_enabled_manifest_voicebanks
@@ -36,6 +36,7 @@ from src.phonemizer import UnsupportedLyricTokenError
 
 
 ROOT_DIR = Path(__file__).parent.parent
+phonemize_api = importlib.import_module("src.api.phonemize")
 VOICEBANKS_DIR = ROOT_DIR / "assets/voicebanks"
 VOICEBANK_PATH = ROOT_DIR / "assets/voicebanks/Raine_Rena_2.01"
 TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
@@ -329,6 +330,36 @@ class TestDictionarySelection(unittest.TestCase):
 
             resolved = _find_dictionary(root, language="en")
             self.assertEqual(resolved, generic.resolve())
+
+    def test_resolve_dictionary_uses_manifest_path_without_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            configured = Path(tmp_dir) / "dsdur" / "dsdict-en.yaml"
+            with mock.patch.object(
+                phonemize_api,
+                "resolve_manifest_phonemizer_dictionary",
+                return_value=configured,
+            ), mock.patch.object(phonemize_api, "_find_dictionary") as find_dictionary:
+                resolved = _resolve_dictionary_path(Path(tmp_dir), language="en")
+
+            self.assertEqual(resolved, configured)
+            find_dictionary.assert_not_called()
+
+    def test_resolve_dictionary_discovers_only_when_manifest_mapping_absent(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            discovered = Path(tmp_dir) / "dsdur" / "dsdict.yaml"
+            with mock.patch.object(
+                phonemize_api,
+                "resolve_manifest_phonemizer_dictionary",
+                return_value=None,
+            ), mock.patch.object(
+                phonemize_api,
+                "_find_dictionary",
+                return_value=discovered,
+            ) as find_dictionary:
+                resolved = _resolve_dictionary_path(Path(tmp_dir), language="en")
+
+            self.assertEqual(resolved, discovered)
+            find_dictionary.assert_called_once_with(Path(tmp_dir), language="en")
 
 
 class TestLinguisticLanguageMapSelection(unittest.TestCase):

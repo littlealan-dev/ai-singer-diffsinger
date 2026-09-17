@@ -11,6 +11,12 @@
       "selector_image": "printto_magicbeat_headshot.png",
       "path_hint": "PM-31_Commercial_Indigo",
       "languages": ["en", "es", "ja", "th"],
+      "phonemizer_dictionaries": {
+        "en": "dsdur/dsdict-en.yaml",
+        "es": "dsdur/dsdict-es.yaml",
+        "ja": "dsdur/dsdict-ja.yaml",
+        "th": "dsdur/dsdict-th.yaml"
+      },
       "language_notes": {"es": "Best-effort Spanish approximation using PM-31's shared native phoneme inventory."},
       "japanese_dictionary_form": "kana",
       "has_duration_model": true,
@@ -92,6 +98,12 @@
       "selector_image": "printto_magicbeat_headshot.png",
       "path_hint": "PM-31_Commercial_Scarlet",
       "languages": ["en", "es", "ja", "th"],
+      "phonemizer_dictionaries": {
+        "en": "dsdur/dsdict-en.yaml",
+        "es": "dsdur/dsdict-es.yaml",
+        "ja": "dsdur/dsdict-ja.yaml",
+        "th": "dsdur/dsdict-th.yaml"
+      },
       "language_notes": {"es": "Best-effort Spanish approximation using PM-31's shared native phoneme inventory."},
       "japanese_dictionary_form": "kana",
       "has_duration_model": true,
@@ -173,6 +185,12 @@
       "selector_image": "qixuan_headshot.png",
       "path_hint": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
       "languages": ["en", "es", "ja", "zh"],
+      "phonemizer_dictionaries": {
+        "en": "dsdur/dsdict-en.yaml",
+        "es": "dsdur/dsdict-es.yaml",
+        "ja": "dsdur/dsdict-ja.yaml",
+        "zh": "dsdur/dsdict-zh.yaml"
+      },
       "language_notes": {"es": "Best-effort Spanish approximation using Qixuan's native EN, JA, and ZH phonemes."},
       "has_duration_model": true,
       "has_pitch_model": true,
@@ -234,6 +252,17 @@
       "selector_image": "liee_immortal_idol_2025.png",
       "path_hint": "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
       "languages": ["en", "es", "fr", "it", "ja", "pt", "pt-eu", "zh", "zh-yue"],
+      "phonemizer_dictionaries": {
+        "en": "dsdur/dsdict-en.yaml",
+        "es": "dsdur/dsdict-es.yaml",
+        "fr": "dsdur/dsdict-fr.yaml",
+        "it": "dsdur/dsdict-it.yaml",
+        "ja": "dsdur/dsdict-ja.yaml",
+        "pt": "dsdur/dsdict-pt.yaml",
+        "pt-eu": "dsdur/dsdict-pt-eu.yaml",
+        "zh": "dsdur/dsdict-zh.yaml",
+        "zh-yue": "dsdur/dsdict-zh-yue.yaml"
+      },
       "language_details": {
         "zh": {
           "label": "Mandarin Chinese",
