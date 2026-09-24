@@ -199,7 +199,8 @@ def integration_client(monkeypatch):
     )
 
     def _fake_create_job(self, *, job_id: str, user_id: str, session_id: str, status: str, **kwargs):
-        fake_jobs[job_id] = {
+        originating_turn_id = kwargs.pop("originating_turn_id", None)
+        payload = {
             "jobId": job_id,
             "userId": user_id,
             "sessionId": session_id,
@@ -207,6 +208,9 @@ def integration_client(monkeypatch):
             "updatedAt": datetime.now(timezone.utc).isoformat(),
             **kwargs,
         }
+        if originating_turn_id:
+            payload["originatingTurnId"] = originating_turn_id
+        fake_jobs[job_id] = payload
 
     def _fake_update_job(self, job_id: str, **kwargs):
         payload = fake_jobs.setdefault(job_id, {"jobId": job_id})

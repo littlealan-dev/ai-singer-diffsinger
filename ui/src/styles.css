@@ -783,6 +783,16 @@ body.legal-active #root {
   flex: 1;
 }
 
+.synthesis-timeout-message,
+.synthesis-timeout-message span {
+  display: block;
+}
+
+.synthesis-timeout-message span {
+  margin-top: 8px;
+  white-space: pre-line;
+}
+
 .message-box svg {
   flex-shrink: 0;
 }

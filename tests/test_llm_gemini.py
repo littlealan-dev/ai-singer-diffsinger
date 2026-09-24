@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
-import urllib.request
 import json
+import logging
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -36,7 +37,9 @@ def test_gemini_generate_uses_cached_content_when_available(
         def ensure_prompt_cache(self, **kwargs):  # type: ignore[no-untyped-def]
             return "cachedContents/prompt-cache-123"
 
-    client = GeminiRestClient(_settings(), api_key="dummy", cache_manager=_CacheManager())
+    client = GeminiRestClient(
+        _settings(), api_key="dummy", cache_manager=_CacheManager()
+    )
     captured: dict[str, object] = {}
 
     class _Resp:
@@ -77,6 +80,138 @@ def test_gemini_generate_uses_cached_content_when_available(
     current_request = payload["contents"][-1]["parts"][0]["text"]
     assert current_request.startswith("Dynamic Context:\n")
     assert current_request.endswith("Current user request:\nhello")
+
+
+def test_gemini_generate_logs_structured_usage_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "high")
+
+    class _CacheManager:
+        def ensure_prompt_cache(self, **kwargs):  # type: ignore[no-untyped-def]
+            return "cachedContents/prompt-cache-123"
+
+    client = GeminiRestClient(_settings(), api_key="dummy", cache_manager=_CacheManager())
+
+    class _Resp:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "responseId": "response-123",
+                    "modelVersion": "gemini-test-version",
+                    "usageMetadata": {
+                        "promptTokenCount": 1000,
+                        "cachedContentTokenCount": 800,
+                        "candidatesTokenCount": 120,
+                        "thoughtsTokenCount": 75,
+                        "toolUsePromptTokenCount": 5,
+                        "totalTokenCount": 1200,
+                        "promptTokensDetails": [
+                            {"modality": "TEXT", "tokenCount": 1000}
+                        ],
+                        "cacheTokensDetails": [
+                            {"modality": "TEXT", "tokenCount": 800}
+                        ],
+                        "candidatesTokensDetails": [
+                            {"modality": "TEXT", "tokenCount": 120}
+                        ],
+                        "toolUsePromptTokensDetails": [
+                            {"modality": "TEXT", "tokenCount": 5}
+                        ],
+                        "serviceTier": "PAYG",
+                        "trafficType": "ON_DEMAND",
+                    },
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": '{"tool_calls":[],"final_message":"ok","include_score":false}'
+                                    },
+                                ]
+                            }
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda request, timeout=None: _Resp()
+    )
+    caplog.set_level(logging.INFO, logger="src.backend.llm_gemini")
+
+    client.generate("system", [{"role": "user", "content": "hello"}])
+
+    usage_record = next(
+        record for record in caplog.records if record.msg == "gemini_usage"
+    )
+    assert usage_record.event == "gemini_usage"
+    assert usage_record.model == _settings().gemini_default.model
+    assert usage_record.role == "default"
+    assert usage_record.response_id == "response-123"
+    assert usage_record.model_version == "gemini-test-version"
+    assert usage_record.usage_metadata_present is True
+    assert usage_record.cache_requested is True
+    assert usage_record.cache_effective is True
+    assert usage_record.thinking_config_sent is True
+    assert usage_record.thinking_level_requested == "high"
+    assert usage_record.prompt_token_count == 1000
+    assert usage_record.cached_content_token_count == 800
+    assert usage_record.uncached_prompt_token_count == 200
+    assert usage_record.candidates_token_count == 120
+    assert usage_record.thoughts_token_count == 75
+    assert usage_record.tool_use_prompt_token_count == 5
+    assert usage_record.total_token_count == 1200
+    assert usage_record.service_tier == "PAYG"
+    assert usage_record.traffic_type == "ON_DEMAND"
+
+
+def test_gemini_generate_logs_usage_before_candidate_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = GeminiRestClient(_settings(), api_key="dummy")
+
+    class _Resp:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "usageMetadata": {
+                        "promptTokenCount": 250,
+                        "totalTokenCount": 250,
+                    },
+                    "candidates": [],
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda request, timeout=None: _Resp()
+    )
+    caplog.set_level(logging.INFO, logger="src.backend.llm_gemini")
+
+    with pytest.raises(RuntimeError, match="Gemini returned no candidates"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+
+    usage_record = next(
+        record for record in caplog.records if record.msg == "gemini_usage"
+    )
+    assert usage_record.prompt_token_count == 250
+    assert usage_record.cached_content_token_count is None
+    assert usage_record.uncached_prompt_token_count == 250
+    assert usage_record.total_token_count == 250
 
 
 def test_gemini_places_authoritative_context_after_stale_history() -> None:

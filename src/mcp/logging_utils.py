@@ -59,7 +59,8 @@ def summarize_payload(value: Any, *, max_list: int = 20, max_str: int = 200, dep
 
 DEFAULT_LOG_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d:%(funcName)s "
-    "session_id=%(session_id)s job_id=%(job_id)s user_id=%(user_id)s %(message)s"
+    "session_id=%(session_id)s turn_id=%(turn_id)s job_id=%(job_id)s "
+    "user_id=%(user_id)s %(message)s"
 )
 
 
@@ -69,6 +70,7 @@ _STANDARD_LOG_RECORD_KEYS = set(
 
 
 _session_id = contextvars.ContextVar("log_session_id", default="-")
+_turn_id = contextvars.ContextVar("log_turn_id", default="-")
 _job_id = contextvars.ContextVar("log_job_id", default="-")
 _user_id = contextvars.ContextVar("log_user_id", default="-")
 
@@ -80,11 +82,17 @@ def _hash_user_id(value: str) -> str:
 
 
 def set_log_context(
-    *, session_id: Optional[str] = None, job_id: Optional[str] = None, user_id: Optional[str] = None
+    *,
+    session_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> None:
     """Set context variables for log enrichment."""
     if session_id is not None:
         _session_id.set(session_id)
+    if turn_id is not None:
+        _turn_id.set(turn_id)
     if job_id is not None:
         _job_id.set(job_id)
     if user_id is not None:
@@ -94,6 +102,7 @@ def set_log_context(
 def clear_log_context() -> None:
     """Reset log context variables to their default values."""
     _session_id.set("-")
+    _turn_id.set("-")
     _job_id.set("-")
     _user_id.set("-")
 
@@ -103,6 +112,7 @@ class LoggingContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         # Attach context vars to the record for formatters.
         record.session_id = _session_id.get()
+        record.turn_id = _turn_id.get()
         record.job_id = _job_id.get()
         record.user_id = _user_id.get()
         return True
@@ -161,6 +171,7 @@ class JsonFormatter(logging.Formatter):
             "function": record.funcName,
             "message": record.getMessage(),
             "session_id": getattr(record, "session_id", "-"),
+            "turn_id": getattr(record, "turn_id", "-"),
             "job_id": getattr(record, "job_id", "-"),
             "user_id": getattr(record, "user_id", "-"),
         }

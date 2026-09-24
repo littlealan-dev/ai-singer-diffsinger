@@ -127,6 +127,14 @@ class SynthesisActionRequired(RuntimeError):
         self.message = message or "Synthesis needs user action."
 
 
+class SynthesisChatResponse(dict[str, Any]):
+    """Chat payload retaining the exact detached synthesis task for streaming."""
+
+    def __init__(self, payload: Dict[str, Any], task: asyncio.Task[Any]) -> None:
+        super().__init__(payload)
+        self.synthesis_task = task
+
+
 @dataclass(frozen=True)
 class _BillingFinalizationResult:
     release_status: str
@@ -312,8 +320,14 @@ class Orchestrator:
                     "type": "chat_error",
                     "message": "Selected language is invalid. Use a lowercase language code such as en, es, ja, or zh.",
                 }
+            user_entry = await self._sessions.append_history(session_id, "user", message)
+            turn_id = user_entry["id"]
+            set_log_context(
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id,
+            )
             self._logger.debug("chat_user session=%s message=%s", session_id, message)
-            await self._sessions.append_history(session_id, "user", message)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
             # This is the canonical balance snapshot for every LLM prompt in this
             # chat request. It deliberately stays request-scoped: a later user
@@ -482,6 +496,7 @@ class Orchestrator:
                             user_id=user_id,
                             user_email=user_email,
                             planning_context=planning_context,
+                            originating_turn_id=turn_id,
                         )
                 if self._should_start_preprocess_job(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
@@ -505,6 +520,7 @@ class Orchestrator:
                             initial_thought_summary=llm_response.thought_summary,
                             user_id=user_id,
                             user_email=user_email,
+                            originating_turn_id=turn_id,
                         )
 
                 response = await self._run_llm_tool_workflow(
@@ -525,6 +541,7 @@ class Orchestrator:
                     forced_voicebank_id=forced_voicebank_id,
                     forced_language=forced_language,
                     workflow_user_message=message,
+                    originating_turn_id=turn_id,
                 )
                 await self._sessions.append_history(
                     session_id, "assistant", str(response.get("message", ""))
@@ -750,6 +767,7 @@ class Orchestrator:
         *,
         user_id: str,
         job_id: Optional[str] = None,
+        originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a Firestore job and kick off synthesis in the background."""
         existing = self._synthesis_tasks.get(session_id)
@@ -775,6 +793,7 @@ class Orchestrator:
             status="queued",
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
+            originating_turn_id=originating_turn_id,
             voicebank_metadata=voicebank_metadata,
             audio_track=audio_track,
             provenance=provenance,
@@ -798,6 +817,7 @@ class Orchestrator:
                 storage_input_path=job_input_storage_path,
                 job_input_storage_path=job_input_storage_path,
                 output_storage_path=output_storage_path,
+                originating_turn_id=originating_turn_id,
             )
         )
         self._synthesis_tasks[session_id] = task
@@ -806,12 +826,15 @@ class Orchestrator:
             self._synthesis_tasks.pop(session_id, None)
 
         task.add_done_callback(_cleanup)
-        return {
-            "type": "chat_progress",
-            "message": "Give me a moment to prepare the take...",
-            "progress_url": _job_progress_url(session_id, job_id),
-            "job_id": job_id,
-        }
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Give me a moment to prepare the take...",
+                "progress_url": _job_progress_url(session_id, job_id),
+                "job_id": job_id,
+            },
+            task,
+        )
 
     async def _start_preprocess_job(
         self,
@@ -824,6 +847,7 @@ class Orchestrator:
         user_id: str,
         user_email: str,
         planning_context: Optional[Dict[str, Any]] = None,
+        originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
         existing = self._preprocess_tasks.get(session_id)
@@ -847,6 +871,7 @@ class Orchestrator:
             render_type="preprocess",
             input_path=storage_path or input_path,
             provenance=provenance,
+            originating_turn_id=originating_turn_id,
         )
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -870,6 +895,7 @@ class Orchestrator:
                 planning_context=copy.deepcopy(planning_context)
                 if isinstance(planning_context, dict)
                 else None,
+                originating_turn_id=originating_turn_id,
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -1181,10 +1207,16 @@ class Orchestrator:
         storage_input_path: Optional[str],
         job_input_storage_path: Optional[str],
         output_storage_path: Optional[str],
+        originating_turn_id: Optional[str] = None,
     ) -> None:
         """Execute a synthesis job and update status in Firestore."""
         try:
-            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
+            set_log_context(
+                session_id=session_id,
+                turn_id=originating_turn_id,
+                job_id=job_id,
+                user_id=user_id,
+            )
             if self._settings.backend_use_storage and job_input_storage_path:
                 # Ensure job input is copied into storage when required.
                 await asyncio.to_thread(
@@ -1470,6 +1502,7 @@ class Orchestrator:
         initial_message: str,
         initial_thought_summary: str,
         planning_context: Optional[Dict[str, Any]] = None,
+        originating_turn_id: Optional[str] = None,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message."""
         async def publish_attempt_messages(
@@ -1487,7 +1520,12 @@ class Orchestrator:
             )
 
         try:
-            set_log_context(session_id=session_id, job_id=job_id, user_id=user_id)
+            set_log_context(
+                session_id=session_id,
+                turn_id=originating_turn_id,
+                job_id=job_id,
+                user_id=user_id,
+            )
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
@@ -1534,6 +1572,7 @@ class Orchestrator:
                 current_credit_availability=current_credit_availability,
                 preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
+                originating_turn_id=originating_turn_id,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
@@ -1775,6 +1814,7 @@ class Orchestrator:
         preprocess_job_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
+        originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns."""
         include_score = initial_include_score
@@ -1859,6 +1899,7 @@ class Orchestrator:
                 explicit_verse_number=explicit_verse_number,
                 forced_voicebank_id=forced_voicebank_id,
                 forced_language=forced_language,
+                originating_turn_id=originating_turn_id,
             )
             if is_preprocess_attempt:
                 attempt_diagnostics = await self._persist_preprocess_attempt_artifacts(
@@ -2340,6 +2381,7 @@ class Orchestrator:
                     user_id=user_id,
                     user_email=user_email,
                     planning_context=planning_context,
+                    originating_turn_id=originating_turn_id,
                 )
 
             if not followup_response.tool_calls:
@@ -3979,7 +4021,13 @@ class Orchestrator:
         """Attach preprocess attempt display entries to response details."""
         if not attempt_messages:
             return response
-        next_response = dict(response)
+        if isinstance(response, SynthesisChatResponse):
+            next_response: Dict[str, Any] = SynthesisChatResponse(
+                dict(response),
+                response.synthesis_task,
+            )
+        else:
+            next_response = dict(response)
         details = next_response.get("details")
         next_details: Dict[str, Any]
         if isinstance(details, dict):
@@ -5747,6 +5795,7 @@ class Orchestrator:
         explicit_verse_number: Optional[str],
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
+        originating_turn_id: Optional[str] = None,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
         current_score = score
@@ -6409,6 +6458,7 @@ class Orchestrator:
                         synth_args,
                         user_id=user_id,
                         job_id=job_id,
+                        originating_turn_id=originating_turn_id,
                     )
                 except Exception as exc:
                     if self._is_e2e_credit_bypass_enabled():

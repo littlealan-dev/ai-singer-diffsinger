@@ -16,6 +16,7 @@ import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -34,7 +35,7 @@ from src.backend.mcp_client import (
     McpToolError,
     McpWorkerUnavailableError,
 )
-from src.backend.orchestrator import Orchestrator
+from src.backend.orchestrator import Orchestrator, SynthesisChatResponse
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
@@ -72,6 +73,164 @@ from src.mcp.logging_utils import (
 from firebase_admin import app_check
 
 _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
+_SYNTHESIS_STREAM_POLL_SECONDS = 1.2
+_SYNTHESIS_STREAM_HEARTBEAT_SECONDS = 15.0
+_TERMINAL_PROGRESS_STATUSES = {"done", "error", "action_required"}
+_SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE = (
+    "We couldn’t confirm the final job status. Checking for updates…"
+)
+
+
+def _sse_event(event: str, payload: Dict[str, Any]) -> str:
+    """Encode one JSON server-sent event."""
+    data = json.dumps(jsonable_encoder(payload), separators=(",", ":"))
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _synthesis_stream_event_name(status: str) -> str:
+    if status == "done":
+        return "completed"
+    if status == "error":
+        return "failed"
+    if status == "action_required":
+        return "action-required"
+    return "progress"
+
+
+async def _stream_synthesis_events(
+    request: Request,
+    accepted_payload: Dict[str, Any],
+    *,
+    synthesis_task: asyncio.Task[Any],
+    session_id: str,
+    user_id: str,
+    job_id: str,
+) -> AsyncIterator[str]:
+    """Stream one accepted synthesis job from its original chat request."""
+    log = get_logger("backend.api")
+    job_store: JobStore = request.app.state.job_store
+    last_payload_json: str | None = None
+    last_heartbeat_at = time.monotonic()
+    terminal_status: str | None = None
+
+    async def read_progress_payload() -> Dict[str, Any] | None:
+        job = await asyncio.to_thread(
+            job_store.get_job_by_id,
+            job_id=job_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if job is None:
+            return None
+        _, data = job
+        payload = build_progress_payload(job_id, data)
+        return _sign_audio_payload_urls(
+            request,
+            payload,
+            user_id=user_id,
+            resource_path=(
+                data.get("outputPath")
+                if isinstance(data.get("outputPath"), str)
+                else None
+            ),
+        )
+
+    async def observe_finished_task(status: str | None) -> None:
+        try:
+            await asyncio.shield(synthesis_task)
+        except asyncio.CancelledError:
+            if not synthesis_task.cancelled():
+                raise
+        except Exception:
+            log.exception(
+                "synthesis_stream_task_failed session_id=%s job_id=%s status=%s",
+                session_id,
+                job_id,
+                status,
+            )
+
+    log.info("synthesis_stream_opened session_id=%s job_id=%s", session_id, job_id)
+    try:
+        yield _sse_event("accepted", accepted_payload)
+        while terminal_status is None:
+            if await request.is_disconnected():
+                log.info(
+                    "synthesis_stream_disconnected session_id=%s job_id=%s task_done=%s",
+                    session_id,
+                    job_id,
+                    synthesis_task.done(),
+                )
+                return
+
+            payload = await read_progress_payload()
+            if payload is not None:
+                payload_json = json.dumps(
+                    jsonable_encoder(payload),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if payload_json != last_payload_json:
+                    status = str(payload.get("status") or "idle")
+                    if status in _TERMINAL_PROGRESS_STATUSES:
+                        terminal_status = status
+                        await observe_finished_task(status)
+                    yield _sse_event(_synthesis_stream_event_name(status), payload)
+                    last_payload_json = payload_json
+                    last_heartbeat_at = time.monotonic()
+                    if terminal_status is not None:
+                        break
+
+            if synthesis_task.done() and terminal_status is None:
+                final_payload = await read_progress_payload()
+                final_status = str((final_payload or {}).get("status") or "running")
+                if final_payload is not None and final_status in _TERMINAL_PROGRESS_STATUSES:
+                    terminal_status = final_status
+                    await observe_finished_task(final_status)
+                    yield _sse_event(
+                        _synthesis_stream_event_name(final_status),
+                        final_payload,
+                    )
+                    break
+
+                await observe_finished_task(final_status)
+                stream_error_payload = dict(
+                    final_payload or {"job_id": job_id, "status": "running"}
+                )
+                stream_error_payload["message"] = _SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE
+                log.warning(
+                    "synthesis_stream_status_unconfirmed session_id=%s job_id=%s "
+                    "firestore_status=%s",
+                    session_id,
+                    job_id,
+                    final_status,
+                )
+                yield _sse_event("stream-error", stream_error_payload)
+                break
+
+            now = time.monotonic()
+            if now - last_heartbeat_at >= _SYNTHESIS_STREAM_HEARTBEAT_SECONDS:
+                yield _sse_event(
+                    "heartbeat",
+                    {"job_id": job_id, "status": "running"},
+                )
+                last_heartbeat_at = now
+            await asyncio.sleep(_SYNTHESIS_STREAM_POLL_SECONDS)
+    except asyncio.CancelledError:
+        log.info(
+            "synthesis_stream_cancelled session_id=%s job_id=%s task_done=%s",
+            session_id,
+            job_id,
+            synthesis_task.done(),
+        )
+        raise
+    finally:
+        log.info(
+            "synthesis_stream_closed session_id=%s job_id=%s terminal_status=%s task_done=%s",
+            session_id,
+            job_id,
+            terminal_status,
+            synthesis_task.done(),
+        )
 
 
 def _default_solfege_settings_response() -> Dict[str, Any]:
@@ -585,7 +744,7 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/sessions/{session_id}/chat")
-    async def chat(session_id: str, request: Request, payload: ChatRequest) -> Dict[str, Any]:
+    async def chat(session_id: str, request: Request, payload: ChatRequest) -> Any:
         """Handle chat requests and orchestrate LLM/tool execution."""
         sessions: SessionStore = request.app.state.sessions
         orchestrator: Orchestrator = request.app.state.orchestrator
@@ -604,7 +763,28 @@ def create_app() -> FastAPI:
                 selected_voicebank_id=payload.selected_voicebank_id,
                 selected_language=payload.selected_language,
             )
-            return _sign_audio_payload_urls(request, response, user_id=user_id)
+            signed_response = _sign_audio_payload_urls(request, response, user_id=user_id)
+            accepts_event_stream = "text/event-stream" in request.headers.get("accept", "")
+            if accepts_event_stream and isinstance(response, SynthesisChatResponse):
+                job_id = str(response.get("job_id") or "").strip()
+                if not job_id:
+                    raise RuntimeError("Synthesis response is missing its job ID.")
+                return StreamingResponse(
+                    _stream_synthesis_events(
+                        request,
+                        signed_response,
+                        synthesis_task=response.synthesis_task,
+                        session_id=session_id,
+                        user_id=user_id,
+                        job_id=job_id,
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache, no-transform",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return signed_response
         except (
             McpStartupInProgressError,
             McpShuttingDownError,

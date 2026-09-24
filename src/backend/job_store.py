@@ -30,6 +30,7 @@ class JobStore:
         status: str,
         input_path: Optional[str] = None,
         render_type: Optional[str] = None,
+        originating_turn_id: Optional[str] = None,
         voicebank_metadata: Optional[Dict[str, Any]] = None,
         audio_track: Optional[Dict[str, Any]] = None,
         provenance: Optional[Dict[str, Any]] = None,
@@ -46,6 +47,8 @@ class JobStore:
             payload["inputPath"] = input_path
         if render_type:
             payload["renderType"] = render_type
+        if originating_turn_id:
+            payload["originatingTurnId"] = originating_turn_id
         if voicebank_metadata:
             payload.update(voicebank_metadata)
         if audio_track:
@@ -62,12 +65,41 @@ class JobStore:
     def update_job(self, job_id: str, **fields: Any) -> None:
         """Update a job record with new fields and a fresh timestamp."""
         payload = dict(fields)
-        immutable = {"userId", "sessionId", "inputPath", "scoreId", "scoreVersionNo", "inputSha256", "inputFileName", "scoreTitle", "provenanceStatus"}
+        immutable = {
+            "userId",
+            "sessionId",
+            "inputPath",
+            "scoreId",
+            "scoreVersionNo",
+            "inputSha256",
+            "inputFileName",
+            "scoreTitle",
+            "provenanceStatus",
+            "originatingTurnId",
+        }
         if immutable.intersection(payload):
             raise ValueError("Job input provenance may only be set at creation.")
         payload["updatedAt"] = firestore.SERVER_TIMESTAMP
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload, merge=True)
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        step: str,
+        message: str,
+        progress: float,
+    ) -> None:
+        """Update only mutable synthesis progress fields for a job."""
+        self.update_job(
+            job_id,
+            status=status,
+            step=step,
+            message=message,
+            progress=progress,
+        )
 
     def get_latest_job_by_session(
         self, *, user_id: str, session_id: str

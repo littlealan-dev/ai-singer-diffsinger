@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import Future
 import copy
 import io
+import logging
 import os
 import shutil
 import threading
@@ -37,6 +38,7 @@ from src.backend.mcp_client import (
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
     TOOL_RESULT_PREFIX,
+    SynthesisChatResponse,
     ToolExecutionResult,
     WorkflowCandidate,
     SynthesisActionRequired,
@@ -47,6 +49,7 @@ from src.backend.orchestrator import (
 from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.session import SessionStore
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
+from src.mcp.logging_utils import LoggingContextFilter
 from src.backend.credits import UserCredits
 from src.backend.credits import (
     CompleteJobAndSettleCreditsResult,
@@ -445,6 +448,7 @@ def _prepare_app(monkeypatch, overrides=None):
         status: str,
         input_path: str | None = None,
         render_type: str | None = None,
+        originating_turn_id: str | None = None,
         voicebank_metadata: dict | None = None,
         audio_track: dict | None = None,
         provenance: dict | None = None,
@@ -459,6 +463,8 @@ def _prepare_app(monkeypatch, overrides=None):
             payload["inputPath"] = input_path
         if render_type:
             payload["renderType"] = render_type
+        if originating_turn_id:
+            payload["originatingTurnId"] = originating_turn_id
         if voicebank_metadata:
             payload.update(voicebank_metadata)
         if audio_track:
@@ -717,6 +723,23 @@ def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
             return payload
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for progress: {last_payload}")
+
+
+def _parse_sse_events(response):
+    events = []
+    for block in response.text.replace("\r\n", "\n").split("\n\n"):
+        if not block.strip():
+            continue
+        event_name = "message"
+        data_lines = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.split(":", 1)[1].lstrip())
+        if data_lines:
+            events.append((event_name, json.loads("\n".join(data_lines))))
+    return events
 
 
 def _resolve_review_response(test_client, payload):
@@ -1193,6 +1216,48 @@ def test_upload_score_context_update_marker_is_delivered_once(client):
         app.state.sessions.get_snapshot(session_id, "test-user")
     )
     assert reparse_acknowledged["score_context_updated"] is False
+
+
+def test_chat_llm_context_uses_persisted_user_message_as_turn_id(client):
+    class RecordingLlmClient:
+        def __init__(self):
+            self.contexts = []
+
+        def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+            record = logging.LogRecord(
+                name="test.chat_context",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=1,
+                msg="capture",
+                args=(),
+                exc_info=None,
+            )
+            LoggingContextFilter().filter(record)
+            self.contexts.append((record.session_id, record.turn_id))
+            return json.dumps(
+                {
+                    "tool_calls": [],
+                    "final_message": "Ready.",
+                    "include_score": False,
+                }
+            )
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    llm_client = RecordingLlmClient()
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "What parts are available?"},
+    )
+
+    assert response.status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    user_entry = next(entry for entry in snapshot["history"] if entry["role"] == "user")
+    assert llm_client.contexts == [(session_id, user_entry["id"])]
 
 
 def test_upload_rejects_invalid_extension_without_resetting_session(client):
@@ -4546,6 +4611,160 @@ def test_chat_audio_response_with_llm_and_get_audio(client):
     assert audio_response.content.startswith(b"RIFF")
 
 
+def test_synthesis_chat_streams_accepted_progress_and_terminal_result(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-job"
+    reads = 0
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.sleep(0))
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    def fake_get_job_by_id(*, job_id, user_id, session_id):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return job_id, {
+                "userId": user_id,
+                "sessionId": session_id,
+                "status": "running",
+                "step": "render",
+                "message": "Rendering.",
+                "progress": 0.5,
+            }
+        return job_id, {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": "completed",
+            "step": "done",
+            "message": "Your take is ready.",
+            "progress": 1.0,
+            "audioUrl": f"/sessions/{session_id}/audio?file=stream-job.mp3",
+            "outputPath": f"sessions/test-user/{session_id}/jobs/{job_id}/output.mp3",
+        }
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    app.state.job_store.get_job_by_id = fake_get_job_by_id
+    monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_POLL_SECONDS", 0)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers={"Accept": "text/event-stream"},
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse_events(response)
+    assert events[0][0] == "accepted"
+    assert events[0][1]["type"] == "chat_progress"
+    assert events[0][1]["job_id"]
+    assert any(name == "progress" for name, _ in events)
+    terminal_name, terminal_payload = events[-1]
+    assert terminal_name == "completed"
+    assert terminal_payload["status"] == "done"
+    assert terminal_payload["job_id"] == events[0][1]["job_id"]
+    assert terminal_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
+    assert "playback_token=" in terminal_payload["audio_url"]
+
+
+def test_synthesis_chat_stream_closes_when_task_finishes_without_terminal_state(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-unconfirmed-job"
+    reads = 0
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.sleep(0))
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    def fake_get_job_by_id(*, job_id, user_id, session_id):
+        nonlocal reads
+        reads += 1
+        return job_id, {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": "running",
+            "step": "render",
+            "message": "Rendering.",
+            "progress": 0.5,
+        }
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    app.state.job_store.get_job_by_id = fake_get_job_by_id
+    monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_POLL_SECONDS", 0)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers={"Accept": "text/event-stream"},
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response)
+    assert [name for name, _ in events] == ["accepted", "progress", "stream-error"]
+    stream_error = events[-1][1]
+    assert stream_error["status"] == "running"
+    assert stream_error["job_id"] == job_id
+    assert stream_error["message"] == (
+        "We couldn’t confirm the final job status. Checking for updates…"
+    )
+    assert reads >= 2
+
+
+def test_synthesis_chat_keeps_json_response_for_non_streaming_clients(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "json-job"
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.sleep(0))
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "type": "chat_progress",
+        "message": "Preparing the take.",
+        "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+        "job_id": job_id,
+    }
+
+
 def test_chat_selected_voicebank_overrides_llm_voicebank(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -6403,6 +6622,7 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
         started["session_id"] = session_id_arg
         started["score"] = score_arg
         started["arguments"] = dict(arguments)
+        started["kwargs"] = dict(kwargs)
         return {"type": "chat_text", "message": "Starting synthesis."}
 
     app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
@@ -6417,6 +6637,9 @@ def test_synthesis_keeps_derived_part_index_after_preprocess(client):
     assert started["session_id"] == session_id
     assert started["arguments"]["part_index"] == 2
     assert started["arguments"]["part_id"] == "P_DERIVED_02F3BA60A5-Staff1"
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    user_entry = next(entry for entry in snapshot["history"] if entry["role"] == "user")
+    assert started["kwargs"]["originating_turn_id"] == user_entry["id"]
 
 
 def test_synthesis_maps_parsed_derived_staff_part_id_to_active_part_index(client):
