@@ -7406,6 +7406,61 @@ def test_shutdown_waits_for_inflight_synthesis_billing_finalization(
     assert job_data["progress"] == 1.0
 
 
+def test_replaced_synthesis_task_remains_tracked_through_shutdown(client):
+    _test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = "session-replaced-synthesis-task"
+
+    async def scenario():
+        task_a_started = asyncio.Event()
+        task_a_cancelling = asyncio.Event()
+        allow_task_a_finish = asyncio.Event()
+        task_b_started = asyncio.Event()
+        task_b_stopped = asyncio.Event()
+
+        async def task_a_work():
+            task_a_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                task_a_cancelling.set()
+                await allow_task_a_finish.wait()
+                raise
+
+        async def task_b_work():
+            task_b_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                task_b_stopped.set()
+
+        task_a = asyncio.create_task(task_a_work())
+        orchestrator._synthesis_tasks[session_id] = task_a
+        task_a.add_done_callback(
+            lambda done: orchestrator._remove_synthesis_task_if_current(
+                session_id, done
+            )
+        )
+        await task_a_started.wait()
+        task_a.cancel()
+        await task_a_cancelling.wait()
+
+        task_b = asyncio.create_task(task_b_work())
+        orchestrator._synthesis_tasks[session_id] = task_b
+        await task_b_started.wait()
+
+        allow_task_a_finish.set()
+        await asyncio.gather(task_a, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert orchestrator._synthesis_tasks.get(session_id) is task_b
+
+        assert await orchestrator.shutdown_tasks(time.monotonic() + 1.0)
+        assert task_b.cancelled()
+        assert task_b_stopped.is_set()
+
+    asyncio.run(scenario())
+
+
 def test_failed_release_during_worker_stop_makes_shutdown_incomplete(
     client, monkeypatch, caplog,
 ):

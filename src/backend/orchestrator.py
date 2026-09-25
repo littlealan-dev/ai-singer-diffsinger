@@ -189,6 +189,14 @@ class Orchestrator:
             self._shutdown_deadline = deadline
         self._shutdown_requested.set()
 
+    def _remove_synthesis_task_if_current(
+        self,
+        session_id: str,
+        done: asyncio.Task[Any],
+    ) -> None:
+        if self._synthesis_tasks.get(session_id) is done:
+            self._synthesis_tasks.pop(session_id, None)
+
     async def shutdown_tasks(self, deadline: float) -> bool:
         """Cancel tracked background jobs and wait within the shared deadline."""
         self.begin_shutdown(deadline)
@@ -821,8 +829,8 @@ class Orchestrator:
         )
         self._synthesis_tasks[session_id] = task
 
-        def _cleanup(_: asyncio.Task) -> None:
-            self._synthesis_tasks.pop(session_id, None)
+        def _cleanup(done: asyncio.Task) -> None:
+            self._remove_synthesis_task_if_current(session_id, done)
 
         task.add_done_callback(_cleanup)
         return SynthesisChatResponse(
