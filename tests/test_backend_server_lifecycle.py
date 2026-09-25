@@ -13,9 +13,11 @@ import sys
 import threading
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 import uvicorn
 
+from src.backend.main import _stream_synthesis_events
 from src.backend.server import LifecycleServer
 from src.backend.lifecycle import ShutdownCoordinator
 from src.backend.orchestrator import Orchestrator
@@ -174,6 +176,119 @@ def test_pending_request_enters_draining_before_uvicorn_waits_and_exits_bounded(
                 server.should_exit = True
                 serve_task.cancel()
                 await asyncio.gather(serve_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_lifecycle_server_closes_synthesis_stream_during_request_drain(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_POLL_SECONDS", 0.01)
+        test_app = FastAPI()
+        settings = _Settings(
+            backend_shutdown_request_seconds=0.8,
+            backend_shutdown_total_seconds=1.5,
+            backend_shutdown_worker_seconds=0.3,
+        )
+        coordinator = ShutdownCoordinator(
+            router=_Router(),
+            orchestrator=_Orchestrator(),
+            export_tasks={},
+            settings=settings,
+        )
+        coordinator.initialize()
+        test_app.state.shutdown_coordinator = coordinator
+        test_app.state.settings = settings
+
+        class RunningJobStore:
+            def get_job_by_id(self, **_kwargs):
+                return "stream-drain-job", {
+                    "status": "running",
+                    "step": "render",
+                    "message": "Rendering.",
+                    "progress": 0.5,
+                }
+
+        test_app.state.job_store = RunningJobStore()
+        stream_closed = asyncio.Event()
+        synthesis_task = None
+
+        @test_app.get("/stream")
+        async def stream(request: Request):
+            nonlocal synthesis_task
+            synthesis_task = asyncio.create_task(asyncio.Event().wait())
+
+            async def events():
+                try:
+                    async for event in _stream_synthesis_events(
+                        request,
+                        {
+                            "type": "chat_progress",
+                            "message": "Preparing take.",
+                            "job_id": "stream-drain-job",
+                            "progress_url": "/progress?job_id=stream-drain-job",
+                        },
+                        synthesis_task=synthesis_task,
+                        session_id="stream-drain-session",
+                        user_id="test-user",
+                        job_id="stream-drain-job",
+                    ):
+                        yield event
+                finally:
+                    stream_closed.set()
+
+            return StreamingResponse(events(), media_type="text/event-stream")
+
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.setblocking(False)
+        port = listener.getsockname()[1]
+        server = LifecycleServer(
+            uvicorn.Config(
+                test_app,
+                host="127.0.0.1",
+                port=port,
+                lifespan="on",
+                log_level="critical",
+            ),
+            lifecycle_app=test_app,
+        )
+        serve_task = asyncio.create_task(server.serve(sockets=[listener]))
+        writer = None
+        try:
+            await _wait_until(lambda: server.started)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            accepted = await asyncio.wait_for(
+                reader.readuntil(b"event: accepted"),
+                timeout=1,
+            )
+            assert b"200 OK" in accepted
+
+            shutdown_started = time.monotonic()
+            server._start_draining()
+            server.should_exit = True
+
+            await asyncio.wait_for(stream_closed.wait(), timeout=0.4)
+            await asyncio.wait_for(serve_task, timeout=1.5)
+            assert time.monotonic() - shutdown_started < 0.6
+            assert coordinator.started
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            listener.close()
+            if synthesis_task is not None and not synthesis_task.done():
+                synthesis_task.cancel()
+                await asyncio.gather(synthesis_task, return_exceptions=True)
+            if not serve_task.done():
+                server.force_exit = True
+                server.should_exit = True
+                serve_task.cancel()
+                await asyncio.gather(serve_task, return_exceptions=True)
+            coordinator.close()
 
     asyncio.run(scenario())
 

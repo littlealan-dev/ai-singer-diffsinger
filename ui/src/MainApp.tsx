@@ -1962,6 +1962,13 @@ export default function MainApp() {
     };
 
     const finishBoundedRecovery = () => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === activeProgress.messageId
+            ? { ...message, isProgress: false }
+            : message
+        )
+      );
       setActiveProgress((current) =>
         current?.messageId === activeProgress.messageId ? null : current
       );

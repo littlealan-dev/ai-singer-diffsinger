@@ -109,6 +109,7 @@ test("stream-error performs bounded recovery and unlocks chat", async ({ page })
   );
   await expect.poll(() => progressRequests).toBe(3);
   await expect(page.getByTestId("chat-input")).toBeEnabled();
+  await expect(page.getByLabel("Processing")).toHaveCount(0);
   await page.waitForTimeout(1500);
   expect(progressRequests).toBe(3);
 });

@@ -7406,10 +7406,10 @@ def test_shutdown_waits_for_inflight_synthesis_billing_finalization(
     assert job_data["progress"] == 1.0
 
 
-def test_replaced_synthesis_task_remains_tracked_through_shutdown(client):
+def test_replaced_synthesis_task_remains_tracked_through_shutdown(client, monkeypatch):
     _test_client, app = client
     orchestrator = app.state.orchestrator
-    session_id = "session-replaced-synthesis-task"
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
 
     async def scenario():
         task_a_started = asyncio.Event()
@@ -7417,36 +7417,63 @@ def test_replaced_synthesis_task_remains_tracked_through_shutdown(client):
         allow_task_a_finish = asyncio.Event()
         task_b_started = asyncio.Event()
         task_b_stopped = asyncio.Event()
+        run_count = 0
 
-        async def task_a_work():
-            task_a_started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                task_a_cancelling.set()
-                await allow_task_a_finish.wait()
-                raise
+        async def fake_voicebank_metadata(_arguments):
+            return {}
 
-        async def task_b_work():
+        async def fake_capture_job_input(_session_id, _user_id, job_id):
+            return f"sessions/{session_id}/jobs/{job_id}/input.xml", None, {}
+
+        async def fake_run_synthesis_job(*_args, **_kwargs):
+            nonlocal run_count
+            run_count += 1
+            if run_count == 1:
+                task_a_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    task_a_cancelling.set()
+                    await allow_task_a_finish.wait()
+                    raise
             task_b_started.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 task_b_stopped.set()
 
-        task_a = asyncio.create_task(task_a_work())
-        orchestrator._synthesis_tasks[session_id] = task_a
-        task_a.add_done_callback(
-            lambda done: orchestrator._remove_synthesis_task_if_current(
-                session_id, done
-            )
+        monkeypatch.setattr(
+            orchestrator,
+            "_build_synthesis_voicebank_metadata",
+            fake_voicebank_metadata,
         )
-        await task_a_started.wait()
-        task_a.cancel()
-        await task_a_cancelling.wait()
+        monkeypatch.setattr(
+            orchestrator,
+            "_build_synthesis_audio_track_metadata",
+            lambda _score, _arguments: {},
+        )
+        monkeypatch.setattr(orchestrator, "_capture_job_input", fake_capture_job_input)
+        monkeypatch.setattr(orchestrator, "_run_synthesis_job", fake_run_synthesis_job)
 
-        task_b = asyncio.create_task(task_b_work())
-        orchestrator._synthesis_tasks[session_id] = task_b
+        first = await orchestrator._start_synthesis_job(
+            session_id,
+            {},
+            {},
+            user_id="test-user",
+            job_id="replacement-task-a",
+        )
+        task_a = first.synthesis_task
+        await task_a_started.wait()
+
+        second = await orchestrator._start_synthesis_job(
+            session_id,
+            {},
+            {},
+            user_id="test-user",
+            job_id="replacement-task-b",
+        )
+        task_b = second.synthesis_task
+        await task_a_cancelling.wait()
         await task_b_started.wait()
 
         allow_task_a_finish.set()
