@@ -3,11 +3,16 @@ from __future__ import annotations
 """Firestore-backed job tracking helpers."""
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
+
+
+logger = logging.getLogger(__name__)
+_MUTABLE_PROGRESS_STATUSES = {"queued", "running"}
 
 
 @dataclass
@@ -91,15 +96,45 @@ class JobStore:
         step: str,
         message: str,
         progress: float,
-    ) -> None:
-        """Update only mutable synthesis progress fields for a job."""
-        self.update_job(
-            job_id,
-            status=status,
-            step=step,
-            message=message,
-            progress=progress,
-        )
+    ) -> bool:
+        """Update progress only while the job remains mutable."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _transactional_update(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                logger.warning("job_progress_update_missing job_id=%s", job_id)
+                return False
+            current_status = str((snapshot.to_dict() or {}).get("status") or "")
+            if current_status not in _MUTABLE_PROGRESS_STATUSES:
+                logger.info(
+                    "job_progress_update_skipped job_id=%s current_status=%s",
+                    job_id,
+                    current_status or "missing",
+                )
+                return False
+            transaction.set(
+                job_ref,
+                {
+                    "status": status,
+                    "step": step,
+                    "message": message,
+                    "progress": progress,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return True
+
+        try:
+            return _transactional_update(transaction)
+        except Exception:
+            logger.exception("job_progress_update_failed job_id=%s", job_id)
+            raise
 
     def get_latest_job_by_session(
         self, *, user_id: str, session_id: str

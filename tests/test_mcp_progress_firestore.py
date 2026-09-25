@@ -29,7 +29,6 @@ def test_synthesize_progress_updates_firestore(monkeypatch, tmp_path):
             "lyric_selection": lyric_selection,
             "voicebank": "Raine_Rena_2.01",
             "progress_job_id": "job-123",
-            "progress_user_id": "user-123",
         },
         device="cpu",
     )
@@ -44,31 +43,3 @@ def test_synthesize_progress_updates_firestore(monkeypatch, tmp_path):
         "message": "Reading the lyrics and score...",
         "progress": 0.1,
     }
-
-
-def test_job_store_progress_update_only_forwards_mutable_fields():
-    updated = []
-
-    class RecordingJobStore(handlers.JobStore):
-        def update_job(self, job_id: str, **fields):
-            updated.append((job_id, fields))
-
-    RecordingJobStore().update_job_progress(
-        "job-123",
-        status="running",
-        step="synthesize",
-        message="Generating audio...",
-        progress=0.75,
-    )
-
-    assert updated == [
-        (
-            "job-123",
-            {
-                "status": "running",
-                "step": "synthesize",
-                "message": "Generating audio...",
-                "progress": 0.75,
-            },
-        )
-    ]

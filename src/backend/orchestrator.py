@@ -591,7 +591,6 @@ class Orchestrator:
             synth_args["voice_id"] = self._settings.default_voice_id
         if job_id is not None:
             synth_args["progress_job_id"] = job_id
-            synth_args["progress_user_id"] = user_id
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
         # Run synthesis on the MCP worker.
         synth_result = await asyncio.to_thread(

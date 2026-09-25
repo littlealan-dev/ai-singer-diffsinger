@@ -97,6 +97,26 @@ def _synthesis_stream_event_name(status: str) -> str:
     return "progress"
 
 
+def _build_signed_progress_payload(
+    request: Request,
+    *,
+    job_id: str,
+    data: Dict[str, Any],
+    user_id: str,
+) -> Dict[str, Any]:
+    """Build the canonical signed progress payload for polling and streaming."""
+    return _sign_audio_payload_urls(
+        request,
+        build_progress_payload(job_id, data),
+        user_id=user_id,
+        resource_path=(
+            data.get("outputPath")
+            if isinstance(data.get("outputPath"), str)
+            else None
+        ),
+    )
+
+
 async def _stream_synthesis_events(
     request: Request,
     accepted_payload: Dict[str, Any],
@@ -123,17 +143,27 @@ async def _stream_synthesis_events(
         if job is None:
             return None
         _, data = job
-        payload = build_progress_payload(job_id, data)
-        return _sign_audio_payload_urls(
+        return _build_signed_progress_payload(
             request,
-            payload,
+            job_id=job_id,
+            data=data,
             user_id=user_id,
-            resource_path=(
-                data.get("outputPath")
-                if isinstance(data.get("outputPath"), str)
-                else None
-            ),
         )
+
+    async def try_read_progress_payload(*, final: bool = False) -> Dict[str, Any] | None:
+        try:
+            return await read_progress_payload()
+        except Exception:
+            log.warning(
+                "synthesis_stream_progress_read_failed session_id=%s job_id=%s "
+                "task_done=%s final_read=%s",
+                session_id,
+                job_id,
+                synthesis_task.done(),
+                final,
+                exc_info=True,
+            )
+            return None
 
     async def observe_finished_task(status: str | None) -> None:
         try:
@@ -153,6 +183,14 @@ async def _stream_synthesis_events(
     try:
         yield _sse_event("accepted", accepted_payload)
         while terminal_status is None:
+            if request.app.state.shutdown_coordinator.started:
+                log.info(
+                    "synthesis_stream_draining session_id=%s job_id=%s task_done=%s",
+                    session_id,
+                    job_id,
+                    synthesis_task.done(),
+                )
+                return
             if await request.is_disconnected():
                 log.info(
                     "synthesis_stream_disconnected session_id=%s job_id=%s task_done=%s",
@@ -162,7 +200,7 @@ async def _stream_synthesis_events(
                 )
                 return
 
-            payload = await read_progress_payload()
+            payload = await try_read_progress_payload()
             if payload is not None:
                 payload_json = json.dumps(
                     jsonable_encoder(payload),
@@ -181,7 +219,7 @@ async def _stream_synthesis_events(
                         break
 
             if synthesis_task.done() and terminal_status is None:
-                final_payload = await read_progress_payload()
+                final_payload = await try_read_progress_payload(final=True)
                 final_status = str((final_payload or {}).get("status") or "running")
                 if final_payload is not None and final_status in _TERMINAL_PROGRESS_STATUSES:
                     terminal_status = final_status
@@ -958,12 +996,11 @@ def create_app() -> FastAPI:
         job_id, data = job
         if not explicit_job and snapshot.get("score_id") != data.get("scoreId"):
             raise HTTPException(status_code=409, detail={"code": "current_job_score_mismatch"})
-        payload = build_progress_payload(job_id, data)
-        return _sign_audio_payload_urls(
+        return _build_signed_progress_payload(
             request,
-            payload,
+            job_id=job_id,
+            data=data,
             user_id=user_id,
-            resource_path=data.get("outputPath") if isinstance(data.get("outputPath"), str) else None,
         )
 
     @app.post("/sessions/{session_id}/export-mix")

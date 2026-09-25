@@ -1,6 +1,134 @@
 from datetime import datetime
+import logging
 
-from src.backend.job_store import build_progress_payload
+import pytest
+
+import src.backend.job_store as job_store_module
+from src.backend.job_store import JobStore, build_progress_payload
+
+
+class _Snapshot:
+    def __init__(self, data):
+        self.exists = data is not None
+        self._data = data
+
+    def to_dict(self):
+        return dict(self._data or {})
+
+
+class _JobRef:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, transaction=None):
+        return _Snapshot(self.data)
+
+
+class _Collection:
+    def __init__(self, ref):
+        self.ref = ref
+
+    def document(self, _job_id):
+        return self.ref
+
+
+class _Transaction:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.writes = []
+
+    def set(self, ref, payload, merge=False):
+        if self.fail:
+            raise RuntimeError("transaction write failed")
+        self.writes.append((ref, payload, merge))
+
+
+class _Client:
+    def __init__(self, data, *, fail=False):
+        self.ref = _JobRef(data)
+        self.transaction_value = _Transaction(fail=fail)
+
+    def collection(self, _name):
+        return _Collection(self.ref)
+
+    def transaction(self):
+        return self.transaction_value
+
+
+def _progress_store(monkeypatch, data, *, fail=False):
+    monkeypatch.setattr(job_store_module.firestore, "transactional", lambda func: func)
+    store = JobStore()
+    store._client = _Client(data, fail=fail)
+    return store
+
+
+def test_job_store_progress_update_writes_while_job_is_running(monkeypatch):
+    store = _progress_store(monkeypatch, {"status": "running"})
+
+    assert store.update_job_progress(
+        "job-123",
+        status="running",
+        step="synthesize",
+        message="Generating audio...",
+        progress=0.75,
+    ) is True
+
+    writes = store._client.transaction_value.writes
+    assert len(writes) == 1
+    _, payload, merge = writes[0]
+    assert merge is True
+    assert payload["status"] == "running"
+    assert payload["step"] == "synthesize"
+    assert payload["message"] == "Generating audio..."
+    assert payload["progress"] == 0.75
+    assert payload["updatedAt"] is job_store_module.firestore.SERVER_TIMESTAMP
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["completed", "failed", "cancelled", "action_required", "credit_reconciliation_required"],
+)
+def test_job_store_progress_update_preserves_terminal_job(
+    monkeypatch, caplog, terminal_status
+):
+    original = {
+        "status": terminal_status,
+        "step": "terminal",
+        "message": "Terminal message.",
+        "progress": 1.0,
+    }
+    store = _progress_store(monkeypatch, original)
+
+    with caplog.at_level(logging.INFO):
+        updated = store.update_job_progress(
+            "job-terminal",
+            status="running",
+            step="synthesize",
+            message="Taking a breath for the take...",
+            progress=0.8,
+        )
+
+    assert updated is False
+    assert store._client.transaction_value.writes == []
+    assert store._client.ref.data == original
+    assert f"current_status={terminal_status}" in caplog.text
+
+
+def test_job_store_progress_update_logs_transaction_failure(monkeypatch, caplog):
+    store = _progress_store(monkeypatch, {"status": "running"}, fail=True)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        RuntimeError, match="transaction write failed"
+    ):
+        store.update_job_progress(
+            "job-failed-write",
+            status="running",
+            step="synthesize",
+            message="Generating audio...",
+            progress=0.8,
+        )
+
+    assert "job_progress_update_failed job_id=job-failed-write" in caplog.text
 
 
 def test_build_progress_payload_maps_status_and_fields():

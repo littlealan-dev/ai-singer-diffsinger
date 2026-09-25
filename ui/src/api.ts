@@ -727,8 +727,7 @@ export async function chat(
       body: JSON.stringify(body),
       signal: controller.signal,
     },
-    API_REQUEST_TIMEOUT_SECONDS,
-    () => new SynthesisJobDetailsTimeoutError()
+    API_REQUEST_TIMEOUT_SECONDS
   );
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
@@ -756,7 +755,8 @@ export async function chat(
     throw error;
   }
   if (first.done || first.value.event !== "accepted") {
-    await reader.cancel();
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
     throw new Error("Synthesis stream ended before the job was accepted.");
   }
   const accepted = normalizeChatResponse(first.value.data as ChatResponse);

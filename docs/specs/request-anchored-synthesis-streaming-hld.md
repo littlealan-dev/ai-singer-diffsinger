@@ -2,7 +2,8 @@
 
 ## 1. Status
 
-High-level design only. This document does not authorize or include implementation changes.
+Approved high-level design implemented by PR #8. The pull request also contains
+separately approved usage-correlation changes where noted below.
 
 ## 2. Objective
 
@@ -45,7 +46,7 @@ This change will not:
 - change the current handling of multiple synthesis jobs on one instance;
 - add synthesis admission limits, a durable queue, leases, automatic retry, or abandoned-job recovery;
 - change Cloud Run concurrency, minimum instances, or maximum instances;
-- change the Firestore job schema; or
+- require a Firestore schema migration for streaming; or
 - replace the planned Cloud Tasks or Cloud Run Jobs architecture.
 
 ## 5. Current and Proposed Flows
@@ -334,6 +335,11 @@ No health-check request, separate progress stream, or session-affinity setting c
 
 The Cloud Run request timeout remains 900 seconds. The five-minute synthesis limit applies to estimated output-audio duration, not wall-clock processing time. Voicebank behavior, alignment, score complexity, model startup, output encoding, and storage or billing work can make a permitted song take longer than 900 seconds to finish.
 
+The production frontend sets `VITE_API_BASE` to the `sightsinger-api` Cloud Run
+service directly. The synthesis stream therefore does not traverse the Firebase
+Hosting `/sessions/**` rewrite or its shorter request timeout. Deployments that
+omit that direct API base do not satisfy this design.
+
 A shorter song can therefore outlive the request. For example, a four-minute output may require 16 minutes of processing. At 15 minutes, Cloud Run closes the streaming request while the synthesis task may continue under the current in-process behavior.
 
 This is an accepted limitation of the interim design. When the request deadline ends the stream:
@@ -359,14 +365,20 @@ The backend should close the stream normally when synthesis finishes within the 
 
 ## 12. Observability
 
-Add structured lifecycle logs without changing job state:
+Emit structured lifecycle logs without changing job state:
 
 ```text
-synthesis_anchor_opened session=<id> job=<id>
-synthesis_anchor_heartbeat job=<id> elapsed_seconds=<n>
-synthesis_anchor_finished job=<id> task_outcome=<outcome>
-synthesis_anchor_disconnected job=<id> task_running=<bool>
+synthesis_stream_opened session_id=<id> job_id=<id>
+synthesis_stream_disconnected session_id=<id> job_id=<id> task_done=<bool>
+synthesis_stream_draining session_id=<id> job_id=<id> task_done=<bool>
+synthesis_stream_progress_read_failed session_id=<id> job_id=<id> task_done=<bool>
+synthesis_stream_status_unconfirmed session_id=<id> job_id=<id> firestore_status=<status>
+synthesis_stream_closed session_id=<id> job_id=<id> terminal_status=<status> task_done=<bool>
 ```
+
+Production and standard development startup use structured JSON logging. Local
+overrides must retain `LOG_JSON=1` when Gemini usage metadata needs to remain
+queryable as structured fields.
 
 Do not log tokens, stream headers containing credentials, score content, lyrics, or user email addresses.
 
@@ -399,7 +411,7 @@ Recommended rollout:
 12. **Request-timeout fallback:** Simulate the stream reaching its request deadline before synthesis finishes, verify the frontend polls the same job ID, and verify no restart or billing transition occurs solely because of the timeout.
 13. **Normalized terminal statuses:** Verify `completed`, `failed`, and `action-required` events carry payload statuses `done`, `error`, and `action_required`, respectively, and drive the existing UI terminal branches.
 14. **Compatibility:** Verify non-synthesis chat turns retain existing JSON behavior and multiple-job queueing behavior remains unchanged.
-15. **Schema and configuration stability:** Verify no Firestore schema or Cloud Run concurrency/minimum/maximum instance change is required.
+15. **Schema and configuration stability:** Verify streaming requires no Firestore migration or Cloud Run concurrency/minimum/maximum instance change. The optional `originatingTurnId` field belongs to the separately bundled usage-correlation work.
 
 ## 15. Residual Risk and Exit Strategy
 

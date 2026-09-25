@@ -11,6 +11,7 @@ import uuid
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -4729,6 +4730,139 @@ def test_synthesis_chat_stream_closes_when_task_finishes_without_terminal_state(
         "We couldn’t confirm the final job status. Checking for updates…"
     )
     assert reads >= 2
+
+
+def test_synthesis_chat_stream_retries_transient_progress_read_failure(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-transient-read-job"
+    reads = 0
+    loop = None
+    allow_task_finish = None
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        nonlocal loop, allow_task_finish
+        loop = asyncio.get_running_loop()
+        allow_task_finish = asyncio.Event()
+        task = asyncio.create_task(allow_task_finish.wait())
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    def fake_get_job_by_id(*, job_id, user_id, session_id):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("temporary Firestore outage")
+        assert loop is not None and allow_task_finish is not None
+        loop.call_soon_threadsafe(allow_task_finish.set)
+        return job_id, {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": "completed",
+            "step": "done",
+            "message": "Your take is ready.",
+            "progress": 1.0,
+        }
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    app.state.job_store.get_job_by_id = fake_get_job_by_id
+    monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_POLL_SECONDS", 0)
+    monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_HEARTBEAT_SECONDS", 0)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers={"Accept": "text/event-stream"},
+        json={"message": "render audio"},
+    )
+
+    events = _parse_sse_events(response)
+    assert [name for name, _ in events] == ["accepted", "heartbeat", "completed"]
+    assert events[-1][1]["status"] == "done"
+    assert reads == 2
+
+
+def test_synthesis_chat_stream_reports_persistent_read_failure_after_task_exit(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-persistent-read-job"
+    reads = 0
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.sleep(0))
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    def fake_get_job_by_id(**_kwargs):
+        nonlocal reads
+        reads += 1
+        raise RuntimeError("persistent Firestore outage")
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    app.state.job_store.get_job_by_id = fake_get_job_by_id
+    monkeypatch.setattr("src.backend.main._SYNTHESIS_STREAM_POLL_SECONDS", 0)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers={"Accept": "text/event-stream"},
+        json={"message": "render audio"},
+    )
+
+    events = _parse_sse_events(response)
+    assert events[0][0] == "accepted"
+    assert events[-1][0] == "stream-error"
+    assert events[-1][1]["job_id"] == job_id
+    assert events[-1][1]["status"] == "running"
+    assert reads >= 2
+
+
+def test_synthesis_chat_stream_closes_when_backend_starts_draining(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-draining-job"
+    original_coordinator = app.state.shutdown_coordinator
+    app.state.shutdown_coordinator = SimpleNamespace(started=True)
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.Event().wait())
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+            },
+            task,
+        )
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    try:
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            headers={"Accept": "text/event-stream"},
+            json={"message": "render audio"},
+        )
+    finally:
+        app.state.shutdown_coordinator = original_coordinator
+
+    assert [name for name, _ in _parse_sse_events(response)] == ["accepted"]
 
 
 def test_synthesis_chat_keeps_json_response_for_non_streaming_clients(client):

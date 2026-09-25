@@ -74,6 +74,11 @@ const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const MULTITRACK_TUTORIAL_DISMISSED_KEY = "sightsinger.multitrack-tutorial-dismissed";
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
+const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
+const SYNTHESIS_STREAM_RECONNECTING_MESSAGE =
+  "Connection lost. Reconnecting to check your take";
+const SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE =
+  "We couldn’t confirm the final job status. Checking for updates…";
 const MULTITRACK_TUTORIAL_STEPS = [
   {
     target: "player",
@@ -974,6 +979,7 @@ export default function MainApp() {
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
+    boundedAttempts?: number;
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -1942,23 +1948,65 @@ export default function MainApp() {
   useEffect(() => {
     if (!activeProgress) return;
     let cancelled = false;
+    let pollInFlight = false;
+    let completedAttempts = 0;
     const generation = workspaceGenerationRef.current;
 
+    const clearRecoveryError = () => {
+      setError((current) =>
+        current === SYNTHESIS_STREAM_RECONNECTING_MESSAGE ||
+        current === SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE
+          ? null
+          : current
+      );
+    };
+
+    const finishBoundedRecovery = () => {
+      setActiveProgress((current) =>
+        current?.messageId === activeProgress.messageId ? null : current
+      );
+      setChatTurnBusy(false);
+    };
+
     const poll = async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled || generation !== workspaceGenerationRef.current) return;
-        await handleProgressPayload(activeProgress.messageId, payload, generation);
+        const terminal = await handleProgressPayload(
+          activeProgress.messageId,
+          payload,
+          generation
+        );
+        if (terminal || activeProgress.boundedAttempts == null) {
+          clearRecoveryError();
+        }
+        if (!terminal && activeProgress.boundedAttempts != null) {
+          completedAttempts += 1;
+          if (completedAttempts >= activeProgress.boundedAttempts) {
+            finishBoundedRecovery();
+          }
+        }
       } catch (err: any) {
         if (!cancelled && generation === workspaceGenerationRef.current) {
+          if (activeProgress.boundedAttempts != null) {
+            completedAttempts += 1;
+            if (completedAttempts >= activeProgress.boundedAttempts) {
+              finishBoundedRecovery();
+            }
+            return;
+          }
           setError(
             err?.message === "Failed to fetch"
-              ? "Connection lost. Reconnecting to check your take"
+              ? SYNTHESIS_STREAM_RECONNECTING_MESSAGE
               : err?.message || "Failed to fetch synthesis progress."
           );
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
+      } finally {
+        pollInFlight = false;
       }
     };
 
@@ -1979,6 +2027,7 @@ export default function MainApp() {
     ) => {
       activeSynthesisStreamRef.current = stream;
       let reachedTerminalState = false;
+      let finalStatusUnconfirmed = false;
       try {
         const iterator = stream[Symbol.asyncIterator]();
         for (;;) {
@@ -1994,11 +2043,9 @@ export default function MainApp() {
           }
           if (streamEvent.event === "heartbeat") continue;
           if (streamEvent.event === "stream-error") {
-            setError(
-              streamEvent.data.message ||
-                "We couldn’t confirm the final job status. Checking for updates…"
-            );
-            continue;
+            finalStatusUnconfirmed = true;
+            setError(streamEvent.data.message || SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE);
+            break;
           }
           reachedTerminalState = await handleProgressPayload(
             messageId,
@@ -2010,7 +2057,7 @@ export default function MainApp() {
       } catch {
         if (generation === workspaceGenerationRef.current) {
           await stream.cancel();
-          setError("Connection lost. Reconnecting to check your take");
+          setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
         }
       } finally {
         if (activeSynthesisStreamRef.current === stream) {
@@ -2020,7 +2067,13 @@ export default function MainApp() {
           !reachedTerminalState &&
           generation === workspaceGenerationRef.current
         ) {
-          setActiveProgress({ messageId, url: progressUrl });
+          setActiveProgress({
+            messageId,
+            url: progressUrl,
+            boundedAttempts: finalStatusUnconfirmed
+              ? SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS
+              : undefined,
+          });
         }
       }
     },
@@ -2432,6 +2485,19 @@ export default function MainApp() {
           setPendingSelection(false);
         }
       }
+      appendMessage(assistantMessage);
+      if (response.type === "chat_progress") {
+        if (stream) {
+          void consumeSynthesisStream(
+            stream,
+            assistantMessage.id,
+            response.progress_url,
+            workspaceGenerationRef.current
+          );
+        } else {
+          setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
+        }
+      }
       if ("current_score" in response && response.current_score) {
         await refreshScorePreview();
       }
@@ -2449,19 +2515,6 @@ export default function MainApp() {
       }
       if ("warning" in response && response.warning) {
         setError(String(response.warning));
-      }
-      appendMessage(assistantMessage);
-      if (response.type === "chat_progress") {
-        if (stream) {
-          void consumeSynthesisStream(
-            stream,
-            assistantMessage.id,
-            response.progress_url,
-            workspaceGenerationRef.current
-          );
-        } else {
-          setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
-        }
       }
     } catch (err: any) {
       const message = err?.message || "Failed to send message.";
