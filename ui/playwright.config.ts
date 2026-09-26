@@ -45,6 +45,7 @@ export default defineConfig({
           VITE_FIREBASE_STORAGE_BUCKET: "demo-sightsinger-e2e.appspot.com",
           VITE_FIREBASE_MESSAGING_SENDER_ID: "1234567890",
           VITE_FIREBASE_APP_ID: "1:1234567890:web:e2e",
+          VITE_FIREBASE_MEASUREMENT_ID: "G-E2ETEST",
         },
       },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
