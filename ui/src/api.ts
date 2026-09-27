@@ -837,13 +837,21 @@ function parseServerSentEventBlock(block: string): { event: string; data: unknow
   return { event, data: JSON.parse(dataLines.join("\n")) };
 }
 
-export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
+export async function fetchProgress(
+  progressUrl: string,
+  options: { signal?: AbortSignal; timeoutSeconds?: number } = {}
+): Promise<ProgressResponse> {
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
-  const response = await fetchWithTimeout(withApiBase(progressUrl), {
-    headers,
-    cache: "no-store",
-  });
+  const response = await fetchWithTimeout(
+    withApiBase(progressUrl),
+    {
+      headers,
+      cache: "no-store",
+      signal: options.signal,
+    },
+    options.timeoutSeconds
+  );
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }
