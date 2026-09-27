@@ -108,6 +108,7 @@ MAX_MEASURE_CHANGE_RATIO = 0.8
 TOOL_REPARSE = "reparse"
 TOOL_PREPARE_SYNTHESIS_QUOTE = "prepare_synthesis_quote"
 ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY = "active_synthesis_quote_id"
+INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY = "instrumental_midi_source_signature"
 TOOL_SYNTHESIZE = "synthesize"
 TOOL_ADD_SOLFEGE_VERSE = "add_solfege_lyric_verse"
 TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
@@ -4604,6 +4605,7 @@ class Orchestrator:
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         """Re-parse the current MusicXML file with new selection filters."""
+        previous = await self._sessions.get_snapshot(session_id, user_id)
         file_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
         parse_args: Dict[str, Any] = {
             "file_path": self._mcp_musicxml_path(file_path),
@@ -4625,12 +4627,60 @@ class Orchestrator:
         score_summary = result.get("score_summary") if isinstance(result, dict) else None
         score = dict(result)
         score.pop("score_summary", None)
+        if isinstance(score_summary, dict):
+            score_summary = await self._carry_published_performance_midi(
+                session_id,
+                previous,
+                score_summary,
+                user_id=user_id,
+                musicxml_path=file_path,
+            )
         await self._sessions.set_score(
             session_id, score, summary=score_summary if isinstance(score_summary, dict) else None,
             baseline=True,
         )
         await self._sessions.mark_score_context_updated(session_id)
         return score
+
+    async def _carry_published_performance_midi(
+        self,
+        session_id: str,
+        previous: Dict[str, Any],
+        score_summary: Dict[str, Any],
+        *,
+        user_id: Optional[str],
+        musicxml_path: Path,
+    ) -> Dict[str, Any]:
+        """Keep published MIDI metadata across a reparse that leaves it valid.
+
+        A reparse re-reads the same MusicXML with new selection filters, so the
+        freshly parsed summary lacks performance_midi although the published
+        MIDI still matches. Dropping it would tell the UI there is no MIDI.
+        """
+        previous_summary = previous.get("score_summary")
+        performance_midi = (
+            previous_summary.get("performance_midi")
+            if isinstance(previous_summary, dict)
+            else None
+        )
+        files = previous.get("files")
+        published = (
+            files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY)
+            if isinstance(files, dict)
+            else None
+        )
+        if not isinstance(performance_midi, dict) or not published:
+            return score_summary
+        signature = await self.instrumental_midi_signature(
+            session_id,
+            user_id=user_id,
+            score_id=previous.get("score_id"),
+            score_summary=score_summary,
+            musicxml_path=musicxml_path,
+        )
+        if signature != published:
+            return score_summary
+        return {**score_summary, "performance_midi": performance_midi}
 
     def _resolve_llm_planning_score(
         self,
@@ -6521,7 +6571,12 @@ class Orchestrator:
                         action_required_payload=action_required,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
+                # Selecting another lyric line reparses the score. Report it so the
+                # response carries the new score instead of leaving the UI on the
+                # old one until the confirmation turn.
+                quote_reparsed = False
                 if current_score.get("selected_lyric_selection") != lyric_selection:
+                    quote_reparsed = True
                     reparsed_score = await self._reparse_score(
                         session_id,
                         part_id=None,
@@ -6554,6 +6609,7 @@ class Orchestrator:
                         followup_prompt=json.dumps(instrument_precheck, sort_keys=True),
                         action_required_payload=instrument_precheck,
                         explicit_verse_number=selected_explicit_verse_number,
+                        session_state_changed=quote_reparsed,
                     )
                 from src.backend.credits import (
                     create_synthesis_quote,
@@ -6660,6 +6716,7 @@ class Orchestrator:
                     followup_prompt=json.dumps(quote_payload, sort_keys=True),
                     followup_message_only=True,
                     explicit_verse_number=selected_explicit_verse_number,
+                    session_state_changed=quote_reparsed,
                 )
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
@@ -7225,6 +7282,22 @@ class Orchestrator:
             session_state_changed=audio_response is not None,
         )
 
+    async def instrumental_midi_signature(
+        self,
+        session_id: str,
+        *,
+        user_id: Optional[str],
+        score_id: Optional[str],
+        score_summary: Optional[Dict[str, Any]],
+        musicxml_path: Optional[Path] = None,
+    ) -> str:
+        """Return the source signature of the session's instrumental MIDI."""
+        if musicxml_path is None:
+            musicxml_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+        return await asyncio.to_thread(
+            instrumental_midi_source_signature, score_id, musicxml_path, score_summary
+        )
+
     async def _ensure_instrumental_midi_artifacts(
         self,
         session_id: str,
@@ -7233,7 +7306,7 @@ class Orchestrator:
         user_id: Optional[str],
         job_id: str,
     ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Prepare per-version MIDI without publishing an unpaid success."""
+        """Prepare MIDI for the current score content without publishing an unpaid success."""
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         current_score = snapshot.get("current_score")
         version = (
@@ -7252,11 +7325,30 @@ class Orchestrator:
             if isinstance(persisted_summary, dict)
             else dict(score_summary or {})
         )
+        try:
+            source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+            signature = await self.instrumental_midi_signature(
+                session_id,
+                user_id=user_id,
+                score_id=snapshot.get("score_id"),
+                score_summary=summary,
+                musicxml_path=source_path,
+            )
+        except Exception as exc:
+            self._logger.exception(
+                "instrumental_midi_generation_failed session=%s job=%s version=%s",
+                session_id,
+                job_id,
+                version,
+            )
+            raise InstrumentalMidiGenerationError(
+                f"Instrumental MIDI could not be prepared: {exc}"
+            ) from exc
         existing = summary.get("performance_midi")
         session_dir = self._sessions.session_dir(session_id)
-        written_path = session_dir / f"instrumental-written-v{version}.mid"
-        expanded_path = session_dir / f"instrumental-expanded-v{version}.mid"
-        marker_matches = files.get("instrumental_midi_score_version") == str(version)
+        written_path = session_dir / f"instrumental-written-{signature}.mid"
+        expanded_path = session_dir / f"instrumental-expanded-{signature}.mid"
+        marker_matches = files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) == signature
         generated_without_parts = (
             isinstance(existing, dict)
             and existing.get("version") == PERFORMANCE_MIDI_VERSION
@@ -7271,6 +7363,13 @@ class Orchestrator:
             and expanded_path.is_file()
         )
         if marker_matches and (generated_without_parts or generated_with_files):
+            self._logger.info(
+                "instrumental_midi_reused session=%s job=%s version=%s signature=%s",
+                session_id,
+                job_id,
+                version,
+                signature,
+            )
             return summary, None
 
         staging_dir = session_dir / ".midi-staging"
@@ -7280,7 +7379,6 @@ class Orchestrator:
         # MIDI is now a billable component, so a failure fails the whole job
         # before vocal work begins instead of degrading to a diagnostic.
         try:
-            source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
             performance_midi = await asyncio.to_thread(
                 build_instrumental_performance_midis,
                 source_path,
@@ -7304,6 +7402,7 @@ class Orchestrator:
         summary["performance_midi"] = performance_midi
         return summary, {
             "score_version_no": version,
+            "source_signature": signature,
             "score_summary": summary,
             "performance_midi": performance_midi,
             "written_staging_path": written_staging_path,
@@ -7319,6 +7418,8 @@ class Orchestrator:
         paths: Dict[str, Any] = {
             "scoreVersionNo": int(publication["score_version_no"]),
         }
+        if publication.get("source_signature"):
+            paths["sourceSignature"] = str(publication["source_signature"])
         # Record only the final paths this job actually wrote, so a later
         # rollback never deletes a file published by a different job.
         moved: List[Path] = publication.setdefault("moved_final_paths", [])
@@ -7341,25 +7442,34 @@ class Orchestrator:
     ) -> None:
         """Publish complete MIDI metadata for reload and later vocal jobs."""
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
-        current_score = snapshot.get("current_score")
-        current_version = (
-            int(current_score.get("version") or 0)
-            if isinstance(current_score, dict)
-            else 0
+        signature = str(publication["source_signature"])
+        current_summary = snapshot.get("score_summary")
+        current_signature = await self.instrumental_midi_signature(
+            session_id,
+            user_id=user_id,
+            score_id=snapshot.get("score_id"),
+            score_summary=current_summary if isinstance(current_summary, dict) else None,
         )
-        version = int(publication["score_version_no"])
-        if current_version != version:
+        if current_signature != signature:
             self._logger.info(
-                "instrumental_midi_session_publish_skipped session=%s job_version=%s current_version=%s",
+                "instrumental_midi_session_publish_skipped session=%s job_signature=%s current_signature=%s",
                 session_id,
-                version,
-                current_version,
+                signature,
+                current_signature,
             )
             return
         performance_midi = publication["performance_midi"]
-        await self._sessions.set_score_summary(session_id, publication["score_summary"])
+        # Attach to the current summary: a selection-only reparse during the job
+        # keeps the signature but replaces the summary the job started from.
+        summary = (
+            dict(current_summary)
+            if isinstance(current_summary, dict)
+            else dict(publication["score_summary"])
+        )
+        summary["performance_midi"] = performance_midi
+        await self._sessions.set_score_summary(session_id, summary)
         await self._sessions.set_metadata(
-            session_id, "instrumental_midi_score_version", str(version)
+            session_id, INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY, signature
         )
         if performance_midi.get("original_midi_available"):
             await self._sessions.set_file(
@@ -7389,22 +7499,18 @@ class Orchestrator:
 
         The staged files are deleted with the job, so leaving the session
         advertising them would offer the UI a MIDI asset that cannot be
-        fetched. Only this job's own score version is retracted; a newer
-        version belongs to whoever published it.
+        fetched. Only this job's own publication is retracted; MIDI published
+        later for different content belongs to whoever published it.
         """
-        version = int(publication["score_version_no"])
+        signature = str(publication["source_signature"])
         try:
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
-            current_score = snapshot.get("current_score")
-            current_version = (
-                int(current_score.get("version") or 0)
-                if isinstance(current_score, dict)
-                else 0
-            )
-            if current_version != version:
+            files = snapshot.get("files")
+            files = files if isinstance(files, dict) else {}
+            if files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) != signature:
                 return
             await self._sessions.set_metadata(
-                session_id, "instrumental_midi_score_version", ""
+                session_id, INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY, ""
             )
             await self._sessions.set_metadata(
                 session_id, "instrumental_midi_original_path", ""
@@ -7428,9 +7534,9 @@ class Orchestrator:
         except Exception:
             # Rollback is best effort; the endpoint still refuses a missing file.
             self._logger.exception(
-                "instrumental_midi_session_retract_failed session=%s version=%s",
+                "instrumental_midi_session_retract_failed session=%s signature=%s",
                 session_id,
-                version,
+                signature,
             )
 
     @staticmethod
@@ -7982,6 +8088,29 @@ def _job_storage_output_path(
 def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str) -> str:
     """Build the storage path for a lossless job output used by mixdown."""
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
+
+
+def instrumental_midi_source_signature(
+    score_id: Optional[str],
+    musicxml_path: Path,
+    score_summary: Optional[Dict[str, Any]],
+) -> str:
+    """Identify instrumental MIDI by everything it is built from.
+
+    The score version is not enough: it also advances on selection-only
+    changes, such as switching lyric lines, which leave every instrumental note
+    unchanged. The MIDI depends on the uploaded score, the MusicXML content,
+    the playback presets and the MIDI format version, so it is keyed on those.
+    """
+    digest = hashlib.sha256()
+    for field in (f"performance-midi-{PERFORMANCE_MIDI_VERSION}", str(score_id or "")):
+        digest.update(field.encode("utf-8"))
+        digest.update(b"\x1f")
+    digest.update(Path(musicxml_path).read_bytes())
+    digest.update(b"\x1f")
+    assignments = llm_program_assignments_from_summary(score_summary or {})
+    digest.update(json.dumps(assignments, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()[:24]
 
 
 def _job_progress_url(session_id: str, job_id: str) -> str:

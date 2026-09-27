@@ -35,7 +35,11 @@ from src.backend.mcp_client import (
     McpToolError,
     McpWorkerUnavailableError,
 )
-from src.backend.orchestrator import Orchestrator, SynthesisChatResponse
+from src.backend.orchestrator import (
+    INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY,
+    Orchestrator,
+    SynthesisChatResponse,
+)
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
@@ -1570,14 +1574,25 @@ def create_app() -> FastAPI:
         user_id = await _get_user_id_or_401(request)
         snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
         files = snapshot.get("files")
-        current_score = snapshot.get("current_score")
-        current_version = (
-            str(current_score.get("version")) if isinstance(current_score, dict) else None
+        published_signature = (
+            files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) if isinstance(files, dict) else None
         )
-        generated_version = (
-            files.get("instrumental_midi_score_version") if isinstance(files, dict) else None
-        )
-        if not current_version or generated_version != current_version:
+        if not isinstance(snapshot.get("current_score"), dict) or not published_signature:
+            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        summary = snapshot.get("score_summary")
+        try:
+            current_signature = await orchestrator.instrumental_midi_signature(
+                session_id,
+                user_id=user_id,
+                score_id=snapshot.get("score_id"),
+                score_summary=summary if isinstance(summary, dict) else None,
+            )
+        except (KeyError, OSError, SessionMusicXmlUnavailableError) as exc:
+            raise HTTPException(
+                status_code=404, detail="Instrumental MIDI is unavailable for this score."
+            ) from exc
+        if published_signature != current_signature:
             raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
         key = (
             "instrumental_midi_expanded_path"

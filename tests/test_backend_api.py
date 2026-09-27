@@ -46,6 +46,7 @@ from src.backend.orchestrator import (
     _format_synthesis_error,
     _ensure_job_input_storage,
     _resolve_job_input_snapshot_paths,
+    instrumental_midi_source_signature,
 )
 from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.session import SessionStore
@@ -1219,7 +1220,7 @@ def test_upload_musicxml_parses_and_saves(client):
     assert score_path.exists()
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["original_score"] == current_score["score"]
-    assert "instrumental_midi_score_version" not in snapshot["files"]
+    assert "instrumental_midi_source_signature" not in snapshot["files"]
     assert not list(score_path.parent.glob("*.mid"))
 
 
@@ -8406,6 +8407,152 @@ def _run_job_with_failing_midi_preparation(app, *, session_id, job_id, billing_c
         )
     )
     return calls
+
+
+_PIANO_SATB_FIXTURE = PROJECT_ROOT / "ui" / "e2e" / "fixtures" / "two-voices-piano-accompaniment.xml"
+
+
+def _use_real_score_parsing(app):
+    """Parse uploads and reparses for real; keep every other tool stubbed."""
+    from src.mcp.handlers import handle_parse_score
+
+    stub = _make_router_call_tool()
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            return handle_parse_score(arguments, "cpu")
+        return stub(name, arguments)
+
+    app.state.router.call_tool = call_tool
+
+
+def _upload_piano_satb(test_client, session_id):
+    files = {"file": ("score.xml", _PIANO_SATB_FIXTURE.read_bytes(), "application/xml")}
+    response = test_client.post(f"/sessions/{session_id}/upload", files=files)
+    assert response.status_code == 200
+    return response.json()
+
+
+def _publish_real_instrumental_midi(orchestrator, session_id, job_id):
+    async def scenario():
+        _, publication = await orchestrator._ensure_instrumental_midi_artifacts(
+            session_id, score_summary=None, user_id="test-user", job_id=job_id
+        )
+        assert publication is not None
+        orchestrator._finalize_instrumental_midi_files(publication)
+        await orchestrator._publish_instrumental_midi_session_state(
+            session_id, publication, user_id="test-user"
+        )
+        return publication
+
+    return asyncio.run(scenario())
+
+
+def _alto_lyric_selection(snapshot):
+    alto = next(
+        part for part in snapshot["score_summary"]["parts"]
+        if part.get("part_name") == "Alto"
+    )
+    return alto["part_id"], dict(alto["lyric_selections"][0])
+
+
+def test_switching_lyric_line_keeps_the_published_midi(client):
+    """Choosing another part's lyric line re-reads the same MusicXML.
+
+    Every instrumental note is unchanged, so the MIDI published for the first
+    part must stay advertised, be reused by the next job, and stay fetchable,
+    even though the reparse advances the score version.
+    """
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication = _publish_real_instrumental_midi(orchestrator, session_id, "job-soprano")
+    published_midi = publication["performance_midi"]
+    assert published_midi["has_instrumental_parts"] is True
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    _, alto_selection = _alto_lyric_selection(before)
+    assert before["current_score"]["score"].get("selected_lyric_selection") != alto_selection
+
+    asyncio.run(
+        orchestrator._reparse_score(
+            session_id, part_id=None, part_index=None, verse_number=None,
+            lyric_selection=alto_selection, user_id="test-user",
+        )
+    )
+
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["current_score"]["version"] == before["current_score"]["version"] + 1
+    assert after["score_summary"]["performance_midi"] == published_midi
+    _, next_publication = asyncio.run(
+        orchestrator._ensure_instrumental_midi_artifacts(
+            session_id, score_summary=None, user_id="test-user", job_id="job-alto"
+        )
+    )
+    assert next_publication is None
+    midi_response = test_client.get(f"/sessions/{session_id}/instrumental-midi")
+    assert midi_response.status_code == 200
+    assert midi_response.content.startswith(b"MThd")
+
+
+def test_quote_that_switches_lyric_line_returns_the_new_score(client, monkeypatch):
+    """The quote turn is where the score changes, so it must say so.
+
+    Otherwise the UI keeps the previous score until the confirmation turn,
+    and only then learns about a change the user made one turn earlier.
+    """
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication = _publish_real_instrumental_midi(orchestrator, session_id, "job-soprano")
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    alto_part_id, alto_selection = _alto_lyric_selection(before)
+    llm_client = _QuoteThenSynthesizeClient(
+        {"part_id": alto_part_id, "voicebank": "Dummy", "lyric_selection": alto_selection}
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing the alto part too"}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert llm_client.quoted is True
+    assert payload["current_score"]["version"] == before["current_score"]["version"] + 1
+    assert payload["current_score"]["score"]["selected_lyric_selection"] == alto_selection
+    assert payload["score_summary"]["performance_midi"] == publication["performance_midi"]
+
+
+def test_midi_source_signature_follows_what_the_midi_is_built_from(tmp_path):
+    from src.musicxml.instrument_programs import FLUIDR3_SOUNDFONT_ID
+
+    musicxml = tmp_path / "input.xml"
+    musicxml.write_bytes(_PIANO_SATB_FIXTURE.read_bytes())
+    summary = {"parts": [{"instruments": [{"score_instrument_id": "P1-I1"}]}]}
+    base = instrumental_midi_source_signature("score-a", musicxml, summary)
+
+    assert instrumental_midi_source_signature("score-a", musicxml, summary) == base
+    # A selection-only change leaves every input untouched.
+    assert instrumental_midi_source_signature(
+        "score-a", musicxml, {**summary, "selected_verse_number": "2"}
+    ) == base
+    assert instrumental_midi_source_signature("score-b", musicxml, summary) != base
+    with_preset = {
+        "parts": [{"instruments": [{
+            "score_instrument_id": "P1-I1",
+            "playback_preset": {
+                "soundfont_id": FLUIDR3_SOUNDFONT_ID, "bank": 0, "program": 40, "kind": "melodic",
+            },
+        }]}]
+    }
+    assert instrumental_midi_source_signature("score-a", musicxml, with_preset) != base
+    musicxml.write_bytes(musicxml.read_bytes().replace(b"<step>C</step>", b"<step>D</step>", 1))
+    assert instrumental_midi_source_signature("score-a", musicxml, summary) != base
 
 
 def test_midi_preparation_failure_still_sings_an_acappella_score(client):
