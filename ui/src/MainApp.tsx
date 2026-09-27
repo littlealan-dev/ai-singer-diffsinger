@@ -29,6 +29,7 @@ import {
   fetchInstrumentalMidi,
   fetchScoreXml,
   fetchProgress,
+  fetchSynthesisEstimate,
   fetchSolfegeSettings,
   fetchVoicebanks,
   markFeedbackPrompted,
@@ -46,6 +47,7 @@ import {
   type ScoreSummary,
   type SolfegeMode,
   type SolfegeSystem,
+  type SynthesisCreditEstimate,
   type VoicebankOption,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
@@ -148,8 +150,9 @@ type MultiTrackAudioTrack = {
   jobId?: string;
   // The completed job whose asset is currently decoded by the player. This is
   // distinct from jobId so a historical UI state cannot pair a newer label/job
-  // with an older rendition's audio source.
-  sourceJobId?: string;
+  // with an older rendition's audio source. Required: it keys the decoded-buffer
+  // cache, so a track without it cannot be played or cached correctly.
+  sourceJobId: string;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -847,6 +850,13 @@ const ScorePlayerMixerBridge = ({
   return null;
 };
 
+// Decoded vocal audio, keyed by the job that produced it. useAudioTracks clears
+// its own buffers whenever the config array changes and keys them by array
+// index, so adding one track re-fetched every other track's URL -- including
+// tokens that had since expired. Handing back an already decoded buffer skips
+// the fetch entirely, so settled takes are never re-downloaded or re-decoded.
+const vocalBufferCache = new Map<string, AudioBuffer>();
+
 const ScorePlayerEngine = ({
   midiUrl,
   vocalTracks,
@@ -909,27 +919,48 @@ const ScorePlayerEngine = ({
   // Mixer changes are forwarded through usePlaylistControls below. Keeping
   // them out of the source configuration prevents useAudioTracks from
   // needlessly refetching/redecoding vocal audio on every Mute/Solo/volume edit.
+  // A buffered track contributes its job id rather than its URL, so re-signing
+  // an already decoded asset no longer rebuilds the configs. An unbuffered one
+  // still contributes its URL, so the Play-time token refresh reloads it.
   const vocalSourceSignature = vocalTracks
-    .map((track) => `${track.key}\u0000${track.audioUrl}\u0000${track.label}\u0000${track.durationSeconds ?? ""}`)
+    .map((track) =>
+      [
+        track.key,
+        track.sourceJobId,
+        vocalBufferCache.has(track.sourceJobId) ? "buffered" : track.audioUrl,
+        track.label,
+        track.durationSeconds ?? "",
+      ].join("\u0000")
+    )
     .join("\u0001");
   const vocalSources = useMemo(
     () =>
-      vocalTracks.map((track) => ({
-        key: `${track.key}\u0000${track.audioUrl}`,
-        trackKey: track.key,
-        src: track.audioUrl,
-        name: track.label,
-        duration: track.durationSeconds ?? undefined,
-        muted: track.muted,
-        soloed: track.solo,
-        volume: track.volume,
-      })),
+      vocalTracks.map((track) => {
+        const cachedBuffer = vocalBufferCache.get(track.sourceJobId);
+        return {
+          key: `${track.key}\u0000${track.sourceJobId}`,
+          trackKey: track.key,
+          sourceJobId: track.sourceJobId,
+          // Exactly one of audioBuffer/src: a config carrying a buffer is never
+          // fetched, so its playback token is never touched.
+          ...(cachedBuffer ? { audioBuffer: cachedBuffer } : { src: track.audioUrl }),
+          name: track.label,
+          duration: track.durationSeconds ?? undefined,
+          muted: track.muted,
+          soloed: track.solo,
+          volume: track.volume,
+        };
+      }),
     // vocalSourceSignature deliberately excludes mixer-only state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [vocalSourceSignature]
   );
   const audioConfigs = useMemo(
-    () => vocalSources.map(({ key: _key, trackKey: _trackKey, ...config }) => config),
+    () =>
+      vocalSources.map(
+        ({ key: _key, trackKey: _trackKey, sourceJobId: _sourceJobId, ...config }) =>
+          config
+      ),
     [vocalSources]
   );
   const { tracks: midiTracks, loading: midiLoading, error: midiError } = useMidiTracks(
@@ -939,6 +970,18 @@ const ScorePlayerEngine = ({
   const { tracks: audioTracks, loading: audioLoading, error: audioError } = useAudioTracks(
     audioConfigs
   );
+  useEffect(() => {
+    audioTracks.forEach((track, index) => {
+      const sourceJobId = vocalSources[index]?.sourceJobId;
+      const buffer = track?.clips?.[0]?.audioBuffer;
+      if (sourceJobId && buffer) vocalBufferCache.set(sourceJobId, buffer);
+    });
+    // Superseded takes never come back, so their buffers would leak.
+    const live = new Set(vocalSources.map((source) => source.sourceJobId));
+    vocalBufferCache.forEach((_buffer, key) => {
+      if (!live.has(key)) vocalBufferCache.delete(key);
+    });
+  }, [audioTracks, vocalSources]);
   const instrumentalProgramSignature = instrumentalTracks
     .map((track) => `${track.key}\u0000${track.soundfontBank}\u0000${track.presetKind}\u0000${track.gmProgram}`)
     .join("\u0001");
@@ -2447,6 +2490,9 @@ export default function MainApp() {
   const [status, setStatus] = useState<string | null>(null);
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
+  const [synthesisEstimate, setSynthesisEstimate] = useState<SynthesisCreditEstimate | null>(null);
+  const [synthesisEstimateLoading, setSynthesisEstimateLoading] = useState(false);
+  const [synthesisEstimateRevision, setSynthesisEstimateRevision] = useState(0);
   const [performanceMidi, setPerformanceMidi] = useState<PerformanceMidi | null>(null);
   const [instrumentalTracks, setInstrumentalTracks] = useState<InstrumentalTrackState[]>([]);
   const [instrumentalBus, setInstrumentalBus] = useState<InstrumentalBusState>(
@@ -2826,11 +2872,28 @@ export default function MainApp() {
       ? `Estimated duration: ${formatDuration(estimatedDuration)}`
       : null;
 
-  const estimatedCost = 
-    typeof estimatedDuration === "number" && estimatedDuration > 0
-      ? Math.ceil(estimatedDuration / 30)
+  // Credit amounts come only from the backend estimate. While a request is in
+  // flight the labels say so rather than briefly showing a locally computed or
+  // stale number.
+  // Only an in-flight request reads as calculating. A request that failed shows
+  // no credit line at all, which is still better than a locally derived number.
+  const estimateCalculating = synthesisEstimateLoading;
+  const estimatedVocalCostLabel = estimateCalculating
+    ? "Estimated cost per vocal part: calculating..."
+    : synthesisEstimate
+      ? `Estimated cost per vocal part: ${synthesisEstimate.vocal_part.estimated_credits} credits`
       : null;
-  const estimatedCostLabel = estimatedCost !== null ? `Estimated cost per part: ${estimatedCost} credits` : null;
+  const instrumentalsAlreadyGenerated = Boolean(
+    synthesisEstimate?.instrumentals.has_instrumental_parts &&
+      !synthesisEstimate.instrumentals.charge_required
+  );
+  const estimatedInstrumentalCostLabel = estimateCalculating
+    ? "Estimated cost for instrumentals: calculating..."
+    : synthesisEstimate
+      ? `Estimated cost for instrumentals: ${synthesisEstimate.instrumentals.estimated_credits} credits${
+          instrumentalsAlreadyGenerated ? " \u00b7 already generated" : ""
+        }`
+      : null;
   const hasScorePlayerTracks = Boolean(instrumentalMidiUrl || (instrumentalTracks.length > 0 && performanceMidi?.has_instrumental_parts)) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
@@ -2972,13 +3035,55 @@ export default function MainApp() {
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
+  const estimatePartId =
+    partOptions.find((option) => option.key === selectedPartKey)?.part_id ?? null;
+
+  // Refresh after upload/reparse, on a With Repeats change, on a vocal part
+  // change, and after any terminal billing state, because a first successful
+  // synthesis drops the instrumental component to 0.
+  useEffect(() => {
+    if (!sessionId || !scoreSummary) {
+      setSynthesisEstimate(null);
+      setSynthesisEstimateLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSynthesisEstimate(null);
+    setSynthesisEstimateLoading(true);
+    void fetchSynthesisEstimate(sessionId, expandRepeats, estimatePartId)
+      .then((estimate) => {
+        if (!cancelled) setSynthesisEstimate(estimate);
+      })
+      .catch(() => {
+        if (!cancelled) setSynthesisEstimate(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSynthesisEstimateLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    estimatePartId,
+    expandRepeats,
+    scoreSummary,
+    sessionId,
+    synthesisEstimateRevision,
+  ]);
 
   const resolveMultiTrackIdentity = useCallback(
     (
       audioTrack?: AudioTrackMetadata
     ): Omit<
       MultiTrackAudioTrack,
-      "audioUrl" | "durationSeconds" | "jobId" | "muted" | "solo" | "volume"
+      // sourceJobId names a rendition, not a slot, so the caller supplies it.
+      | "audioUrl"
+      | "durationSeconds"
+      | "jobId"
+      | "sourceJobId"
+      | "muted"
+      | "solo"
+      | "volume"
     > => {
       const partIndex =
         typeof audioTrack?.part_index === "number" && Number.isFinite(audioTrack.part_index)
@@ -3030,11 +3135,25 @@ export default function MainApp() {
         const isNewTake = Boolean(jobId && jobId !== existing?.sourceJobId);
         const shouldReplaceAudioUrl = replaceExistingUrl || isNewTake;
         const nextAudioUrl = existing && !shouldReplaceAudioUrl ? existing.audioUrl : audioUrl;
+        const nextSourceJobId = shouldReplaceAudioUrl
+          ? (jobId ?? existing?.sourceJobId)
+          : existing?.sourceJobId;
+        if (!nextSourceJobId) {
+          // Every rendition comes from a completed job, so this cannot happen.
+          // Fail the add rather than hold a track whose audio cannot be
+          // identified: it would be uncacheable and unrefreshable.
+          console.error(
+            "Refusing to add multitrack audio without a source job id",
+            { key: identity.key, audioUrl }
+          );
+          setError("Couldn't add that audio track. Please retry the render.");
+          return current;
+        }
         const nextTrack: MultiTrackAudioTrack = {
           ...identity,
           audioUrl: nextAudioUrl,
           jobId: jobId ?? existing?.jobId,
-          sourceJobId: shouldReplaceAudioUrl ? (jobId ?? existing?.sourceJobId) : existing?.sourceJobId,
+          sourceJobId: nextSourceJobId,
           durationSeconds: hasBackendDuration
             ? durationSeconds
             : existing?.audioUrl === nextAudioUrl
@@ -4149,6 +4268,17 @@ export default function MainApp() {
           );
         }
       }
+      if (payload.performance_midi) {
+        // Every completed synthesis carries this metadata, so applying it
+        // unconditionally rebuilt the instrumental tracks even when the job
+        // only re-sang a vocal part. Adopt it when the job actually published
+        // MIDI, or when we have nothing yet and need it to hydrate.
+        setPerformanceMidi((current) =>
+          payload.performance_midi_published || current === null
+            ? payload.performance_midi ?? null
+            : current
+        );
+      }
     };
 
     const poll = async () => {
@@ -4186,6 +4316,13 @@ export default function MainApp() {
           requestChatAutoScroll();
           setActiveProgress(null);
           setChatTurnBusy(false);
+        }
+        if (
+          payload.status === "done" ||
+          payload.status === "error" ||
+          payload.status === "action_required"
+        ) {
+          setSynthesisEstimateRevision((current) => current + 1);
         }
       } catch (err: any) {
         if (!cancelled && generation === workspaceGenerationRef.current) {
@@ -4720,8 +4857,20 @@ export default function MainApp() {
         assistantMessage.audioTrack = response.audio_track;
         setAudioUrl(response.audio_url);
         // A synchronous audio response is already a completed new take, so it
-        // replaces any previous rendition of the same score part.
-        addOrReplaceMultiTrackAudio(response.audio_url, response.audio_track, undefined, undefined, true);
+        // replaces any previous rendition of the same score part. The backend no
+        // longer returns this type -- synthesis always runs as a job -- and a
+        // track needs its source job id to be cached or refreshed, so any
+        // revival of this path must carry one.
+        if (response.job_id) {
+          addOrReplaceMultiTrackAudio(
+            response.audio_url, response.audio_track, response.job_id, undefined, true
+          );
+        } else {
+          console.error(
+            "Ignoring chat_audio without a job id; it cannot be cached or refreshed",
+            { audioUrl: response.audio_url }
+          );
+        }
         if (pendingSelection) {
           setPendingSelection(false);
         }
@@ -5613,8 +5762,27 @@ export default function MainApp() {
                 {estimatedDurationLabel && (
                   <span className="score-estimate">{estimatedDurationLabel}</span>
                 )}
-                {estimatedCostLabel && (
-                  <span className="score-estimate">{estimatedCostLabel}</span>
+                {estimatedVocalCostLabel && (
+                  <span
+                    className={
+                      estimateCalculating
+                        ? "score-estimate score-estimate-pending"
+                        : "score-estimate"
+                    }
+                  >
+                    {estimatedVocalCostLabel}
+                  </span>
+                )}
+                {estimatedInstrumentalCostLabel && (
+                  <span
+                    className={
+                      estimateCalculating || instrumentalsAlreadyGenerated
+                        ? "score-estimate score-estimate-pending"
+                        : "score-estimate"
+                    }
+                  >
+                    {estimatedInstrumentalCostLabel}
+                  </span>
                 )}
               </div>
               <div className="score-expansion-control">

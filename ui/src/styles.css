@@ -942,6 +942,15 @@ body.legal-active #root {
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A credit line that is still being priced, or is already paid for, reads as
+   secondary so the header never implies a fresh billable amount. */
+.score-estimate-pending {
+  color: rgba(220, 210, 255, 0.55);
 }
 
 .score-expansion-control {

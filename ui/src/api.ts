@@ -128,6 +128,8 @@ export type ChatResponse =
       type: "chat_audio";
       message: string;
       audio_url: string;
+      /** Required to cache or refresh the take; the backend no longer sends this type. */
+      job_id?: string;
       audio_track?: AudioTrackMetadata;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
@@ -171,6 +173,30 @@ export type ProgressResponse = {
   required_credits?: number;
   billable_duration_seconds?: number;
   billing?: Record<string, unknown>;
+  credit_breakdown?: Record<string, unknown>;
+  performance_midi?: PerformanceMidi;
+  /** True when this job actually wrote MIDI files, not merely billed for them. */
+  performance_midi_published?: boolean;
+};
+
+export type SynthesisCreditEstimate = {
+  pricing_version: number;
+  vocal_part_id?: string | null;
+  expand_repeats: boolean;
+  vocal_duration_seconds: number;
+  vocal_part: { pricing_unit_seconds: number; estimated_credits: number };
+  instrumentals: {
+    has_instrumental_parts: boolean;
+    charge_required: boolean;
+    charge_scope?: string | null;
+    pricing_expand_repeats?: boolean | null;
+    pricing_duration_seconds?: number | null;
+    pricing_unit_seconds: number;
+    estimated_credits: number;
+    charged_once_for_all_tracks: boolean;
+  };
+  billing_components: string[];
+  total_estimated_credits: number;
 };
 
 export type ExportMixTrackRequest = {
@@ -735,6 +761,22 @@ export async function chat(
     };
   }
   return response;
+}
+
+export async function fetchSynthesisEstimate(
+  sessionId: string,
+  expandRepeats: boolean,
+  partId?: string | null
+): Promise<SynthesisCreditEstimate> {
+  const params = new URLSearchParams({
+    expand_repeats: String(expandRepeats),
+  });
+  if (partId) params.set("part_id", partId);
+  const response = await request<{ synthesis_credit_estimate: SynthesisCreditEstimate }>(
+    `/sessions/${sessionId}/synthesis-estimate?${params.toString()}`,
+    { method: "GET" }
+  );
+  return response.synthesis_credit_estimate;
 }
 
 export async function fetchProgress(progressUrl: string): Promise<ProgressResponse> {
