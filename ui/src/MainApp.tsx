@@ -75,6 +75,8 @@ const MULTITRACK_TUTORIAL_DISMISSED_KEY = "sightsinger.multitrack-tutorial-dismi
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
 const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
+const SYNTHESIS_PROGRESS_POLL_TIMEOUT_SECONDS = 12;
+const SYNTHESIS_STREAM_RECOVERY_TIMEOUT_MS = 3 * 60_000;
 const SYNTHESIS_STREAM_RECONNECTING_MESSAGE =
   "Connection lost. Reconnecting to check your take";
 const SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE =
@@ -1949,6 +1951,9 @@ export default function MainApp() {
     if (!activeProgress) return;
     let cancelled = false;
     let pollInFlight = false;
+    let pollAbortController: AbortController | null = null;
+    let retryAfterCurrentPoll = false;
+    let transientRecoveryTimeout: number | null = null;
     let completedAttempts = 0;
     const generation = workspaceGenerationRef.current;
 
@@ -1975,12 +1980,52 @@ export default function MainApp() {
       setChatTurnBusy(false);
     };
 
+    const finishUnconfirmedRecovery = () => {
+      setError(SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE);
+      finishBoundedRecovery();
+    };
+
+    const clearTransientRecoveryTimeout = () => {
+      if (transientRecoveryTimeout === null) return;
+      window.clearTimeout(transientRecoveryTimeout);
+      transientRecoveryTimeout = null;
+    };
+
+    const startTransientRecoveryTimeout = () => {
+      if (
+        activeProgress.boundedAttempts != null ||
+        transientRecoveryTimeout !== null
+      ) {
+        return;
+      }
+      transientRecoveryTimeout = window.setTimeout(() => {
+        transientRecoveryTimeout = null;
+        if (!cancelled && generation === workspaceGenerationRef.current) {
+          finishUnconfirmedRecovery();
+        }
+      }, SYNTHESIS_STREAM_RECOVERY_TIMEOUT_MS);
+    };
+
     const poll = async () => {
       if (pollInFlight) return;
+      if (
+        activeProgress.boundedAttempts == null &&
+        navigator.onLine === false
+      ) {
+        setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
+        startTransientRecoveryTimeout();
+        return;
+      }
       pollInFlight = true;
+      const controller = new AbortController();
+      pollAbortController = controller;
       try {
-        const payload = await fetchProgress(activeProgress.url);
+        const payload = await fetchProgress(activeProgress.url, {
+          signal: controller.signal,
+          timeoutSeconds: SYNTHESIS_PROGRESS_POLL_TIMEOUT_SECONDS,
+        });
         if (cancelled || generation !== workspaceGenerationRef.current) return;
+        clearTransientRecoveryTimeout();
         const terminal = await handleProgressPayload(
           activeProgress.messageId,
           payload,
@@ -2004,24 +2049,56 @@ export default function MainApp() {
             }
             return;
           }
+          const isTransientConnectionFailure =
+            err instanceof TypeError ||
+            err?.name === "ApiRequestTimeoutError" ||
+            err?.name === "BackendStartingError" ||
+            err?.code === "auth/network-request-failed";
           setError(
-            err?.message === "Failed to fetch"
+            isTransientConnectionFailure
               ? SYNTHESIS_STREAM_RECONNECTING_MESSAGE
               : err?.message || "Failed to fetch synthesis progress."
           );
+          if (isTransientConnectionFailure) {
+            startTransientRecoveryTimeout();
+            return;
+          }
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
       } finally {
+        if (pollAbortController === controller) {
+          pollAbortController = null;
+        }
         pollInFlight = false;
+        if (
+          retryAfterCurrentPoll &&
+          !cancelled &&
+          generation === workspaceGenerationRef.current
+        ) {
+          retryAfterCurrentPoll = false;
+          void poll();
+        }
       }
     };
 
     void poll();
     const interval = window.setInterval(() => void poll(), 1200);
+    const handleOnline = () => {
+      if (pollInFlight) {
+        retryAfterCurrentPoll = true;
+        pollAbortController?.abort();
+        return;
+      }
+      void poll();
+    };
+    window.addEventListener("online", handleOnline);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      clearTransientRecoveryTimeout();
+      window.removeEventListener("online", handleOnline);
+      pollAbortController?.abort();
     };
   }, [activeProgress, handleProgressPayload]);
 
