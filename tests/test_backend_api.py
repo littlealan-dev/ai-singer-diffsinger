@@ -902,6 +902,11 @@ def _wait_for_progress(test_client, progress_url, timeout_seconds=10.0):
     raise AssertionError(f"Timed out waiting for progress: {last_payload}")
 
 
+def _reject_non_json_constant(constant):
+    # Python accepts NaN and Infinity; browsers' JSON.parse does not.
+    raise ValueError(f"{constant} is not valid JSON")
+
+
 def _parse_sse_events(response):
     events = []
     for block in response.text.replace("\r\n", "\n").split("\n\n"):
@@ -915,7 +920,14 @@ def _parse_sse_events(response):
             elif line.startswith("data:"):
                 data_lines.append(line.split(":", 1)[1].lstrip())
         if data_lines:
-            events.append((event_name, json.loads("\n".join(data_lines))))
+            events.append(
+                (
+                    event_name,
+                    json.loads(
+                        "\n".join(data_lines), parse_constant=_reject_non_json_constant
+                    ),
+                )
+            )
     return events
 
 
@@ -1212,14 +1224,14 @@ def test_upload_musicxml_parses_and_saves(client):
     payload = response.json()
     assert payload["parsed"] is True
     assert payload["session_id"] == session_id
-    current_score = payload["current_score"]
-    assert current_score["version"] == 1
-    assert "score" in current_score
+    # The browser renders the MusicXML; it only needs the version.
+    assert payload["current_score"] == {"version": 1}
     assert payload["performance_midi"] is None
     score_path = app.state.settings.sessions_dir / session_id / "scores" / payload["score_id"] / "upload" / "score.xml"
     assert score_path.exists()
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    assert snapshot["original_score"] == current_score["score"]
+    assert snapshot["current_score"]["version"] == 1
+    assert snapshot["original_score"] == snapshot["current_score"]["score"]
     assert "instrumental_midi_source_signature" not in snapshot["files"]
     assert not list(score_path.parent.glob("*.mid"))
 
@@ -2746,7 +2758,7 @@ def test_solfege_settings_api_returns_defaults_and_applies_confirmed_change(clie
         "revision": 2,
     }
     assert payload["updated_generated_verses"] == []
-    assert payload["current_score"]["version"] == payload["score_version"]
+    assert payload["current_score"] == {"version": payload["score_version"]}
 
 
 def test_solfege_settings_can_change_before_score_upload(client):
@@ -2812,8 +2824,10 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     assert '"operation_scope": "exactly_one_part"' in payload["message"]
     assert '"completed_target"' in payload["message"]
     assert '"part_name": "Soprano"' in payload["message"]
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert payload["current_score"] == {"version": snapshot["current_score"]["version"]}
     assert (
-        payload["current_score"]["score"]["selected_verse_number"]
+        snapshot["current_score"]["score"]["selected_verse_number"]
         == GENERATED_LYRIC_NUMBER
     )
     # available_verses retains the UI display ordinal; exact selection uses the
@@ -2847,6 +2861,7 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
             "notes_updated": 2,
         }
     ]
+    assert settings_payload["current_score"] == {"version": settings_payload["score_version"]}
 
 
 def test_unknown_voicebank_is_rejected_before_anything_resolves_it(client):
@@ -5246,7 +5261,9 @@ def test_upload_parses_zipped_musicxml(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["parsed"] is True
-    current_score = payload["current_score"]["score"]
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert payload["current_score"] == {"version": snapshot["current_score"]["version"]}
+    current_score = snapshot["current_score"]["score"]
     assert current_score["parts"]
     session_dir = app.state.settings.sessions_dir / session_id / "scores" / payload["score_id"] / "upload"
     assert (session_dir / "score.mxl").exists()
@@ -5374,6 +5391,66 @@ def test_synthesis_chat_streams_accepted_progress_and_terminal_result(client, mo
     assert terminal_payload["job_id"] == events[0][1]["job_id"]
     assert terminal_payload["audio_url"].startswith(f"/sessions/{session_id}/audio")
     assert "playback_token=" in terminal_payload["audio_url"]
+
+
+def test_synthesis_chat_stream_sends_browser_valid_json_and_no_parsed_score(client):
+    """The accepted event must be readable, or the UI never learns its job.
+
+    Voice-part analysis marks a voice with no pitched notes as -inf. JSON
+    responses encode that as null, but the stream wrote -Infinity, which
+    JSON.parse rejects; the job then ran and charged with nothing delivered.
+    The parsed score is not sent at all: the UI renders the MusicXML.
+    """
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stream-non-finite-job"
+
+    async def fake_handle_chat(*_args, **_kwargs):
+        task = asyncio.create_task(asyncio.sleep(0))
+        return SynthesisChatResponse(
+            {
+                "type": "chat_progress",
+                "message": "Preparing the take.",
+                "progress_url": f"/sessions/{session_id}/progress?job_id={job_id}",
+                "job_id": job_id,
+                "current_score": {
+                    "score": {"voice_part_signals": {"avg_pitch_midi": float("-inf")}},
+                    "version": 4,
+                },
+                "score_summary": {"duration_seconds": float("nan"), "parts": []},
+            },
+            task,
+        )
+
+    def fake_get_job_by_id(*, job_id, user_id, session_id):
+        return job_id, {
+            "userId": user_id,
+            "sessionId": session_id,
+            "status": "completed",
+            "step": "done",
+            "message": "Your take is ready.",
+            "progress": 1.0,
+            "actualDurationSeconds": float("inf"),
+        }
+
+    app.state.orchestrator.handle_chat = fake_handle_chat
+    app.state.job_store.get_job_by_id = fake_get_job_by_id
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        headers={"Accept": "text/event-stream"},
+        json={"message": "render audio"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response)
+    accepted_name, accepted = events[0]
+    assert accepted_name == "accepted"
+    assert accepted["current_score"] == {"version": 4}
+    assert accepted["score_summary"]["duration_seconds"] is None
+    terminal_name, terminal = events[-1]
+    assert terminal_name == "completed"
+    assert terminal["actual_duration_seconds"] is None
 
 
 def test_synthesis_chat_stream_closes_when_task_finishes_without_terminal_state(
@@ -8523,8 +8600,9 @@ def test_quote_that_switches_lyric_line_returns_the_new_score(client, monkeypatc
     assert response.status_code == 200
     payload = response.json()
     assert llm_client.quoted is True
-    assert payload["current_score"]["version"] == before["current_score"]["version"] + 1
-    assert payload["current_score"]["score"]["selected_lyric_selection"] == alto_selection
+    assert payload["current_score"] == {"version": before["current_score"]["version"] + 1}
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["current_score"]["score"]["selected_lyric_selection"] == alto_selection
     assert payload["score_summary"]["performance_midi"] == publication["performance_midi"]
 
 

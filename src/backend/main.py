@@ -19,7 +19,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter
 import logging
 
 from src.backend.config import Settings
@@ -94,10 +94,33 @@ _SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE = (
 )
 
 
+_JSON_RESPONSE_ADAPTER: TypeAdapter[Any] = TypeAdapter(Any)
+
+
 def _sse_event(event: str, payload: Dict[str, Any]) -> str:
-    """Encode one JSON server-sent event."""
-    data = json.dumps(jsonable_encoder(payload), separators=(",", ":"))
+    """Encode one JSON server-sent event.
+
+    Encode exactly like FastAPI's JSON responses, so a payload that works on
+    the progress endpoint also works on the stream. In particular, non-finite
+    floats become null: json.dumps would write -Infinity or NaN, which no
+    browser JSON parser accepts.
+    """
+    data = _JSON_RESPONSE_ADAPTER.dump_json(jsonable_encoder(payload)).decode("utf-8")
     return f"event: {event}\ndata: {data}\n\n"
+
+
+def _public_score_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Send the browser the score version, never the parsed score.
+
+    The UI renders the MusicXML from GET /score and only needs to know that
+    the score changed. The parsed score is backend state and can be megabytes.
+    """
+    current_score = payload.get("current_score")
+    if not isinstance(current_score, dict):
+        return payload
+    public = dict(payload)
+    public["current_score"] = {"version": current_score.get("version")}
+    return public
 
 
 def _synthesis_stream_event_name(status: str) -> str:
@@ -795,7 +818,7 @@ def create_app() -> FastAPI:
             "session_id": session_id,
             "score_id": score_id,
             "parsed": True,
-            "current_score": {"score": score, "version": version},
+            "current_score": {"version": version},
             "score_summary": score_summary,
             # Instrumental MIDI is intentionally generated on the first
             # successful synthesis request, not while parsing an upload.
@@ -863,7 +886,9 @@ def create_app() -> FastAPI:
                 selected_language=payload.selected_language,
                 expand_repeats=payload.expand_repeats,
             )
-            signed_response = _sign_audio_payload_urls(request, response, user_id=user_id)
+            signed_response = _public_score_payload(
+                _sign_audio_payload_urls(request, response, user_id=user_id)
+            )
             accepts_event_stream = "text/event-stream" in request.headers.get("accept", "")
             if accepts_event_stream and isinstance(response, SynthesisChatResponse):
                 job_id = str(response.get("job_id") or "").strip()
@@ -922,12 +947,13 @@ def create_app() -> FastAPI:
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
         try:
-            return await orchestrator.update_solfege_settings(
+            result = await orchestrator.update_solfege_settings(
                 session_id,
                 user_id=user_id,
                 system=payload.settings.system,
                 mode=payload.settings.mode,
             )
+            return _public_score_payload(result)
         except SessionMusicXmlUnavailableError as exc:
             raise HTTPException(
                 status_code=409,
