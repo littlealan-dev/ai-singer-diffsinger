@@ -68,7 +68,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def cleanup_firestore(monkeypatch):
+def cleanup_firestore(monkeypatch, firestore_emulator):
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("BACKEND_AUTH_DISABLED", "false")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")

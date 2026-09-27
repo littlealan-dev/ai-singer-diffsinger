@@ -37,7 +37,7 @@ os.environ["GCLOUD_PROJECT"] = "demo-project"
 
 
 @pytest.fixture(autouse=True)
-def cleanup_firestore():
+def cleanup_firestore(firestore_emulator):
     db = get_firestore_client()
     for collection in [
         "users",

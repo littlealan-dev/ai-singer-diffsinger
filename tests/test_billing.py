@@ -122,7 +122,7 @@ class _FakeStripeClient:
 
 
 @pytest.fixture(autouse=True)
-def billing_env(monkeypatch):
+def billing_env(monkeypatch, firestore_emulator):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_123")
     monkeypatch.setenv("STRIPE_PRODUCT_SOLO", "prod_solo")

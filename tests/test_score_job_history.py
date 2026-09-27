@@ -1,7 +1,6 @@
 """Score and job retention regressions, using a local emulator or memory."""
 
 import asyncio
-import os
 import uuid
 
 import pytest
@@ -39,8 +38,7 @@ def test_job_payload_records_immutable_originating_turn():
 @pytest.fixture(params=["memory", "firestore"])
 def workspace(request, monkeypatch, tmp_path):
     if request.param == "firestore":
-        if not os.environ.get("FIRESTORE_EMULATOR_HOST"):
-            pytest.skip("Requires local FIRESTORE_EMULATOR_HOST")
+        request.getfixturevalue("firestore_emulator")
         from google.cloud.firestore import Client
         from google.auth.credentials import AnonymousCredentials
         client = Client(project="demo-score-history", credentials=AnonymousCredentials())
