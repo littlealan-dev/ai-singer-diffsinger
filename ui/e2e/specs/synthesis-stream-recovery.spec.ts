@@ -380,6 +380,48 @@ test("transient recovery stops after the bounded recovery window", async ({ page
   await expect(page.getByRole("alert")).toContainText(
     "We couldn’t confirm the final job status"
   );
-  await expect(page.getByTestId("chat-input")).toBeEnabled();
+  await page.getByTestId("chat-input").fill("Check this job later");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
   await expect(page.getByLabel("Processing")).toHaveCount(0);
+});
+
+test("healthy progress polling continues beyond the transient recovery window", async ({
+  page,
+}) => {
+  const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
+  const sessionId = "stream-healthy-long-recovery";
+  const scoreId = "score-stream-healthy-long-recovery";
+  const jobId = "job-stream-healthy-long-recovery";
+  let progressRequests = 0;
+
+  await installScenarioRoutes(page, xml, {
+    sessionId,
+    scoreId,
+    streamEvents: acceptedAndRunningEvents(sessionId, jobId),
+    onProgress: async (route) => {
+      progressRequests += 1;
+      await route.fulfill({
+        json: {
+          status: "running",
+          job_id: jobId,
+          score_id: scoreId,
+          step: "render",
+          message: "Rendering.",
+          progress: 0.5,
+        },
+      });
+    },
+  });
+
+  await openUploadedScore(page, xml, "synthesis-stream-healthy-long-recovery");
+  await page.clock.install();
+  await sendSynthesisRequest(page);
+
+  await expect.poll(() => progressRequests).toBeGreaterThan(0);
+  await page.clock.fastForward(3 * 60_000 + 1_000);
+
+  await page.getByTestId("chat-input").fill("Do not send while this job is running");
+  await expect(page.getByTestId("send-message")).toBeDisabled();
+  await expect(page.getByLabel("Processing")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });

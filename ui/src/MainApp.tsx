@@ -1953,6 +1953,7 @@ export default function MainApp() {
     let pollInFlight = false;
     let pollAbortController: AbortController | null = null;
     let retryAfterCurrentPoll = false;
+    let transientRecoveryTimeout: number | null = null;
     let completedAttempts = 0;
     const generation = workspaceGenerationRef.current;
 
@@ -1984,6 +1985,27 @@ export default function MainApp() {
       finishBoundedRecovery();
     };
 
+    const clearTransientRecoveryTimeout = () => {
+      if (transientRecoveryTimeout === null) return;
+      window.clearTimeout(transientRecoveryTimeout);
+      transientRecoveryTimeout = null;
+    };
+
+    const startTransientRecoveryTimeout = () => {
+      if (
+        activeProgress.boundedAttempts != null ||
+        transientRecoveryTimeout !== null
+      ) {
+        return;
+      }
+      transientRecoveryTimeout = window.setTimeout(() => {
+        transientRecoveryTimeout = null;
+        if (!cancelled && generation === workspaceGenerationRef.current) {
+          finishUnconfirmedRecovery();
+        }
+      }, SYNTHESIS_STREAM_RECOVERY_TIMEOUT_MS);
+    };
+
     const poll = async () => {
       if (pollInFlight) return;
       if (
@@ -1991,6 +2013,7 @@ export default function MainApp() {
         navigator.onLine === false
       ) {
         setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
+        startTransientRecoveryTimeout();
         return;
       }
       pollInFlight = true;
@@ -2002,6 +2025,7 @@ export default function MainApp() {
           timeoutSeconds: SYNTHESIS_PROGRESS_POLL_TIMEOUT_SECONDS,
         });
         if (cancelled || generation !== workspaceGenerationRef.current) return;
+        clearTransientRecoveryTimeout();
         const terminal = await handleProgressPayload(
           activeProgress.messageId,
           payload,
@@ -2036,6 +2060,7 @@ export default function MainApp() {
               : err?.message || "Failed to fetch synthesis progress."
           );
           if (isTransientConnectionFailure) {
+            startTransientRecoveryTimeout();
             return;
           }
           setActiveProgress(null);
@@ -2059,13 +2084,6 @@ export default function MainApp() {
 
     void poll();
     const interval = window.setInterval(() => void poll(), 1200);
-    const recoveryTimeout =
-      activeProgress.boundedAttempts == null
-        ? window.setTimeout(
-            finishUnconfirmedRecovery,
-            SYNTHESIS_STREAM_RECOVERY_TIMEOUT_MS
-          )
-        : null;
     const handleOnline = () => {
       if (pollInFlight) {
         retryAfterCurrentPoll = true;
@@ -2078,9 +2096,7 @@ export default function MainApp() {
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      if (recoveryTimeout !== null) {
-        window.clearTimeout(recoveryTimeout);
-      }
+      clearTransientRecoveryTimeout();
       window.removeEventListener("online", handleOnline);
       pollAbortController?.abort();
     };
