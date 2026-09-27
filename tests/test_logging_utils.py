@@ -42,10 +42,13 @@ def test_log_format_includes_context_fields(monkeypatch):
         exc_info=None,
         func="test_func",
     )
-    set_log_context(session_id="s1", job_id="j1", user_id="user-123")
+    set_log_context(
+        session_id="s1", turn_id="t1", job_id="j1", user_id="user-123"
+    )
     LoggingContextFilter().filter(record)
     formatted = formatter.format(record)
     assert "session_id=" in formatted
+    assert "turn_id=t1" in formatted
     assert "job_id=" in formatted
     assert "user_id=" in formatted
 
@@ -64,10 +67,13 @@ def test_json_format_includes_context_fields(monkeypatch):
         exc_info=None,
         func="test_func",
     )
-    set_log_context(session_id="s1", job_id="j1", user_id="user-123")
+    set_log_context(
+        session_id="s1", turn_id="t1", job_id="j1", user_id="user-123"
+    )
     LoggingContextFilter().filter(record)
     formatted = formatter.format(record)
     assert '"session_id"' in formatted
+    assert '"turn_id": "t1"' in formatted
     assert '"job_id"' in formatted
     assert '"user_id"' in formatted
 

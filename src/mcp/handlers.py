@@ -200,7 +200,6 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     )
     progress_path = params.get("progress_path")
     progress_job_id = params.get("progress_job_id")
-    progress_user_id = params.get("progress_user_id")
     progress_callback = None
     if progress_path:
         # File-based progress updates.
@@ -224,13 +223,12 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         job_store = JobStore()
 
         def progress_callback(step: str, message: str, progress: float) -> None:
-            job_store.update_job(
+            job_store.update_job_progress(
                 progress_job_id,
                 status="running",
                 step=step,
                 message=message,
                 progress=progress,
-                userId=progress_user_id,
             )
 
     result = synthesize(

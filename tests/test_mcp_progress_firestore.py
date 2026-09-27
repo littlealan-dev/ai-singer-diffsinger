@@ -5,9 +5,10 @@ import src.mcp.handlers as handlers
 
 def test_synthesize_progress_updates_firestore(monkeypatch, tmp_path):
     updated = []
+    lyric_selection = {"id": "lyrics-1", "number": "1", "name": "Verse 1"}
 
     class FakeJobStore:
-        def update_job(self, job_id: str, **fields):
+        def update_job_progress(self, job_id: str, **fields):
             updated.append((job_id, fields))
 
     def fake_synthesize(_score, _voicebank, **kwargs):
@@ -24,10 +25,10 @@ def test_synthesize_progress_updates_firestore(monkeypatch, tmp_path):
 
     result = handlers.handle_synthesize(
         {
-            "score": {},
+            "score": {"selected_lyric_selection": lyric_selection},
+            "lyric_selection": lyric_selection,
             "voicebank": "Raine_Rena_2.01",
             "progress_job_id": "job-123",
-            "progress_user_id": "user-123",
         },
         device="cpu",
     )
@@ -36,5 +37,9 @@ def test_synthesize_progress_updates_firestore(monkeypatch, tmp_path):
     assert updated
     job_id, fields = updated[0]
     assert job_id == "job-123"
-    assert fields["status"] == "running"
-    assert fields["step"] == "align"
+    assert fields == {
+        "status": "running",
+        "step": "align",
+        "message": "Reading the lyrics and score...",
+        "progress": 0.1,
+    }

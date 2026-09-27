@@ -154,12 +154,15 @@ def test_history_preserves_repeated_turns_with_ids_and_utc_timestamps(
 
     async def run():
         session = await sessions.create_session(user_id="user-1")
+        appended = []
         for role, content in turns:
-            await sessions.append_history(session.id, role, content)
-        return await sessions.get_snapshot(session.id, "user-1")
+            appended.append(await sessions.append_history(session.id, role, content))
+        return appended, await sessions.get_snapshot(session.id, "user-1")
 
-    history = asyncio.run(run())["history"]
+    appended, snapshot = asyncio.run(run())
+    history = snapshot["history"]
     assert [(entry["role"], entry["content"]) for entry in history] == turns
+    assert appended == history
     assert len({entry["id"] for entry in history}) == len(turns)
     assert all(datetime.fromisoformat(entry["timestamp"]) == now for entry in history)
     assert all(entry["timestamp"].endswith("+00:00") for entry in history)

@@ -33,11 +33,15 @@ import {
   fetchSolfegeSettings,
   fetchVoicebanks,
   markFeedbackPrompted,
+  SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY,
+  SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE,
+  SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE,
   submitAudioFeedback,
   uploadScore,
   updateSolfegeSettings,
   type AudioTrackMetadata,
   type ChatSelection,
+  type ChatStream,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
   type InstrumentalPart,
@@ -107,6 +111,12 @@ const STARTING_CONVERSATIONS = [
 
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
+const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
+const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
+const SYNTHESIS_STREAM_RECONNECTING_MESSAGE =
+  "Connection lost. Reconnecting to check your take";
+const SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE =
+  "We couldn’t confirm the final job status. Checking for updates…";
 
 type Role = "user" | "assistant";
 
@@ -2564,6 +2574,7 @@ export default function MainApp() {
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
+    boundedAttempts?: number;
   } | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -2611,6 +2622,7 @@ export default function MainApp() {
   const lastBillingSyncAtRef = useRef(0);
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
+  const activeSynthesisStreamRef = useRef<ChatStream | null>(null);
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
   const activeScoreIdRef = useRef<string | null>(null);
   const workspaceGenerationRef = useRef(0);
@@ -4164,43 +4176,58 @@ export default function MainApp() {
   }, []);
 
   useEffect(() => {
-    if (!activeProgress) return;
-    let cancelled = false;
+    const container = chatStreamRef.current;
+    if (!container) return;
+    if (!shouldAutoScrollRef.current) return;
+    container.scrollTop = container.scrollHeight;
+  }, [chatAutoScrollRequest]);
+
+  const handleChatScroll = () => {
+    const container = chatStreamRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom < 48;
+  };
+
+  const appendMessage = (message: Message) => {
+    setMessages((prev) => [...prev, message]);
+    requestChatAutoScroll();
+  };
+
+  const toggleThoughtSummary = (messageId: string) => {
+    setExpandedThoughts((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
+  };
+
+  const toggleDiagnostics = (messageId: string) => {
+    setExpandedDiagnostics((prev) => ({
+      ...prev,
+      [messageId]: !prev[messageId],
+    }));
+  };
+
+  const refreshScorePreview = useCallback(async () => {
+    if (!sessionId || !score) return;
     const generation = workspaceGenerationRef.current;
+    const data = await fetchScoreXml(sessionId);
+    if (generation !== workspaceGenerationRef.current) return;
+    setScore({ name: score.name, data });
+  }, [score, sessionId]);
 
-    const appendProgressMessage = (current: string, incoming?: string | null): string => {
-      if (!incoming) return current;
-      const trimmedIncoming = incoming.trim();
-      if (!trimmedIncoming) return current;
-      if (!current) return trimmedIncoming;
-      const trimmedCurrent = current.trimEnd();
-      const lastLine = trimmedCurrent.split("\n").pop() ?? "";
-      if (lastLine.trim() === trimmedIncoming) {
-        return current;
-      }
-      return `${trimmedCurrent}\n${trimmedIncoming}`;
-    };
-
-    // Progress responses are re-created by each poll, so referential equality
-    // alone would make an unchanged payload look new. Keep the existing
-    // message object when its user-visible and expandable fields are the same;
-    // otherwise every 1.2-second poll makes the chat auto-scroll effect read
-    // scrollHeight and synchronously lay out the score preview.
-    const sameProgressValue = (left: unknown, right: unknown): boolean => {
-      if (Object.is(left, right)) return true;
-      if (!left || !right || typeof left !== "object" || typeof right !== "object") {
-        return false;
-      }
-      try {
-        return JSON.stringify(left) === JSON.stringify(right);
-      } catch {
-        return false;
-      }
-    };
-
-    const applyProgress = (payload: ProgressResponse) => {
-      if (cancelled || generation !== workspaceGenerationRef.current) return;
-      if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return;
+  // The single sink for job progress. Stream events and the polling fallback
+  // both land here, so audio, MIDI and estimate updates cannot depend on which
+  // transport delivered the job's final status.
+  const handleProgressPayload = useCallback(
+    async (
+      messageId: string,
+      payload: ProgressResponse,
+      generation: number
+    ): Promise<boolean> => {
+      if (generation !== workspaceGenerationRef.current) return false;
+      if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return false;
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
@@ -4215,7 +4242,7 @@ export default function MainApp() {
         payload.status === "action_required";
       const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) => {
-        const messageIndex = prev.findIndex((msg) => msg.id === activeProgress.messageId);
+        const messageIndex = prev.findIndex((msg) => msg.id === messageId);
         if (messageIndex < 0) return prev;
 
         const message = prev[messageIndex];
@@ -4233,8 +4260,8 @@ export default function MainApp() {
           details: payload.details ?? message.details,
           attemptMessages: nextAttemptMessages ?? message.attemptMessages,
           progressValue: typeof nextProgress === "number" ? nextProgress : message.progressValue,
-          // Progress polling returns a newly signed URL each time. Keep the first
-          // one rather than rebuilding the player and re-fetching audio on every poll.
+          // Each progress payload carries a newly signed URL. Keep the first
+          // one rather than rebuilding the player and re-fetching audio on every update.
           audioUrl: message.audioUrl || nextAudioUrl,
           audioTrack: payload.audio_track ?? message.audioTrack,
           jobId: payload.job_id ?? message.jobId,
@@ -4279,113 +4306,198 @@ export default function MainApp() {
             : current
         );
       }
+      if (payload.status === "done" && payload.review_required) {
+        await refreshScorePreview();
+      }
+      if (generation !== workspaceGenerationRef.current) return false;
+      if (payload.warning) {
+        setError(payload.warning);
+      }
+      if (payload.status === "done") {
+        setActiveProgress((current) =>
+          current?.messageId === messageId ? null : current
+        );
+        setChatTurnBusy(false);
+      } else if (payload.status === "error") {
+        setActiveProgress((current) =>
+          current?.messageId === messageId ? null : current
+        );
+        setChatTurnBusy(false);
+        const fallbackError =
+          payload.job_kind === "preprocess" ? "Preprocess failed." : "Synthesis failed.";
+        const baseMessage = payload.message || fallbackError;
+        setError(
+          payload.error && payload.error !== baseMessage
+            ? `${baseMessage} Reason: ${payload.error}`
+            : baseMessage
+        );
+      } else if (payload.status === "action_required") {
+        setActiveProgress((current) =>
+          current?.messageId === messageId ? null : current
+        );
+        setChatTurnBusy(false);
+      }
+      if (isTerminalProgress) {
+        requestChatAutoScroll();
+        setSynthesisEstimateRevision((current) => current + 1);
+      }
+      return isTerminalProgress;
+    },
+    [addOrReplaceMultiTrackAudio, refreshScorePreview, requestChatAutoScroll]
+  );
+
+  useEffect(() => {
+    if (!activeProgress) return;
+    let cancelled = false;
+    let pollInFlight = false;
+    let completedAttempts = 0;
+    const generation = workspaceGenerationRef.current;
+
+    const clearRecoveryError = () => {
+      setError((current) =>
+        current === SYNTHESIS_STREAM_RECONNECTING_MESSAGE ||
+        current === SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE
+          ? null
+          : current
+      );
+    };
+
+    const finishBoundedRecovery = () => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === activeProgress.messageId
+            ? { ...message, isProgress: false }
+            : message
+        )
+      );
+      setActiveProgress((current) =>
+        current?.messageId === activeProgress.messageId ? null : current
+      );
+      setChatTurnBusy(false);
+      // The job's outcome is unknown, but it may have settled credits, so the
+      // estimate is re-read. MIDI is left as is rather than guessed.
+      setSynthesisEstimateRevision((current) => current + 1);
     };
 
     const poll = async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled || generation !== workspaceGenerationRef.current) return;
-        if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return;
-        applyProgress(payload);
-        if (payload.status === "done" && payload.review_required) {
-          await refreshScorePreview();
+        const terminal = await handleProgressPayload(
+          activeProgress.messageId,
+          payload,
+          generation
+        );
+        if (terminal || activeProgress.boundedAttempts == null) {
+          clearRecoveryError();
         }
-        if (cancelled || generation !== workspaceGenerationRef.current) return;
-        if (payload.warning) {
-          setError(payload.warning);
-        }
-        if (payload.status === "done") {
-          requestChatAutoScroll();
-          setActiveProgress(null);
-          setChatTurnBusy(false);
-        }
-        if (payload.status === "error") {
-          requestChatAutoScroll();
-          setActiveProgress(null);
-          setChatTurnBusy(false);
-          const fallbackError =
-            payload.job_kind === "preprocess" ? "Preprocess failed." : "Synthesis failed.";
-          const baseMessage = payload.message || fallbackError;
-          setError(
-            payload.error && payload.error !== baseMessage
-              ? `${baseMessage} Reason: ${payload.error}`
-              : baseMessage
-          );
-        }
-        if (payload.status === "action_required") {
-          requestChatAutoScroll();
-          setActiveProgress(null);
-          setChatTurnBusy(false);
-        }
-        if (
-          payload.status === "done" ||
-          payload.status === "error" ||
-          payload.status === "action_required"
-        ) {
-          setSynthesisEstimateRevision((current) => current + 1);
+        if (!terminal && activeProgress.boundedAttempts != null) {
+          completedAttempts += 1;
+          if (completedAttempts >= activeProgress.boundedAttempts) {
+            finishBoundedRecovery();
+          }
         }
       } catch (err: any) {
         if (!cancelled && generation === workspaceGenerationRef.current) {
+          if (activeProgress.boundedAttempts != null) {
+            completedAttempts += 1;
+            if (completedAttempts >= activeProgress.boundedAttempts) {
+              finishBoundedRecovery();
+            }
+            return;
+          }
           setError(
             err?.message === "Failed to fetch"
-              ? "Connection lost. Reconnecting to check your take"
+              ? SYNTHESIS_STREAM_RECONNECTING_MESSAGE
               : err?.message || "Failed to fetch synthesis progress."
           );
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
+      } finally {
+        pollInFlight = false;
       }
     };
 
-    poll();
-    const interval = window.setInterval(poll, 1200);
+    void poll();
+    const interval = window.setInterval(() => void poll(), 1200);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [activeProgress, addOrReplaceMultiTrackAudio, requestChatAutoScroll]);
+  }, [activeProgress, handleProgressPayload]);
+
+  const consumeSynthesisStream = useCallback(
+    async (
+      stream: ChatStream,
+      messageId: string,
+      progressUrl: string,
+      generation: number
+    ) => {
+      activeSynthesisStreamRef.current = stream;
+      let reachedTerminalState = false;
+      let finalStatusUnconfirmed = false;
+      try {
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = await nextStreamEventWithTimeout(
+            iterator,
+            SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS
+          );
+          if (next.done) break;
+          const streamEvent = next.value;
+          if (generation !== workspaceGenerationRef.current) {
+            await stream.cancel();
+            return;
+          }
+          if (streamEvent.event === "heartbeat") continue;
+          if (streamEvent.event === "stream-error") {
+            finalStatusUnconfirmed = true;
+            setError(streamEvent.data.message || SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE);
+            break;
+          }
+          reachedTerminalState = await handleProgressPayload(
+            messageId,
+            streamEvent.data,
+            generation
+          );
+          if (reachedTerminalState) return;
+        }
+      } catch {
+        if (generation === workspaceGenerationRef.current) {
+          await stream.cancel();
+          setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
+        }
+      } finally {
+        if (activeSynthesisStreamRef.current === stream) {
+          activeSynthesisStreamRef.current = null;
+        }
+        if (
+          !reachedTerminalState &&
+          generation === workspaceGenerationRef.current
+        ) {
+          setActiveProgress({
+            messageId,
+            url: progressUrl,
+            boundedAttempts: finalStatusUnconfirmed
+              ? SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS
+              : undefined,
+          });
+        }
+      }
+    },
+    [handleProgressPayload]
+  );
 
   useEffect(() => {
-    const container = chatStreamRef.current;
-    if (!container) return;
-    if (!shouldAutoScrollRef.current) return;
-    container.scrollTop = container.scrollHeight;
-  }, [chatAutoScrollRequest]);
-
-  const handleChatScroll = () => {
-    const container = chatStreamRef.current;
-    if (!container) return;
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldAutoScrollRef.current = distanceFromBottom < 48;
-  };
-
-  const appendMessage = (message: Message) => {
-    setMessages((prev) => [...prev, message]);
-    requestChatAutoScroll();
-  };
-
-  const toggleThoughtSummary = (messageId: string) => {
-    setExpandedThoughts((prev) => ({
-      ...prev,
-      [messageId]: !prev[messageId],
-    }));
-  };
-
-  const toggleDiagnostics = (messageId: string) => {
-    setExpandedDiagnostics((prev) => ({
-      ...prev,
-      [messageId]: !prev[messageId],
-    }));
-  };
-
-  const refreshScorePreview = async () => {
-    if (!sessionId || !score) return;
-    const generation = workspaceGenerationRef.current;
-    const data = await fetchScoreXml(sessionId);
-    if (generation !== workspaceGenerationRef.current) return;
-    setScore({ name: score.name, data });
-  };
+    return () => {
+      const stream = activeSynthesisStreamRef.current;
+      activeSynthesisStreamRef.current = null;
+      if (stream) void stream.cancel();
+    };
+  }, []);
 
   const handleScoreDownload = () => {
     if (!score) {
@@ -4751,6 +4863,9 @@ export default function MainApp() {
       const uploadResponse = await uploadScore(activeSessionId, file);
       activeScoreIdRef.current = uploadResponse.score_id ?? null;
       workspaceGenerationRef.current += 1;
+      const priorStream = activeSynthesisStreamRef.current;
+      activeSynthesisStreamRef.current = null;
+      if (priorStream) void priorStream.cancel();
       messages.forEach((message) => {
         suppressedMultiTrackMessageIdsRef.current.add(message.id);
       });
@@ -4823,7 +4938,7 @@ export default function MainApp() {
 
     try {
       const activeSessionId = sessionId ?? await ensureSession();
-      const response = await chat(
+      const { response, stream } = await chat(
         activeSessionId,
         content,
         selection,
@@ -4884,9 +4999,7 @@ export default function MainApp() {
           setPendingSelection(false);
         }
       }
-      if ("current_score" in response && response.current_score) {
-        await refreshScorePreview();
-      }
+      appendMessage(assistantMessage);
       if ("score_summary" in response && response.score_summary) {
         setScoreSummary(response.score_summary);
         setPerformanceMidi(response.score_summary.performance_midi ?? null);
@@ -4903,9 +5016,23 @@ export default function MainApp() {
       if ("warning" in response && response.warning) {
         setError(String(response.warning));
       }
-      appendMessage(assistantMessage);
+      // Start consuming job progress only after the accepted response's own
+      // state is applied: a job update must not be overwritten by the older
+      // score summary that came with the request.
       if (response.type === "chat_progress") {
-        setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
+        if (stream) {
+          void consumeSynthesisStream(
+            stream,
+            assistantMessage.id,
+            response.progress_url,
+            workspaceGenerationRef.current
+          );
+        } else {
+          setActiveProgress({ messageId: assistantMessage.id, url: response.progress_url });
+        }
+      }
+      if ("current_score" in response && response.current_score) {
+        await refreshScorePreview();
       }
     } catch (err: any) {
       const message = err?.message || "Failed to send message.";
@@ -5132,7 +5259,14 @@ export default function MainApp() {
       )}
       {error && (
         <div className="message-box error" role="alert">
-          <span className="message-box-content">{error}</span>
+          {error === SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE ? (
+            <span className="message-box-content synthesis-timeout-message">
+              <strong>{SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE}</strong>
+              <span>{SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY}</span>
+            </span>
+          ) : (
+            <span className="message-box-content">{error}</span>
+          )}
           <button
             type="button"
             className="message-box-close"
@@ -6101,6 +6235,58 @@ function formatDuration(totalSeconds: number): string {
     return `${minutes}:${String(seconds).padStart(2, "0")}`;
   }
   return `${seconds}s`;
+}
+
+// Progress payloads are re-created by each stream event or poll, so
+// referential equality alone would make an unchanged payload look new. Keep the
+// existing message object when its user-visible and expandable fields are the
+// same; otherwise every update makes the chat auto-scroll effect read
+// scrollHeight and synchronously lay out the score preview.
+function sameProgressValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function appendProgressMessage(current: string, incoming?: string | null): string {
+  if (!incoming) return current;
+  const trimmedIncoming = incoming.trim();
+  if (!trimmedIncoming) return current;
+  if (!current) return trimmedIncoming;
+  const trimmedCurrent = current.trimEnd();
+  const lastLine = trimmedCurrent.split("\n").pop() ?? "";
+  if (lastLine.trim() === trimmedIncoming) {
+    return current;
+  }
+  return `${trimmedCurrent}\n${trimmedIncoming}`;
+}
+
+function nextStreamEventWithTimeout<T>(
+  iterator: AsyncIterator<T>,
+  timeoutMs: number
+): Promise<IteratorResult<T>> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(
+      () => reject(new Error("Synthesis stream stopped responding.")),
+      timeoutMs
+    );
+    iterator.next().then(
+      (result) => {
+        window.clearTimeout(timeoutId);
+        resolve(result);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }
 
 function splitThoughtSummary(content: string): {

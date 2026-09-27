@@ -3,11 +3,16 @@ from __future__ import annotations
 """Firestore-backed job tracking helpers."""
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
+
+
+logger = logging.getLogger(__name__)
+_MUTABLE_PROGRESS_STATUSES = {"queued", "running"}
 
 
 @dataclass
@@ -30,6 +35,7 @@ class JobStore:
         status: str,
         input_path: Optional[str] = None,
         render_type: Optional[str] = None,
+        originating_turn_id: Optional[str] = None,
         voicebank_metadata: Optional[Dict[str, Any]] = None,
         audio_track: Optional[Dict[str, Any]] = None,
         provenance: Optional[Dict[str, Any]] = None,
@@ -46,6 +52,8 @@ class JobStore:
             payload["inputPath"] = input_path
         if render_type:
             payload["renderType"] = render_type
+        if originating_turn_id:
+            payload["originatingTurnId"] = originating_turn_id
         if voicebank_metadata:
             payload.update(voicebank_metadata)
         if audio_track:
@@ -62,12 +70,71 @@ class JobStore:
     def update_job(self, job_id: str, **fields: Any) -> None:
         """Update a job record with new fields and a fresh timestamp."""
         payload = dict(fields)
-        immutable = {"userId", "sessionId", "inputPath", "scoreId", "scoreVersionNo", "inputSha256", "inputFileName", "scoreTitle", "provenanceStatus"}
+        immutable = {
+            "userId",
+            "sessionId",
+            "inputPath",
+            "scoreId",
+            "scoreVersionNo",
+            "inputSha256",
+            "inputFileName",
+            "scoreTitle",
+            "provenanceStatus",
+            "originatingTurnId",
+        }
         if immutable.intersection(payload):
             raise ValueError("Job input provenance may only be set at creation.")
         payload["updatedAt"] = firestore.SERVER_TIMESTAMP
         self._ensure_client()
         self._client.collection(self.collection).document(job_id).set(payload, merge=True)
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        step: str,
+        message: str,
+        progress: float,
+    ) -> bool:
+        """Update progress only while the job remains mutable."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _transactional_update(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                logger.warning("job_progress_update_missing job_id=%s", job_id)
+                return False
+            current_status = str((snapshot.to_dict() or {}).get("status") or "")
+            if current_status not in _MUTABLE_PROGRESS_STATUSES:
+                logger.info(
+                    "job_progress_update_skipped job_id=%s current_status=%s",
+                    job_id,
+                    current_status or "missing",
+                )
+                return False
+            transaction.set(
+                job_ref,
+                {
+                    "status": status,
+                    "step": step,
+                    "message": message,
+                    "progress": progress,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return True
+
+        try:
+            return _transactional_update(transaction)
+        except Exception:
+            logger.exception("job_progress_update_failed job_id=%s", job_id)
+            raise
 
     def get_latest_job_by_session(
         self, *, user_id: str, session_id: str

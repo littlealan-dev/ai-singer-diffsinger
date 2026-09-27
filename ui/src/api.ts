@@ -199,6 +199,26 @@ export type SynthesisCreditEstimate = {
   total_estimated_credits: number;
 };
 
+export type ChatStreamEvent = {
+  event:
+    | "progress"
+    | "completed"
+    | "failed"
+    | "action-required"
+    | "heartbeat"
+    | "stream-error";
+  data: ProgressResponse;
+};
+
+export type ChatStream = AsyncIterable<ChatStreamEvent> & {
+  cancel: () => Promise<void>;
+};
+
+export type ChatRequestResult = {
+  response: ChatResponse;
+  stream?: ChatStream;
+};
+
 export type ExportMixTrackRequest = {
   job_id: string;
   part_id: string;
@@ -364,6 +384,12 @@ const APP_ENV = import.meta.env.VITE_APP_ENV ?? "";
 const IS_LOCAL_DEV = ["dev", "development", "local"].includes(APP_ENV.toLowerCase());
 export const BACKEND_STARTING_MESSAGE =
   "SightSinger is still starting up. Please try again in a moment.";
+export const SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE =
+  "We couldn’t receive your job details";
+export const SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY =
+  "Your synthesis may still complete and use credits, but we can’t retrieve the result automatically. If synthesis fails, the normal rollback releases its reserved credits.\n\nPlease contact support to check the outcome, help retrieve any completed audio, and resolve any credit issue.";
+export const SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE =
+  `${SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE}\n\n${SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY}`;
 const BACKEND_READY_TIMEOUT_SECONDS = parsePositiveNumber(
   import.meta.env.VITE_BACKEND_READY_TIMEOUT_SECONDS,
   240
@@ -387,6 +413,13 @@ class ApiRequestTimeoutError extends Error {
   }
 }
 
+class SynthesisJobDetailsTimeoutError extends Error {
+  constructor() {
+    super(SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE);
+    this.name = "SynthesisJobDetailsTimeoutError";
+  }
+}
+
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
@@ -400,6 +433,36 @@ function withApiBase(url: string): string {
   }
   if (!API_BASE) return url;
   return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+function normalizeProgressResponse(payload: ProgressResponse): ProgressResponse {
+  if (!payload.audio_url) return payload;
+  return { ...payload, audio_url: withApiBase(payload.audio_url) };
+}
+
+async function nextBeforeDeadline<T>(
+  iterator: AsyncIterator<T>,
+  deadlineMs: number,
+  createTimeoutError: () => Error
+): Promise<IteratorResult<T>> {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) throw createTimeoutError();
+  return new Promise<IteratorResult<T>>((resolve, reject) => {
+    const timeoutId = window.setTimeout(
+      () => reject(createTimeoutError()),
+      remainingMs
+    );
+    iterator.next().then(
+      (result) => {
+        window.clearTimeout(timeoutId);
+        resolve(result);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }
 
 async function withAppCheckHeaders(
@@ -730,7 +793,7 @@ export async function chat(
   selection?: ChatSelection,
   selectedVoicebankId?: string | null,
   expandRepeats = true
-): Promise<ChatResponse> {
+): Promise<ChatRequestResult> {
   const body: {
     message: string;
     selection?: ChatSelection;
@@ -743,24 +806,129 @@ export async function chat(
   if (selectedVoicebankId) {
     body.selected_voicebank_id = selectedVoicebankId;
   }
-  const response = await request<ChatResponse>(`/sessions/${sessionId}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  let headers = await withAppCheckHeaders({
+    "Content-Type": "application/json",
+    Accept: "text/event-stream, application/json",
   });
-  if (response.type === "chat_audio") {
-    return {
-      ...response,
-      audio_url: withApiBase(response.audio_url),
+  headers = await withAuthHeaders(headers);
+  const controller = new AbortController();
+  const acceptedDeadlineMs = Date.now() + API_REQUEST_TIMEOUT_SECONDS * 1000;
+  const response = await fetchWithTimeout(
+    `${API_BASE}/sessions/${sessionId}/chat`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    },
+    API_REQUEST_TIMEOUT_SECONDS
+  );
+  if (!response.ok) {
+    throw await errorFromResponse(response, `Request failed: ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("text/event-stream")) {
+    return { response: normalizeChatResponse((await response.json()) as ChatResponse) };
+  }
+  if (!response.body) {
+    throw new Error("Synthesis stream did not provide a response body.");
+  }
+
+  const reader = response.body.getReader();
+  const iterator = parseServerSentEvents(reader)[Symbol.asyncIterator]();
+  let first: IteratorResult<{ event: string; data: unknown }>;
+  try {
+    first = await nextBeforeDeadline(
+      iterator,
+      acceptedDeadlineMs,
+      () => new SynthesisJobDetailsTimeoutError()
+    );
+  } catch (error) {
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  if (first.done || first.value.event !== "accepted") {
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
+    throw new Error("Synthesis stream ended before the job was accepted.");
+  }
+  const accepted = normalizeChatResponse(first.value.data as ChatResponse);
+  const normalizedIterator = normalizeChatStreamEvents(iterator)[Symbol.asyncIterator]();
+  const stream: ChatStream = {
+    [Symbol.asyncIterator]() {
+      return normalizedIterator;
+    },
+    async cancel() {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    },
+  };
+  return { response: accepted, stream };
+}
+
+async function* normalizeChatStreamEvents(
+  iterator: AsyncIterator<{ event: string; data: unknown }>
+): AsyncGenerator<ChatStreamEvent> {
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done) return;
+    yield {
+      event: next.value.event as ChatStreamEvent["event"],
+      data: normalizeProgressResponse(next.value.data as ProgressResponse),
     };
+  }
+}
+
+function normalizeChatResponse(response: ChatResponse): ChatResponse {
+  if (response.type === "chat_audio") {
+    return { ...response, audio_url: withApiBase(response.audio_url) };
   }
   if (response.type === "chat_progress") {
-    return {
-      ...response,
-      progress_url: withApiBase(response.progress_url),
-    };
+    return { ...response, progress_url: withApiBase(response.progress_url) };
   }
   return response;
+}
+
+async function* parseServerSentEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>
+): AsyncGenerator<{ event: string; data: unknown }> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let boundary = buffer.search(/\r?\n\r?\n/);
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] || "\n\n";
+        buffer = buffer.slice(boundary + separator.length);
+        const parsed = parseServerSentEventBlock(block);
+        if (parsed) yield parsed;
+        boundary = buffer.search(/\r?\n\r?\n/);
+      }
+      if (done) break;
+    }
+    const parsed = parseServerSentEventBlock(buffer);
+    if (parsed) yield parsed;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseServerSentEventBlock(block: string): { event: string; data: unknown } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (!dataLines.length) return null;
+  return { event, data: JSON.parse(dataLines.join("\n")) };
 }
 
 export async function fetchSynthesisEstimate(
@@ -789,11 +957,7 @@ export async function fetchProgress(progressUrl: string): Promise<ProgressRespon
   if (!response.ok) {
     throw await errorFromResponse(response, `Request failed: ${response.status}`);
   }
-  const payload = (await response.json()) as ProgressResponse;
-  if (payload.audio_url) {
-    payload.audio_url = withApiBase(payload.audio_url);
-  }
-  return payload;
+  return normalizeProgressResponse((await response.json()) as ProgressResponse);
 }
 
 export async function exportMix(

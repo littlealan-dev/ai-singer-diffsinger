@@ -90,7 +90,13 @@ class GeminiRestClient:
             payload,
         )
         try:
-            return self._generate_with_payload(payload, model=model, timeout=timeout, thinking_level=thinking_level)
+            return self._generate_with_payload(
+                payload,
+                model=model,
+                timeout=timeout,
+                thinking_level=thinking_level,
+                role=role,
+            )
         except RuntimeError as exc:
             if not cached_content_name or not _is_missing_cached_content_error(str(exc)):
                 raise
@@ -115,6 +121,7 @@ class GeminiRestClient:
                 model=model,
                 timeout=timeout,
                 thinking_level=thinking_level,
+                role=role,
             )
 
     def _generate_with_payload(
@@ -124,6 +131,7 @@ class GeminiRestClient:
         model: str,
         timeout: float,
         thinking_level: str,
+        role: LlmRole,
     ) -> str:
         url = f"{self._base_url}/models/{model}:generateContent"
         # Encode payload as JSON for the HTTP request body.
@@ -148,6 +156,13 @@ class GeminiRestClient:
             raise RuntimeError(f"Gemini connection error: {exc.reason}") from exc
 
         parsed = json.loads(body)
+        self._log_usage(
+            parsed,
+            payload=payload,
+            model=model,
+            role=role,
+            thinking_level=thinking_level,
+        )
         candidates = parsed.get("candidates", [])
         if not candidates:
             raise RuntimeError("Gemini returned no candidates.")
@@ -188,6 +203,80 @@ class GeminiRestClient:
                 if text:
                     return self._inject_thought_summary(text, thinking_parts)
         raise RuntimeError("Gemini returned no text content.")
+
+    def _log_usage(
+        self,
+        parsed: Dict[str, Any],
+        *,
+        payload: Dict[str, Any],
+        model: str,
+        role: LlmRole,
+        thinking_level: str,
+    ) -> None:
+        """Log Gemini token usage without recording prompt or response content."""
+        usage = parsed.get("usageMetadata")
+        usage_metadata_present = isinstance(usage, dict)
+        usage = usage if usage_metadata_present else {}
+
+        prompt_tokens = _optional_int(usage.get("promptTokenCount"))
+        cached_tokens = _optional_int(usage.get("cachedContentTokenCount"))
+        cache_requested = bool(payload.get("cachedContent"))
+        if prompt_tokens is None:
+            uncached_prompt_tokens = None
+        elif cached_tokens is not None:
+            uncached_prompt_tokens = max(prompt_tokens - cached_tokens, 0)
+        elif not cache_requested:
+            uncached_prompt_tokens = prompt_tokens
+        else:
+            uncached_prompt_tokens = None
+        cache_effective = (
+            cached_tokens > 0
+            if cached_tokens is not None
+            else (False if not cache_requested else None)
+        )
+        generation_config = payload.get("generationConfig")
+        thinking_config = (
+            generation_config.get("thinkingConfig")
+            if isinstance(generation_config, dict)
+            else None
+        )
+
+        self._logger.info(
+            "gemini_usage",
+            extra={
+                "event": "gemini_usage",
+                "provider": "gemini",
+                "model": model,
+                "role": role.value,
+                "build_id": self._settings.backend_build_id,
+                "response_id": parsed.get("responseId"),
+                "model_version": parsed.get("modelVersion"),
+                "usage_metadata_present": usage_metadata_present,
+                "cache_requested": cache_requested,
+                "cache_effective": cache_effective,
+                "thinking_config_sent": bool(thinking_config),
+                "thinking_level_requested": thinking_level or None,
+                "prompt_token_count": prompt_tokens,
+                "cached_content_token_count": cached_tokens,
+                "uncached_prompt_token_count": uncached_prompt_tokens,
+                "candidates_token_count": _optional_int(
+                    usage.get("candidatesTokenCount")
+                ),
+                "thoughts_token_count": _optional_int(usage.get("thoughtsTokenCount")),
+                "tool_use_prompt_token_count": _optional_int(
+                    usage.get("toolUsePromptTokenCount")
+                ),
+                "total_token_count": _optional_int(usage.get("totalTokenCount")),
+                "prompt_tokens_details": usage.get("promptTokensDetails"),
+                "cache_tokens_details": usage.get("cacheTokensDetails"),
+                "candidates_tokens_details": usage.get("candidatesTokensDetails"),
+                "tool_use_prompt_tokens_details": usage.get(
+                    "toolUsePromptTokensDetails"
+                ),
+                "service_tier": usage.get("serviceTier"),
+                "traffic_type": usage.get("trafficType"),
+            },
+        )
 
     def _inject_thought_summary(self, text: str, thinking_parts: List[str]) -> str:
         """Attach optional thought summary to JSON responses without changing schema shape."""
@@ -241,3 +330,12 @@ def _is_missing_cached_content_error(message: str) -> bool:
         or "cachedContent not found" in message
         or "Cached content not found" in message
     )
+
+
+def _optional_int(value: Any) -> int | None:
+    """Return integer usage values while rejecting booleans and invalid types."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None

@@ -304,14 +304,18 @@ class SessionStore(WorkspacePersistence):
             state.last_active_at = _utcnow()
             return state.snapshot()
 
-    async def append_history(self, session_id: str, role: str, content: str) -> None:
+    async def append_history(
+        self, session_id: str, role: str, content: str
+    ) -> Dict[str, str]:
         """Append a chat message to the session history."""
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            state.history.append(_new_history_entry(role, content))
+            entry = _new_history_entry(role, content)
+            state.history.append(entry)
             state.last_active_at = _utcnow()
+            return dict(entry)
 
     async def set_file(self, session_id: str, key: str, path: Path) -> None:
         """Associate a file path with the session."""
@@ -725,7 +729,9 @@ class FirestoreSessionStore(WorkspacePersistence):
                     )
             return state.snapshot()
 
-    async def append_history(self, session_id: str, role: str, content: str) -> None:
+    async def append_history(
+        self, session_id: str, role: str, content: str
+    ) -> Dict[str, str]:
         """Append a chat entry to Firestore history."""
         async with self._lock:
             entry = _new_history_entry(role, content)
@@ -735,6 +741,7 @@ class FirestoreSessionStore(WorkspacePersistence):
                     "lastActiveAt": firestore.SERVER_TIMESTAMP,
                 }
             )
+            return dict(entry)
 
     async def set_file(self, session_id: str, key: str, path: Path) -> None:
         """Associate a file path with the session in Firestore."""
