@@ -148,6 +148,13 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "required_credits": billing.get("requiredCredits"),
         "billable_duration_seconds": billing.get("billableDurationSeconds"),
         "billing": billing or None,
+        "credit_breakdown": data.get("creditBreakdown"),
+        "performance_midi": data.get("performanceMidi"),
+        # True only when this job actually wrote MIDI files. Billing cannot
+        # answer this: a revision of an already-paid score regenerates MIDI
+        # while charging no instrumental credits. The stored paths stay server
+        # side; the client only needs the yes/no.
+        "performance_midi_published": bool(data.get("performanceMidiPaths")),
         "updated_at": data.get("updatedAt"),
     }
     if raw_status == "credit_reconciliation_required":

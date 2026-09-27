@@ -42,7 +42,13 @@ def test_synthesize_schema_requires_parser_visible_part_id_and_describes_output(
     input_schema = tool["inputSchema"]
     output_schema = tool["outputSchema"]
 
-    assert set(input_schema["required"]) == {"score", "part_id", "language", "lyric_selection"}
+    assert set(input_schema["required"]) == {
+        "score",
+        "quote_id",
+        "part_id",
+        "language",
+        "lyric_selection",
+    }
     assert input_schema["properties"]["part_id"]["type"] == "string"
     assert "score_summary.parts[].part_id" in input_schema["properties"]["part_id"]["description"]
     assert "part_index" not in input_schema["properties"]
@@ -55,6 +61,35 @@ def test_synthesize_schema_requires_parser_visible_part_id_and_describes_output(
     assert len(output_schema["oneOf"]) == 2
     assert output_schema["oneOf"][0]["description"]
     assert output_schema["oneOf"][1]["description"]
+
+
+def test_voicebank_fields_demand_the_id_not_the_display_name() -> None:
+    """A display name in a tool argument broke a bound quote in practice.
+
+    The model is shown both an ID and a display name and is asked to speak the
+    name to users, so both schemas must say which one an argument takes.
+    """
+    schemas = _tool_schema_map()
+    for tool_name in ("prepare_synthesis_quote", "synthesize"):
+        description = schemas[tool_name]["inputSchema"]["properties"]["voicebank"].get(
+            "description", ""
+        )
+        assert "Available voicebanks (IDs)" in description, tool_name
+        assert "Never the display name" in description, tool_name
+
+
+def test_prepare_synthesis_quote_schema_requires_complete_render_identity() -> None:
+    tool = _tool_schema_map()["prepare_synthesis_quote"]
+    input_schema = tool["inputSchema"]
+    assert set(input_schema["required"]) == {
+        "voicebank",
+        "language",
+        "lyric_selection",
+        "part_id",
+    }
+    assert "score" not in input_schema["properties"]
+    assert "part_index" not in input_schema["properties"]
+    assert tool["outputSchema"]["properties"]["quote_id"]["type"] == "string"
 
 
 def test_parse_score_schema_describes_per_part_lyric_verse_samples() -> None:

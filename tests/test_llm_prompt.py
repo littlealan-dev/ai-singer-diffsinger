@@ -146,6 +146,144 @@ def test_build_system_prompt_declares_full_score_credit_capability_contract() ->
     assert "offer exactly these two next actions: add more credits, or upload another shorter song" in prompt
 
 
+def test_prompt_states_that_voicebank_arguments_take_the_id() -> None:
+    """The display name is for prose only; arguments take the ID."""
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "Every `voicebank` argument takes the exact ID" in prompt
+    assert "never a display name" in prompt
+    assert "only for speaking to the user" in prompt
+    assert "action=voicebank_id_required" in prompt
+
+
+def test_dynamic_context_carries_the_active_quote_for_the_confirmation_turn() -> None:
+    """Without this block the model has no quote_id to confirm with."""
+    bundle = build_prompt_bundle(
+        [],
+        score_available=True,
+        active_synthesis_quote={
+            "quote_id": "quote-abc",
+            "part_id": "Sop",
+            "total_estimated_credits": 2,
+        },
+    )
+
+    assert "Active synthesis quote awaiting confirmation" in bundle.dynamic_prompt_text
+    assert '"quote_id": "quote-abc"' in bundle.dynamic_prompt_text
+
+    without = build_prompt_bundle([], score_available=True)
+    assert "Active synthesis quote awaiting confirmation" in without.dynamic_prompt_text
+    assert "none" in without.dynamic_prompt_text
+
+
+def test_prompt_forbids_claiming_synthesis_without_calling_synthesize() -> None:
+    """The reported failure was prose claiming a render that never started."""
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "Active synthesis quote awaiting confirmation" in prompt
+    assert "never invent or guess a `quote_id`" in prompt
+    # A confirmation after the user changed a choice must re-quote, not synthesize.
+    assert "compare `bound_render_choices` with the current state" in prompt
+    assert "the User-selected voicebank override" in prompt
+    assert "rather than calling `synthesize` with a quote that does not cover them" in prompt
+    assert (
+        "Never state or imply that synthesis has started, is running, or is in "
+        "progress unless this response actually calls `synthesize`." in prompt
+    )
+
+
+def test_build_system_prompt_requires_the_quote_substance_without_dictating_wording() -> None:
+    """The disclosure's content is mandated; its phrasing and language are not."""
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    # Wording and layout are the model's to choose, in the user's language;
+    # only the substance of the disclosure is mandated.
+    assert "Write that confirmation in your own words, in the user's language" in prompt
+    assert "Do not follow a fixed template or copy English labels" in prompt
+
+    # Required substance.
+    assert "the estimated duration of the render" in prompt
+    assert "the credits for the requested vocal part, naming which part it is" in prompt
+    assert "covers every instrumental track together rather than being per track" in prompt
+    assert (
+        "the total estimated credits and the credits currently available, both as "
+        "the exact numbers from the quote" in prompt
+    )
+    assert "recalculated from the actual generated audio length" in prompt
+    assert "an explicit request for confirmation" in prompt
+
+    # Numbers stay the backend's; a 0 must carry its reason.
+    assert "never calculate, round, restate approximately, or infer a credit figure" in prompt
+    assert "say why it is 0" in prompt
+    assert "instrumental_already_generated" in prompt
+
+    # No label template survives, so nothing forces English or "1 credits".
+    for template in (
+        "Estimated vocal part (<part name>): X credits",
+        "Estimated all instrumentals: Y credits",
+        "Estimated total: Z credits",
+        "Available: N credits",
+    ):
+        assert template not in prompt
+
+    # A stale quote must be re-quoted, never retried.
+    assert "action=synthesis_quote_refresh_required" in prompt
+    assert "do not retry `synthesize`" in prompt
+
+
+def test_build_system_prompt_routes_an_unsatisfiable_lyric_blocker_to_a_recovery() -> None:
+    """An empty available_lyric_selections must never invite the same call again."""
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+    )
+
+    assert "empty `available_lyric_selections`" in prompt
+    assert "Never invent one and never repeat the same request" in prompt
+    assert "reason=part_has_no_lyrics" in prompt
+    assert "Call `add_solfege_lyric_verse` for that exact `part_id`" in prompt
+    assert "complex_target_requires_preparation" in prompt
+    assert "reason=requested_part_not_found" in prompt
+    assert "ask the user which one to sing" in prompt
+
+
 def test_build_system_prompt_requires_a_billable_synthesis_quote_before_rendering() -> None:
     prompt = build_system_prompt(
         tools=[],
@@ -160,19 +298,21 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     )
 
     assert "Billable synthesis confirmation:" in prompt
-    assert "Use `Current synthesis estimate.estimated_credits` exactly" in prompt
+    assert "call `prepare_synthesis_quote` with those choices" in prompt
     assert "never calculate, round, or infer the credit amount yourself" in prompt
     assert "part, verse/lyric selection, lyrics or solfege, resolved language, AI voice" in prompt
     assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
     assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
-    assert "If any quoted choice, score, or estimate changes, present a new quote" in prompt
+    assert "If any quoted choice, score, or estimate changes, call `prepare_synthesis_quote` again" in prompt
     assert "A billable quote is the complete, authoritative summary of one synthesis take" in prompt
     assert "authorizes every quoted choice, and only those choices" in prompt
-    assert "call `synthesize` once with the quoted parameters unchanged" in prompt
+    assert "call `synthesize` once with the quoted parameters unchanged and the exact returned `quote_id`" in prompt
     assert "do not repeat or restate the quote" in prompt
     assert "ask for separate confirmation of an individual quoted parameter" in prompt
     assert "whether the render is with repeats or written order" in prompt
     assert "call `synthesize` directly" not in prompt
+    # The confirmation's wording is no longer dictated by the prompt.
+    assert "Structure the credit lines of that confirmation exactly like this" not in prompt
     assert "proceed straight to `synthesize`" not in prompt
 
 
@@ -224,8 +364,9 @@ def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration(
         expand_repeats=False,
     )
 
-    assert '"estimated_credits": 4' in with_repeats.dynamic_prompt_text
-    assert '"estimated_credits": 2' in without_repeats.dynamic_prompt_text
+    assert "Call prepare_synthesis_quote after resolving all render choices." in with_repeats.dynamic_prompt_text
+    assert '"expand_repeats": true' in with_repeats.dynamic_prompt_text
+    assert '"expand_repeats": false' in without_repeats.dynamic_prompt_text
 
 
 def test_build_system_prompt_requires_resolved_compatible_synthesis_language() -> None:
@@ -525,10 +666,10 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
     )
     assert '"available_credits": 53' in bundle.dynamic_prompt_text
     assert '"topup_credits_available": 45' in bundle.dynamic_prompt_text
-    assert "Current synthesis estimate (authoritative for the current score):" in (
+    assert "Synthesis quote instruction:" in (
         bundle.dynamic_prompt_text
     )
-    assert '"estimated_credits": 6' in bundle.dynamic_prompt_text
+    assert "Call prepare_synthesis_quote after resolving all render choices." in bundle.dynamic_prompt_text
 
 
 def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability() -> None:

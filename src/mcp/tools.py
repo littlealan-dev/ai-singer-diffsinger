@@ -1883,6 +1883,121 @@ TOOLS: List[Tool] = [
         output_schema=_SAVE_AUDIO_OUTPUT_SCHEMA,
     ),
     Tool(
+        name="prepare_synthesis_quote",
+        description=(
+            "Create the authoritative synthesis credit quote after all render choices "
+            "are resolved and before asking the user for billable confirmation."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "voicebank": {
+                    "type": "string",
+                    "description": 'Exact voicebank ID from Available voicebanks (IDs) in Dynamic Context, such as Qixuan_v2.7.0_DiffSinger_OpenUtau. Never the display name shown to the user (for example "Qixuan / 绮萱 v2.7.0"); an unknown value is rejected.',
+                },
+                "confirmed_voicebank_override": {"type": "boolean", "default": False},
+                "language": {"type": "string", "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$"},
+                "part_id": {"type": "string"},
+                "voice_id": {"type": ["string", "null"]},
+                "voice_part_id": {"type": ["string", "null"]},
+                "allow_lyric_propagation": {"type": "boolean"},
+                "source_voice_part_id": {"type": ["string", "null"]},
+                "lyric_selection": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "number": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["id", "number", "name"],
+                    "additionalProperties": False,
+                },
+                "verse_number": {"type": ["integer", "string", "null"]},
+                "voice_color": {"type": ["string", "null"]},
+                "articulation": {"type": "number", "minimum": -1.0, "maximum": 1.0},
+                "airiness": {"type": "number", "minimum": -100.0, "maximum": 100.0},
+                "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "clarity": {"type": "number", "minimum": 0.0, "maximum": 200.0},
+                "gender": {"type": "number", "minimum": -100.0, "maximum": 100.0},
+                "solfege_pronunciation_patch": {"type": "boolean", "default": False},
+                "require_solfege_lyrics": {"type": "boolean", "default": False},
+                "instrument_program_assignments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "score_instrument_id": {"type": "string"},
+                            "playback_preset": {
+                                "type": "object",
+                                "properties": {
+                                    "soundfont_id": {"type": "string", "const": "FluidR3_GM"},
+                                    "bank": {"type": "integer", "minimum": 0, "maximum": 16383},
+                                    "program": {"type": "integer", "minimum": 0, "maximum": 127},
+                                    "kind": {"type": "string", "enum": ["melodic", "percussion_kit"]},
+                                },
+                                "required": ["soundfont_id", "bank", "program", "kind"],
+                                "additionalProperties": False,
+                            },
+                            "source": {"type": "string", "const": "llm_inferred"},
+                            "evidence": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["score_instrument_id", "playback_preset", "source"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["voicebank", "language", "lyric_selection", "part_id"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "const": "quote_ready"},
+                "quote_id": {
+                    "type": "string",
+                    "description": "Pass this back as synthesize.quote_id once the user confirms.",
+                },
+                "part_id": {"type": ["string", "null"]},
+                "vocal_duration_seconds": {"type": "number"},
+                "vocal_part_credits": {
+                    "type": "integer",
+                    "description": "Estimated credits for the one requested vocal part.",
+                },
+                "instrumental_credits": {
+                    "type": "integer",
+                    "description": (
+                        "Estimated credits for all instrumental tracks together, charged "
+                        "once per uploaded score and never multiplied by track count."
+                    ),
+                },
+                "instrumental_pricing_expand_repeats": {"type": ["boolean", "null"]},
+                "instrumental_pricing_duration_seconds": {"type": ["number", "null"]},
+                "instrumental_already_generated": {
+                    "type": "boolean",
+                    "description": (
+                        "True when this uploaded score already paid the instrumental fee, "
+                        "so the quote shows 0 credits (already generated)."
+                    ),
+                },
+                "total_estimated_credits": {"type": "integer"},
+                "available_credits": {"type": "integer"},
+                "balance_after": {"type": "integer"},
+                "estimate": {"type": "object"},
+                "render_choices": {"type": "object"},
+            },
+            "required": [
+                "status",
+                "quote_id",
+                "vocal_part_credits",
+                "instrumental_credits",
+                "total_estimated_credits",
+                "estimate",
+                "render_choices",
+            ],
+            "additionalProperties": True,
+        },
+    ),
+    Tool(
         name="synthesize",
         description="Run the full pipeline (internal steps 2-6) in one call.",
         input_schema={
@@ -1892,9 +2007,16 @@ TOOLS: List[Tool] = [
                     "type": "object",
                     "description": "Parsed score payload or derived score payload to synthesize from.",
                 },
+                "quote_id": {
+                    "type": "string",
+                    "description": (
+                        "Exact quote_id returned by prepare_synthesis_quote for the "
+                        "latest user-confirmed quote and unchanged render choices."
+                    ),
+                },
                 "voicebank": {
                     "type": "string",
-                    "description": "Voicebank id to render with.",
+                    "description": 'Voicebank to render with. Exact voicebank ID from Available voicebanks (IDs) in Dynamic Context, such as Qixuan_v2.7.0_DiffSinger_OpenUtau. Never the display name shown to the user (for example "Qixuan / 绮萱 v2.7.0"); an unknown value is rejected.',
                 },
                 "confirmed_voicebank_override": {
                     "type": "boolean",
@@ -2074,7 +2196,7 @@ TOOLS: List[Tool] = [
                     },
                 },
             },
-            "required": ["score", "language", "lyric_selection", "part_id"],
+            "required": ["score", "quote_id", "language", "lyric_selection", "part_id"],
             "additionalProperties": False,
         },
         output_schema=_SYNTH_OUTPUT_SCHEMA,

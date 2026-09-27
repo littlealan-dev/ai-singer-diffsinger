@@ -38,6 +38,15 @@ from src.backend.orchestrator import Orchestrator
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.message_catalog import backend_message
+from src.backend.credits import (
+    get_instrumental_charge_state,
+    instrumental_charge_scope,
+)
+from src.backend.synthesis_pricing import (
+    estimate_synthesis_credits,
+    score_has_instrumental_parts,
+    selected_score_duration,
+)
 from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
@@ -592,6 +601,45 @@ def create_app() -> FastAPI:
             "performance_midi": None,
             "solfege_settings": _default_solfege_settings_response(),
         }
+
+    @app.get("/sessions/{session_id}/synthesis-estimate")
+    async def get_synthesis_estimate(
+        session_id: str,
+        request: Request,
+        expand_repeats: bool = True,
+        part_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Return the authoritative vocal/instrumental synthesis estimate."""
+        sessions: SessionStore = request.app.state.sessions
+        user_id = await _get_user_id_or_401(request)
+        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        summary = snapshot.get("score_summary")
+        if not isinstance(summary, dict):
+            raise HTTPException(status_code=409, detail="No parsed score is available.")
+        score_id = snapshot.get("score_id")
+        if not isinstance(score_id, str) or not score_id:
+            raise HTTPException(status_code=409, detail="The score identity is unavailable.")
+        has_instrumentals = score_has_instrumental_parts(summary)
+        charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
+        charge_required = (
+            has_instrumentals
+            and await asyncio.to_thread(get_instrumental_charge_state, charge_scope) != "paid"
+        )
+        try:
+            duration_seconds = selected_score_duration(
+                summary, expand_repeats=expand_repeats
+            )
+            estimate = estimate_synthesis_credits(
+                vocal_duration_seconds=duration_seconds,
+                vocal_part_id=part_id,
+                expand_repeats=expand_repeats,
+                has_instrumental_parts=has_instrumentals,
+                instrumental_charge_required=charge_required,
+                instrumental_charge_scope=charge_scope,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"synthesis_credit_estimate": estimate.to_dict()}
 
     @app.post("/sessions/{session_id}/chat")
     async def chat(session_id: str, request: Request, payload: ChatRequest) -> Dict[str, Any]:

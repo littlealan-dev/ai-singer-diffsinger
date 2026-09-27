@@ -71,6 +71,7 @@ def build_prompt_bundle(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
+    active_synthesis_quote: Optional[Dict[str, Any]] = None,
     expand_repeats: bool = True,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
@@ -170,26 +171,16 @@ def build_prompt_bundle(
         current_credit_availability_text = json.dumps(
             current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
         )
-    current_synthesis_estimate_text = "unavailable"
-    duration_seconds = None
-    if isinstance(score_summary, dict):
-        duration_seconds = score_summary.get("duration_seconds")
-        expanded_duration_seconds = score_summary.get("expanded_duration_seconds")
-        if (
-            expand_repeats
-            and isinstance(expanded_duration_seconds, (int, float))
-            and expanded_duration_seconds > 0
-        ):
-            duration_seconds = expanded_duration_seconds
-    if isinstance(duration_seconds, (int, float)) and duration_seconds > 0:
-        from src.backend.credits import CREDIT_DURATION_SECONDS, estimate_credits
-
-        current_synthesis_estimate = {
-            "estimated_credits": estimate_credits(float(duration_seconds)),
-            "pricing_unit_seconds": CREDIT_DURATION_SECONDS,
-        }
-        current_synthesis_estimate_text = json.dumps(
-            current_synthesis_estimate, indent=2, sort_keys=True, ensure_ascii=False
+    current_synthesis_estimate_text = (
+        "Call prepare_synthesis_quote after resolving all render choices."
+    )
+    # The quote tool's result is delivered in a message-only follow-up, so its
+    # quote_id is not in conversation history on the confirmation turn. Carry it
+    # here instead; otherwise the model has no id to pass to synthesize.
+    active_synthesis_quote_text = "none"
+    if active_synthesis_quote is not None:
+        active_synthesis_quote_text = json.dumps(
+            active_synthesis_quote, indent=2, sort_keys=True, ensure_ascii=False
         )
     repeat_expansion_text = json.dumps(
         {
@@ -248,8 +239,11 @@ def build_prompt_bundle(
         f"{solfege_settings_text}\n"
         "Current credit availability (authoritative, refreshed for this request):\n"
         f"{current_credit_availability_text}\n"
-        "Current synthesis estimate (authoritative for the current score):\n"
+        "Synthesis quote instruction:\n"
         f"{current_synthesis_estimate_text}\n"
+        "Active synthesis quote awaiting confirmation (authoritative; pass this "
+        "exact quote_id to synthesize once the user confirms it):\n"
+        f"{active_synthesis_quote_text}\n"
         "Repeat-expansion setting (authoritative):\n"
         f"{repeat_expansion_text}\n"
         "End Dynamic Context."

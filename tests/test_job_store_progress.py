@@ -45,6 +45,71 @@ def test_build_progress_payload_includes_audio_track_metadata():
     }
 
 
+def test_progress_payload_reports_whether_this_job_published_midi():
+    """Billing cannot answer this, so the payload must say it explicitly.
+
+    A revision of an already-paid score regenerates MIDI while charging zero
+    instrumental credits, so the UI cannot infer freshness from the breakdown.
+    """
+    performance_midi = {"version": 1, "has_instrumental_parts": True}
+
+    published = build_progress_payload(
+        "job-published",
+        {
+            "status": "completed",
+            "performanceMidi": performance_midi,
+            "performanceMidiPaths": {"scoreVersionNo": 2, "originalPath": "a.mid"},
+        },
+    )
+    assert published["performance_midi_published"] is True
+
+    # A vocal-only take on an already-generated score still carries the
+    # metadata, but wrote nothing, so the UI must not churn its track set.
+    reused = build_progress_payload(
+        "job-vocal-only",
+        {"status": "completed", "performanceMidi": performance_midi},
+    )
+    assert reused["performance_midi"] == performance_midi
+    assert reused["performance_midi_published"] is False
+
+    # Server-side file locations never reach the client.
+    assert "performance_midi_paths" not in published
+    assert "performanceMidiPaths" not in published
+
+
+def test_build_progress_payload_publishes_midi_and_credit_breakdown_at_completion():
+    performance_midi = {
+        "version": 1,
+        "has_instrumental_parts": True,
+        "instrumental_parts": [{"part_id": "P2", "eligible": True}],
+    }
+    credit_breakdown = {
+        "estimated": {
+            "vocal_part_credits": 2,
+            "instrumental_credits": 1,
+            "total_credits": 3,
+        },
+        "actual": {
+            "duration_seconds": 119.8,
+            "vocal_part_credits": 4,
+            "instrumental_credits": 1,
+            "total_credits": 5,
+        },
+        "quote_id": "quote-1",
+        "pricing_version": 1,
+    }
+    payload = build_progress_payload(
+        "job-components",
+        {
+            "status": "completed",
+            "performanceMidi": performance_midi,
+            "creditBreakdown": credit_breakdown,
+        },
+    )
+    assert payload["performance_midi"] == performance_midi
+    assert payload["credit_breakdown"] == credit_breakdown
+
+
 def test_build_progress_payload_includes_export_mix_job_kind():
     payload = build_progress_payload(
         "job-mix",
