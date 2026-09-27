@@ -267,8 +267,11 @@ test.describe("core singing regression", () => {
     await page.keyboard.press("Escape");
     await installActiveMeasureObserver(page);
     const canvas = page.locator(".score-canvas");
-    // Constrain both axes so the test exercises page-follow alignment rather
-    // than passing merely because the full page happens to fit the viewport.
+    // The page preview refits to the canvas width, so constraining the canvas
+    // also shrinks the page. A short score then fits entirely and never needs
+    // to scroll; a multi-page score still extends below the constrained
+    // canvas, so page-follow has to scroll to reach later systems.
+    expect(await page.getByTestId("score-preview-surface").locator("svg").count()).toBeGreaterThan(1);
     await canvas.evaluate((element) => {
       element.style.flex = "0 0 320px";
       element.style.width = "320px";
@@ -455,7 +458,8 @@ async function uploadFixture(page: Page, filename: string): Promise<void> {
   const response = await uploadResponse;
   expect(response.ok()).toBeTruthy();
   setSessionIdFromResponse(response, "upload");
-  await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
+  // A multi-page score engraves one SVG per page.
+  await expect(page.getByTestId("score-preview-surface").locator("svg").first()).toBeVisible();
   await expect(page.getByTestId("chat-input")).toBeEnabled();
 }
 
