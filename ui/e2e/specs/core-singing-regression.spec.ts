@@ -555,7 +555,7 @@ async function sendMessage(page: Page, message: string): Promise<Record<string, 
   const response = await chatResponse;
   expect(response.ok()).toBeTruthy();
   setSessionIdFromResponse(response, "chat");
-  return response.json() as Promise<Record<string, unknown>>;
+  return chatResponseJson(response);
 }
 
 async function clickUseSelection(page: Page): Promise<Record<string, unknown>> {
@@ -567,7 +567,27 @@ async function clickUseSelection(page: Page): Promise<Record<string, unknown>> {
   const response = await chatResponse;
   expect(response.ok()).toBeTruthy();
   setSessionIdFromResponse(response, "chat");
-  return response.json() as Promise<Record<string, unknown>>;
+  return chatResponseJson(response);
+}
+
+// A synthesis turn replies with an event stream whose first event, "accepted",
+// carries the chat response; every other turn replies with plain JSON. Reading
+// the stream's text waits for it to close, which happens when the job finishes.
+async function chatResponseJson(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  if (!(response.headers()["content-type"] ?? "").includes("text/event-stream")) {
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+  const accepted = text
+    .split(/\r?\n\r?\n/)
+    .find((block) => /^event: accepted\r?$/m.test(block));
+  const data = accepted
+    ?.split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  expect(data, `Chat stream has no accepted event: ${text.slice(0, 200)}`).toBeTruthy();
+  return JSON.parse(data!) as Record<string, unknown>;
 }
 
 function setSessionIdFromResponse(response: Response, operation: "upload" | "chat"): void {
