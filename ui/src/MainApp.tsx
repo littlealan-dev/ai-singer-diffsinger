@@ -2004,11 +2004,16 @@ export default function MainApp() {
             }
             return;
           }
+          const isTransientConnectionFailure =
+            err?.message === "Failed to fetch" || err?.name === "ApiRequestTimeoutError";
           setError(
-            err?.message === "Failed to fetch"
+            isTransientConnectionFailure
               ? SYNTHESIS_STREAM_RECONNECTING_MESSAGE
               : err?.message || "Failed to fetch synthesis progress."
           );
+          if (isTransientConnectionFailure) {
+            return;
+          }
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
@@ -2019,9 +2024,12 @@ export default function MainApp() {
 
     void poll();
     const interval = window.setInterval(() => void poll(), 1200);
+    const handleOnline = () => void poll();
+    window.addEventListener("online", handleOnline);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      window.removeEventListener("online", handleOnline);
     };
   }, [activeProgress, handleProgressPayload]);
 
