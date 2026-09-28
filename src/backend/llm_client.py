@@ -84,6 +84,9 @@ class RegressionLlmClient:
     }
     _staff_derived_verse_one = {"id": "lyr_7567cc2310ec4fd83dcc", "number": "1", "name": ""}
     _chord_derived_verse_one = {"id": "lyr_34ae8f300f849b77c4a6", "number": "1", "name": ""}
+    # tests/fixtures/repeat_navigation_piano: every fixture's vocal part is P1
+    # with verse 1 named "1", so they all share this lyric selection.
+    _repeat_regression_verse_one = {"id": "lyr_9552d0d4c6ca37a7e581", "number": "1", "name": "1"}
 
     def generate(
         self,
@@ -118,6 +121,7 @@ class RegressionLlmClient:
                     "split-staff",
                     "split-chords",
                     "two-verses",
+                    "repeat-regression",
                 )
                 if f"[e2e:{name}]" in transcript
             ),
@@ -208,6 +212,12 @@ class RegressionLlmClient:
                     "synthesize",
                     {"part_index": 1, "lyric_selection": lyric_selection},
                 )
+            if scenario == "repeat-regression":
+                return self._response(
+                    "Starting the confirmed take.",
+                    "synthesize",
+                    {"part_index": 0, "lyric_selection": self._repeat_regression_verse_one},
+                )
             if scenario == "two-verses":
                 return self._response(
                     "Starting the confirmed selected verse.",
@@ -242,7 +252,7 @@ class RegressionLlmClient:
             if "Please sing" in latest:
                 return self._response("The selected verse is ready to quote. Please confirm to start it.")
         if latest.startswith("[e2e:"):
-            if scenario in {"basic", "repeat-piano"}:
+            if scenario in {"basic", "repeat-piano", "repeat-regression"}:
                 return self._response("The take is ready to quote. Please confirm to start it.")
             if scenario in {"active-measure-written", "active-measure-repeat"}:
                 return self._response("The take is ready to quote. Please confirm to start it.")
