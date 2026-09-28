@@ -929,19 +929,31 @@ const ScorePlayerEngine = ({
   // Mixer changes are forwarded through usePlaylistControls below. Keeping
   // them out of the source configuration prevents useAudioTracks from
   // needlessly refetching/redecoding vocal audio on every Mute/Solo/volume edit.
-  // A buffered track contributes its job id rather than its URL, so re-signing
-  // an already decoded asset no longer rebuilds the configs. An unbuffered one
-  // still contributes its URL, so the Play-time token refresh reloads it.
+  //
+  // Only a real source change may rebuild the configs: every rebuild hands the
+  // provider a new tracks array, which disposes and rebuilds its whole engine.
+  // A vocal therefore keeps the URL it was last configured with once its
+  // decoded buffer is cached, so neither the decode filling the cache nor a
+  // re-signed URL counts as a change. A vocal that is not cached still
+  // contributes its current URL, so the Play-time token refresh reloads it.
+  // Whenever the configs do rebuild, cached vocals are configured from their
+  // buffer and are never fetched again.
+  const vocalSignatureUrlsRef = useRef(new Map<string, string>());
   const vocalSourceSignature = vocalTracks
-    .map((track) =>
-      [
+    .map((track) => {
+      let sourceUrl = vocalSignatureUrlsRef.current.get(track.sourceJobId);
+      if (!vocalBufferCache.has(track.sourceJobId) || sourceUrl === undefined) {
+        sourceUrl = track.audioUrl;
+        vocalSignatureUrlsRef.current.set(track.sourceJobId, sourceUrl);
+      }
+      return [
         track.key,
         track.sourceJobId,
-        vocalBufferCache.has(track.sourceJobId) ? "buffered" : track.audioUrl,
+        sourceUrl,
         track.label,
         track.durationSeconds ?? "",
-      ].join("\u0000")
-    )
+      ].join("\u0000");
+    })
     .join("\u0001");
   const vocalSources = useMemo(
     () =>
@@ -990,6 +1002,9 @@ const ScorePlayerEngine = ({
     const live = new Set(vocalSources.map((source) => source.sourceJobId));
     vocalBufferCache.forEach((_buffer, key) => {
       if (!live.has(key)) vocalBufferCache.delete(key);
+    });
+    vocalSignatureUrlsRef.current.forEach((_url, key) => {
+      if (!live.has(key)) vocalSignatureUrlsRef.current.delete(key);
     });
   }, [audioTracks, vocalSources]);
   const instrumentalProgramSignature = instrumentalTracks

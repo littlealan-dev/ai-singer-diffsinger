@@ -7,20 +7,21 @@ import test from "node:test";
 import ts from "typescript";
 
 const app = readFileSync(new URL("../src/MainApp.tsx", import.meta.url), "utf8");
-const start = app.indexOf("  const vocalSourceSignature =");
+const start = app.indexOf("  const vocalSignatureUrlsRef =");
 const end = app.indexOf("  const hasMountedPlayerRef =", start);
 assert.ok(start >= 0 && end > start);
 const pipeline = ts.transpileModule(app.slice(start, end), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const runPipeline = new Function(
-  "vocalTracks", "instrumentalTracks", "midiConfigs", "useMemo", "useRef",
-  "useAudioTracks", "useMidiTracks",
+  "vocalTracks", "instrumentalTracks", "midiConfigs", "useMemo", "useRef", "useEffect",
+  "useAudioTracks", "useMidiTracks", "vocalBufferCache",
   `${pipeline}\nreturn { tracks, audioConfigs };`,
 );
 
 function createRenderer() {
   const slots = [];
+  const vocalBufferCache = new Map();
   const midiTracks = [{ id: "piano", clips: [] }];
   let cursor = 0;
   const useMemo = (compute, deps) => {
@@ -35,18 +36,31 @@ function createRenderer() {
     const index = cursor++;
     return slots[index] ?? (slots[index] = { current: initial });
   };
+  // Effects run after render in React; running them in place is equivalent
+  // here because this render has already read everything they write.
+  const useEffect = (effect, deps) => {
+    const index = cursor++;
+    const cached = slots[index];
+    if (!cached || deps.some((dep, i) => !Object.is(dep, cached.deps[i]))) {
+      slots[index] = { deps };
+      effect();
+    }
+  };
   return (vocals, decoded, loading = false) => {
     cursor = 0;
-    return runPipeline(vocals, [], [], useMemo, useRef,
+    return runPipeline(vocals, [], [], useMemo, useRef, useEffect,
       () => ({ tracks: decoded, loading }),
-      () => ({ tracks: midiTracks, loading: false }));
+      () => ({ tracks: midiTracks, loading: false }),
+      vocalBufferCache);
   };
 }
 
 const vocal = {
-  key: "P1", audioUrl: "/solfege.mp3", label: "Soprano", durationSeconds: 8,
+  key: "P1", sourceJobId: "job-1", audioUrl: "/solfege.mp3", label: "Soprano", durationSeconds: 8,
   muted: false, solo: false, volume: 1,
 };
+// A decoded vocal as useAudioTracks returns it: its first clip carries the buffer.
+const decodedTrack = (id) => ({ id, clips: [{ audioBuffer: { decodedFrom: id } }] });
 
 test("vocal mixer edits preserve source configs and provider tracks identity", () => {
   const render = createRenderer();
@@ -64,7 +78,7 @@ test("a replacement vocal uses freshly decoded audio, not the previous take", ()
   const render = createRenderer();
   const oldDecoded = [{ id: "solfege", clips: [] }];
   const initial = render([vocal], oldDecoded);
-  const replacement = { ...vocal, audioUrl: "/lyrics.mp3", label: "V1" };
+  const replacement = { ...vocal, sourceJobId: "job-2", audioUrl: "/lyrics.mp3", label: "V1" };
   const changed = render([replacement], oldDecoded);
   assert.notStrictEqual(changed.audioConfigs, initial.audioConfigs);
   assert.equal(changed.audioConfigs[0].src, "/lyrics.mp3");
@@ -81,7 +95,7 @@ test("adding a second vocal preserves the existing decoded track", () => {
   const firstDecoded = [{ id: "first", clips: [] }];
   render([vocal], firstDecoded, true);
   const ready = render([vocal], firstDecoded);
-  const second = { ...vocal, key: "P2", audioUrl: "/alto.mp3", label: "Alto" };
+  const second = { ...vocal, key: "P2", sourceJobId: "job-3", audioUrl: "/alto.mp3", label: "Alto" };
   render([vocal, second], firstDecoded);
   render([vocal, second], firstDecoded, true);
   const reloaded = [{ id: "first-redecoded", clips: [] }, { id: "second", clips: [] }];
@@ -89,4 +103,48 @@ test("adding a second vocal preserves the existing decoded track", () => {
   assert.equal(added.tracks.length, 3);
   assert.strictEqual(added.tracks[1], ready.tracks[1]);
   assert.strictEqual(added.tracks[2], reloaded[1]);
+});
+
+test("a decode filling the buffer cache does not rebuild configs or tracks", () => {
+  const render = createRenderer();
+  render([vocal], [], true);
+  const decoded = [decodedTrack("first")];
+  const ready = render([vocal], decoded);
+  assert.equal(ready.audioConfigs[0].src, "/solfege.mp3");
+  // The cache effect has now stored the buffer; the next render must not treat
+  // that as a source change, or the provider would rebuild its engine.
+  const after = render([vocal], decoded);
+  assert.strictEqual(after.audioConfigs, ready.audioConfigs);
+  assert.strictEqual(after.tracks, ready.tracks);
+});
+
+test("a re-signed URL for a cached vocal does not rebuild configs or tracks", () => {
+  const render = createRenderer();
+  const decoded = [decodedTrack("first")];
+  render([vocal], decoded);
+  const ready = render([vocal], decoded);
+  const resigned = render([{ ...vocal, audioUrl: "/solfege.mp3?playback_token=new" }], decoded);
+  assert.strictEqual(resigned.audioConfigs, ready.audioConfigs);
+  assert.strictEqual(resigned.tracks, ready.tracks);
+});
+
+test("a new URL for a vocal that is not cached reloads it", () => {
+  const render = createRenderer();
+  const initial = render([vocal], [], true);
+  const refreshed = render([{ ...vocal, audioUrl: "/solfege.mp3?playback_token=new" }], [], true);
+  assert.notStrictEqual(refreshed.audioConfigs, initial.audioConfigs);
+  assert.equal(refreshed.audioConfigs[0].src, "/solfege.mp3?playback_token=new");
+});
+
+test("a later rebuild configures an already decoded vocal from its buffer", () => {
+  const render = createRenderer();
+  const decoded = [decodedTrack("first")];
+  render([vocal], decoded);
+  render([vocal], decoded);
+  const second = { ...vocal, key: "P2", sourceJobId: "job-3", audioUrl: "/alto.mp3", label: "Alto" };
+  const added = render([vocal, second], decoded, true);
+  // The first take's token may have expired by now: it must not be fetched.
+  assert.deepEqual(added.audioConfigs[0].audioBuffer, { decodedFrom: "first" });
+  assert.ok(!("src" in added.audioConfigs[0]));
+  assert.equal(added.audioConfigs[1].src, "/alto.mp3");
 });
