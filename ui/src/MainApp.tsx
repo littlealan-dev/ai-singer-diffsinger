@@ -1037,6 +1037,7 @@ const ScorePlayerEngine = ({
   // old ClipTrack at the same array index.
   const stableAudioTracksRef = useRef(new Map<string, (typeof audioTracks)[number]>());
   const previousVocalSourceKeysRef = useRef(new Map<string, string>());
+  const previousStableAudioTracksRef = useRef<typeof audioTracks | null>(null);
   // Depend only on decoded audio and memoized sources. Mixer-only edits must
   // not create a new tracks array: the provider would rebuild its engine.
   const stableAudioTracks = useMemo(() => {
@@ -1062,6 +1063,22 @@ const ScorePlayerEngine = ({
     });
     stableAudioTracksRef.current = next;
     previousVocalSourceKeysRef.current = nextSourceKeys;
+    // Adding a take re-runs this memo twice before the new vocal decodes (its
+    // configs change, then loading starts) while the tracks are still the same
+    // objects. The provider only appends incrementally when the array grows; a
+    // new array of the same length makes it rebuild its whole engine. Return the
+    // previous array when every track is the same object in the same place. Any
+    // real change (a replaced, removed or reordered take, or a new decode)
+    // produces a different object or length and still yields a new array.
+    const previous = previousStableAudioTracksRef.current;
+    if (
+      previous &&
+      previous.length === normalized.length &&
+      normalized.every((track, index) => track === previous[index])
+    ) {
+      return previous;
+    }
+    previousStableAudioTracksRef.current = normalized;
     return normalized;
   }, [audioLoading, audioTracks, vocalSources]);
   const tracks = useMemo(

@@ -148,3 +148,49 @@ test("a later rebuild configures an already decoded vocal from its buffer", () =
   assert.ok(!("src" in added.audioConfigs[0]));
   assert.equal(added.audioConfigs[1].src, "/alto.mp3");
 });
+
+test("adding a take keeps the tracks array until the new vocal decodes", () => {
+  const render = createRenderer();
+  const firstDecoded = [decodedTrack("first")];
+  render([vocal], firstDecoded);
+  const ready = render([vocal], firstDecoded);
+  const second = { ...vocal, key: "P2", sourceJobId: "job-3", audioUrl: "/alto.mp3", label: "Alto" };
+  // The configs change, then loading starts; the loader still reports the old
+  // decoded list. A new array here would make the provider rebuild its engine.
+  const configsChanged = render([vocal, second], firstDecoded);
+  assert.strictEqual(configsChanged.tracks, ready.tracks);
+  const loading = render([vocal, second], firstDecoded, true);
+  assert.strictEqual(loading.tracks, ready.tracks);
+  // Once decoded, the loader returns new objects for every vocal; the existing
+  // take keeps its object, so the provider sees a pure append.
+  const decoded = render([vocal, second], [decodedTrack("first-again"), decodedTrack("second")]);
+  assert.notStrictEqual(decoded.tracks, ready.tracks);
+  assert.equal(decoded.tracks.length, ready.tracks.length + 1);
+  ready.tracks.forEach((track, index) => assert.strictEqual(decoded.tracks[index], track));
+});
+
+test("replacing a take in place still yields a new tracks array", () => {
+  const render = createRenderer();
+  const oldDecoded = [decodedTrack("old")];
+  render([vocal], oldDecoded);
+  const ready = render([vocal], oldDecoded);
+  const replacement = { ...vocal, sourceJobId: "job-2", audioUrl: "/lyrics.mp3" };
+  render([replacement], oldDecoded);
+  render([replacement], oldDecoded, true);
+  const newDecoded = [decodedTrack("new")];
+  const replaced = render([replacement], newDecoded);
+  assert.equal(replaced.tracks.length, ready.tracks.length);
+  assert.notStrictEqual(replaced.tracks, ready.tracks);
+  assert.strictEqual(replaced.tracks[1], newDecoded[0]);
+});
+
+test("removing a take yields a new tracks array", () => {
+  const render = createRenderer();
+  const second = { ...vocal, key: "P2", sourceJobId: "job-3", audioUrl: "/alto.mp3", label: "Alto" };
+  const both = [decodedTrack("first"), decodedTrack("second")];
+  render([vocal, second], both);
+  const ready = render([vocal, second], both);
+  const removed = render([vocal], [both[0]]);
+  assert.notStrictEqual(removed.tracks, ready.tracks);
+  assert.equal(removed.tracks.length, ready.tracks.length - 1);
+});
