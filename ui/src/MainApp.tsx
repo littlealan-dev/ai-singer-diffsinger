@@ -2913,31 +2913,51 @@ export default function MainApp() {
     : scoreSummary?.duration_seconds;
   const estimatedDurationLabel =
     typeof estimatedDuration === "number" && estimatedDuration > 0
-      ? `Estimated duration: ${formatDuration(estimatedDuration)}`
+      ? `Est. length ${formatDuration(estimatedDuration)}`
       : null;
+  const estimatedDurationTitle =
+    typeof estimatedDuration === "number" && estimatedDuration > 0
+      ? `Estimated duration: ${formatDuration(estimatedDuration)} (${
+          expandRepeats ? "with repeats" : "written order"
+        })`
+      : undefined;
 
   // Credit amounts come only from the backend estimate. While a request is in
   // flight the labels say so rather than briefly showing a locally computed or
   // stale number.
   // Only an in-flight request reads as calculating. A request that failed shows
   // no credit line at all, which is still better than a locally derived number.
+  // The header column is narrow, so each line uses a short label and carries
+  // the full wording as a tooltip.
   const estimateCalculating = synthesisEstimateLoading;
+  const vocalCredits = synthesisEstimate?.vocal_part.estimated_credits;
   const estimatedVocalCostLabel = estimateCalculating
-    ? "Estimated cost per vocal part: calculating..."
+    ? "Vocal: calculating…"
     : synthesisEstimate
-      ? `Estimated cost per vocal part: ${synthesisEstimate.vocal_part.estimated_credits} credits`
+      ? `Vocal: ${formatCredits(vocalCredits ?? 0)} / part`
       : null;
+  const estimatedVocalCostTitle = synthesisEstimate
+    ? `Estimated cost per vocal part: ${formatCredits(vocalCredits ?? 0)}`
+    : undefined;
   const instrumentalsAlreadyGenerated = Boolean(
     synthesisEstimate?.instrumentals.has_instrumental_parts &&
       !synthesisEstimate.instrumentals.charge_required
   );
+  const instrumentalCredits = synthesisEstimate?.instrumentals.estimated_credits;
   const estimatedInstrumentalCostLabel = estimateCalculating
-    ? "Estimated cost for instrumentals: calculating..."
+    ? "Instruments: calculating…"
     : synthesisEstimate
-      ? `Estimated cost for instrumentals: ${synthesisEstimate.instrumentals.estimated_credits} credits${
-          instrumentalsAlreadyGenerated ? " \u00b7 already generated" : ""
-        }`
+      ? instrumentalsAlreadyGenerated
+        ? "Instruments: paid"
+        : `Instruments: ${formatCredits(instrumentalCredits ?? 0)}`
       : null;
+  const estimatedInstrumentalCostTitle = synthesisEstimate
+    ? instrumentalsAlreadyGenerated
+      ? "Instrumentals for this score are already generated: no further charge"
+      : `Estimated cost for instrumentals: ${formatCredits(
+          instrumentalCredits ?? 0
+        )}, charged once for all instrumental tracks`
+    : undefined;
   const hasScorePlayerTracks = Boolean(instrumentalMidiUrl || (instrumentalTracks.length > 0 && performanceMidi?.has_instrumental_parts)) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
@@ -5926,7 +5946,9 @@ export default function MainApp() {
                     Latest upload only {audioUrl ? "· Audio ready" : ""}
                 </span>
                 {estimatedDurationLabel && (
-                  <span className="score-estimate">{estimatedDurationLabel}</span>
+                  <span className="score-estimate" title={estimatedDurationTitle}>
+                    {estimatedDurationLabel}
+                  </span>
                 )}
                 {estimatedVocalCostLabel && (
                   <span
@@ -5935,6 +5957,7 @@ export default function MainApp() {
                         ? "score-estimate score-estimate-pending"
                         : "score-estimate"
                     }
+                    title={estimatedVocalCostTitle}
                   >
                     {estimatedVocalCostLabel}
                   </span>
@@ -5946,6 +5969,7 @@ export default function MainApp() {
                         ? "score-estimate score-estimate-pending"
                         : "score-estimate"
                     }
+                    title={estimatedInstrumentalCostTitle}
                   >
                     {estimatedInstrumentalCostLabel}
                   </span>
@@ -6253,6 +6277,10 @@ function hasBillingPaymentIssue(billing: ReturnType<typeof useBillingState>): bo
     return true;
   }
   return billing.latestInvoiceStatus === "open" && billing.latestPaymentIntentStatus === "requires_payment_method";
+}
+
+function formatCredits(credits: number): string {
+  return `${credits} ${credits === 1 ? "credit" : "credits"}`;
 }
 
 function formatDuration(totalSeconds: number): string {

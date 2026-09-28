@@ -950,11 +950,12 @@ body.legal-active #root {
 .score-estimate {
   color: rgba(220, 210, 255, 0.85);
   font-size: 12px;
+  line-height: 1.35;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Short labels fit the narrow header column; when it is narrower still,
+     wrap between words rather than hide part of a figure. */
+  white-space: normal;
 }
 
 /* A credit line that is still being priced, or is already paid for, reads as
