@@ -1098,6 +1098,8 @@ def create_app() -> FastAPI:
         payload: ExportMixRequest,
     ) -> Dict[str, Any]:
         """Start an async mixdown job for the current multitrack state."""
+        if not request.app.state.settings.export_mix_enabled:
+            raise HTTPException(status_code=404, detail="Export mix is not available.")
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         job_store: JobStore = request.app.state.job_store

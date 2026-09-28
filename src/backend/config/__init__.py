@@ -161,6 +161,10 @@ class Settings:
     turnstile_secret_key_secret: str
     turnstile_secret_key_secret_version: str
     turnstile_timeout_seconds: float
+    # The billable server-side export mix is retired from the product: the
+    # browser renders the mix in real time with the instrumental tracks, which
+    # the server mix never had. Its code stays, reachable only when enabled.
+    export_mix_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -444,6 +448,8 @@ class Settings:
             audio_mp3_bitrate=audio_mp3_bitrate,
             synthesis_max_duration_seconds=synthesis_max_duration_seconds,
             backend_debug=backend_debug,
+            export_mix_enabled=os.getenv("BACKEND_EXPORT_MIX_ENABLED", "").lower()
+            in {"1", "true", "yes"},
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_api_key_secret=gemini_api_key_secret,

@@ -1037,9 +1037,38 @@ def test_single_track_export_uses_total_track_count_only():
     assert _is_noop_single_track_export([unity_track, unity_track]) is False
 
 
-@pytest.mark.parametrize("volume,muted,solo", [(1, False, False), (0.8, False, True), (0, True, False)])
-def test_export_mix_rejects_noop_before_credit_reservation(client, monkeypatch, volume, muted, solo):
+_EXPORT_MIX_ENABLED = {"BACKEND_EXPORT_MIX_ENABLED": "true"}
+
+
+def test_export_mix_is_unavailable_unless_enabled(client, monkeypatch):
+    """The billable server-side mix is retired; its endpoint stays off by default."""
     test_client, _app = client
+    session_id = _create_session(test_client)
+
+    def fail_if_reserved(*_args, **_kwargs):
+        raise AssertionError("A disabled export must not reserve credits.")
+
+    monkeypatch.setattr("src.backend.credits.reserve_credits", fail_if_reserved)
+    response = test_client.post(
+        f"/sessions/{session_id}/export-mix",
+        json={
+            "format": "wav",
+            "billing_reference_job_id": "job-1",
+            "tracks": [
+                {"job_id": "job-1", "part_id": "part-1", "volume": 1, "muted": False, "solo": False},
+                {"job_id": "job-2", "part_id": "part-2", "volume": 1, "muted": False, "solo": False},
+            ],
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Export mix is not available."
+
+
+@pytest.mark.parametrize("client_with_env", [_EXPORT_MIX_ENABLED], indirect=True)
+@pytest.mark.parametrize("volume,muted,solo", [(1, False, False), (0.8, False, True), (0, True, False)])
+def test_export_mix_rejects_noop_before_credit_reservation(client_with_env, monkeypatch, volume, muted, solo):
+    test_client, _app = client_with_env
     session_id = _create_session(test_client)
     reserve_called = False
 

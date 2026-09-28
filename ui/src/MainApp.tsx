@@ -111,6 +111,10 @@ const STARTING_CONVERSATIONS = [
 
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
+// The billable server-side export mix is retired: it mixed vocal tracks only,
+// while the real-time browser mix also includes the instrumental tracks. The
+// backend endpoint is disabled by default too; the code stays for re-enabling.
+const BILLABLE_SERVER_EXPORT_MIX_ENABLED = false;
 const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
 const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
 const SYNTHESIS_STREAM_RECONNECTING_MESSAGE =
@@ -6036,8 +6040,9 @@ export default function MainApp() {
                       : "Download mix (real-time)"
                   }
                 >
-                  {browserMixBounceActive ? <X size={16} /> : <Download size={16} />}
+                  {browserMixBounceActive ? <X size={16} /> : <Upload size={16} />}
                 </button>
+                {BILLABLE_SERVER_EXPORT_MIX_ENABLED && (
                 <button
                   type="button"
                   className={clsx("score-action-button", "multitrack-export-button", {
@@ -6074,6 +6079,7 @@ export default function MainApp() {
                     )
                   )}
                 </button>
+                )}
                 <button
                   type="button"
                   className="score-action-button"
