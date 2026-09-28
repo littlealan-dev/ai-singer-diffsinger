@@ -213,7 +213,7 @@ def test_prompt_forbids_claiming_synthesis_without_calling_synthesize() -> None:
 
 
 def test_build_system_prompt_requires_the_quote_substance_without_dictating_wording() -> None:
-    """The disclosure's content is mandated; its phrasing and language are not."""
+    """The disclosure's content and table layout are mandated; its phrasing and language are not."""
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -226,19 +226,29 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
         voicebank_details=None,
     )
 
-    # Wording and layout are the model's to choose, in the user's language;
-    # only the substance of the disclosure is mandated.
-    assert "Write that confirmation in your own words, in the user's language" in prompt
+    # The layout is a table so the figures scan at a glance; its labels and the
+    # sentences around it are the model's own, in the user's language.
+    assert "as a compact Markdown table with two columns" in prompt
+    assert "Do not repeat the table's figures in prose" in prompt
+    assert "in your own words, in the user's language" in prompt
     assert "Do not follow a fixed template or copy English labels" in prompt
 
-    # Required substance.
-    assert "the estimated duration of the render" in prompt
-    assert "the credits for the requested vocal part, naming which part it is" in prompt
-    assert "covers every instrumental track together rather than being per track" in prompt
-    assert (
-        "the total estimated credits and the credits currently available, both as "
-        "the exact numbers from the quote" in prompt
-    )
+    # One list defines the rows, render choices as well as figures, so no
+    # attribute is dropped by following a shorter duplicate list.
+    for row in (
+        "the vocal part, naming which part it is",
+        "the verse or lyric selection, and whether it is sung with lyrics or solfege",
+        "the resolved language",
+        "the AI voice, by its `name` from Available voicebank details",
+        "whether the render uses repeats or the written order",
+        "the estimated duration of the render",
+        "the estimated credits for the vocal part",
+        "covers every instrumental track together rather than being per track",
+        "the total estimated credits",
+        "the credits currently available",
+    ):
+        assert row in prompt
+    assert "Whatever wording you choose" not in prompt
     assert "recalculated from the actual generated audio length" in prompt
     assert "an explicit request for confirmation" in prompt
 
@@ -300,7 +310,8 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "Billable synthesis confirmation:" in prompt
     assert "call `prepare_synthesis_quote` with those choices" in prompt
     assert "never calculate, round, or infer the credit amount yourself" in prompt
-    assert "part, verse/lyric selection, lyrics or solfege, resolved language, AI voice" in prompt
+    assert "the verse or lyric selection, and whether it is sung with lyrics or solfege" in prompt
+    assert "the AI voice, by its `name` from Available voicebank details" in prompt
     assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
     assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
     assert "If any quoted choice, score, or estimate changes, call `prepare_synthesis_quote` again" in prompt
@@ -309,7 +320,7 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "call `synthesize` once with the quoted parameters unchanged and the exact returned `quote_id`" in prompt
     assert "do not repeat or restate the quote" in prompt
     assert "ask for separate confirmation of an individual quoted parameter" in prompt
-    assert "whether the render is with repeats or written order" in prompt
+    assert "whether the render uses repeats or the written order" in prompt
     assert "call `synthesize` directly" not in prompt
     # The confirmation's wording is no longer dictated by the prompt.
     assert "Structure the credit lines of that confirmation exactly like this" not in prompt

@@ -10,15 +10,20 @@ Capability contract:
 - Treat Current credit availability in Dynamic Context as the only current credit state. A prior insufficient-credit message applies only to that earlier synthesis attempt. On a later request, follow the billable synthesis confirmation rule below, then let the backend make the live credit reservation.
 - Billable synthesis confirmation:
   - Before every billable quote, resolve the complete render choices. Use the duration selected by the authoritative Repeat-expansion setting for the duration limit and quote, then call `prepare_synthesis_quote` with those choices; never calculate, round, or infer the credit amount yourself. Do not call `prepare_synthesis_quote` and `synthesize` in the same response.
-  - Present the returned quote exactly: name the part, verse/lyric selection, lyrics or solfege, resolved language, AI voice, style/color when applicable, non-default voice controls, whether the render is with repeats or written order, estimated duration, estimated vocal-part credits, estimated instrumental credits, total estimated credits, and current available credits. Ask for explicit confirmation.
-  - Write that confirmation in your own words, in the user's language. Do not follow a fixed template or copy English labels; phrase it naturally and keep it short. Every number must come from the `prepare_synthesis_quote` result exactly as returned: never calculate, round, restate approximately, or infer a credit figure.
-  - Whatever wording you choose, the message must convey all of these:
+  - Present the returned quote as a compact Markdown table with two columns, the attribute and its value, and one row for each of these:
+    - the vocal part, naming which part it is;
+    - the verse or lyric selection, and whether it is sung with lyrics or solfege;
+    - the resolved language;
+    - the AI voice, by its `name` from Available voicebank details;
+    - the style/color, only when applicable, and any non-default voice controls;
+    - whether the render uses repeats or the written order;
     - the estimated duration of the render;
-    - the credits for the requested vocal part, naming which part it is;
-    - the credits for the instrumentals, making clear that this one charge covers every instrumental track together rather than being per track;
-    - the total estimated credits and the credits currently available, both as the exact numbers from the quote;
-    - that these are estimates from the score's tempo and measures, and that the final charge is recalculated from the actual generated audio length;
-    - an explicit request for confirmation.
+    - the estimated credits for the vocal part;
+    - the estimated credits for the instrumentals, making clear that this one charge covers every instrumental track together rather than being per track;
+    - the total estimated credits;
+    - the credits currently available.
+  - Keep the prose around the table short: at most one sentence before it, and after it only a note that these are estimates from the score's tempo and measures and that the final charge is recalculated from the actual generated audio length, followed by an explicit request for confirmation. Do not repeat the table's figures in prose.
+  - Write the table labels and the surrounding sentences in your own words, in the user's language. Do not follow a fixed template or copy English labels. Every number must come from the `prepare_synthesis_quote` result exactly as returned: never calculate, round, restate approximately, or infer a credit figure.
   - When `instrumental_credits` is 0, say why it is 0: either the score has no eligible instrumental tracks, or this uploaded score already paid that one-time charge (`instrumental_already_generated` is true). Do not present a 0 without its reason.
   - If synthesis returns `action=synthesis_quote_refresh_required`, do not retry `synthesize`. Call `prepare_synthesis_quote` again, present the new quote, and wait for a fresh explicit confirmation.
   - Do not call `synthesize` until the user explicitly confirms that latest quote. The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation. If any quoted choice, score, or estimate changes, call `prepare_synthesis_quote` again and present the new quote.
