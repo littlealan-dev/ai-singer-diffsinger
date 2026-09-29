@@ -13,6 +13,7 @@ import {
 } from "@waveform-playlist/browser";
 import { useAudioTracks } from "@waveform-playlist/browser/tone";
 import { useMidiTracks } from "@waveform-playlist/midi";
+import { getContext as getToneContext } from "tone";
 import {
   MediaRecorder as ExtendableMediaRecorder,
   register as registerExtendableMediaRecorderEncoder,
@@ -650,6 +651,10 @@ type BrowserMixBounceOperation = {
 type ScorePlayerEngineProps = {
   midiUrl: string | null;
   vocalTracks: MultiTrackAudioTrack[];
+  /** Decoded audio of each take, keyed by its source job. */
+  decodedVocals: ReadonlyMap<string, AudioBuffer>;
+  /** True while any take in the player is still being downloaded and decoded. */
+  vocalsDecoding: boolean;
   instrumentalTracks?: InstrumentalTrackState[];
   instrumentalBus: InstrumentalBusState;
   playbackRequestId: number;
@@ -864,16 +869,30 @@ const ScorePlayerMixerBridge = ({
   return null;
 };
 
-// Decoded vocal audio, keyed by the job that produced it. useAudioTracks clears
-// its own buffers whenever the config array changes and keys them by array
-// index, so adding one track re-fetched every other track's URL -- including
-// tokens that had since expired. Handing back an already decoded buffer skips
-// the fetch entirely, so settled takes are never re-downloaded or re-decoded.
-const vocalBufferCache = new Map<string, AudioBuffer>();
+/** Download and decode one take, in the playback context the player uses. */
+const decodeVocalAudio = async (audioUrl: string): Promise<AudioBuffer> => {
+  // The URL carries its own playback token, as for the player's loader.
+  const response = await fetch(audioUrl);
+  if (!response.ok) {
+    // Keep the status code: an expired token (401) is refreshed on Play.
+    throw new Error(`Failed to fetch ${audioUrl}: ${response.status} ${response.statusText}`);
+  }
+  return getToneContext().rawContext.decodeAudioData(await response.arrayBuffer());
+};
+
+const withoutKeysOutside = <T,>(
+  map: ReadonlyMap<string, T>,
+  live: ReadonlySet<string>
+): ReadonlyMap<string, T> => {
+  if ([...map.keys()].every((key) => live.has(key))) return map;
+  return new Map([...map].filter(([key]) => live.has(key)));
+};
 
 const ScorePlayerEngine = ({
   midiUrl,
   vocalTracks,
+  decodedVocals,
+  vocalsDecoding,
   instrumentalTracks = [],
   instrumentalBus,
   playbackRequestId,
@@ -930,53 +949,38 @@ const ScorePlayerEngine = ({
     () => (midiUrl ? [{ src: midiUrl, name: "Score instruments" }] : []),
     [midiUrl]
   );
+  // Each take is downloaded and decoded once, when its job completes, into
+  // decodedVocals (see MainApp). The player only ever receives decoded audio:
+  // useAudioTracks never fetches, so a take never needs its playback token
+  // again, and a take still decoding joins the player when its audio is ready.
+  // The mixer bridge maps vocals to provider tracks by position, so it gets
+  // exactly this list too.
+  const playerVocalTracks = useMemo(
+    () => vocalTracks.filter((track) => decodedVocals.has(track.sourceJobId)),
+    [decodedVocals, vocalTracks]
+  );
   // Mixer changes are forwarded through usePlaylistControls below. Keeping
   // them out of the source configuration prevents useAudioTracks from
-  // needlessly refetching/redecoding vocal audio on every Mute/Solo/volume edit.
-  //
-  // Only a real source change may rebuild the configs: every rebuild hands the
-  // provider a new tracks array, which disposes and rebuilds its whole engine.
-  // A vocal therefore keeps the URL it was last configured with once its
-  // decoded buffer is cached, so neither the decode filling the cache nor a
-  // re-signed URL counts as a change. A vocal that is not cached still
-  // contributes its current URL, so the Play-time token refresh reloads it.
-  // Whenever the configs do rebuild, cached vocals are configured from their
-  // buffer and are never fetched again.
-  const vocalSignatureUrlsRef = useRef(new Map<string, string>());
-  const vocalSourceSignature = vocalTracks
-    .map((track) => {
-      let sourceUrl = vocalSignatureUrlsRef.current.get(track.sourceJobId);
-      if (!vocalBufferCache.has(track.sourceJobId) || sourceUrl === undefined) {
-        sourceUrl = track.audioUrl;
-        vocalSignatureUrlsRef.current.set(track.sourceJobId, sourceUrl);
-      }
-      return [
-        track.key,
-        track.sourceJobId,
-        sourceUrl,
-        track.label,
-        track.durationSeconds ?? "",
-      ].join("\u0000");
-    })
+  // rebuilding its tracks, and the provider its engine, on every Mute/Solo/
+  // volume edit.
+  const vocalSourceSignature = playerVocalTracks
+    .map((track) =>
+      [track.key, track.sourceJobId, track.label, track.durationSeconds ?? ""].join("\u0000")
+    )
     .join("\u0001");
   const vocalSources = useMemo(
     () =>
-      vocalTracks.map((track) => {
-        const cachedBuffer = vocalBufferCache.get(track.sourceJobId);
-        return {
-          key: `${track.key}\u0000${track.sourceJobId}`,
-          trackKey: track.key,
-          sourceJobId: track.sourceJobId,
-          // Exactly one of audioBuffer/src: a config carrying a buffer is never
-          // fetched, so its playback token is never touched.
-          ...(cachedBuffer ? { audioBuffer: cachedBuffer } : { src: track.audioUrl }),
-          name: track.label,
-          duration: track.durationSeconds ?? undefined,
-          muted: track.muted,
-          soloed: track.solo,
-          volume: track.volume,
-        };
-      }),
+      playerVocalTracks.map((track) => ({
+        key: `${track.key}\u0000${track.sourceJobId}`,
+        trackKey: track.key,
+        sourceJobId: track.sourceJobId,
+        audioBuffer: decodedVocals.get(track.sourceJobId) as AudioBuffer,
+        name: track.label,
+        duration: track.durationSeconds ?? undefined,
+        muted: track.muted,
+        soloed: track.solo,
+        volume: track.volume,
+      })),
     // vocalSourceSignature deliberately excludes mixer-only state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [vocalSourceSignature]
@@ -996,21 +1000,6 @@ const ScorePlayerEngine = ({
   const { tracks: audioTracks, loading: audioLoading, error: audioError } = useAudioTracks(
     audioConfigs
   );
-  useEffect(() => {
-    audioTracks.forEach((track, index) => {
-      const sourceJobId = vocalSources[index]?.sourceJobId;
-      const buffer = track?.clips?.[0]?.audioBuffer;
-      if (sourceJobId && buffer) vocalBufferCache.set(sourceJobId, buffer);
-    });
-    // Superseded takes never come back, so their buffers would leak.
-    const live = new Set(vocalSources.map((source) => source.sourceJobId));
-    vocalBufferCache.forEach((_buffer, key) => {
-      if (!live.has(key)) vocalBufferCache.delete(key);
-    });
-    vocalSignatureUrlsRef.current.forEach((_url, key) => {
-      if (!live.has(key)) vocalSignatureUrlsRef.current.delete(key);
-    });
-  }, [audioTracks, vocalSources]);
   const instrumentalProgramSignature = instrumentalTracks
     .map((track) => `${track.key}\u0000${track.soundfontBank}\u0000${track.presetKind}\u0000${track.gmProgram}`)
     .join("\u0001");
@@ -1033,47 +1022,40 @@ const ScorePlayerEngine = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [midiTracks, instrumentalProgramSignature]
   );
-  // useAudioTracks reloads its complete declarative source list when a new
-  // vocal arrives. Retain decoded ClipTrack objects only for unchanged source
-  // URLs so WaveformPlaylistProvider can incrementally append a new vocal.
-  // Do not cache the hook's previous result under a changed URL: between a
-  // config change and its decode completing, useAudioTracks still exposes the
-  // old ClipTrack at the same array index.
+  // useAudioTracks rebuilds every track object whenever its configs change,
+  // and until it has processed the new configs it still exposes its previous
+  // result. Keep each take's first track object, so the provider sees an
+  // unchanged take as unchanged and appends a new take incrementally.
+  // A loader track belongs to a take only if it was built from that take's
+  // decoded buffer. While the loader catches up after a take is replaced, the
+  // track at that position still carries the previous take's buffer: it stays
+  // in place until the new one arrives, but is never recorded as the new take.
   const stableAudioTracksRef = useRef(new Map<string, (typeof audioTracks)[number]>());
-  const previousVocalSourceKeysRef = useRef(new Map<string, string>());
   const previousStableAudioTracksRef = useRef<typeof audioTracks | null>(null);
   // Depend only on decoded audio and memoized sources. Mixer-only edits must
   // not create a new tracks array: the provider would rebuild its engine.
   const stableAudioTracks = useMemo(() => {
     const next = new Map<string, (typeof audioTracks)[number]>();
-    const nextSourceKeys = new Map<string, string>();
     const normalized = audioTracks.map((track, index) => {
-      const sourceKey = vocalSources[index]?.key;
-      if (!sourceKey) return track;
-      const trackKey = vocalSources[index].trackKey;
-      const sourceChanged = previousVocalSourceKeysRef.current.get(trackKey) !== sourceKey;
-      const existing = stableAudioTracksRef.current.get(sourceKey);
-      const resolved = existing ?? track;
-      // While a changed source is loading, ``track`` still describes the old
-      // audio. Leave it uncached. On the render after decoding finishes,
-      // audioLoading is false and the hook's track is the newly decoded source.
-      // Keep already verified buffers while another vocal is loading. Only
-      // newly decoded sources need the loading/source-change guard.
-      if (existing || (!sourceChanged && !audioLoading)) {
-        next.set(sourceKey, resolved);
-      }
-      nextSourceKeys.set(trackKey, sourceKey);
+      const source = vocalSources[index];
+      if (!source || track?.clips?.[0]?.audioBuffer !== source.audioBuffer) return track;
+      const resolved = stableAudioTracksRef.current.get(source.key) ?? track;
+      next.set(source.key, resolved);
       return resolved;
     });
+    // A take the loader has not re-emitted yet keeps its recorded object.
+    vocalSources.forEach((source) => {
+      const recorded = stableAudioTracksRef.current.get(source.key);
+      if (recorded && !next.has(source.key)) next.set(source.key, recorded);
+    });
     stableAudioTracksRef.current = next;
-    previousVocalSourceKeysRef.current = nextSourceKeys;
-    // Adding a take re-runs this memo twice before the new vocal decodes (its
-    // configs change, then loading starts) while the tracks are still the same
-    // objects. The provider only appends incrementally when the array grows; a
-    // new array of the same length makes it rebuild its whole engine. Return the
-    // previous array when every track is the same object in the same place. Any
-    // real change (a replaced, removed or reordered take, or a new decode)
-    // produces a different object or length and still yields a new array.
+    // Adding a take re-runs this memo before the new vocal is processed while
+    // the tracks are still the same objects. The provider only appends
+    // incrementally when the array grows; a new array of the same length makes
+    // it rebuild its whole engine. Return the previous array when every track
+    // is the same object in the same place. Any real change (a replaced,
+    // removed or reordered take, or a newly processed one) produces a different
+    // object or length and still yields a new array.
     const previous = previousStableAudioTracksRef.current;
     if (
       previous &&
@@ -1084,7 +1066,7 @@ const ScorePlayerEngine = ({
     }
     previousStableAudioTracksRef.current = normalized;
     return normalized;
-  }, [audioLoading, audioTracks, vocalSources]);
+  }, [audioTracks, vocalSources]);
   const tracks = useMemo(
     () => [...configuredMidiTracks, ...stableAudioTracks],
     [configuredMidiTracks, stableAudioTracks]
@@ -1131,8 +1113,8 @@ const ScorePlayerEngine = ({
   }, [midiUrl, onEngineLoading, vocalSourceSignature]);
 
   useEffect(() => {
-    if (midiLoading || audioLoading || soundFontLoading) onEngineLoading();
-  }, [audioLoading, midiLoading, onEngineLoading, soundFontLoading]);
+    if (midiLoading || audioLoading || soundFontLoading || vocalsDecoding) onEngineLoading();
+  }, [audioLoading, midiLoading, onEngineLoading, soundFontLoading, vocalsDecoding]);
 
   useEffect(() => {
     if (tracks.length !== 0 || !adapterRef.current) return;
@@ -1148,7 +1130,7 @@ const ScorePlayerEngine = ({
     hasMountedPlayerRef.current = false;
     return null;
   }
-  if (!hasMountedPlayerRef.current && (midiLoading || audioLoading)) {
+  if (!hasMountedPlayerRef.current && (midiLoading || audioLoading || vocalsDecoding)) {
     return null;
   }
   hasMountedPlayerRef.current = true;
@@ -1162,7 +1144,7 @@ const ScorePlayerEngine = ({
     >
       <ScorePlayerEngineBridge
         onControlsChange={onControlsChange}
-        loading={midiLoading || audioLoading || soundFontLoading}
+        loading={midiLoading || audioLoading || soundFontLoading || vocalsDecoding}
         onReady={handleProviderReady}
         onPlaybackStateChange={onPlaybackStateChange}
         onPlaybackPositionChange={onPlaybackPositionChange}
@@ -1170,7 +1152,7 @@ const ScorePlayerEngine = ({
       />
       <ScorePlayerMixerBridge
         midiTrackCount={midiTracks.length}
-        vocalTracks={vocalTracks}
+        vocalTracks={playerVocalTracks}
         instrumentalTracks={instrumentalTracks}
         instrumentalBus={instrumentalBus}
       />
@@ -2552,6 +2534,21 @@ export default function MainApp() {
   const [scorePlayerPlaybackRequestId, setScorePlayerPlaybackRequestId] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [multiTrackAudioTracks, setMultiTrackAudioTracks] = useState<MultiTrackAudioTrack[]>([]);
+  // Decoded audio of each take in the player, keyed by its source job. A take
+  // is decoded once, when it enters the player; the player plays only these
+  // buffers, so a take is never downloaded again. A take leaving the player
+  // (replaced by a newer take of its part, or cleared by a new score) drops
+  // its audio here too.
+  const [decodedVocals, setDecodedVocals] = useState<ReadonlyMap<string, AudioBuffer>>(
+    () => new Map()
+  );
+  // Takes whose decode failed, with the URL that failed. A new URL for the
+  // take (a token refresh) or a Play click retries it.
+  const [failedVocalDecodes, setFailedVocalDecodes] = useState<ReadonlyMap<string, string>>(
+    () => new Map()
+  );
+  const vocalDecodesInFlightRef = useRef(new Set<string>());
+  const liveVocalJobsRef = useRef(new Set<string>());
   const [multiTrackPlaying, setMultiTrackPlaying] = useState(false);
   const [multiTrackExportProgress, setMultiTrackExportProgress] = useState<number | null>(null);
   const [multiTrackExportError, setMultiTrackExportError] = useState<string | null>(null);
@@ -3284,6 +3281,7 @@ export default function MainApp() {
         // The initial preload is still in flight. A user play request waits for it;
         // an earlier failed preload is retried by remounting the player once.
         scorePlayerPlayPendingRef.current = true;
+        if (failedVocalDecodes.size) setFailedVocalDecodes(new Map());
         if (scorePlayerError) {
           const requestId = scorePlayerPlaybackRequestRef.current + 1;
           scorePlayerPlaybackRequestRef.current = requestId;
@@ -3313,7 +3311,7 @@ export default function MainApp() {
     void Promise.allSettled(playable.map(({ waveSurfer }) => waveSurfer.play())).then(() => {
       setMultiTrackPlaying(true);
     });
-  }, [instrumentalMidiUrl, multiTrackAudioTracks, scorePlayerControls, scorePlayerError]);
+  }, [failedVocalDecodes, instrumentalMidiUrl, multiTrackAudioTracks, scorePlayerControls, scorePlayerError]);
 
   const handleMultiTrackPause = useCallback(() => {
     scorePlayerPlayPendingRef.current = false;
@@ -3770,14 +3768,6 @@ export default function MainApp() {
       waveSurfer.setVolume(track.volume);
     });
   }, [multiTrackAudioTracks]);
-
-  useEffect(() => {
-    messages.forEach((message) => {
-      if (message.role !== "assistant" || !message.audioUrl) return;
-      if (suppressedMultiTrackMessageIdsRef.current.has(message.id)) return;
-      addOrReplaceMultiTrackAudio(message.audioUrl, message.audioTrack, message.jobId);
-    });
-  }, [addOrReplaceMultiTrackAudio, messages]);
 
   const renderVoiceAvatar = (voice: VoicebankOption, className: string) => {
     const imageUrl = failedVoiceImages[voice.id] ? null : voiceImageUrl(voice);
@@ -4794,6 +4784,45 @@ export default function MainApp() {
       });
     },
     [messages, multiTrackAudioTracks, refreshMessageAudioUrl]
+  );
+
+  // Decode each take once, when it enters the player, and forget the audio of
+  // takes that left it. The player only receives what is decoded here, so it
+  // never downloads a take itself.
+  const handleScorePlayerEngineErrorRef = useRef(handleScorePlayerEngineError);
+  handleScorePlayerEngineErrorRef.current = handleScorePlayerEngineError;
+  useEffect(() => {
+    const live = new Set(multiTrackAudioTracks.map((track) => track.sourceJobId));
+    liveVocalJobsRef.current = live;
+    setDecodedVocals((current) => withoutKeysOutside(current, live));
+    setFailedVocalDecodes((current) => withoutKeysOutside(current, live));
+    multiTrackAudioTracks.forEach((track) => {
+      const jobId = track.sourceJobId;
+      const audioUrl = track.audioUrl;
+      if (decodedVocals.has(jobId) || vocalDecodesInFlightRef.current.has(jobId)) return;
+      if (failedVocalDecodes.get(jobId) === audioUrl) return;
+      vocalDecodesInFlightRef.current.add(jobId);
+      void decodeVocalAudio(audioUrl).then(
+        (buffer) => {
+          vocalDecodesInFlightRef.current.delete(jobId);
+          // A take replaced or cleared while decoding is not stored.
+          if (!liveVocalJobsRef.current.has(jobId)) return;
+          setDecodedVocals((current) => new Map(current).set(jobId, buffer));
+        },
+        (err: unknown) => {
+          vocalDecodesInFlightRef.current.delete(jobId);
+          if (!liveVocalJobsRef.current.has(jobId)) return;
+          setFailedVocalDecodes((current) => new Map(current).set(jobId, audioUrl));
+          handleScorePlayerEngineErrorRef.current(
+            err instanceof Error ? err.message : "Failed to load vocal audio."
+          );
+        }
+      );
+    });
+  }, [decodedVocals, failedVocalDecodes, multiTrackAudioTracks]);
+  const vocalsDecoding = multiTrackAudioTracks.some(
+    (track) =>
+      !decodedVocals.has(track.sourceJobId) && !failedVocalDecodes.has(track.sourceJobId)
   );
 
   const shouldOpenFeedbackPrompt = (message: Message): boolean =>
@@ -5920,6 +5949,8 @@ export default function MainApp() {
             key={`score-player-${scorePlayerPlaybackRequestId}`}
             midiUrl={instrumentalMidiUrl}
             vocalTracks={multiTrackAudioTracks}
+            decodedVocals={decodedVocals}
+            vocalsDecoding={vocalsDecoding}
             instrumentalTracks={instrumentalTracks}
             instrumentalBus={instrumentalBus}
             playbackRequestId={scorePlayerPlaybackRequestId}
