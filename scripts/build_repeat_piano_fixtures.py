@@ -18,14 +18,16 @@ import xml.etree.ElementTree as ElementTree
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRECTORY = ROOT / "tests" / "fixtures" / "repeat_navigation"
 TARGET_DIRECTORY = ROOT / "tests" / "fixtures" / "repeat_navigation_piano"
+# .xml, as the upload accepts only .xml and .mxl names: a fixture can be
+# uploaded in the UI as it is.
 FIXTURE_NAMES = (
-    "forward_repeat.musicxml",
-    "volta_endings.musicxml",
-    "da_capo.musicxml",
-    "da_capo_al_fine.musicxml",
+    "forward_repeat.xml",
+    "volta_endings.xml",
+    "da_capo.xml",
+    "da_capo_al_fine.xml",
     "da_capo_al_coda.xml",
-    "dal_segno.musicxml",
-    "dal_segno_al_fine.musicxml",
+    "dal_segno.xml",
+    "dal_segno_al_fine.xml",
     "dal_segno_al_coda.xml",
 )
 VOICE_PART_ID = "P1"

@@ -364,13 +364,13 @@ Baseline source routes verified during design, shown one-based for readability:
 
 | Existing fixture | Expanded source order | Multi-verse assertion |
 | --- | --- | --- |
-| `forward_repeat.musicxml` | 1 2 1 2 3 4 5 | V1 then V2 in repeated block; independent/shared following material. |
-| `volta_endings.musicxml` | 1 2 1 3 4 5 | Second ending uses pass-2 assignment on its first visit. |
-| `da_capo.musicxml` | 1 2 3 4 1 2 3 4 5 | Explicit next-stanza and same-words-on-return variants. |
-| `da_capo_al_fine.musicxml` | 1 2 3 4 1 2 | Return lyrics selected correctly and stop at Fine. |
+| `forward_repeat.xml` | 1 2 1 2 3 4 5 | V1 then V2 in repeated block; independent/shared following material. |
+| `volta_endings.xml` | 1 2 1 3 4 5 | Second ending uses pass-2 assignment on its first visit. |
+| `da_capo.xml` | 1 2 3 4 1 2 3 4 5 | Explicit next-stanza and same-words-on-return variants. |
+| `da_capo_al_fine.xml` | 1 2 3 4 1 2 | Return lyrics selected correctly and stop at Fine. |
 | `da_capo_al_coda.xml` | 1 2 3 4 1 2 3 5 6 | Return and coda have distinct explicit assignments. |
-| `dal_segno.musicxml` | 1 2 3 4 2 3 4 5 | Intro once; returned range assigned separately. |
-| `dal_segno_al_fine.musicxml` | 1 2 3 4 2 3 | Return assignment ends at Fine. |
+| `dal_segno.xml` | 1 2 3 4 2 3 4 5 | Intro once; returned range assigned separately. |
+| `dal_segno_al_fine.xml` | 1 2 3 4 2 3 | Return assignment ends at Fine. |
 | `dal_segno_al_coda.xml` | 1 2 3 4 5 3 4 6 | V2 on returned measures 3–4; coda unchanged unless assigned otherwise. |
 
 Additional fixtures cover three passes, more verses than passes, nested/independent repeats, D.S. plus inner repeats, one-measure repeats, combined endings such as 1–2 versus 3, explicit `time-only`, pickup and tempo changes, nonnumeric lyric IDs, translations, shared chorus/endings, submeasure transitions, different verse melismas, isolated missing syllables, and unaligned stanza text. Explicitly record expansion limitations when the library cannot produce a valid route.

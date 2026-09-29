@@ -122,6 +122,7 @@ class RegressionLlmClient:
                     "split-chords",
                     "two-verses",
                     "repeat-regression",
+                    "midi-republish",
                 )
                 if f"[e2e:{name}]" in transcript
             ),
@@ -224,7 +225,13 @@ class RegressionLlmClient:
                     "synthesize",
                     {"part_index": 0, "lyric_selection": self._verse_one},
                 )
-            if scenario in {"basic", "repeat-piano", "active-measure-written", "active-measure-repeat"}:
+            if scenario in {
+                "basic",
+                "repeat-piano",
+                "active-measure-written",
+                "active-measure-repeat",
+                "midi-republish",
+            }:
                 return self._response(
                     "Starting the confirmed take.",
                     "synthesize",
@@ -244,6 +251,14 @@ class RegressionLlmClient:
 
         if latest.startswith("[e2e:render-solfege]"):
             return self._response("The solfege take is ready to quote. Please confirm to start it.")
+        # midi-republish: a take, then an edit of the score, then another take.
+        if latest.startswith("[e2e:add-solfege]"):
+            return self._response(
+                "Adding solfege to the active score.",
+                "add_solfege_lyric_verse",
+                {"part_id": "Solo"},
+                include_score=True,
+            )
         if latest.startswith("[e2e:render-derived]"):
             return self._response("The derived-part take is ready to quote. Please confirm to start it.")
         if scenario == "two-verses":
@@ -252,7 +267,7 @@ class RegressionLlmClient:
             if "Please sing" in latest:
                 return self._response("The selected verse is ready to quote. Please confirm to start it.")
         if latest.startswith("[e2e:"):
-            if scenario in {"basic", "repeat-piano", "repeat-regression"}:
+            if scenario in {"basic", "repeat-piano", "repeat-regression", "midi-republish"}:
                 return self._response("The take is ready to quote. Please confirm to start it.")
             if scenario in {"active-measure-written", "active-measure-repeat"}:
                 return self._response("The take is ready to quote. Please confirm to start it.")

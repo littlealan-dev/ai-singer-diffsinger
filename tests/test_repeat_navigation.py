@@ -15,10 +15,6 @@ from src.mcp.tools import list_tools
 from src.musicxml.parser import build_performance_measure_map
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "repeat_navigation"
-FIXTURE_FILENAMES = {
-    "da_capo_al_coda": "da_capo_al_coda.xml",
-    "dal_segno_al_coda": "dal_segno_al_coda.xml",
-}
 
 
 def _part_pitch_steps(score: dict) -> str:
@@ -45,7 +41,7 @@ class RepeatNavigationParsingTests(unittest.TestCase):
     }
 
     def _parse_case(self, label: str) -> tuple[dict, dict]:
-        source_path = FIXTURE_DIRECTORY / FIXTURE_FILENAMES.get(label, f"{label}.musicxml")
+        source_path = FIXTURE_DIRECTORY / f"{label}.xml"
         display_score = parse_score(source_path, expand_repeats=False)
         expanded_score = expanded_score_for_synthesis(display_score)
         return display_score, expanded_score
@@ -60,9 +56,7 @@ class RepeatNavigationParsingTests(unittest.TestCase):
     def test_navigation_directions_precede_their_measure_notes(self) -> None:
         """Keep notation symbols over the intended measure, not the next one."""
         navigation_words = ("da capo", "dal segno", "fine")
-        fixture_paths = sorted(
-            [*FIXTURE_DIRECTORY.glob("*.musicxml"), *FIXTURE_DIRECTORY.glob("*.xml")]
-        )
+        fixture_paths = sorted(FIXTURE_DIRECTORY.glob("*.xml"))
         for fixture_path in fixture_paths:
             root = ElementTree.parse(fixture_path).getroot()
             for measure in root.iter("measure"):
@@ -101,7 +95,7 @@ class RepeatNavigationParsingTests(unittest.TestCase):
     def test_expansion_does_not_change_the_display_score(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "repeat-case.musicxml"
-            fixture_path = FIXTURE_DIRECTORY / "volta_endings.musicxml"
+            fixture_path = FIXTURE_DIRECTORY / "volta_endings.xml"
             source_path.write_bytes(fixture_path.read_bytes())
             display_score = parse_score(source_path, expand_repeats=False)
             original_snapshot = deepcopy(display_score)
@@ -119,7 +113,7 @@ class RepeatNavigationParsingTests(unittest.TestCase):
     def test_duration_estimation_selects_written_or_played_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "repeat-case.musicxml"
-            fixture_path = FIXTURE_DIRECTORY / "forward_repeat.musicxml"
+            fixture_path = FIXTURE_DIRECTORY / "forward_repeat.xml"
             source_path.write_bytes(fixture_path.read_bytes())
             display_score = parse_score(source_path, expand_repeats=False)
 
@@ -131,7 +125,7 @@ class RepeatNavigationParsingTests(unittest.TestCase):
         )
 
     def test_performance_measure_map_returns_to_source_measures_for_repeats(self) -> None:
-        source_path = FIXTURE_DIRECTORY / "forward_repeat.musicxml"
+        source_path = FIXTURE_DIRECTORY / "forward_repeat.xml"
         display_score = parse_score(source_path, expand_repeats=False)
         performance_map = display_score["score_summary"]["performance_measure_map"]
 

@@ -624,6 +624,7 @@ def _prepare_app(monkeypatch, overrides=None):
         originating_turn_id: str | None = None,
         voicebank_metadata: dict | None = None,
         audio_track: dict | None = None,
+        expand_repeats: bool | None = None,
         provenance: dict | None = None,
     ) -> None:
         payload = {
@@ -642,6 +643,8 @@ def _prepare_app(monkeypatch, overrides=None):
             payload.update(voicebank_metadata)
         if audio_track:
             payload["audioTrack"] = audio_track
+        if expand_repeats is not None:
+            payload["expandRepeats"] = expand_repeats
         if provenance:
             payload.update(provenance)
         fake_jobs[job_id] = payload
@@ -3483,6 +3486,108 @@ def test_synthesize_auto_enables_patch_for_generated_solfege_verse(client, monke
     assert response.status_code == 200
     assert response.json()["type"] == "chat_text"
     assert started["arguments"]["solfege_pronunciation_patch"] is True
+
+
+def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes(
+    client, monkeypatch
+):
+    """The score player keeps takes of one repeat setting, so the quote says which go.
+
+    Every take rendered in the other order is removed when this take finishes,
+    including the previous take of the part being sung. A take in the same
+    order stays, so it is not named.
+    """
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    lyric_selection = {"id": "lyr_test_1", "number": "1", "name": "1"}
+    part_names = ("Soprano", "Alto", "Tenor")
+    asyncio.run(
+        app.state.sessions.set_score(
+            session_id,
+            {
+                "title": "Test",
+                "selected_verse_number": "1",
+                "selected_lyric_selection": lyric_selection,
+                "parts": [{"part_id": name, "part_name": name, "notes": []} for name in part_names],
+            },
+        )
+    )
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "duration_seconds": 4,
+                "available_verses": ["1"],
+                "selected_verse_number": "1",
+                "parts": [
+                    {
+                        "part_index": index,
+                        "part_id": name,
+                        "part_name": name,
+                        "has_lyrics": True,
+                        "lyric_selections": [lyric_selection],
+                    }
+                    for index, name in enumerate(part_names)
+                ],
+            },
+        )
+    )
+
+    class RecordingQuoteClient(_QuoteThenSynthesizeClient):
+        def __init__(self, arguments):
+            super().__init__(arguments)
+            self.tool_results: list[str] = []
+
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                self.tool_results.append(last)
+            return super().generate(prompt_bundle, history, role=role, **kwargs)
+
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    player_takes = [
+        {"part_id": "Soprano", "label": "Soprano", "expand_repeats": True},
+        {"part_id": "Alto", "label": "Alto", "expand_repeats": True},
+        {"part_id": "Tenor", "label": "Tenor", "expand_repeats": False},
+    ]
+
+    def quote(expand_repeats: bool) -> str:
+        llm_client = RecordingQuoteClient(
+            {"part_id": "Soprano", "voicebank": "Dummy", "lyric_selection": lyric_selection}
+        )
+        app.state.llm_client = llm_client
+        app.state.orchestrator._llm_client = llm_client
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={
+                "message": "sing the soprano part",
+                "expand_repeats": expand_repeats,
+                "score_player_takes": player_takes,
+            },
+        )
+        assert response.status_code == 200
+        quotes = [text for text in llm_client.tool_results if "quote_ready" in text]
+        assert len(quotes) == 1, llm_client.tool_results
+        return quotes[0]
+
+    written_order_quote = quote(False)
+    assert (
+        '"takes_removed_from_player": {"parts": ["Soprano", "Alto"], "rendered_with_repeats": true}'
+        in written_order_quote
+    )
+    with_repeats_quote = quote(True)
+    assert (
+        '"takes_removed_from_player": {"parts": ["Tenor"], "rendered_with_repeats": false}'
+        in with_repeats_quote
+    )
+
+    player_takes = [take for take in player_takes if take["expand_repeats"]]
+    assert "takes_removed_from_player" not in quote(True)
 
 
 def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(

@@ -16,13 +16,13 @@ const FIXTURES = path.resolve(import.meta.dirname, "..", "..", "..", "tests", "f
 const QUARTER_SECONDS = 0.5;
 // Played orders pinned by tests/test_repeat_navigation.py.
 const CASES = [
-  { file: "forward_repeat.musicxml", written: "CDEFG", played: "CDCDEFG" },
-  { file: "volta_endings.musicxml", written: "CDEFG", played: "CDCEFG" },
-  { file: "da_capo.musicxml", written: "CDEFG", played: "CDEFCDEFG" },
-  { file: "da_capo_al_fine.musicxml", written: "CDEFG", played: "CDEFCD" },
+  { file: "forward_repeat.xml", written: "CDEFG", played: "CDCDEFG" },
+  { file: "volta_endings.xml", written: "CDEFG", played: "CDCEFG" },
+  { file: "da_capo.xml", written: "CDEFG", played: "CDEFCDEFG" },
+  { file: "da_capo_al_fine.xml", written: "CDEFG", played: "CDEFCD" },
   { file: "da_capo_al_coda.xml", written: "CDEFGA", played: "CDEFCDEGA" },
-  { file: "dal_segno.musicxml", written: "CDEFG", played: "CDEFDEFG" },
-  { file: "dal_segno_al_fine.musicxml", written: "CDEFG", played: "CDEFDE" },
+  { file: "dal_segno.xml", written: "CDEFG", played: "CDEFDEFG" },
+  { file: "dal_segno_al_fine.xml", written: "CDEFG", played: "CDEFDE" },
   { file: "dal_segno_al_coda.xml", written: "CDEFGAB", played: "CDEFGEFAB" },
 ];
 const MIDI_TOLERANCE_SECONDS = 0.01;
@@ -114,6 +114,12 @@ async function synthesize(page: Page, request: APIRequestContext, sessionId: str
   }, { timeout: 540_000, intervals: [1_000] }).toMatch(/^(completed|failed)$/);
   const state = await getE2EState(page, request, sessionId);
   expect(state.job?.status, `synthesis failed: ${state.job?.error}`).toBe("completed");
+  // The job reports the order it was rendered in: the player plays the
+  // instrumental MIDI in the same order.
+  const progress = await (
+    await api(page, request, `/sessions/${sessionId}/progress?job_id=${jobId}`)
+  ).json();
+  expect(progress.expand_repeats).toBe(expandRepeats);
   return state.synthesis?.duration_seconds ?? 0;
 }
 
@@ -129,8 +135,7 @@ test("vocal audio and instrumental MIDI follow the repeat setting for every navi
       method: "POST",
       multipart: {
         file: {
-          // Uploads accept .xml or .mxl names; .musicxml is the same format.
-          name: testCase.file.replace(/\.musicxml$/, ".xml"),
+          name: testCase.file,
           mimeType: "application/xml",
           buffer: await readFile(path.join(FIXTURES, testCase.file)),
         },

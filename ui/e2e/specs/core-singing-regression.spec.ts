@@ -166,6 +166,41 @@ test.describe("core singing regression", () => {
     expect(state.synthesis?.lyric_selection?.name).toBe("");
   });
 
+  test("loads the new instrumental MIDI when a later take of the same score republishes it", async ({ page, request }, testInfo) => {
+    const midiStatuses: number[] = [];
+    page.on("response", (response) => {
+      if (new URL(response.url()).pathname.endsWith("/instrumental-midi")) midiStatuses.push(response.status());
+    });
+    await uploadFixture(page, "solfege-source-piano.xml");
+    await requestScenario(page, "midi-republish");
+    await waitForAudio(page, request, testInfo);
+    await expect.poll(() => midiStatuses).toEqual([200]);
+    const first = await getE2EState(page, request, sessionId);
+    const firstSignature = first.files?.instrumental_midi_source_signature;
+    expect(firstSignature).toBeTruthy();
+
+    // Adding solfege edits the MusicXML of the same score, so the next take
+    // publishes new instrumental MIDI. (The edited score engraves on two pages,
+    // so this waits on the score version rather than on one preview page.)
+    await sendMessage(page, "[e2e:add-solfege] add solfege to the solo part");
+    await expect.poll(async () => (await getE2EState(page, request, sessionId)).score_version ?? 0, {
+      timeout: 120_000,
+    }).toBeGreaterThan(first.score_version ?? 0);
+    const quoteResponse = await sendMessage(page, "[e2e:render-solfege]");
+    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
+    const fetchesBeforeSecondTake = midiStatuses.length;
+    // The synthesis turn's stream closes when the job finishes.
+    const renderResponse = await confirmSynthesis(page);
+    expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
+    const second = await getE2EState(page, request, sessionId);
+    expect(second.job?.status).toBe("completed");
+    expect(second.files?.instrumental_midi_source_signature).toBeTruthy();
+    expect(second.files?.instrumental_midi_source_signature).not.toBe(firstSignature);
+
+    // The player loads the republished MIDI rather than keeping the first one.
+    await expect.poll(() => midiStatuses.slice(fetchesBeforeSecondTake), { timeout: 15_000 }).toContain(200);
+  });
+
   test("plays deferred repeat-expanded piano MIDI alongside synthesized vocals", async ({ page, request }, testInfo) => {
     const updateDepthWarnings: string[] = [];
     page.on("console", (message) => {

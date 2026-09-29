@@ -324,6 +324,13 @@ def _require_e2e_control(request: Request, settings: Settings) -> None:
         raise HTTPException(status_code=404, detail="Not found.")
 
 
+class ScorePlayerTake(BaseModel):
+    """A take in the UI's score player, as the UI reports it."""
+    part_id: str | None = Field(default=None, max_length=200)
+    label: str = Field(max_length=200)
+    expand_repeats: bool
+
+
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
     message: str
@@ -334,6 +341,9 @@ class ChatRequest(BaseModel):
     # Score notation always remains unchanged; this only controls render order
     # and the estimate used before a synthesis job is started.
     expand_repeats: bool = True
+    # The takes the score player holds. The player keeps takes of one repeat
+    # setting only, so a quote can say which takes a render would remove.
+    score_player_takes: list[ScorePlayerTake] = Field(default_factory=list, max_length=64)
     # Backend-ready structured override. UI controls will be added separately.
     selected_language: str | None = Field(
         default=None,
@@ -885,6 +895,9 @@ def create_app() -> FastAPI:
                 selected_voicebank_id=payload.selected_voicebank_id,
                 selected_language=payload.selected_language,
                 expand_repeats=payload.expand_repeats,
+                score_player_takes=[
+                    take.model_dump() for take in payload.score_player_takes
+                ],
             )
             signed_response = _public_score_payload(
                 _sign_audio_payload_urls(request, response, user_id=user_id)

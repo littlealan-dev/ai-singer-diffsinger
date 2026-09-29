@@ -927,10 +927,10 @@ body.legal-active #root {
 
 .score-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content max-content max-content max-content;
+  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
   grid-template-areas:
-    "subtitles expansion zoom transport actions"
-    "subtitles seek seek seek seek";
+    "subtitles zoom transport actions"
+    "subtitles seek seek seek";
   align-items: center;
   column-gap: 16px;
   row-gap: 8px;
@@ -962,64 +962,6 @@ body.legal-active #root {
    secondary so the header never implies a fresh billable amount. */
 .score-estimate-pending {
   color: rgba(220, 210, 255, 0.55);
-}
-
-.score-expansion-control {
-  grid-area: expansion;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 0;
-  padding: 6px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.score-expansion-control label {
-  display: flex;
-  color: var(--text-strong);
-  font-size: 13px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.score-expansion-control input {
-  appearance: none;
-  width: 42px;
-  height: 24px;
-  margin: 0;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
-  cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease;
-}
-
-.score-expansion-control input::after {
-  content: "";
-  display: block;
-  width: 18px;
-  height: 18px;
-  margin: 2px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 160ms ease;
-}
-
-.score-expansion-control input:checked {
-  border-color: rgba(167, 139, 250, 0.9);
-  background: rgba(139, 92, 246, 0.8);
-}
-
-.score-expansion-control input:checked::after {
-  transform: translateX(18px);
-}
-
-.score-expansion-control input:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
 }
 
 .score-player-transport {
@@ -2004,7 +1946,7 @@ div[id^="fire_app_check_"] {
 
 .composer-menu-bar {
   display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
   min-width: 0;
@@ -2328,6 +2270,65 @@ img.voice-picker-option-avatar {
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: left;
+}
+
+.composer-repeat-toggle {
+  min-width: 0;
+  min-height: 60px;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-strong);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+
+.composer-repeat-toggle:hover {
+  border-color: rgba(155, 134, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(155, 134, 255, 0.14);
+}
+
+.composer-repeat-toggle.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.composer-repeat-toggle input {
+  appearance: none;
+  flex-shrink: 0;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: inherit;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.composer-repeat-toggle input::after {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 160ms ease;
+}
+
+.composer-repeat-toggle input:checked {
+  border-color: rgba(167, 139, 250, 0.9);
+  background: rgba(139, 92, 246, 0.8);
+}
+
+.composer-repeat-toggle input:checked::after {
+  transform: translateX(18px);
 }
 
 .solfege-picker-menu {
@@ -3291,7 +3292,7 @@ img.voice-picker-option-avatar {
   }
 
   .composer-menu-bar {
-    grid-template-columns: 44px repeat(2, minmax(0, 1fr));
+    grid-template-columns: 44px repeat(3, minmax(0, 1fr));
   }
 
   .composer-upload-button {

@@ -160,6 +160,8 @@ export type ProgressResponse = {
   progress?: number;
   audio_url?: string;
   audio_track?: AudioTrackMetadata;
+  /** Whether the take was rendered with repeats; absent for jobs from before it was recorded. */
+  expand_repeats?: boolean;
   job_id?: string;
   job_kind?: string;
   review_required?: boolean;
@@ -197,6 +199,13 @@ export type SynthesisCreditEstimate = {
   };
   billing_components: string[];
   total_estimated_credits: number;
+};
+
+/** A take in the score player, so a quote can say which takes a render removes. */
+export type ScorePlayerTake = {
+  part_id: string | null;
+  label: string;
+  expand_repeats: boolean;
 };
 
 export type ChatStreamEvent = {
@@ -792,14 +801,16 @@ export async function chat(
   message: string,
   selection?: ChatSelection,
   selectedVoicebankId?: string | null,
-  expandRepeats = true
+  expandRepeats = true,
+  scorePlayerTakes: ScorePlayerTake[] = []
 ): Promise<ChatRequestResult> {
   const body: {
     message: string;
     selection?: ChatSelection;
     selected_voicebank_id?: string;
     expand_repeats: boolean;
-  } = { message, expand_repeats: expandRepeats };
+    score_player_takes: ScorePlayerTake[];
+  } = { message, expand_repeats: expandRepeats, score_player_takes: scorePlayerTakes };
   if (selection) {
     body.selection = selection;
   }

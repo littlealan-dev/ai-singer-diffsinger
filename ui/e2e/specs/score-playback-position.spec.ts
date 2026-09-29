@@ -62,13 +62,13 @@ test("follows timing intervals, repeat occurrences and seeks without scanning th
 });
 
 const navigationCases: [string, number[]][] = [
-  ["forward_repeat.musicxml", [1, 2, 1, 2, 3, 4, 5]],
-  ["volta_endings.musicxml", [1, 2, 1, 3, 4, 5]],
-  ["da_capo.musicxml", [1, 2, 3, 4, 1, 2, 3, 4, 5]],
-  ["da_capo_al_fine.musicxml", [1, 2, 3, 4, 1, 2]],
+  ["forward_repeat.xml", [1, 2, 1, 2, 3, 4, 5]],
+  ["volta_endings.xml", [1, 2, 1, 3, 4, 5]],
+  ["da_capo.xml", [1, 2, 3, 4, 1, 2, 3, 4, 5]],
+  ["da_capo_al_fine.xml", [1, 2, 3, 4, 1, 2]],
   ["da_capo_al_coda.xml", [1, 2, 3, 4, 1, 2, 3, 5, 6]],
-  ["dal_segno.musicxml", [1, 2, 3, 4, 2, 3, 4, 5]],
-  ["dal_segno_al_fine.musicxml", [1, 2, 3, 4, 2, 3]],
+  ["dal_segno.xml", [1, 2, 3, 4, 2, 3, 4, 5]],
+  ["dal_segno_al_fine.xml", [1, 2, 3, 4, 2, 3]],
   ["dal_segno_al_coda.xml", [1, 2, 3, 4, 5, 3, 4, 6]],
 ];
 

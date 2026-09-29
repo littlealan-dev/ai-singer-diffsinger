@@ -249,6 +249,11 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
     ):
         assert row in prompt
     assert "Whatever wording you choose" not in prompt
+    # The score player keeps takes of one repeat setting; the quote warns which
+    # takes this render removes, and only when there are any.
+    assert "When the quote has `takes_removed_from_player`" in prompt
+    assert "those takes stay available in the chat" in prompt
+    assert "do not mention the notice when the field is absent" in prompt
     assert "recalculated from the actual generated audio length" in prompt
     assert "an explicit request for confirmation" in prompt
 

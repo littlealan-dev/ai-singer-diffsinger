@@ -38,6 +38,7 @@ class JobStore:
         originating_turn_id: Optional[str] = None,
         voicebank_metadata: Optional[Dict[str, Any]] = None,
         audio_track: Optional[Dict[str, Any]] = None,
+        expand_repeats: Optional[bool] = None,
         provenance: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new job record with initial metadata."""
@@ -58,6 +59,8 @@ class JobStore:
             payload.update(voicebank_metadata)
         if audio_track:
             payload["audioTrack"] = audio_track
+        if expand_repeats is not None:
+            payload["expandRepeats"] = bool(expand_repeats)
         if provenance:
             payload.update(provenance)
         return payload
@@ -81,6 +84,7 @@ class JobStore:
             "scoreTitle",
             "provenanceStatus",
             "originatingTurnId",
+            "expandRepeats",
         }
         if immutable.intersection(payload):
             raise ValueError("Job input provenance may only be set at creation.")
@@ -209,6 +213,9 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "action_required": data.get("actionRequired"),
         "details": data.get("details"),
         "audio_track": data.get("audioTrack"),
+        # The repeat setting this take was rendered with. The player plays the
+        # instrumental MIDI in the same order, so the two stay in sync.
+        "expand_repeats": data.get("expandRepeats"),
         "feedback": data.get("feedback"),
         "actual_duration_seconds": data.get("actualDurationSeconds"),
         "consumed_credits": data.get("consumedCredits"),

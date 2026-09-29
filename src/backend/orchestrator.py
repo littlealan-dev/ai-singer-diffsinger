@@ -295,6 +295,7 @@ class Orchestrator:
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         expand_repeats: bool = True,
+        score_player_takes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
@@ -573,6 +574,7 @@ class Orchestrator:
                     forced_voicebank_id=forced_voicebank_id,
                     forced_language=forced_language,
                     expand_repeats=expand_repeats,
+                    score_player_takes=score_player_takes,
                     workflow_user_message=message,
                     originating_turn_id=turn_id,
                 )
@@ -830,6 +832,7 @@ class Orchestrator:
             originating_turn_id=originating_turn_id,
             voicebank_metadata=voicebank_metadata,
             audio_track=audio_track,
+            expand_repeats=bool(arguments.get("expand_repeats", True)),
             provenance=provenance,
         )
         await asyncio.to_thread(
@@ -1969,6 +1972,7 @@ class Orchestrator:
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
         expand_repeats: bool = True,
+        score_player_takes: Optional[List[Dict[str, Any]]] = None,
         preprocess_job_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
@@ -2058,6 +2062,7 @@ class Orchestrator:
                 forced_voicebank_id=forced_voicebank_id,
                 forced_language=forced_language,
                 expand_repeats=expand_repeats,
+                score_player_takes=score_player_takes,
                 originating_turn_id=originating_turn_id,
             )
             if is_preprocess_attempt:
@@ -6136,6 +6141,7 @@ class Orchestrator:
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
         expand_repeats: bool = True,
+        score_player_takes: Optional[List[Dict[str, Any]]] = None,
         originating_turn_id: Optional[str] = None,
     ) -> "ToolExecutionResult":
         """Execute allowed tool calls and update session state."""
@@ -6705,6 +6711,14 @@ class Orchestrator:
                         "the generated audio length and may differ from this estimate."
                     ),
                 }
+                removed_takes = _score_player_takes_removed_by(
+                    score_player_takes, expand_repeats=expand_repeats
+                )
+                if removed_takes:
+                    quote_payload["takes_removed_from_player"] = {
+                        "parts": removed_takes,
+                        "rendered_with_repeats": not expand_repeats,
+                    }
                 if available_credits is not None:
                     quote_payload["available_credits"] = available_credits
                     quote_payload["balance_after"] = (
@@ -8026,6 +8040,26 @@ class BootstrapPlanBaseline:
     action: str
     lint_findings: List[Dict[str, Any]]
     repair_scopes: List[Dict[str, Any]]
+
+
+def _score_player_takes_removed_by(
+    takes: Optional[List[Dict[str, Any]]],
+    *,
+    expand_repeats: bool,
+) -> List[str]:
+    """Labels of the player's takes that a render in the other order removes.
+
+    The UI's score player keeps takes of one repeat setting only, and plays the
+    instrumental MIDI in that order, so a finished take removes every take
+    rendered with the other setting. That includes the previous take of the
+    same part: it is replaced in any case, but the user should know the new
+    take will not play in its order.
+    """
+    return [
+        str(take.get("label") or take.get("part_id") or "")
+        for take in takes or []
+        if bool(take.get("expand_repeats")) != bool(expand_repeats)
+    ]
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

@@ -149,6 +149,23 @@ def test_build_progress_payload_maps_status_and_fields():
     assert payload["progress"] == 1.0
 
 
+def test_job_records_the_repeat_setting_and_progress_reports_it():
+    """The player plays the instrumental MIDI in the order the take was rendered."""
+    record = JobStore.build_job_payload(
+        job_id="job-written",
+        user_id="user",
+        session_id="session",
+        status="queued",
+        expand_repeats=False,
+    )
+    assert record["expandRepeats"] is False
+    assert build_progress_payload("job-written", record)["expand_repeats"] is False
+    assert build_progress_payload("job-old", {"status": "completed"}).get("expand_repeats") is None
+    # Set once, when the job is created: the audio was rendered in that order.
+    with pytest.raises(ValueError):
+        JobStore().update_job("job-written", expandRepeats=True)
+
+
 def test_build_progress_payload_includes_audio_track_metadata():
     payload = build_progress_payload(
         "job-track",

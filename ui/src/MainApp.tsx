@@ -19,7 +19,7 @@ import {
   register as registerExtendableMediaRecorderEncoder,
 } from "extendable-media-recorder";
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
-import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
+import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -168,6 +168,10 @@ type MultiTrackAudioTrack = {
   // with an older rendition's audio source. Required: it keys the decoded-buffer
   // cache, so a track without it cannot be played or cached correctly.
   sourceJobId: string;
+  // Whether the take was rendered with repeats; unknown for a take from before
+  // jobs recorded it. The player keeps only takes of one repeat setting, and
+  // plays the instrumental MIDI in that order.
+  expandRepeats?: boolean;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -2639,8 +2643,15 @@ export default function MainApp() {
   const activePerformanceMeasureRef = useRef<PerformanceMeasureMapEntry | null>(null);
   const performanceMeasureMapRef = useRef(scoreSummary?.performance_measure_map ?? null);
   performanceMeasureMapRef.current = scoreSummary?.performance_measure_map ?? null;
-  const expandRepeatsRef = useRef(expandRepeats);
-  expandRepeatsRef.current = expandRepeats;
+  // The toggle chooses the repeat setting of the next render. Playback follows
+  // the takes in the player instead, which all share one setting: the
+  // instrumental MIDI and the score cursor play in that order. With no such
+  // take there is nothing to keep in sync, so playback previews the toggle.
+  const playbackExpandRepeats =
+    multiTrackAudioTracks.find((track) => track.expandRepeats !== undefined)?.expandRepeats ??
+    expandRepeats;
+  const playbackExpandRepeatsRef = useRef(playbackExpandRepeats);
+  playbackExpandRepeatsRef.current = playbackExpandRepeats;
   const scorePreviewLayoutRef = useRef(scorePreviewLayout);
   scorePreviewLayoutRef.current = scorePreviewLayout;
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
@@ -2816,7 +2827,7 @@ export default function MainApp() {
 
   const handleScorePlayerPlaybackPositionChange = useCallback((playbackSeconds: number) => {
     const performanceMeasureMap = performanceMeasureMapRef.current;
-    const entries = expandRepeatsRef.current
+    const entries = playbackExpandRepeatsRef.current
       ? performanceMeasureMap?.expanded
       : performanceMeasureMap?.written;
     const activeMeasure = performanceMeasureLookupRef.current(entries, playbackSeconds);
@@ -2875,7 +2886,7 @@ export default function MainApp() {
   // against the newly selected map.
   useEffect(() => {
     activeScoreMeasureRef.current = null;
-  }, [expandRepeats]);
+  }, [playbackExpandRepeats]);
 
   const splitStyle = useMemo(
     () => ({ "--split": `${splitPct}%` }) as CSSProperties,
@@ -3068,7 +3079,7 @@ export default function MainApp() {
       return null;
     });
     setScorePlayerError(null);
-    void fetchInstrumentalMidi(sessionId, expandRepeats)
+    void fetchInstrumentalMidi(sessionId, playbackExpandRepeats)
       .then((blob) => {
         nextUrl = URL.createObjectURL(blob);
         if (disposed) {
@@ -3096,7 +3107,7 @@ export default function MainApp() {
       disposed = true;
       if (nextUrl && !published) URL.revokeObjectURL(nextUrl);
     };
-  }, [expandRepeats, performanceMidi?.has_instrumental_parts, sessionId]);
+  }, [performanceMidi?.has_instrumental_parts, playbackExpandRepeats, sessionId]);
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
   const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
@@ -3180,11 +3191,24 @@ export default function MainApp() {
       audioTrack?: AudioTrackMetadata,
       jobId?: string,
       durationSeconds?: number | null,
-      replaceExistingUrl = false
+      replaceExistingUrl = false,
+      expandRepeats?: boolean
     ) => {
       if (!audioUrl) return;
       const identity = resolveMultiTrackIdentity(audioTrack);
-      setMultiTrackAudioTracks((current) => {
+      setMultiTrackAudioTracks((all) => {
+        // A take in the other repeat order cannot play in sync with this one or
+        // with the instrumental MIDI, which follows this take. Its audio stays
+        // in the chat.
+        const current =
+          expandRepeats === undefined
+            ? all
+            : all.filter(
+                (track) =>
+                  track.key === identity.key ||
+                  track.expandRepeats === undefined ||
+                  track.expandRepeats === expandRepeats
+              );
         const existing = current.find((track) => track.key === identity.key);
         const hasBackendDuration =
           typeof durationSeconds === "number" &&
@@ -3212,13 +3236,14 @@ export default function MainApp() {
             { key: identity.key, audioUrl }
           );
           setError("Couldn't add that audio track. Please retry the render.");
-          return current;
+          return all;
         }
         const nextTrack: MultiTrackAudioTrack = {
           ...identity,
           audioUrl: nextAudioUrl,
           jobId: jobId ?? existing?.jobId,
           sourceJobId: nextSourceJobId,
+          expandRepeats: expandRepeats ?? (isNewTake ? undefined : existing?.expandRepeats),
           durationSeconds: hasBackendDuration
             ? durationSeconds
             : existing?.audioUrl === nextAudioUrl
@@ -3233,13 +3258,14 @@ export default function MainApp() {
             existing.audioUrl === nextTrack.audioUrl &&
             existing.jobId === nextTrack.jobId &&
             existing.sourceJobId === nextTrack.sourceJobId &&
+            existing.expandRepeats === nextTrack.expandRepeats &&
             existing.durationSeconds === nextTrack.durationSeconds &&
             existing.label === nextTrack.label &&
             existing.partId === nextTrack.partId &&
             existing.partIndex === nextTrack.partIndex &&
             existing.verseNumber === nextTrack.verseNumber
           ) {
-            return current;
+            return current.length === all.length ? all : current;
           }
           return current.map((track) => (track.key === identity.key ? nextTrack : track));
         }
@@ -4337,7 +4363,9 @@ export default function MainApp() {
             nextAudioUrl,
             payload.audio_track,
             payload.job_id,
-            payload.actual_duration_seconds
+            payload.actual_duration_seconds,
+            false,
+            payload.expand_repeats
           );
         }
       }
@@ -4701,7 +4729,8 @@ export default function MainApp() {
           payload.audio_track,
           payload.job_id,
           payload.actual_duration_seconds,
-          true
+          true,
+          payload.expand_repeats
         );
       }
       return nextAudioUrl;
@@ -5028,7 +5057,12 @@ export default function MainApp() {
         content,
         selection,
         voicebankId,
-        expandRepeats
+        expandRepeats,
+        multiTrackAudioTracks.flatMap((track) =>
+          track.expandRepeats === undefined
+            ? []
+            : [{ part_id: track.partId ?? null, label: track.label, expand_repeats: track.expandRepeats }]
+        )
       );
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
@@ -5932,6 +5966,33 @@ export default function MainApp() {
                   <ChevronsUpDown size={16} aria-hidden="true" />
                 </button>
               </div>
+              {/* A render setting, like the voice and solfege: it applies to the
+                  next take. The player keeps playing the takes it has. */}
+              <label
+                className={clsx("composer-repeat-toggle", {
+                  disabled: !score || browserMixBounceActive,
+                })}
+                title="Render the next take with repeats, or in written order"
+              >
+                <span className="solfege-picker-trigger-icon" aria-hidden="true">
+                  <Repeat size={16} />
+                </span>
+                <span className="solfege-picker-trigger-copy">
+                  <span className="solfege-picker-trigger-label">Repeats</span>
+                  <span className="solfege-picker-trigger-name">
+                    {expandRepeats ? "With repeats" : "Written order"}
+                  </span>
+                </span>
+                <input
+                  id="expand-repeats-toggle"
+                  type="checkbox"
+                  role="switch"
+                  aria-label="With Repeats"
+                  checked={expandRepeats}
+                  disabled={!score || browserMixBounceActive}
+                  onChange={(event) => setExpandRepeats(event.target.checked)}
+                />
+              </label>
             </div>
           </div>
         </section>
@@ -6009,17 +6070,6 @@ export default function MainApp() {
                     {estimatedInstrumentalCostLabel}
                   </span>
                 )}
-              </div>
-              <div className="score-expansion-control">
-                <label htmlFor="expand-repeats-toggle">With Repeats</label>
-                <input
-                  id="expand-repeats-toggle"
-                  type="checkbox"
-                  role="switch"
-                  checked={expandRepeats}
-                  disabled={!score || browserMixBounceActive}
-                  onChange={(event) => setExpandRepeats(event.target.checked)}
-                />
               </div>
               <div className="zoom-controls">
                 <button
