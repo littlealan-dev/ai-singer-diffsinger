@@ -402,6 +402,72 @@
   color: #cbd5e1;
 }
 
+.billing-credit-rates {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.billing-credit-rates h3 {
+  margin: 0 0 6px;
+  color: #f8fafc;
+  font-size: 0.95rem;
+  text-align: center;
+}
+
+.billing-credit-rates table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.billing-credit-rates th,
+.billing-credit-rates td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  text-align: left;
+  vertical-align: top;
+}
+
+.billing-credit-rates thead th {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.billing-credit-rates tbody th {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.billing-credit-rates tbody td {
+  color: #cbd5e1;
+}
+
+.billing-credit-rates tbody td:nth-child(2) {
+  color: #fff;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.billing-credit-rates tbody tr:last-child th,
+.billing-credit-rates tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.billing-credit-rates p {
+  margin: 8px 0 0;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .billing-shared-features {
   margin-top: 12px;
   padding: 12px 16px;
@@ -553,6 +619,31 @@
 }
 
 @media (max-width: 600px) {
+  .billing-credit-rates thead {
+    display: none;
+  }
+
+  .billing-credit-rates tr {
+    display: grid;
+    gap: 2px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .billing-credit-rates tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .billing-credit-rates th,
+  .billing-credit-rates td {
+    padding: 0;
+    border-bottom: none;
+  }
+
+  .billing-credit-rates tbody td:nth-child(2) {
+    white-space: normal;
+  }
+
   .billing-modal-overlay {
     padding: 0;
     align-items: stretch;

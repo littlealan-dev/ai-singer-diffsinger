@@ -218,7 +218,7 @@ export function AuthModal({ isOpen, onClose, onSuccess, redirectPath }: AuthModa
                     <p className="auth-modal-subtitle">
                         Get 8 free credits every month
                         <br />
-                        About 4 minutes of audio, no time limit
+                        About 4 minutes of vocal audio, no time limit
                     </p>
                     <p className="auth-modal-subtitle auth-modal-note">
                         No password required.

@@ -483,6 +483,7 @@ export function BillingPaywallModal({
                 onCheckout={handleTopupCheckout}
               />
             </div>
+            <CreditRatesTable />
             <div className="billing-shared-features" aria-label="Included in every plan">
               <h3>Included in every plan</h3>
               <ul>
@@ -606,6 +607,41 @@ type TopupCardProps = {
   onCheckout: () => void;
 };
 
+/** Credit usage per kind of generation, as on the marketing site's pricing page. */
+function CreditRatesTable() {
+  return (
+    <div className="billing-credit-rates">
+      <h3>How credits are used</h3>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">What you generate</th>
+            <th scope="col">Credit usage</th>
+            <th scope="col">When it&apos;s charged</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Vocal audio</th>
+            <td>1 credit per 30 seconds</td>
+            <td>For each vocal part, every time you render it</td>
+          </tr>
+          <tr>
+            <th scope="row">Instrumental accompaniment (MIDI)</th>
+            <td>1 credit per 2 minutes</td>
+            <td>Once per uploaded score, regardless of the number of instrument tracks</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Rounded up. Length follows your With repeats setting. The quote shows the exact credits
+        before you confirm, and the final charge uses the actual audio length. Downloading the
+        real-time mix is free.
+      </p>
+    </div>
+  );
+}
+
 function TopupPlanCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
   const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
   return (
@@ -636,7 +672,7 @@ function TopupPlanCard({ billing, busy, emphasized, disabled, onCheckout }: Topu
         </li>
         <li>
           <Check size={15} aria-hidden="true" />
-          <span>Good for one-off exports or extra renders</span>
+          <span>Good for extra renders</span>
         </li>
         <li>
           <Check size={15} aria-hidden="true" />

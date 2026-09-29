@@ -125,7 +125,7 @@ export function getDisplayPlans(
         priceSuffix: "/mo",
         creditsAmountLabel: `${plan.monthlyCredits} credits`,
         creditsLabel: `${plan.monthlyCredits} credits reset every month`,
-        audioLabel: `About ${plan.audioMinutes} minutes of audio monthly`,
+        audioLabel: `About ${plan.audioMinutes} minutes of vocal audio monthly`,
       };
     }
 
@@ -164,7 +164,7 @@ export function getDisplayPlans(
           : undefined,
       creditsAmountLabel: `${plan.monthlyCredits} credits`,
       creditsLabel: `${plan.monthlyCredits} credits reset every month`,
-      audioLabel: `About ${plan.audioMinutes} minutes of audio monthly`,
+      audioLabel: `About ${plan.audioMinutes} minutes of vocal audio monthly`,
     };
   });
 }
