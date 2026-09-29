@@ -18,6 +18,10 @@ FLUIDR3_SOUNDFONT_ID = "FluidR3_GM"
 FLUIDR3_MELODIC_BANK = 0
 FLUIDR3_PERCUSSION_BANK = 128
 FLUIDR3_PERCUSSION_PROGRAMS = {0, 8, 16, 24, 25, 32, 40, 48}
+# The unresolved reason of a part that declares no instrument: the LLM decides
+# whether it is an instrument at all.
+UNDECLARED_INSTRUMENT_ROLE = "undeclared_instrument_role"
+NOT_INSTRUMENTAL_ROLE = "not_instrumental"
 
 
 def build_instrument_program_summary(
@@ -47,9 +51,18 @@ def build_instrument_program_summary(
         )
         part["instruments"] = instruments
         for instrument in instruments:
+            instrument_id = instrument["score_instrument_id"]
+            if instrument["instrumental_candidate"]:
+                # The score declares no instrument for this part, so only the
+                # LLM can tell an accompaniment from a vocal line written
+                # without lyrics: it answers with a preset or "not_instrumental".
+                if instrument_id not in seen_ids:
+                    seen_ids.add(instrument_id)
+                    unresolved_ids.append(instrument_id)
+                    unresolved_reasons[instrument_id] = UNDECLARED_INSTRUMENT_ROLE
+                continue
             if not instrument["eligible_for_instrumental_midi"]:
                 continue
-            instrument_id = instrument["score_instrument_id"]
             # The parser can expose the same MusicXML route on multiple staff
             # views. The exporter has one track for that route, so resolve it once.
             if instrument_id in seen_ids:
@@ -89,6 +102,12 @@ def instrumental_programs_by_part(
             has_lyrics=bool(declaration.get("has_lyrics")),
             note_count=1,
         )
+        for item in instruments:
+            # A part declaring no instrument plays only once the LLM gave it a preset.
+            if item["instrumental_candidate"] and assignments and _normalise_preset(
+                assignments.get(item["score_instrument_id"])
+            ):
+                item["eligible_for_instrumental_midi"] = True
         eligible = [item for item in instruments if item["eligible_for_instrumental_midi"]]
         if not eligible and (not include_ineligible or not instruments):
             continue
@@ -137,6 +156,11 @@ def apply_llm_program_assignments(
         return summary, _resolution_required_payload(expected_ids, "instrument_program_assignments must be an array.")
 
     instrument_index = _summary_instrument_index(summary)
+    candidate_ids = {
+        instrument_id
+        for instrument_id in expected_ids
+        if any(item.get("instrumental_candidate") for item in instrument_index.get(instrument_id, []))
+    }
     supplied: Dict[str, Dict[str, Any]] = {}
     invalid: List[str] = []
     for item in assignments:
@@ -161,6 +185,21 @@ def apply_llm_program_assignments(
         if not isinstance(evidence, list) or not all(isinstance(value, str) for value in evidence):
             invalid.append(f"{instrument_id} evidence must be an array of strings.")
             continue
+        role = item.get("role", "instrumental")
+        if role == NOT_INSTRUMENTAL_ROLE:
+            if instrument_id not in candidate_ids:
+                invalid.append(
+                    f"{instrument_id} declares an instrument, so it needs a playback_preset."
+                )
+                continue
+            if item.get("playback_preset") is not None:
+                invalid.append(f"{instrument_id} is not instrumental, so omit playback_preset.")
+                continue
+            supplied[instrument_id] = {"role": NOT_INSTRUMENTAL_ROLE, "evidence": list(evidence)}
+            continue
+        if role != "instrumental":
+            invalid.append(f"{instrument_id} role must be instrumental or not_instrumental.")
+            continue
         preset = _normalise_preset(item.get("playback_preset"))
         matching_instruments = instrument_index.get(instrument_id, [])
         if not preset or not matching_instruments or not _valid_preset_for_instrument(preset, matching_instruments[0]):
@@ -173,14 +212,31 @@ def apply_llm_program_assignments(
 
     missing = [instrument_id for instrument_id in expected_ids if instrument_id not in supplied]
     if missing:
-        return summary, _resolution_required_payload(missing, "A FluidR3 playback preset is required for every listed instrumental route.")
+        message = "A FluidR3 playback preset is required for every listed instrumental route."
+        if candidate_ids.intersection(missing):
+            message += (
+                " A route whose reason is undeclared_instrument_role takes either a preset"
+                " or role not_instrumental."
+            )
+        return summary, _resolution_required_payload(missing, message)
 
+    instrumental_ids = resolution.setdefault("instrumental_score_instrument_ids", [])
     for instrument_id, assignment in supplied.items():
         for instrument in instrument_index[instrument_id]:
+            instrument["program_evidence"] = assignment["evidence"]
+            if assignment.get("role") == NOT_INSTRUMENTAL_ROLE:
+                instrument["instrumental_role"] = NOT_INSTRUMENTAL_ROLE
+                instrument["program_source"] = "llm_not_instrumental"
+                continue
             instrument["playback_preset"] = assignment["playback_preset"]
             instrument["resolved_gm_program"] = assignment["playback_preset"]["program"]
             instrument["program_source"] = "llm_inferred"
-            instrument["program_evidence"] = assignment["evidence"]
+            if instrument_id in candidate_ids:
+                instrument["instrumental_role"] = "instrumental"
+                instrument["eligible_for_instrumental_midi"] = True
+        if instrument_id in candidate_ids and assignment.get("role") != NOT_INSTRUMENTAL_ROLE:
+            if instrument_id not in instrumental_ids:
+                instrumental_ids.append(instrument_id)
     resolution["unresolved_score_instrument_ids"] = []
     resolution["unresolved_reasons"] = {}
     return summary, None
@@ -265,13 +321,14 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
             "midi_by_id": midi_by_id,
             "direction_words": [],
             "has_lyrics": False,
+            "has_unpitched_notes": False,
         }
 
     for part in _children_named(root, "part"):
         raw_part_id = str(part.attrib.get("id") or "")
         declaration = score_parts.setdefault(
             raw_part_id,
-            {"part_name": None, "midi_devices": {}, "instruments": [], "midi_by_id": {}, "direction_words": [], "has_lyrics": False},
+            {"part_name": None, "midi_devices": {}, "instruments": [], "midi_by_id": {}, "direction_words": [], "has_lyrics": False, "has_unpitched_notes": False},
         )
         for measure in _children_named(part, "measure"):
             measure_number = str(measure.attrib.get("number") or "")
@@ -292,6 +349,8 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
                 for text in _children_named(lyric, "text")
             ):
                 declaration["has_lyrics"] = True
+            if _descendants_named(measure, "unpitched"):
+                declaration["has_unpitched_notes"] = True
     return score_parts
 
 
@@ -342,8 +401,14 @@ def _part_instruments(
         native_bank = native.get("native_midi_bank")
         percussion = native_channel == 10
         synthetic = bool(source.get("synthetic"))
-        # A synthetic placeholder cannot be targeted by the MIDI exporter and
-        # must never make synthesis wait for an LLM assignment.
+        # A part that declares no instrument is either an accompaniment or a
+        # vocal line written without lyrics; the score cannot tell which, so it
+        # becomes a candidate the LLM decides (a preset, or not instrumental).
+        # Unpitched notes carry no drum pitches without a declaration, so such
+        # a part cannot be played and never waits on the LLM.
+        instrumental_candidate = (
+            synthetic and not has_lyrics and not declaration.get("has_unpitched_notes")
+        )
         has_explicit_midi = isinstance(native_program, int) or isinstance(native_channel, int)
         # MusicXML's standard sound IDs use the voice.* family for vocal
         # sounds, independently of the MIDI playback preset. Do not infer
@@ -383,6 +448,7 @@ def _part_instruments(
                 "program_evidence": ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
                 "direction_words": list(declaration.get("direction_words") or []),
                 "eligible_for_instrumental_midi": eligible,
+                "instrumental_candidate": instrumental_candidate,
                 "is_explicit_vocal": is_explicit_vocal,
                 "is_percussion": percussion,
                 "synthetic": synthetic,

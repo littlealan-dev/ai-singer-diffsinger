@@ -445,6 +445,20 @@ class _QuoteThenSynthesizeClient:
         )
 
 
+class _RecordingQuoteClient(_QuoteThenSynthesizeClient):
+    """Also records each tool result the model receives, such as the quote."""
+
+    def __init__(self, arguments: dict):
+        super().__init__(arguments)
+        self.tool_results: list[str] = []
+
+    def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+        last = history[-1].get("content", "") if history else ""
+        if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+            self.tool_results.append(last)
+        return super().generate(prompt_bundle, history, role=role, **kwargs)
+
+
 _STALE_LLM_STUB_SKIP = (
     "Stub LLM predates the lyric_selection and billable-quote contracts: it re-emits "
     "the same synthesize call, so synthesis is never reached and some of these spin "
@@ -3535,17 +3549,6 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
         )
     )
 
-    class RecordingQuoteClient(_QuoteThenSynthesizeClient):
-        def __init__(self, arguments):
-            super().__init__(arguments)
-            self.tool_results: list[str] = []
-
-        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
-            last = history[-1].get("content", "") if history else ""
-            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
-                self.tool_results.append(last)
-            return super().generate(prompt_bundle, history, role=role, **kwargs)
-
     monkeypatch.setattr(
         "src.backend.orchestrator.synthesize_preflight_action_required",
         lambda score, part_index: None,
@@ -3557,7 +3560,7 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
     ]
 
     def quote(expand_repeats: bool) -> str:
-        llm_client = RecordingQuoteClient(
+        llm_client = _RecordingQuoteClient(
             {"part_id": "Soprano", "voicebank": "Dummy", "lyric_selection": lyric_selection}
         )
         app.state.llm_client = llm_client
@@ -3588,6 +3591,105 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
 
     player_takes = [take for take in player_takes if take["expand_repeats"]]
     assert "takes_removed_from_player" not in quote(True)
+
+
+def test_quote_charges_instrumentals_for_an_undeclared_part_only_if_the_llm_calls_it_one(
+    client, monkeypatch
+):
+    """A part declaring no instrument is priced by the LLM's role decision."""
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    lyric_selection = {"id": "lyr_test_1", "number": "1", "name": "1"}
+    asyncio.run(
+        app.state.sessions.set_score(
+            session_id,
+            {
+                "title": "Test",
+                "selected_verse_number": "1",
+                "selected_lyric_selection": lyric_selection,
+                "parts": [
+                    {"part_id": "Sop", "part_name": "Sop", "notes": []},
+                    {"part_id": "Piano", "part_name": "Piano", "notes": []},
+                ],
+            },
+        )
+    )
+    piano = {
+        "score_instrument_id": "P3:default",
+        "synthetic": True,
+        "instrumental_candidate": True,
+        "eligible_for_instrumental_midi": False,
+        "is_percussion": False,
+        "playback_preset": None,
+    }
+    asyncio.run(
+        app.state.sessions.set_score_summary(
+            session_id,
+            {
+                "title": "Test",
+                "duration_seconds": 4,
+                "available_verses": ["1"],
+                "selected_verse_number": "1",
+                "parts": [
+                    {
+                        "part_index": 0,
+                        "part_id": "Sop",
+                        "part_name": "Sop",
+                        "has_lyrics": True,
+                        "lyric_selections": [lyric_selection],
+                    },
+                    {
+                        "part_index": 1,
+                        "part_id": "Piano",
+                        "part_name": "Piano",
+                        "has_lyrics": False,
+                        "instruments": [piano],
+                    },
+                ],
+                "instrument_program_resolution": {
+                    "instrumental_score_instrument_ids": [],
+                    "unresolved_score_instrument_ids": ["P3:default"],
+                    "unresolved_reasons": {"P3:default": "undeclared_instrument_role"},
+                    "playback_profile": "FluidR3_GM",
+                },
+            },
+        )
+    )
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+
+    def quote(assignment: dict) -> dict:
+        llm_client = _RecordingQuoteClient(
+            {
+                "part_id": "Sop",
+                "voicebank": "Dummy",
+                "lyric_selection": lyric_selection,
+                "instrument_program_assignments": [
+                    {"score_instrument_id": "P3:default", "source": "llm_inferred", **assignment}
+                ],
+            }
+        )
+        app.state.llm_client = llm_client
+        app.state.orchestrator._llm_client = llm_client
+        response = test_client.post(
+            f"/sessions/{session_id}/chat", json={"message": "sing the soprano part"}
+        )
+        assert response.status_code == 200
+        quotes = [text for text in llm_client.tool_results if "quote_ready" in text]
+        assert len(quotes) == 1, llm_client.tool_results
+        return json.loads(quotes[0][quotes[0].index("{"):])
+
+    as_piano = quote(
+        {"playback_preset": {"soundfont_id": "FluidR3_GM", "bank": 0, "program": 0, "kind": "melodic"}}
+    )
+    assert as_piano["estimate"]["instrumentals"]["has_instrumental_parts"] is True
+    assert as_piano["instrumental_credits"] > 0
+    as_vocal = quote({"role": "not_instrumental"})
+    assert as_vocal["estimate"]["instrumentals"]["has_instrumental_parts"] is False
+    assert as_vocal["instrumental_credits"] == 0
 
 
 def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(

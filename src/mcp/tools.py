@@ -1940,8 +1940,17 @@ TOOLS: List[Tool] = [
                             },
                             "source": {"type": "string", "const": "llm_inferred"},
                             "evidence": {"type": "array", "items": {"type": "string"}},
+                            "role": {
+                                "type": "string",
+                                "enum": ["instrumental", "not_instrumental"],
+                                "description": (
+                                    "not_instrumental only for a route whose unresolved reason is "
+                                    "undeclared_instrument_role and that is not an instrument; "
+                                    "then omit playback_preset."
+                                ),
+                            },
                         },
-                        "required": ["score_instrument_id", "playback_preset", "source"],
+                        "required": ["score_instrument_id", "source"],
                         "additionalProperties": False,
                     },
                 },
@@ -2167,8 +2176,10 @@ TOOLS: List[Tool] = [
                     "description": (
                         "For every ID in score_summary.instrument_program_resolution."
                         "unresolved_score_instrument_ids, provide the LLM-inferred "
-                        "target FluidR3 playback preset before synthesis. Omit only "
-                        "when that unresolved-ID list is empty."
+                        "target FluidR3 playback preset before synthesis, or, for a "
+                        "route whose reason is undeclared_instrument_role and that is "
+                        "not an instrument, role not_instrumental. Omit only when that "
+                        "unresolved-ID list is empty."
                     ),
                     "items": {
                         "type": "object",
@@ -2190,8 +2201,17 @@ TOOLS: List[Tool] = [
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
+                            "role": {
+                                "type": "string",
+                                "enum": ["instrumental", "not_instrumental"],
+                                "description": (
+                                    "not_instrumental only for a route whose unresolved reason is "
+                                    "undeclared_instrument_role and that is not an instrument; "
+                                    "then omit playback_preset."
+                                ),
+                            },
                         },
-                        "required": ["score_instrument_id", "playback_preset", "source"],
+                        "required": ["score_instrument_id", "source"],
                         "additionalProperties": False,
                     },
                 },

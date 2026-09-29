@@ -7,7 +7,12 @@ import pytest
 from music21 import midi
 
 from src.api.score import parse_score
-from src.musicxml.instrument_programs import apply_llm_program_assignments, instrumental_programs_by_part
+from src.backend.synthesis_pricing import score_has_instrumental_parts
+from src.musicxml.instrument_programs import (
+    apply_llm_program_assignments,
+    instrumental_programs_by_part,
+    llm_program_assignments_from_summary,
+)
 from src.musicxml.performance_midi import build_instrumental_performance_midis
 
 
@@ -327,3 +332,151 @@ def test_vocal_sounding_part_name_does_not_override_instrument_facts(tmp_path: P
     assert facts["is_explicit_vocal"] is False
     assert facts["eligible_for_instrumental_midi"] is True
     assert facts["resolved_gm_program"] == 24
+
+
+# Like assets/test_data/happy-birthday-transcribed.xml: the voices have lyrics
+# and no part declares an instrument, including the two-staff Piano.
+UNDECLARED_ACCOMPANIMENT_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Sop</part-name></score-part>
+    <score-part id="P2"><part-name>Tenor</part-name></score-part>
+    <score-part id="P3"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric><text>Hap</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>1</divisions><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>"""
+
+
+def _undeclared_accompaniment(tmp_path: Path) -> tuple[Path, dict]:
+    source = tmp_path / "undeclared-accompaniment.xml"
+    source.write_text(UNDECLARED_ACCOMPANIMENT_XML, encoding="utf-8")
+    return source, parse_score(source)["score_summary"]
+
+
+def _instruments_by_id(summary: dict) -> dict[str, dict]:
+    return {
+        instrument["score_instrument_id"]: instrument
+        for part in summary["parts"]
+        for instrument in part.get("instruments", [])
+    }
+
+
+def test_parts_without_an_instrument_or_lyrics_await_the_llm_role_decision(tmp_path: Path) -> None:
+    """Only the LLM can tell a Piano from a Tenor written without lyrics."""
+    _source, summary = _undeclared_accompaniment(tmp_path)
+    resolution = summary["instrument_program_resolution"]
+    assert resolution["instrumental_score_instrument_ids"] == []
+    assert resolution["unresolved_score_instrument_ids"] == ["P2:default", "P3:default"]
+    assert resolution["unresolved_reasons"] == {
+        "P2:default": "undeclared_instrument_role",
+        "P3:default": "undeclared_instrument_role",
+    }
+    assert score_has_instrumental_parts(summary) is False
+    # A sung part is never a candidate.
+    assert "P1:default" not in resolution["unresolved_score_instrument_ids"]
+
+
+def test_llm_role_decision_makes_the_piano_a_midi_track_and_keeps_the_tenor_singable(
+    tmp_path: Path,
+) -> None:
+    source, summary = _undeclared_accompaniment(tmp_path)
+    resolved, action = apply_llm_program_assignments(
+        summary,
+        [
+            {
+                "score_instrument_id": "P3:default",
+                "playback_preset": fluidr3_preset(program=0),
+                "source": "llm_inferred",
+                "evidence": ["part-name: Piano"],
+            },
+            {
+                "score_instrument_id": "P2:default",
+                "role": "not_instrumental",
+                "source": "llm_inferred",
+                "evidence": ["part-name: Tenor"],
+            },
+        ],
+    )
+    assert action is None
+    resolution = resolved["instrument_program_resolution"]
+    assert resolution["unresolved_score_instrument_ids"] == []
+    assert resolution["instrumental_score_instrument_ids"] == ["P3:default"]
+    assert score_has_instrumental_parts(resolved) is True
+    instruments = _instruments_by_id(resolved)
+    assert instruments["P3:default"]["eligible_for_instrumental_midi"] is True
+    assert instruments["P3:default"]["program_source"] == "llm_inferred"
+    assert instruments["P2:default"]["eligible_for_instrumental_midi"] is False
+    assert instruments["P2:default"]["instrumental_role"] == "not_instrumental"
+
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        instrument_program_assignments=llm_program_assignments_from_summary(resolved),
+    )
+    eligible = {part["raw_part_id"]: part["eligible"] for part in result["instrumental_parts"]}
+    assert eligible["P3"] is True
+    assert eligible.get("P2") is not True
+    assert result["has_instrumental_parts"] is True
+    assert (tmp_path / "written.mid").is_file()
+
+
+def test_an_undeclared_part_the_llm_calls_vocal_gets_no_midi_or_charge(tmp_path: Path) -> None:
+    source, summary = _undeclared_accompaniment(tmp_path)
+    resolved, action = apply_llm_program_assignments(
+        summary,
+        [
+            {"score_instrument_id": instrument_id, "role": "not_instrumental", "source": "llm_inferred"}
+            for instrument_id in ("P2:default", "P3:default")
+        ],
+    )
+    assert action is None
+    assert resolved["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
+    assert score_has_instrumental_parts(resolved) is False
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        instrument_program_assignments=llm_program_assignments_from_summary(resolved),
+    )
+    assert result["has_instrumental_parts"] is False
+
+
+def test_an_undeclared_part_left_unanswered_asks_for_a_preset_or_role(tmp_path: Path) -> None:
+    _source, summary = _undeclared_accompaniment(tmp_path)
+    _unchanged, action = apply_llm_program_assignments(summary, None)
+    assert action is not None
+    assert action["unresolved_score_instrument_ids"] == ["P2:default", "P3:default"]
+    assert "role not_instrumental" in action["message"]
+
+
+def test_a_declared_instrument_cannot_be_marked_not_instrumental() -> None:
+    with TemporaryDirectory() as temp_dir:
+        source = Path(temp_dir) / "missing-program.musicxml"
+        source.write_text(MISSING_PROGRAM_XML, encoding="utf-8")
+        summary = parse_score(source)["score_summary"]
+    _unchanged, action = apply_llm_program_assignments(
+        summary,
+        [{"score_instrument_id": "P1-I1", "role": "not_instrumental", "source": "llm_inferred"}],
+    )
+    assert action is not None
+    assert "needs a playback_preset" in action["message"]

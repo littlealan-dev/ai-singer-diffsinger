@@ -6604,7 +6604,7 @@ class Orchestrator:
                     quote_args,
                     current_score=current_score,
                 )
-                _validated_summary, instrument_precheck = apply_llm_program_assignments(
+                validated_summary, instrument_precheck = apply_llm_program_assignments(
                     score_summary if isinstance(score_summary, dict) else {},
                     quote_args.get("instrument_program_assignments"),
                 )
@@ -6638,7 +6638,9 @@ class Orchestrator:
                 )
                 if not isinstance(score_id, str) or not score_id or not isinstance(score_version_no, int):
                     raise ValueError("The current score identity is unavailable for quoting.")
-                has_instrumentals = score_has_instrumental_parts(score_summary)
+                # Priced with the quote's assignments: a part that declares no
+                # instrument is instrumental only if the LLM gave it a preset.
+                has_instrumentals = score_has_instrumental_parts(validated_summary)
                 charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
                 charge_required = (
                     has_instrumentals

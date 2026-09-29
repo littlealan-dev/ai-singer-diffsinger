@@ -506,6 +506,15 @@ def test_build_system_prompt_requires_llm_program_assignments_for_unresolved_ins
     assert "source` to exactly `llm_inferred`" in prompt
     assert "present a new billable synthesis quote" in prompt
     assert "do not retry synthesis immediately" in prompt
+    # A part declaring no instrument: the model decides whether it is one.
+    assert "`undeclared_instrument_role` means the score declares no instrument" in prompt
+    # Lyrics already decided the part is not vocal-with-words; the model weighs
+    # every fact of the part rather than a prescribed few.
+    assert "the missing lyrics are not evidence either way" in prompt
+    assert "Decide from all parser-visible entries of that part in `score_summary.parts[]`" in prompt
+    assert "chiefly its `part_name`" not in prompt
+    assert "set `role` to `not_instrumental` and omit `playback_preset`" in prompt
+    assert "only for a route whose unresolved reason is `undeclared_instrument_role`" in prompt
 
 
 def test_build_system_prompt_shows_none_when_parsed_score_json_not_provided() -> None:
