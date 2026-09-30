@@ -213,6 +213,28 @@ export type InstrumentalTrackState = {
   percussion?: boolean;
 };
 
+/**
+ * The row key of an instrumental part. A part written on several staves, such
+ * as a piano, arrives as one entry and one MIDI track per staff, all sharing
+ * its raw part ID, so all of them get one row.
+ */
+const instrumentalTrackKey = (part: InstrumentalPart): string =>
+  `inst-${part.raw_part_id || part.part_index}`;
+
+/**
+ * The row that controls MIDI track `index`. The MIDI has one track per
+ * eligible entry, in order, and `midiTrackKeys` holds each track's row key.
+ */
+const instrumentalTrackForMidiTrack = (
+  index: number,
+  midiTrackKeys: readonly string[],
+  instrumentalTracks: InstrumentalTrackState[]
+): InstrumentalTrackState | null => {
+  const key = midiTrackKeys[index];
+  if (key !== undefined) return instrumentalTracks.find((track) => track.key === key) ?? null;
+  return instrumentalTracks.length === 1 ? instrumentalTracks[0] : null;
+};
+
 type InstrumentalBusState = {
   muted: boolean;
   solo: boolean;
@@ -660,6 +682,8 @@ type ScorePlayerEngineProps = {
   /** True while any take in the player is still being downloaded and decoded. */
   vocalsDecoding: boolean;
   instrumentalTracks?: InstrumentalTrackState[];
+  /** The row key of each instrumental MIDI track, in track order. */
+  instrumentalMidiTrackKeys?: readonly string[];
   instrumentalBus: InstrumentalBusState;
   playbackRequestId: number;
   onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
@@ -813,11 +837,13 @@ const ScorePlayerMixerBridge = ({
   midiTrackCount,
   vocalTracks,
   instrumentalTracks = [],
+  instrumentalMidiTrackKeys = [],
   instrumentalBus,
 }: {
   midiTrackCount: number;
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks?: InstrumentalTrackState[];
+  instrumentalMidiTrackKeys?: readonly string[];
   instrumentalBus: InstrumentalBusState;
 }) => {
   const controls = usePlaylistControls();
@@ -839,7 +865,7 @@ const ScorePlayerMixerBridge = ({
     const hasIndividualInstrumentSolo = instrumentalTracks.some((track) => track.solo);
     const busGain = dbToGain(instrumentalBus.levelDb);
     for (let i = 0; i < midiTrackCount; i++) {
-      const track = instrumentalTracks[i] ?? (instrumentalTracks.length === 1 ? instrumentalTracks[0] : null);
+      const track = instrumentalTrackForMidiTrack(i, instrumentalMidiTrackKeys, instrumentalTracks);
       if (track) {
         const effectiveSolo = hasIndividualInstrumentSolo ? track.solo : instrumentalBus.solo;
         currentControls.setTrackMute(i, instrumentalBus.muted || track.muted);
@@ -866,6 +892,7 @@ const ScorePlayerMixerBridge = ({
     instMixerSignature,
     instrumentalBusSignature,
     instrumentalTracks,
+    instrumentalMidiTrackKeys,
     instrumentalBus,
     vocalTracks,
   ]);
@@ -898,6 +925,7 @@ const ScorePlayerEngine = ({
   decodedVocals,
   vocalsDecoding,
   instrumentalTracks = [],
+  instrumentalMidiTrackKeys = [],
   instrumentalBus,
   playbackRequestId,
   onControlsChange,
@@ -1010,8 +1038,11 @@ const ScorePlayerEngine = ({
   const configuredMidiTracks = useMemo(
     () =>
       midiTracks.map((track, index) => {
-        const instrumentalTrack =
-          instrumentalTracks[index] ?? (instrumentalTracks.length === 1 ? instrumentalTracks[0] : null);
+        const instrumentalTrack = instrumentalTrackForMidiTrack(
+          index,
+          instrumentalMidiTrackKeys,
+          instrumentalTracks
+        );
         if (!instrumentalTrack) return track;
 
         let changed = false;
@@ -1024,7 +1055,7 @@ const ScorePlayerEngine = ({
         return changed ? { ...track, clips } : track;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [midiTracks, instrumentalProgramSignature]
+    [midiTracks, instrumentalProgramSignature, instrumentalMidiTrackKeys]
   );
   // useAudioTracks rebuilds every track object whenever its configs change,
   // and until it has processed the new configs it still exposes its previous
@@ -1158,6 +1189,7 @@ const ScorePlayerEngine = ({
         midiTrackCount={midiTracks.length}
         vocalTracks={playerVocalTracks}
         instrumentalTracks={instrumentalTracks}
+        instrumentalMidiTrackKeys={instrumentalMidiTrackKeys}
         instrumentalBus={instrumentalBus}
       />
       <ScorePlayerSeekBar
@@ -2989,19 +3021,32 @@ export default function MainApp() {
   );
   const noOpSingleTrackExport = isNoOpSingleTrackExport(multiTrackAudioTracks);
 
+  const instrumentalMidiTrackKeys = useMemo(
+    () =>
+      (performanceMidi?.instrumental_parts ?? [])
+        .filter((part) => part.eligible)
+        .map(instrumentalTrackKey),
+    [performanceMidi]
+  );
+
   useEffect(() => {
     if (!performanceMidi?.instrumental_parts) {
       setInstrumentalTracks([]);
       return;
     }
     const eligible = performanceMidi.instrumental_parts.filter((p) => p.eligible);
+    // One row per part: a part's later staves share its first staff's row.
+    const rowParts = eligible.filter(
+      (part, index) =>
+        eligible.findIndex((other) => instrumentalTrackKey(other) === instrumentalTrackKey(part)) === index
+    );
     setInstrumentalTracks((current) => {
-      return eligible.map((part) => {
+      return rowParts.map((part) => {
         const existing = part.raw_part_id
           ? current.find((track) => track.rawPartId === part.raw_part_id)
           : current.find((track) => track.partId === part.part_id);
         return {
-          key: `inst-${part.raw_part_id || part.part_index}`,
+          key: instrumentalTrackKey(part),
           partId: part.part_id,
           rawPartId: part.raw_part_id,
           partIndex: part.part_index,
@@ -6013,6 +6058,7 @@ export default function MainApp() {
             decodedVocals={decodedVocals}
             vocalsDecoding={vocalsDecoding}
             instrumentalTracks={instrumentalTracks}
+            instrumentalMidiTrackKeys={instrumentalMidiTrackKeys}
             instrumentalBus={instrumentalBus}
             playbackRequestId={scorePlayerPlaybackRequestId}
             onControlsChange={handleScorePlayerControlsChange}

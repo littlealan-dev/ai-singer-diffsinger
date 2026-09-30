@@ -15,7 +15,7 @@ from src.musicxml.part_reference import load_musicxml_score, map_parser_part_ind
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 
 
-PERFORMANCE_MIDI_VERSION = 8
+PERFORMANCE_MIDI_VERSION = 9
 
 
 def build_instrumental_performance_midis(
@@ -80,23 +80,23 @@ def _instrumental_part_metadata(
     programs_by_part: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
+    # A part with lyrics is sung, whatever instrument or program it declares.
+    # music21 splits a multi-staff part into one part per staff, so lyrics on
+    # any staff make every staff of that MusicXML part vocal.
+    part_raw_ids = [
+        raw_part_ids.get(index, str(part.id or "")) for index, part in enumerate(score.parts)
+    ]
+    raw_part_ids_with_lyrics = {
+        raw_part_id for raw_part_id, part in zip(part_raw_ids, score.parts) if _part_has_lyrics(part)
+    }
     for index, part in enumerate(score.parts):
-        raw_part_id = raw_part_ids.get(index, str(part.id or ""))
+        raw_part_id = part_raw_ids[index]
         program_facts = programs_by_part.get(raw_part_id, {})
         is_explicit_vocal = bool(program_facts.get("is_explicit_vocal"))
         score_instrument = part.getInstrument(returnDefault=False)
-        has_lyrics = _part_has_lyrics(part)
-        is_vocal = isinstance(score_instrument, instrument.Vocalist)
-        program = getattr(score_instrument, "midiProgram", None)
+        has_lyrics = raw_part_id in raw_part_ids_with_lyrics
         channel = getattr(score_instrument, "midiChannel", None)
-        has_explicit_non_vocal_instrument = (
-            score_instrument is not None
-            and not is_vocal
-            and (isinstance(program, int) or isinstance(channel, int))
-        )
-        source_eligible = not is_explicit_vocal and bool(part.recurse().notes) and (
-            not has_lyrics or has_explicit_non_vocal_instrument
-        )
+        source_eligible = not is_explicit_vocal and bool(part.recurse().notes) and not has_lyrics
         percussion = channel == 9 or isinstance(score_instrument, instrument.UnpitchedPercussion)
         resolved_program = program_facts.get("resolved_gm_program")
         playback_preset = program_facts.get("playback_preset")
@@ -127,8 +127,8 @@ def _instrumental_part_metadata(
                 "diagnostic": (
                     "MusicXML instrument-sound explicitly declares a vocal part."
                     if is_explicit_vocal
-                    else "Part has lyrics and no explicit non-vocal instrument."
-                    if has_lyrics and not has_explicit_non_vocal_instrument
+                    else "Part has lyrics, so it is sung, not played."
+                    if has_lyrics
                     else "Part has no resolved General MIDI program."
                     if source_eligible and not isinstance(resolved_program, int)
                     else None

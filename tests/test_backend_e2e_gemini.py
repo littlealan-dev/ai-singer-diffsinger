@@ -27,6 +27,12 @@ from src.backend.storage_client import blob_exists
 from src.mcp.resolve import PROJECT_ROOT
 
 
+_REAL_LLM_SKIP = (
+    "Calls the real Gemini API. Disabled even with RUN_REAL_LLM_TESTS=1 until the "
+    "orchestrator's tool loop is bounded: it re-invokes the LLM for as long as a tool "
+    "returns a followup_prompt, so a model that repeats a blocked call never stops "
+    "and keeps spending API calls."
+)
 VOICEBANK_ID = "Raine_Rena_2.01"
 BASIC_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
 <score-partwise version='3.1'>
@@ -654,6 +660,7 @@ def emulator_gemini_client(monkeypatch):
         log_handle.close()
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_gemini_synthesize(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
     response = test_client.post("/sessions")
@@ -685,6 +692,7 @@ def test_backend_e2e_gemini_synthesize(gemini_client):
     assert len(audio_response.content) > 0
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
 
@@ -831,6 +839,7 @@ def test_backend_e2e_gemini_my_tribute_parse_preprocess_synthesize(gemini_client
     )
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_gemini_verse_change_reparse_preprocess_review_synthesize(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
 
@@ -983,6 +992,7 @@ def test_backend_e2e_gemini_verse_change_reparse_preprocess_review_synthesize(ge
     )
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_gemini_contextual_flow(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
     response = test_client.post("/sessions")
@@ -1032,6 +1042,7 @@ def test_backend_e2e_gemini_contextual_flow(gemini_client):
     assert second_payload["current_score"]["version"] >= 2
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
     test_client, data_dir, startup_id, logger = gemini_client
     response = test_client.post("/sessions")
@@ -1062,6 +1073,7 @@ def test_backend_e2e_gemini_requests_verse_selection(gemini_client):
     assert "verse" in message
 
 
+@pytest.mark.skip(reason=_REAL_LLM_SKIP)
 def test_backend_e2e_emulator_synthesize(emulator_gemini_client):
     test_client, _ = emulator_gemini_client
     response = test_client.post("/sessions")

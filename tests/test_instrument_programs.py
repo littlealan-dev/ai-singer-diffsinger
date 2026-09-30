@@ -322,16 +322,99 @@ def test_vocal_sounding_part_name_does_not_override_instrument_facts(tmp_path: P
         "</score-instrument>",
         '</score-instrument><midi-instrument id="P1-I1"><midi-program>25</midi-program></midi-instrument>',
         1,
-    ).replace(
-        '<type>quarter</type></note>',
-        '<type>quarter</type><lyric><text>chord</text></lyric></note>', 1,
     )
-    source = tmp_path / "instrument-with-text.musicxml"
+    source = tmp_path / "instrument-named-voice.musicxml"
     source.write_text(xml, encoding="utf-8")
     facts = instrumental_programs_by_part(source)["P1"]
     assert facts["is_explicit_vocal"] is False
     assert facts["eligible_for_instrumental_midi"] is True
     assert facts["resolved_gm_program"] == 24
+
+
+def test_lyrics_make_a_part_vocal_whatever_program_it_declares(tmp_path: Path) -> None:
+    """Like assets/test_data/amazing-grace-with-piano.xml: the voices declare a piano program."""
+    xml = MISSING_PROGRAM_XML.replace(
+        "</score-instrument>",
+        '</score-instrument><midi-instrument id="P1-I1"><midi-program>25</midi-program></midi-instrument>',
+        1,
+    ).replace(
+        '<score-part id="P2"><part-name>Voice</part-name></score-part>',
+        """<score-part id="P2"><part-name>Soprano</part-name>
+        <score-instrument id="P2-I1"><instrument-name>ARIA Player</instrument-name></score-instrument>
+        <midi-instrument id="P2-I1"><midi-channel>2</midi-channel><midi-program>1</midi-program></midi-instrument>
+        </score-part>""",
+    )
+    source = tmp_path / "voice-with-piano-program.musicxml"
+    source.write_text(xml, encoding="utf-8")
+
+    summary = parse_score(source)["score_summary"]
+    soprano = summary["parts"][1]["instruments"][0]
+    assert soprano["native_midi_program"] == 1
+    assert soprano["eligible_for_instrumental_midi"] is False
+    resolution = summary["instrument_program_resolution"]
+    assert resolution["instrumental_score_instrument_ids"] == ["P1-I1"]
+    assert resolution["unresolved_score_instrument_ids"] == []
+    assert instrumental_programs_by_part(source, include_ineligible=True)["P2"][
+        "eligible_for_instrumental_midi"
+    ] is False
+
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+    )
+    guitar, voice = result["instrumental_parts"]
+    assert guitar["eligible"] is True
+    assert voice["eligible"] is False
+    assert voice["has_lyrics"] is True
+    assert "lyrics" in voice["diagnostic"]
+
+
+# A two-staff part declaring a piano, with lyrics under the upper staff only,
+# as in a hymn printed on two staves.
+TWO_STAFF_LYRICS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Hymn</part-name>
+      <score-instrument id="P1-I1"><instrument-name>Piano</instrument-name></score-instrument>
+      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><staff>1</staff><lyric><text>Praise</text></lyric></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>5</voice><type>whole</type><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>"""
+
+
+def test_lyrics_on_one_staff_make_every_staff_of_the_part_vocal(tmp_path: Path) -> None:
+    source = tmp_path / "two-staff-hymn.musicxml"
+    source.write_text(TWO_STAFF_LYRICS_XML, encoding="utf-8")
+
+    summary = parse_score(source)["score_summary"]
+    staves = [part for part in summary["parts"] if part.get("raw_part_id") == "P1"]
+    assert len(staves) >= 2
+    assert any(not staff["has_lyrics"] for staff in staves)
+    for staff in staves:
+        assert all(not item["eligible_for_instrumental_midi"] for item in staff["instruments"])
+    assert summary["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
+    assert score_has_instrumental_parts(summary) is False
+
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+    )
+    assert len(result["instrumental_parts"]) == 2
+    assert all(part["has_lyrics"] and not part["eligible"] for part in result["instrumental_parts"])
+    assert result["has_instrumental_parts"] is False
 
 
 # Like assets/test_data/happy-birthday-transcribed.xml: the voices have lyrics

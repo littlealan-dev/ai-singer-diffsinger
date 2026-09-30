@@ -46,7 +46,9 @@ def build_instrument_program_summary(
         instruments = _part_instruments(
             raw_part_id,
             declaration,
-            has_lyrics=bool(part.get("has_lyrics")),
+            # Lyrics make the whole MusicXML part vocal, including its staves
+            # and voices that carry none, as at MIDI export.
+            has_lyrics=bool(declaration.get("has_lyrics", part.get("has_lyrics"))),
             note_count=int(part.get("note_count") or 0),
         )
         part["instruments"] = instruments
@@ -409,14 +411,14 @@ def _part_instruments(
         instrumental_candidate = (
             synthetic and not has_lyrics and not declaration.get("has_unpitched_notes")
         )
-        has_explicit_midi = isinstance(native_program, int) or isinstance(native_channel, int)
         # MusicXML's standard sound IDs use the voice.* family for vocal
         # sounds, independently of the MIDI playback preset. Do not infer
         # this role from names, lyric words, or GM program numbers.
         # https://www.w3.org/2021/06/musicxml40/listings/sounds.xml/
         sound_id = source.get("instrument_sound")
         is_explicit_vocal = isinstance(sound_id, str) and sound_id.startswith("voice.")
-        eligible = not synthetic and not is_explicit_vocal and (not has_lyrics or has_explicit_midi)
+        # A part with lyrics is sung, whatever instrument or program it declares.
+        eligible = not synthetic and not is_explicit_vocal and not has_lyrics
         preset, program_source = _portable_preset(
             channel=native_channel, bank=native_bank, program=native_program
         )
