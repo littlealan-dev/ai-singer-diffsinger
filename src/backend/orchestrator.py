@@ -1995,6 +1995,10 @@ class Orchestrator:
         )
         working_score = current_score
         score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
+        # A tool round that saves a new score, such as adding a solfege line,
+        # also saves its summary. Later rounds in this turn must check against
+        # that summary, so track the score version it belongs to.
+        score_version = _snapshot_score_version(snapshot)
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
@@ -2287,6 +2291,9 @@ class Orchestrator:
                     break
 
                 latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                if _snapshot_score_version(latest_snapshot) != score_version:
+                    score_version = _snapshot_score_version(latest_snapshot)
+                    score_summary = latest_snapshot.get("score_summary")
                 repair_response, repair_error = await self._decide_followup_with_llm(
                     latest_snapshot,
                     self._build_repair_planning_prompt(
@@ -2408,6 +2415,9 @@ class Orchestrator:
                 continue
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            if _snapshot_score_version(latest_snapshot) != score_version:
+                score_version = _snapshot_score_version(latest_snapshot)
+                score_summary = latest_snapshot.get("score_summary")
             if tool_result.followup_message_only:
                 message_only_instructions = (
                     INSUFFICIENT_CREDITS_MESSAGE_ONLY_INSTRUCTIONS
@@ -8062,6 +8072,12 @@ def _score_player_takes_removed_by(
         for take in takes or []
         if bool(take.get("expand_repeats")) != bool(expand_repeats)
     ]
+
+
+def _snapshot_score_version(snapshot: Any) -> Any:
+    """The version of a session snapshot's current score; every score save bumps it."""
+    current = snapshot.get("current_score") if isinstance(snapshot, dict) else None
+    return current.get("version") if isinstance(current, dict) else None
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

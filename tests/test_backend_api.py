@@ -3907,6 +3907,86 @@ def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
     assert started["value"] is False
 
 
+def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, monkeypatch):
+    """A tool round that saves a new score also refreshes the summary later rounds check.
+
+    The turn used to read the summary once, so quoting a solfege line added
+    earlier in the same turn failed as an unknown lyric line, and the model kept
+    retrying the quote and re-adding the solfege line.
+    """
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("score.xml", VERSED_SCORE_XML, "application/xml")},
+    )
+    assert upload.status_code == 200
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+
+    class AddSolfegeThenQuoteClient:
+        def __init__(self):
+            self.tool_results: list[dict] = []
+
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if not (isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX)):
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "add_solfege_lyric_verse",
+                                "arguments": {"part_id": "Soprano", "reason": "Sing in solfege."},
+                            }
+                        ],
+                        "final_message": "Adding solfege.",
+                        "include_score": False,
+                    }
+                )
+            # A message-only follow-up puts instructions before the tool result.
+            text = last[len(TOOL_RESULT_PREFIX):]
+            payload, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+            self.tool_results.append(payload)
+            if payload.get("status") == "solfege_verse_ready":
+                return json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "name": "prepare_synthesis_quote",
+                                "arguments": {
+                                    "part_index": payload["completed_target"]["part_index"],
+                                    "voicebank": "Dummy",
+                                    "lyric_selection": payload["lyric_selection"],
+                                    "require_solfege_lyrics": True,
+                                },
+                            }
+                        ],
+                        "final_message": "Preparing a quote.",
+                        "include_score": False,
+                    }
+                )
+            # Any other result ends the turn, so a regression fails instead of looping.
+            return json.dumps(
+                {"tool_calls": [], "final_message": "Done.", "include_score": False}
+            )
+
+    llm_client = AddSolfegeThenQuoteClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the soprano part in solfege"},
+    )
+
+    assert response.status_code == 200
+    results = [result.get("action") or result.get("status") for result in llm_client.tool_results]
+    assert results == ["solfege_verse_ready", "quote_ready"], llm_client.tool_results
+
+
 def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
     test_client, app = client
     session_id = _create_session(test_client)
