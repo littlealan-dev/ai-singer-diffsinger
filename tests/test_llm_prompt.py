@@ -317,9 +317,20 @@ def test_build_system_prompt_requires_a_billable_synthesis_quote_before_renderin
     assert "never calculate, round, or infer the credit amount yourself" in prompt
     assert "the verse or lyric selection, and whether it is sung with lyrics or solfege" in prompt
     assert "the AI voice, by its `name` from Available voicebank details" in prompt
-    assert "Do not call `synthesize` until the user explicitly confirms that latest quote" in prompt
-    assert "The original request to sing, or a choice of language, lyrics/solfege, voice, or style, is not billable confirmation" in prompt
-    assert "If any quoted choice, score, or estimate changes, call `prepare_synthesis_quote` again" in prompt
+    assert "Do not call `synthesize` until the user confirms the latest quote" in prompt
+    assert "The request that produced the quote is not confirmation" in prompt
+    # Each kind of reply to a quote has one action, so a user who asks again
+    # for the quoted take is not shown the same quote over and over.
+    assert "After a billable quote, judge the user's next message:" in prompt
+    assert 'An explicit acceptance, such as "yes", "proceed" or "go ahead", in any language: call `synthesize`' in prompt
+    assert "A request to sing that matches the quote: treat it as confirmation and call `synthesize`" in prompt
+    assert "it names the quoted part, or the score has only one singable part" in prompt
+    assert "every choice it states is the quoted one" in prompt
+    assert "does not name the part" in prompt
+    assert "do not quote again. Ask one short question" in prompt
+    assert "A message that changes any quoted choice, the score, or the estimate: call `prepare_synthesis_quote` again" in prompt
+    assert "A message that declines: do not call `synthesize`" in prompt
+    assert "explicitly confirms" not in prompt
     assert "A billable quote is the complete, authoritative summary of one synthesis take" in prompt
     assert "authorizes every quoted choice, and only those choices" in prompt
     assert "call `synthesize` once with the quoted parameters unchanged and the exact returned `quote_id`" in prompt
