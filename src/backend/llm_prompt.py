@@ -72,7 +72,7 @@ def build_prompt_bundle(
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
     active_synthesis_quote: Optional[Dict[str, Any]] = None,
-    expand_repeats: bool = True,
+    expand_repeats: bool = False,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> PromptBundle:
@@ -269,7 +269,7 @@ def build_system_prompt(
     score_context_updated: bool = False,
     solfege_settings: Optional[Dict[str, Any]] = None,
     current_credit_availability: Optional[Dict[str, Any]] = None,
-    expand_repeats: bool = True,
+    expand_repeats: bool = False,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
 ) -> str:

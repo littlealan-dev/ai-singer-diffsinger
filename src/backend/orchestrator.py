@@ -294,7 +294,7 @@ class Orchestrator:
         selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         score_player_takes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
@@ -618,7 +618,7 @@ class Orchestrator:
         synth_args = dict(arguments)
         # Verse selection is resolved at parse/reparse stage.
         synth_args.pop("verse_number", None)
-        synth_args.setdefault("expand_repeats", True)
+        synth_args.setdefault("expand_repeats", False)
         synth_args["score"] = score
         if "voicebank" not in synth_args:
             synth_args["voicebank"] = await self._resolve_voicebank()
@@ -832,7 +832,7 @@ class Orchestrator:
             originating_turn_id=originating_turn_id,
             voicebank_metadata=voicebank_metadata,
             audio_track=audio_track,
-            expand_repeats=bool(arguments.get("expand_repeats", True)),
+            expand_repeats=bool(arguments.get("expand_repeats", False)),
             provenance=provenance,
         )
         await asyncio.to_thread(
@@ -1971,7 +1971,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         score_player_takes: Optional[List[Dict[str, Any]]] = None,
         preprocess_job_id: Optional[str] = None,
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
@@ -5200,7 +5200,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Query the LLM to determine tool calls and response text."""
@@ -5482,7 +5482,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
@@ -6140,7 +6140,7 @@ class Orchestrator:
         explicit_verse_number: Optional[str],
         forced_voicebank_id: Optional[str] = None,
         forced_language: Optional[str] = None,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         score_player_takes: Optional[List[Dict[str, Any]]] = None,
         originating_turn_id: Optional[str] = None,
     ) -> "ToolExecutionResult":

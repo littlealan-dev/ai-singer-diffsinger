@@ -2164,7 +2164,7 @@ TOOLS: List[Tool] = [
                 },
                 "expand_repeats": {
                     "type": "boolean",
-                    "default": True,
+                    "default": False,
                     "description": (
                         "Expand repeat bars, endings, D.C./D.S., Fine, and Coda navigation "
                         "into the internal rendering score. The displayed source score is "

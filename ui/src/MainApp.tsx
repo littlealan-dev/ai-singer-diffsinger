@@ -2606,7 +2606,7 @@ export default function MainApp() {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [scorePreviewLayout, setScorePreviewLayout] = useState<ScorePreviewLayout>("page");
   const [horizontalRendererRevision, setHorizontalRendererRevision] = useState(0);
-  const [expandRepeats, setExpandRepeats] = useState(true);
+  const [expandRepeats, setExpandRepeats] = useState(false);
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
   const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
@@ -5050,7 +5050,7 @@ export default function MainApp() {
       }
       setScoreSummary(summary);
       setPerformanceMidi(uploadResponse.performance_midi ?? summary?.performance_midi ?? null);
-      setExpandRepeats(true);
+      setExpandRepeats(false);
       setPendingSelection(shouldPromptSelection(summary));
       setSelectorShown(false);
       const nextPartOptions = buildPartOptions(summary);

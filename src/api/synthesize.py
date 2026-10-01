@@ -1907,7 +1907,7 @@ def synthesize(
     solfege_pronunciation_patch: bool = False,
     require_solfege_lyrics: bool = False,
     skip_voice_part_preprocess: bool = False,
-    expand_repeats: bool = True,
+    expand_repeats: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> Dict[str, Any]:

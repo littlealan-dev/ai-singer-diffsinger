@@ -187,7 +187,7 @@ def create_synthesis_quote(
         "renderChoicesHash": render_hash,
         "renderChoices": dict(render_choices),
         "partId": estimate.get("vocal_part_id"),
-        "expandRepeats": bool(estimate.get("expand_repeats", True)),
+        "expandRepeats": bool(estimate.get("expand_repeats", False)),
         "vocalDurationSeconds": float(estimate.get("vocal_duration_seconds", 0.0)),
         "vocalPartCredits": int(vocal.get("estimated_credits", 0) or 0),
         "instrumentalCredits": int(instrumentals.get("estimated_credits", 0) or 0),

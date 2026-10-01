@@ -181,7 +181,7 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         raise ValueError(
             "score does not match the requested lyric_selection; reparse the exact lyric line first."
         )
-    expand_repeats = params.get("expand_repeats", True)
+    expand_repeats = params.get("expand_repeats", False)
     if not isinstance(expand_repeats, bool):
         raise ValueError("expand_repeats must be a boolean.")
     voicebank_id = params["voicebank"]
@@ -303,7 +303,7 @@ def handle_get_voicebank_info(params: Dict[str, Any], device: str) -> Dict[str, 
 
 
 def _calculate_score_duration(
-    score: Dict[str, Any], *, expand_repeats: bool = True
+    score: Dict[str, Any], *, expand_repeats: bool = False
 ) -> float:
     """Calculate default playback duration in seconds.
 

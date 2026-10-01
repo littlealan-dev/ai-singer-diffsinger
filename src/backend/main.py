@@ -340,7 +340,7 @@ class ChatRequest(BaseModel):
     selected_voicebank_id: str | None = None
     # Score notation always remains unchanged; this only controls render order
     # and the estimate used before a synthesis job is started.
-    expand_repeats: bool = True
+    expand_repeats: bool = False
     # The takes the score player holds. The player keeps takes of one repeat
     # setting only, so a quote can say which takes a render would remove.
     score_player_takes: list[ScorePlayerTake] = Field(default_factory=list, max_length=64)
@@ -840,7 +840,7 @@ def create_app() -> FastAPI:
     async def get_synthesis_estimate(
         session_id: str,
         request: Request,
-        expand_repeats: bool = True,
+        expand_repeats: bool = False,
         part_id: str | None = None,
     ) -> Dict[str, Any]:
         """Return the authoritative vocal/instrumental synthesis estimate."""
@@ -1607,7 +1607,7 @@ def create_app() -> FastAPI:
 
     @app.get("/sessions/{session_id}/instrumental-midi")
     async def get_instrumental_midi(
-        session_id: str, request: Request, expand_repeats: bool = True
+        session_id: str, request: Request, expand_repeats: bool = False
     ) -> FileResponse:
         """Serve the session's notation- or played-order instrumental MIDI file."""
         sessions: SessionStore = request.app.state.sessions

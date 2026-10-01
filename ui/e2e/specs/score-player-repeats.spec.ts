@@ -209,10 +209,13 @@ test("the instrumental MIDI follows the takes' repeat order, not the toggle", as
   if (await declineCookies.isVisible()) await declineCookies.click();
   await uploadScore(page, "first-score.xml");
 
-  // No MIDI until a take publishes it; the toggle alone fetches nothing.
+  // The toggle starts in written order. No MIDI until a take publishes it;
+  // the toggle alone fetches nothing.
+  await expect(repeatsToggle(page)).not.toBeChecked();
+  await repeatsToggle(page).click();
+  await repeatsToggle(page).click();
+  await repeatsToggle(page).click();
   await expect(repeatsToggle(page)).toBeChecked();
-  await repeatsToggle(page).click();
-  await repeatsToggle(page).click();
   await page.waitForTimeout(1_000);
   expect(backend.midiRequests()).toEqual([]);
 
@@ -244,11 +247,12 @@ test("the instrumental MIDI follows the takes' repeat order, not the toggle", as
   await expect(timeline(page)).toHaveText("0:00 / 0:06");
   expect(backend.midiRequests()).toEqual([true, false]);
 
-  // A new score clears every track, MIDI included, and resets the toggle.
+  // A new score clears every track, MIDI included, and resets the toggle to
+  // written order.
   await uploadScore(page, "second-score.xml");
   await expect(vocalRows(page)).toHaveCount(0);
   await expect(page.locator(".score-player-seek-time")).toHaveCount(0);
-  await expect(repeatsToggle(page)).toBeChecked();
+  await expect(repeatsToggle(page)).not.toBeChecked();
   await page.waitForTimeout(1_000);
   expect(backend.midiRequests()).toEqual([true, false]);
 });

@@ -119,9 +119,9 @@ class RepeatNavigationParsingTests(unittest.TestCase):
 
         self.assertEqual(_part_pitch_steps(display_score), "CDEFG")
         self.assertEqual(_part_pitch_steps(display_score["expanded_score"]), "CDCDEFG")
-        self.assertEqual(handlers._calculate_score_duration(display_score), 3.5)
+        self.assertEqual(handlers._calculate_score_duration(display_score), 2.5)
         self.assertEqual(
-            handlers._calculate_score_duration(display_score, expand_repeats=False), 2.5
+            handlers._calculate_score_duration(display_score, expand_repeats=True), 3.5
         )
 
     def test_performance_measure_map_returns_to_source_measures_for_repeats(self) -> None:
@@ -178,13 +178,13 @@ class RepeatNavigationParsingTests(unittest.TestCase):
         self.assertAlmostEqual(entries[1]["start_seconds"], 1.0)
         self.assertAlmostEqual(entries[1]["end_seconds"], 3.0)
 
-    def test_synthesize_schema_defaults_repeat_expansion_to_true(self) -> None:
+    def test_synthesize_schema_defaults_to_written_order(self) -> None:
         synthesize_tool = next(
             tool for tool in list_tools() if tool["name"] == "synthesize"
         )
         setting = synthesize_tool["inputSchema"]["properties"]["expand_repeats"]
         self.assertEqual(setting["type"], "boolean")
-        self.assertIs(setting["default"], True)
+        self.assertIs(setting["default"], False)
 
     def test_mcp_synthesize_forwards_default_and_explicit_repeat_setting(self) -> None:
         score = {
@@ -212,12 +212,12 @@ class RepeatNavigationParsingTests(unittest.TestCase):
             return_value={"waveform": [0.0], "sample_rate": 44100},
         ) as synthesize_mock:
             handlers.handle_synthesize(dict(base_params), device="cpu")
-            self.assertIs(synthesize_mock.call_args.kwargs["expand_repeats"], True)
+            self.assertIs(synthesize_mock.call_args.kwargs["expand_repeats"], False)
 
             handlers.handle_synthesize(
-                {**base_params, "expand_repeats": False}, device="cpu"
+                {**base_params, "expand_repeats": True}, device="cpu"
             )
-            self.assertIs(synthesize_mock.call_args.kwargs["expand_repeats"], False)
+            self.assertIs(synthesize_mock.call_args.kwargs["expand_repeats"], True)
 
 
 if __name__ == "__main__":
