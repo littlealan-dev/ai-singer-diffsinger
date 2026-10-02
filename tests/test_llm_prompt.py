@@ -253,7 +253,9 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
     # takes this render removes, and only when there are any.
     assert "When the quote has `takes_removed_from_player`" in prompt
     assert "those takes stay available in the chat" in prompt
-    assert "do not mention the notice when the field is absent" in prompt
+    assert "Do not mention the notice when the field is absent" in prompt
+    # Takes sung before a score edit are replaced too, with their own reason.
+    assert "`score_edited` means it was sung before the score was edited" in prompt
     assert "recalculated from the actual generated audio length" in prompt
     assert "an explicit request for confirmation" in prompt
 

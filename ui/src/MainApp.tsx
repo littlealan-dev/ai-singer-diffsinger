@@ -207,6 +207,10 @@ type MultiTrackAudioTrack = {
   // jobs recorded it. The player keeps only takes of one repeat setting, and
   // plays the instrumental MIDI in that order.
   expandRepeats?: boolean;
+  // The part's take_signature when the take was rendered; null for a take from
+  // before jobs recorded it. A take whose signature no longer matches its part
+  // in the current score summary was sung from music that has since changed.
+  takeSignature?: string | null;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -2589,6 +2593,10 @@ export default function MainApp() {
   const [status, setStatus] = useState<string | null>(null);
   const [score, setScore] = useState<ScorePayload | null>(null);
   const [scoreSummary, setScoreSummary] = useState<ScoreSummary | null>(null);
+  // Read when a take lands, to drop takes that no longer match the score,
+  // without re-creating the take callbacks on every summary change.
+  const scoreSummaryRef = useRef(scoreSummary);
+  scoreSummaryRef.current = scoreSummary;
   const [synthesisEstimate, setSynthesisEstimate] = useState<SynthesisCreditEstimate | null>(null);
   const [synthesisEstimateLoading, setSynthesisEstimateLoading] = useState(false);
   const [synthesisEstimateRevision, setSynthesisEstimateRevision] = useState(0);
@@ -3285,19 +3293,29 @@ export default function MainApp() {
     ) => {
       if (!audioUrl) return;
       const identity = resolveMultiTrackIdentity(audioTrack);
+      const takeSignature = audioTrack?.take_signature ?? null;
+      const currentTakeSignatures = new Map(
+        (scoreSummaryRef.current?.parts ?? []).flatMap((part) =>
+          part.part_id && part.take_signature ? [[part.part_id, part.take_signature] as const] : []
+        )
+      );
       setMultiTrackAudioTracks((all) => {
         // A take in the other repeat order cannot play in sync with this one or
-        // with the instrumental MIDI, which follows this take. Its audio stays
-        // in the chat.
-        const current =
-          expandRepeats === undefined
-            ? all
-            : all.filter(
-                (track) =>
-                  track.key === identity.key ||
-                  track.expandRepeats === undefined ||
-                  track.expandRepeats === expandRepeats
-              );
+        // with the instrumental MIDI, which follows this take. A take sung
+        // before its part's music was edited no longer matches the score. Both
+        // keep their audio in the chat.
+        const inRepeatOrder = (track: MultiTrackAudioTrack) =>
+          expandRepeats === undefined ||
+          track.expandRepeats === undefined ||
+          track.expandRepeats === expandRepeats;
+        const matchesScore = (track: MultiTrackAudioTrack) => {
+          const current = track.partId ? currentTakeSignatures.get(track.partId) : undefined;
+          return !track.takeSignature || !current || track.takeSignature === current;
+        };
+        const kept = all.filter(
+          (track) => track.key === identity.key || (inRepeatOrder(track) && matchesScore(track))
+        );
+        const current = kept.length === all.length ? all : kept;
         const existing = current.find((track) => track.key === identity.key);
         const hasBackendDuration =
           typeof durationSeconds === "number" &&
@@ -3333,6 +3351,7 @@ export default function MainApp() {
           jobId: jobId ?? existing?.jobId,
           sourceJobId: nextSourceJobId,
           expandRepeats: expandRepeats ?? (isNewTake ? undefined : existing?.expandRepeats),
+          takeSignature: takeSignature ?? (isNewTake ? null : existing?.takeSignature ?? null),
           durationSeconds: hasBackendDuration
             ? durationSeconds
             : existing?.audioUrl === nextAudioUrl
@@ -3348,6 +3367,7 @@ export default function MainApp() {
             existing.jobId === nextTrack.jobId &&
             existing.sourceJobId === nextTrack.sourceJobId &&
             existing.expandRepeats === nextTrack.expandRepeats &&
+            existing.takeSignature === nextTrack.takeSignature &&
             existing.durationSeconds === nextTrack.durationSeconds &&
             existing.label === nextTrack.label &&
             existing.partId === nextTrack.partId &&
@@ -5184,7 +5204,12 @@ export default function MainApp() {
         multiTrackAudioTracks.flatMap((track) =>
           track.expandRepeats === undefined
             ? []
-            : [{ part_id: track.partId ?? null, label: track.label, expand_repeats: track.expandRepeats }]
+            : [{
+                part_id: track.partId ?? null,
+                label: track.label,
+                expand_repeats: track.expandRepeats,
+                take_signature: track.takeSignature ?? null,
+              }]
         )
       );
       if (response.type === "chat_error") {

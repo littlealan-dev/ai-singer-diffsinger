@@ -3542,6 +3542,7 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
                         "part_name": name,
                         "has_lyrics": True,
                         "lyric_selections": [lyric_selection],
+                        "take_signature": f"take-{name}",
                     }
                     for index, name in enumerate(part_names)
                 ],
@@ -3554,9 +3555,9 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
         lambda score, part_index: None,
     )
     player_takes = [
-        {"part_id": "Soprano", "label": "Soprano", "expand_repeats": True},
-        {"part_id": "Alto", "label": "Alto", "expand_repeats": True},
-        {"part_id": "Tenor", "label": "Tenor", "expand_repeats": False},
+        {"part_id": "Soprano", "label": "Soprano", "expand_repeats": True, "take_signature": "take-Soprano"},
+        {"part_id": "Alto", "label": "Alto", "expand_repeats": True, "take_signature": "take-Alto"},
+        {"part_id": "Tenor", "label": "Tenor", "expand_repeats": False, "take_signature": "take-Tenor"},
     ]
 
     def quote(expand_repeats: bool) -> str:
@@ -3580,17 +3581,45 @@ def test_quote_names_the_player_takes_a_render_in_the_other_repeat_order_removes
 
     written_order_quote = quote(False)
     assert (
-        '"takes_removed_from_player": {"parts": ["Soprano", "Alto"], "rendered_with_repeats": true}'
-        in written_order_quote
-    )
+        '"takes_removed_from_player": {"takes": ['
+        '{"label": "Soprano", "reason": "rendered_with_repeats"}, '
+        '{"label": "Alto", "reason": "rendered_with_repeats"}]}'
+    ) in written_order_quote
     with_repeats_quote = quote(True)
     assert (
-        '"takes_removed_from_player": {"parts": ["Tenor"], "rendered_with_repeats": false}'
-        in with_repeats_quote
-    )
+        '"takes_removed_from_player": {"takes": ['
+        '{"label": "Tenor", "reason": "rendered_in_written_order"}]}'
+    ) in with_repeats_quote
 
     player_takes = [take for take in player_takes if take["expand_repeats"]]
     assert "takes_removed_from_player" not in quote(True)
+
+    # A take sung before its part was edited no longer matches the score.
+    player_takes[1] = {**player_takes[1], "take_signature": "take-Alto-before-edit"}
+    assert (
+        '"takes_removed_from_player": {"takes": [{"label": "Alto", "reason": "score_edited"}]}'
+    ) in quote(True)
+    # A take from before jobs recorded signatures is never called out of date.
+    player_takes[1] = {key: value for key, value in player_takes[1].items() if key != "take_signature"}
+    assert "takes_removed_from_player" not in quote(True)
+
+
+def test_a_take_records_the_signature_of_the_music_it_sings(client):
+    _, app = client
+    score = {"parts": [{"part_id": "Alto", "part_name": "Alto"}, {"part_id": "Men", "part_name": "Men"}]}
+    summary = {"parts": [
+        {"part_id": "Alto", "take_signature": "take-alto"},
+        {"part_id": "Men", "take_signature": "take-men"},
+    ]}
+    track = app.state.orchestrator._build_synthesis_audio_track_metadata(
+        score, {"part_id": "Men"}, score_summary=summary
+    )
+    assert track["part_id"] == "Men"
+    assert track["take_signature"] == "take-men"
+    # A summary without signatures, as before they existed, records none.
+    assert app.state.orchestrator._build_synthesis_audio_track_metadata(
+        score, {"part_id": "Men"}, score_summary={"parts": [{"part_id": "Men"}]}
+    )["take_signature"] is None
 
 
 def test_quote_charges_instrumentals_for_an_undeclared_part_only_if_the_llm_calls_it_one(
@@ -9158,7 +9187,7 @@ def test_replaced_synthesis_task_remains_tracked_through_shutdown(client, monkey
         monkeypatch.setattr(
             orchestrator,
             "_build_synthesis_audio_track_metadata",
-            lambda _score, _arguments: {},
+            lambda _score, _arguments, **_kwargs: {},
         )
         monkeypatch.setattr(orchestrator, "_capture_job_input", fake_capture_job_input)
         monkeypatch.setattr(orchestrator, "_run_synthesis_job", fake_run_synthesis_job)

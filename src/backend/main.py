@@ -329,6 +329,8 @@ class ScorePlayerTake(BaseModel):
     part_id: str | None = Field(default=None, max_length=200)
     label: str = Field(max_length=200)
     expand_repeats: bool
+    # The part's take_signature when the take was rendered; absent for older takes.
+    take_signature: str | None = Field(default=None, max_length=64)
 
 
 class ChatRequest(BaseModel):

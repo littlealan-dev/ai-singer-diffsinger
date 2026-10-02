@@ -849,7 +849,10 @@ class Orchestrator:
                 user_id, session_id, job_id, self._settings.audio_format
             )
         voicebank_metadata = await self._build_synthesis_voicebank_metadata(arguments)
-        audio_track = self._build_synthesis_audio_track_metadata(score, arguments)
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        audio_track = self._build_synthesis_audio_track_metadata(
+            score, arguments, score_summary=snapshot.get("score_summary")
+        )
         input_path, job_input_storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
@@ -6027,8 +6030,14 @@ class Orchestrator:
         self,
         score: Dict[str, Any],
         synth_args: Dict[str, Any],
+        *,
+        score_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Return stable UI track metadata for a completed synthesis target."""
+        """Return stable UI track metadata for a completed synthesis target.
+
+        ``take_signature`` records the music this take is sung from, so the
+        player can tell when a later score edit leaves the take out of date.
+        """
         part_index = self._resolve_synthesize_part_index(
             score,
             part_id=synth_args.get("part_id"),
@@ -6044,12 +6053,24 @@ class Orchestrator:
         part_name = str(part.get("part_name") or "").strip()
         label = part_name or (f"Part {part_id}" if part_id else f"Part {part_index + 1}")
         key = f"id:{part_id}" if part_id else f"index:{part_index}"
+        summary_parts = (score_summary or {}).get("parts") or []
+        take_signature = next(
+            (
+                summary_part.get("take_signature")
+                for summary_part in summary_parts
+                if isinstance(summary_part, dict)
+                and part_id
+                and str(summary_part.get("part_id") or "") == part_id
+            ),
+            None,
+        )
         return {
             "key": key,
             "label": label,
             "part_id": part_id or None,
             "part_index": part_index,
             "verse_number": self._score_selected_verse_number(score),
+            "take_signature": take_signature,
         }
 
     async def _normalize_synthesize_voice_color(
@@ -6770,13 +6791,12 @@ class Orchestrator:
                     ),
                 }
                 removed_takes = _score_player_takes_removed_by(
-                    score_player_takes, expand_repeats=expand_repeats
+                    score_player_takes,
+                    expand_repeats=expand_repeats,
+                    score_summary=score_summary,
                 )
                 if removed_takes:
-                    quote_payload["takes_removed_from_player"] = {
-                        "parts": removed_takes,
-                        "rendered_with_repeats": not expand_repeats,
-                    }
+                    quote_payload["takes_removed_from_player"] = {"takes": removed_takes}
                 if available_credits is not None:
                     quote_payload["available_credits"] = available_credits
                     quote_payload["balance_after"] = (
@@ -8104,20 +8124,36 @@ def _score_player_takes_removed_by(
     takes: Optional[List[Dict[str, Any]]],
     *,
     expand_repeats: bool,
-) -> List[str]:
-    """Labels of the player's takes that a render in the other order removes.
+    score_summary: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    """The player's takes that the next finished take will replace, with why.
 
     The UI's score player keeps takes of one repeat setting only, and plays the
     instrumental MIDI in that order, so a finished take removes every take
-    rendered with the other setting. That includes the previous take of the
-    same part: it is replaced in any case, but the user should know the new
-    take will not play in its order.
+    rendered with the other setting. It also removes takes sung before their
+    part's music was edited: their take_signature no longer matches the
+    score's. That includes the previous take of the same part: it is replaced
+    in any case, but the user should know why.
     """
-    return [
-        str(take.get("label") or take.get("part_id") or "")
-        for take in takes or []
-        if bool(take.get("expand_repeats")) != bool(expand_repeats)
-    ]
+    current_signatures = {
+        str(part.get("part_id")): part.get("take_signature")
+        for part in (score_summary or {}).get("parts") or []
+        if isinstance(part, dict) and part.get("part_id") and part.get("take_signature")
+    }
+    removed: List[Dict[str, str]] = []
+    for take in takes or []:
+        label = str(take.get("label") or take.get("part_id") or "")
+        if bool(take.get("expand_repeats")) != bool(expand_repeats):
+            reason = (
+                "rendered_with_repeats" if take.get("expand_repeats") else "rendered_in_written_order"
+            )
+            removed.append({"label": label, "reason": reason})
+            continue
+        recorded = take.get("take_signature")
+        current = current_signatures.get(str(take.get("part_id") or ""))
+        if recorded and current and recorded != current:
+            removed.append({"label": label, "reason": "score_edited"})
+    return removed
 
 
 def _snapshot_score_version(snapshot: Any) -> Any:

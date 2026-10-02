@@ -5,6 +5,8 @@ export type ScoreSummaryPart = {
   part_index?: number;
   part_name?: string;
   has_lyrics?: boolean;
+  /** Changes when the part's music or the score's timing is edited. */
+  take_signature?: string;
 };
 
 export type InstrumentalPart = {
@@ -206,6 +208,7 @@ export type ScorePlayerTake = {
   part_id: string | null;
   label: string;
   expand_repeats: boolean;
+  take_signature?: string | null;
 };
 
 export type ChatStreamEvent = {
@@ -253,6 +256,8 @@ export type AudioTrackMetadata = {
   part_id?: string | null;
   part_index?: number | null;
   verse_number?: string | number | null;
+  /** The part's take_signature when the take was rendered. */
+  take_signature?: string | null;
 };
 
 export type FeedbackPromptState = {
