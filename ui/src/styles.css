@@ -1162,6 +1162,27 @@ body.legal-active #root {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.demo-song-links {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.demo-song-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #b7a5ff;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.demo-song-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .demo-empty-action {
   width: 100%;
   display: grid;
@@ -2253,8 +2274,17 @@ img.voice-picker-option-avatar {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.composer-upload-button input {
-  display: none;
+.score-picker {
+  position: relative;
+}
+
+.score-picker-heading {
+  padding: 6px 8px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .composer-toolbar-divider {
@@ -2344,7 +2374,7 @@ img.voice-picker-option-avatar {
 }
 
 /* The first control's tooltip starts at its left edge, inside the panel. */
-.composer-toolbar > .composer-tool:first-child::after {
+.composer-toolbar > :first-child .composer-tool::after {
   left: 0;
   transform: none;
 }
@@ -3103,6 +3133,78 @@ img.voice-picker-option-avatar {
   text-align: center;
   color: var(--text-muted);
   padding: 0 24px;
+}
+
+/* Empty score panel: what to do when there is no score yet. */
+.score-placeholder-content {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  max-width: 520px;
+}
+
+.score-placeholder-content p {
+  margin: 0;
+}
+
+.demo-song-offer-label {
+  margin-top: 12px !important;
+  font-size: 13px;
+  color: #5b5f6b;
+}
+
+.demo-song-cards {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.demo-song-card {
+  width: 200px;
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(109, 91, 208, 0.25);
+  background: #fff;
+  color: #1b1b1b;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(20, 16, 40, 0.08);
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.demo-song-card:hover:not(:disabled) {
+  border-color: #6d5bd0;
+  transform: translateY(-1px);
+}
+
+.demo-song-card:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.demo-song-card svg {
+  color: #6d5bd0;
+}
+
+.demo-song-card-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.demo-song-card-detail {
+  font-size: 12px;
+  color: #5b5f6b;
+}
+
+.demo-song-card-action {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6d5bd0;
 }
 
 .score-loading-overlay {

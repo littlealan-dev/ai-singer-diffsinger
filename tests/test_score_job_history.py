@@ -35,6 +35,11 @@ def test_job_payload_records_immutable_originating_turn():
         JobStore().update_job("job-1", originatingTurnId="turn-2")
 
 
+def test_demo_song_id_is_immutable_job_provenance():
+    with pytest.raises(ValueError, match="provenance may only be set at creation"):
+        JobStore().update_job("job-1", demoSongId="happy-birthday")
+
+
 @pytest.fixture(params=["memory", "firestore"])
 def workspace(request, monkeypatch, tmp_path):
     if request.param == "firestore":

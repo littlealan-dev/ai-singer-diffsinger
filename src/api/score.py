@@ -27,6 +27,7 @@ except ImportError:
 from src.musicxml.parser import build_performance_measure_map, parse_musicxml_with_summary
 from src.api.voice_parts import analyze_score_voice_parts
 from src.musicxml.instrument_programs import build_instrument_program_summary
+from src.musicxml.demo_songs import read_demo_song_id
 
 
 def parse_score(
@@ -245,6 +246,9 @@ def _parse_score_variant(
             Path(file_path),
             score_summary.get("parts") if isinstance(score_summary.get("parts"), list) else [],
         )
+        demo_song = read_demo_song_id(Path(file_path))
+        if demo_song is not None:
+            score_summary["demo_song"] = demo_song
     score_dict["voice_part_signals"] = analyze_score_voice_parts(
         score_dict,
         verse_number=selected_verse_number,

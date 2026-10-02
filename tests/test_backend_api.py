@@ -4055,6 +4055,27 @@ def test_a_turn_that_keeps_calling_the_llm_stops_at_the_limit(client, caplog):
     assert llm_client.calls == LLM_CALLS_PER_TURN_LIMIT
 
 
+@pytest.mark.parametrize("demo_song", ["happy-birthday", None])
+def test_job_input_records_the_demo_song_it_sings(client, demo_song):
+    """A job records the demo song id from the score summary, never from the title or file name."""
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    summary = dict(snapshot.get("score_summary") or {})
+    # The title and file name say "Happy Birthday" either way; only the marker counts.
+    summary["title"] = "Happy Birthday"
+    if demo_song:
+        summary["demo_song"] = demo_song
+    asyncio.run(app.state.sessions.set_score_summary(session_id, summary))
+
+    _, _, provenance = asyncio.run(
+        app.state.orchestrator._capture_job_input(session_id, snapshot["user_id"], "job-demo")
+    )
+
+    assert provenance["demoSongId"] == demo_song
+
+
 def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
     test_client, app = client
     session_id = _create_session(test_client)

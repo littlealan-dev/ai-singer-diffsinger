@@ -819,6 +819,9 @@ class Orchestrator:
             "inputSha256": hashlib.sha256(content).hexdigest(),
             "inputFileName": files.get("musicxml_name"),
             "scoreTitle": (snapshot.get("score_summary") or {}).get("title"),
+            # The built-in demo song this job sings, from the marker inside its
+            # MusicXML; None for a user's own score.
+            "demoSongId": (snapshot.get("score_summary") or {}).get("demo_song"),
             "provenanceStatus": "captured",
         }
 

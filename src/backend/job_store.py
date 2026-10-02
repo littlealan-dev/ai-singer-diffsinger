@@ -82,6 +82,7 @@ class JobStore:
             "inputSha256",
             "inputFileName",
             "scoreTitle",
+            "demoSongId",
             "provenanceStatus",
             "originatingTurnId",
             "expandRepeats",

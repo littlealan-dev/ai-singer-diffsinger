@@ -110,6 +110,41 @@ const STARTING_CONVERSATIONS = [
   "sing the alto part in solfege / solfa",
 ] as const;
 
+type DemoSong = {
+  id: string;
+  title: string;
+  detail: string;
+  /** Served from ui/public, so it loads through the same upload path as a user's file. */
+  file: string;
+  /** Starter prompts that name this song's real parts and verses. */
+  prompts: readonly string[];
+};
+
+const DEMO_SONGS: readonly DemoSong[] = [
+  {
+    id: "amazing-grace",
+    title: "Amazing Grace",
+    detail: "SATB choir + piano · 2 verses",
+    file: "/demo-scores/amazing-grace.xml",
+    prompts: [
+      "sing the soprano part, verse 1",
+      "sing the alto part in solfege",
+      "sing the bass part, verse 2",
+    ],
+  },
+  {
+    id: "happy-birthday",
+    title: "Happy Birthday",
+    detail: "Alto & men + piano",
+    file: "/demo-scores/happy-birthday.xml",
+    prompts: [
+      "sing the alto part",
+      "sing the men's part",
+      "sing the alto part in solfege",
+    ],
+  },
+];
+
 const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 // The billable server-side export mix is retired: it mixed vocal tracks only,
@@ -2688,6 +2723,11 @@ export default function MainApp() {
   scorePreviewLayoutRef.current = scorePreviewLayout;
   const voicePickerRef = useRef<HTMLDivElement | null>(null);
   const solfegePickerRef = useRef<HTMLDivElement | null>(null);
+  const [scoreMenuOpen, setScoreMenuOpen] = useState(false);
+  const scorePickerRef = useRef<HTMLDivElement | null>(null);
+  const scoreFileInputRef = useRef<HTMLInputElement | null>(null);
+  // The demo song in the score panel, if any; its prompts replace the generic ones.
+  const [activeDemoSongId, setActiveDemoSongId] = useState<string | null>(null);
   const sessionInitPromiseRef = useRef<Promise<string> | null>(null);
   const activeUserIdRef = useRef<string | null>(user?.uid ?? null);
   const autoPaywallTriggersRef = useRef<Set<string>>(new Set());
@@ -3005,6 +3045,8 @@ export default function MainApp() {
   const hasScorePlayerTracks = Boolean(instrumentalMidiUrl || (instrumentalTracks.length > 0 && performanceMidi?.has_instrumental_parts)) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
   const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
+  const starterPrompts =
+    DEMO_SONGS.find((song) => song.id === activeDemoSongId)?.prompts ?? STARTING_CONVERSATIONS;
   const solfegeSystemLabel = solfegeSystem === "movable_do" ? "Movable Do" : "Fixed Do";
   const solfegeModeLabel =
     solfegeMode === "major"
@@ -3972,22 +4014,26 @@ export default function MainApp() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!voiceMenuOpen && !solfegeMenuOpen) return;
+    if (!voiceMenuOpen && !solfegeMenuOpen && !scoreMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (
         target instanceof Node &&
-        (voicePickerRef.current?.contains(target) || solfegePickerRef.current?.contains(target))
+        (voicePickerRef.current?.contains(target) ||
+          solfegePickerRef.current?.contains(target) ||
+          scorePickerRef.current?.contains(target))
       ) {
         return;
       }
       setVoiceMenuOpen(false);
       setSolfegeMenuOpen(false);
+      setScoreMenuOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setVoiceMenuOpen(false);
         setSolfegeMenuOpen(false);
+        setScoreMenuOpen(false);
       }
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -3996,7 +4042,7 @@ export default function MainApp() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [solfegeMenuOpen, voiceMenuOpen]);
+  }, [scoreMenuOpen, solfegeMenuOpen, voiceMenuOpen]);
 
   const ensureSession = async (): Promise<string> => {
     if (sessionId) {
@@ -5007,7 +5053,7 @@ export default function MainApp() {
     }
   };
 
-  const handleUpload = async (file: File) => {
+  const handleUpload = async (file: File, demoSongId: string | null = null) => {
     if (browserMixBounceActive) {
       setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
       return;
@@ -5061,6 +5107,7 @@ export default function MainApp() {
       setSelectedVerse(nextVerseOptions[0] ?? null);
       const data = await fetchScoreXml(activeSessionId);
       setScore({ name: file.name, data });
+      setActiveDemoSongId(demoSongId);
     } catch (err: any) {
       const message = err?.message || "Upload failed.";
       if (isInsufficientCreditError(message)) {
@@ -5070,6 +5117,35 @@ export default function MainApp() {
     } finally {
       setUploading(false);
     }
+  };
+
+  // A demo song is a score shipped with the app, loaded exactly like an upload.
+  const loadDemoSong = async (song: DemoSong) => {
+    setScoreMenuOpen(false);
+    if (creditsLocked) {
+      openPaywall("upload_blocked");
+      return;
+    }
+    logAnalyticsEvent("demo_song_load", { demo_song_id: song.id });
+    let file: File;
+    try {
+      const response = await fetch(song.file);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      file = new File([await response.blob()], `${song.id}.xml`, { type: "application/xml" });
+    } catch {
+      setError(`Couldn't load the demo song "${song.title}". Please try again.`);
+      return;
+    }
+    await handleUpload(file, song.id);
+  };
+
+  const chooseScoreFile = () => {
+    setScoreMenuOpen(false);
+    if (creditsLocked) {
+      openPaywall("upload_blocked");
+      return;
+    }
+    scoreFileInputRef.current?.click();
   };
 
   const sendMessage = async (
@@ -5518,6 +5594,22 @@ export default function MainApp() {
             {messages.length === 0 && (
               <div className="empty-state">
                 <p>Drop a MusicXML file here to begin.</p>
+                <p className="demo-song-links">
+                  or try a demo song:{" "}
+                  {DEMO_SONGS.map((song, index) => (
+                    <span key={song.id}>
+                      {index > 0 ? " · " : ""}
+                      <button
+                        type="button"
+                        className="demo-song-link"
+                        disabled={uploading || browserMixBounceActive}
+                        onClick={() => void loadDemoSong(song)}
+                      >
+                        {song.title}
+                      </button>
+                    </span>
+                  ))}
+                </p>
               </div>
             )}
             {messages.map((msg, index) => (
@@ -5742,7 +5834,7 @@ export default function MainApp() {
           </div>
           <div className="chat-input">
             <div className="starting-conversations" aria-label="Suggested starting conversations">
-              {STARTING_CONVERSATIONS.map((suggestion) => (
+              {starterPrompts.map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
@@ -5789,22 +5881,58 @@ export default function MainApp() {
             {/* One compact toolbar of icon controls. Each control names itself
                 and its current value in an instant tooltip (data-tooltip). */}
             <div className="composer-menu-bar composer-toolbar" role="toolbar" aria-label="Composer settings">
-              <label
-                className={clsx("composer-tool composer-upload-button", {
-                  disabled: uploading || creditsLocked || browserMixBounceActive,
-                })}
-                data-tooltip={uploading ? "Uploading score…" : "Upload score"}
-                aria-label={uploading ? "Uploading score" : "Upload score"}
-                onClick={(event) => {
-                  if (creditsLocked) {
-                    event.preventDefault();
-                    openPaywall("upload_blocked");
-                  }
-                }}
-              >
-                <Plus size={16} aria-hidden="true" />
+              <div className="score-picker" ref={scorePickerRef}>
+                {scoreMenuOpen ? (
+                  <div className="voice-picker-menu score-picker-menu" role="menu" aria-label="Add a score">
+                    <button type="button" role="menuitem" className="voice-picker-option" onClick={chooseScoreFile}>
+                      <span className="voice-picker-option-avatar recommended" aria-hidden="true">
+                        <Upload size={14} />
+                      </span>
+                      <span className="voice-picker-option-copy">
+                        <span className="voice-picker-option-name">Upload MusicXML…</span>
+                        <span className="voice-picker-option-meta">.xml or .mxl</span>
+                      </span>
+                    </button>
+                    <div className="score-picker-heading">Demo songs</div>
+                    {DEMO_SONGS.map((song) => (
+                      <button
+                        key={song.id}
+                        type="button"
+                        role="menuitem"
+                        className="voice-picker-option"
+                        onClick={() => void loadDemoSong(song)}
+                      >
+                        <span className="voice-picker-option-avatar recommended" aria-hidden="true">
+                          <Music2 size={14} />
+                        </span>
+                        <span className="voice-picker-option-copy">
+                          <span className="voice-picker-option-name">{song.title}</span>
+                          <span className="voice-picker-option-meta">{song.detail}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className={clsx("composer-tool", { open: scoreMenuOpen })}
+                  aria-haspopup="menu"
+                  aria-expanded={scoreMenuOpen}
+                  aria-label={uploading ? "Uploading score" : "Add a score"}
+                  data-tooltip={uploading ? "Uploading score…" : "Upload a score or load a demo song"}
+                  disabled={uploading || browserMixBounceActive}
+                  onClick={() => {
+                    setScoreMenuOpen((open) => !open);
+                    setVoiceMenuOpen(false);
+                    setSolfegeMenuOpen(false);
+                  }}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                </button>
                 <input
+                  ref={scoreFileInputRef}
                   type="file"
+                  hidden
                   data-testid="score-upload-input"
                   accept=".xml,.mxl"
                   disabled={uploading || creditsLocked || browserMixBounceActive}
@@ -5813,7 +5941,7 @@ export default function MainApp() {
                     if (file) handleUpload(file);
                   }}
                 />
-              </label>
+              </div>
               <span className="composer-toolbar-divider" aria-hidden="true" />
               <div className="voice-picker" ref={voicePickerRef}>
                 {voiceMenuOpen ? (
@@ -5867,6 +5995,7 @@ export default function MainApp() {
                   onClick={() => {
                     setVoiceMenuOpen((open) => !open);
                     setSolfegeMenuOpen(false);
+                    setScoreMenuOpen(false);
                   }}
                 >
                   {selectedVoice ? (
@@ -5999,6 +6128,7 @@ export default function MainApp() {
                     }
                     setSolfegeMenuOpen((open) => !open);
                     setVoiceMenuOpen(false);
+                    setScoreMenuOpen(false);
                   }}
                 >
                   <Music2 size={16} aria-hidden="true" />
@@ -6357,7 +6487,26 @@ export default function MainApp() {
                 </div>
               ) : !score ? (
                 <div className="score-placeholder">
-                  <p>Upload a MusicXML file to render the score here.</p>
+                  <div className="score-placeholder-content">
+                    <p>Upload a MusicXML file to render the score here.</p>
+                    <p className="demo-song-offer-label">No score handy? Try a demo song:</p>
+                    <div className="demo-song-cards">
+                      {DEMO_SONGS.map((song) => (
+                        <button
+                          key={song.id}
+                          type="button"
+                          className="demo-song-card"
+                          disabled={uploading || browserMixBounceActive}
+                          onClick={() => void loadDemoSong(song)}
+                        >
+                          <Music2 size={18} aria-hidden="true" />
+                          <span className="demo-song-card-title">{song.title}</span>
+                          <span className="demo-song-card-detail">{song.detail}</span>
+                          <span className="demo-song-card-action">Load demo</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               ) : null}
               {uploading ? (
