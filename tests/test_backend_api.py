@@ -287,6 +287,18 @@ def _make_router_call_tool():
                 part_id=arguments["part_id"],
                 settings=arguments.get("settings"),
             )
+        if name == "replace_birthday_name":
+            from src.api.birthday_name import replace_birthday_name
+
+            return replace_birthday_name(
+                PROJECT_ROOT / arguments["source_musicxml_path"],
+                PROJECT_ROOT / arguments["output_musicxml_path"],
+                name=arguments.get("name"),
+                sung_text=arguments.get("sung_text"),
+                voicebank_path=arguments["voicebank"],
+                selected_verse_number=arguments.get("selected_verse_number"),
+                selected_lyric_selection=arguments.get("selected_lyric_selection"),
+            )
         if name == "regenerate_solfege_verses":
             from src.api.solfege import regenerate_solfege_verses
 
@@ -3680,6 +3692,137 @@ def test_solfege_lines_are_regenerated_only_for_parts_whose_music_changed(client
     assert after["current_score"]["version"] == before["current_score"]["version"] + 1
     active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
     root = ET.parse(active).getroot()
+    alto_notes = [note for note in root.find("part[@id='P2']").iter("note") if note.find("pitch") is not None]
+    assert all(
+        any(lyric.get("name") == "SightSinger Solfege" for lyric in note.findall("lyric"))
+        for note in alto_notes
+    )
+
+
+def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
+    from src.backend.llm_prompt import build_prompt_bundle
+
+    _, app = client
+    orchestrator = app.state.orchestrator
+    demo = {"demo_song": "happy-birthday"}
+    names = lambda tools: [tool["name"] for tool in tools]
+    assert names(orchestrator._score_tools(LlmRole.DEFAULT, demo)) == ["replace_birthday_name"]
+    assert orchestrator._score_tools(LlmRole.DEFAULT, {"demo_song": "amazing-grace"}) == []
+    assert orchestrator._score_tools(LlmRole.DEFAULT, {}) == []
+    assert orchestrator._score_tools(LlmRole.PREPROCESS, demo) == []
+
+    call = ToolCall(name="replace_birthday_name", arguments={"name": "Tom", "sung_text": "Tom"})
+    assert orchestrator._first_invalid_tool_for_role([call], LlmRole.DEFAULT, {}) == "replace_birthday_name"
+    assert orchestrator._first_invalid_tool_for_role([call], LlmRole.DEFAULT, demo) is None
+
+    # The tool is listed per request, so the cached static prompt never changes.
+    tools = orchestrator._llm_tools_for_role(LlmRole.DEFAULT)
+    plain = build_prompt_bundle(tools, True)
+    with_tool = build_prompt_bundle(
+        tools, True, score_tools=orchestrator._score_tools(LlmRole.DEFAULT, demo)
+    )
+    assert with_tool.static_prompt_text == plain.static_prompt_text
+    assert "replace_birthday_name" not in with_tool.static_prompt_text
+    assert "Tools available for this score" in with_tool.dynamic_prompt_text
+    assert "replace_birthday_name" in with_tool.dynamic_prompt_text
+    assert "replace_birthday_name" not in plain.dynamic_prompt_text
+
+
+def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, monkeypatch, tmp_path):
+    """The name edit regenerates the Alto's solfege line and is followed by a quote."""
+    from xml.etree import ElementTree as ET
+
+    from src.api.solfege import add_solfege_lyric_verse
+
+    from src.mcp.handlers import handle_parse_score
+
+    test_client, app = client
+    stub_call_tool = _make_router_call_tool()
+
+    def call_tool(name, arguments):
+        # The quote reparses for its lyric line and prices from the real durations.
+        if name == "parse_score":
+            return handle_parse_score(arguments, "cpu")
+        return stub_call_tool(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    # The real check runs the voicebank's phonemizer; here the split is taken as given.
+    monkeypatch.setattr(
+        "src.api.birthday_name._validate_name",
+        lambda name, sung_text, voicebank_path: {"words": [word.split("-") for word in sung_text.split()]},
+    )
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+    with_solfege = tmp_path / "happy-birthday.xml"
+    add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("happy-birthday.xml", with_solfege.read_bytes(), "application/xml")},
+    )
+    assert upload.status_code == 200
+    # The test router's parse is a stub; give the session the real summary.
+    real_summary = parse_score(with_solfege)["score_summary"]
+    asyncio.run(app.state.sessions.set_score_summary(session_id, real_summary))
+    alto_verse_1 = next(
+        selection
+        for part in real_summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+
+    class NameThenQuoteClient:
+        def __init__(self):
+            self.tool_results: list[dict] = []
+
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if not (isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX)):
+                return json.dumps({
+                    "tool_calls": [{"name": "replace_birthday_name",
+                                    "arguments": {"name": "Henry", "sung_text": "Hen-ry", "voicebank": "Dummy"}}],
+                    "final_message": "Writing Henry into the song.", "include_score": True,
+                })
+            text = last[len(TOOL_RESULT_PREFIX):]
+            payload, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+            self.tool_results.append(payload)
+            if payload.get("status") == "name_ready":
+                return json.dumps({
+                    "tool_calls": [{"name": "prepare_synthesis_quote",
+                                    "arguments": {"part_id": "Alto", "voicebank": "Dummy",
+                                                  "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")}}}],
+                    "final_message": "Preparing a quote.", "include_score": False,
+                })
+            return json.dumps({"tool_calls": [], "final_message": "Here is the quote.", "include_score": False})
+
+    llm_client = NameThenQuoteClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing it for Henry"})
+
+    assert response.status_code == 200
+    statuses = [result.get("action") or result.get("status") for result in llm_client.tool_results]
+    assert statuses == ["name_ready", "quote_ready"], llm_client.tool_results
+    assert llm_client.tool_results[0]["sung_text"] == "Hen-ry"
+    assert "current_score" in response.json()
+
+    active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
+    root = ET.parse(active).getroot()
+    measure = next(m for m in root.find("part[@id='P2']").findall("measure") if m.get("number") == "7")
+    verse_1 = [
+        lyric.findtext("text")
+        for note in measure.findall("note")
+        for lyric in note.findall("lyric")
+        if lyric.get("number") == "1"
+    ]
+    assert verse_1[:2] == ["Hen", "ry"]
+    # The Alto's solfege line was generated again on the edited notes.
     alto_notes = [note for note in root.find("part[@id='P2']").iter("note") if note.find("pitch") is not None]
     assert all(
         any(lyric.get("name") == "SightSinger Solfege" for lyric in note.findall("lyric"))

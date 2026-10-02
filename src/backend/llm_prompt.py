@@ -75,6 +75,7 @@ def build_prompt_bundle(
     expand_repeats: bool = False,
     synthesis_max_duration_seconds: float = 300.0,
     role: Any = "default",
+    score_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> PromptBundle:
     """Build static and dynamic prompt layers for the current request."""
     tool_specs = []
@@ -213,6 +214,27 @@ def build_prompt_bundle(
         .replace("{last_preprocess_plan}", "<provided in Dynamic Context>")
         .replace("{voicebank_details}", "<provided in Dynamic Context>")
     )
+    # Tools offered only for some scores. They are listed here, not in the
+    # static prompt, so the cached static prompt is the same for every score.
+    score_tools_text = ""
+    if score_tools:
+        score_tools_json = json.dumps(
+            [
+                {
+                    "name": tool.get("name"),
+                    "description": tool.get("description"),
+                    "input_schema": tool.get("inputSchema"),
+                }
+                for tool in score_tools
+            ],
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        score_tools_text = (
+            "Tools available for this score (call them like the tools listed in the "
+            f"system prompt):\n{score_tools_json}\n"
+        )
     dynamic_prompt = (
         "Dynamic Context:\n"
         "AUTHORITATIVE CURRENT APPLICATION STATE: The values below are current and supersede "
@@ -246,6 +268,7 @@ def build_prompt_bundle(
         f"{active_synthesis_quote_text}\n"
         "Repeat-expansion setting (authoritative):\n"
         f"{repeat_expansion_text}\n"
+        f"{score_tools_text}"
         "End Dynamic Context."
     )
     return PromptBundle(

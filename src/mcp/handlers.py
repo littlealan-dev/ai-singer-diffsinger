@@ -112,6 +112,21 @@ def handle_modify_solfege_settings(params: Dict[str, Any], device: str) -> Dict[
     )
 
 
+def handle_replace_birthday_name(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle writing a name into the Happy Birthday demo's placeholder."""
+    from src.api.birthday_name import replace_birthday_name
+
+    return replace_birthday_name(
+        resolve_project_path(params["source_musicxml_path"]),
+        resolve_project_path(params["output_musicxml_path"]),
+        name=params.get("name"),
+        sung_text=params.get("sung_text"),
+        voicebank_path=resolve_voicebank_id(params["voicebank"]),
+        selected_verse_number=params.get("selected_verse_number"),
+        selected_lyric_selection=params.get("selected_lyric_selection"),
+    )
+
+
 def handle_regenerate_solfege_verses(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     """Handle regenerating generated solfege verses after a part's notes changed."""
     return regenerate_solfege_verses(
@@ -336,6 +351,7 @@ HANDLERS = {
     "add_solfege_lyric_verse": handle_add_solfege_lyric_verse,
     "modify_solfege_settings": handle_modify_solfege_settings,
     "regenerate_solfege_verses": handle_regenerate_solfege_verses,
+    "replace_birthday_name": handle_replace_birthday_name,
     "preprocess_voice_parts": handle_preprocess_voice_parts,
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,

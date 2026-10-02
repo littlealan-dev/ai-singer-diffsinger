@@ -137,6 +137,9 @@ for every LLM call:
     execution       → any call outside `available` takes the existing invalid-tool path
 ```
 
+The executor's own set of runnable tools (`_execute_tool_calls`) also lists
+`replace_birthday_name`; availability is decided by the check above.
+
 All instructions for `replace_birthday_name` live in its own description (when
 to call it, the `sung_text` format, the edit → review + quote flow). The general
 system prompt gets no lines about it, so a score without the tool shows the LLM
@@ -155,9 +158,14 @@ replace_birthday_name(
     sung_text: string,       # the name split into syllables: "Hen-ry", "An-na Ma-rie"; omitted when name is null
     voicebank: string,       # resolved like the quote: the UI selection overrides
 )
-→ success: { status: "name_ready", sung_text, syllables, lyric_selection, message }
+→ success (tool):      { status: "name_ready", unchanged, sung_text, derived_score, score_summary, derived_musicxml_path }
+→ success (LLM sees):  { status: "name_ready", sung_text, score_changed, message }
 → action_required: name_not_singable | name_syllables_mismatch | name_too_long | demo_placeholder_not_found
 ```
+
+`unchanged: true` when the placeholder already holds exactly this name and
+rhythm (compared on pitch, duration, type and verse-1 lyric): nothing is written,
+no new score version is saved, and `score_changed` is false.
 
 The LLM interprets the request ("sing it for Henry") and supplies `sung_text`.
 Everything else is deterministic.
@@ -180,15 +188,18 @@ table**, so a second name, or `null`, replaces any earlier split cleanly.
 ### 5.3 Validation
 
 ```
+name is null → no validation; restore "you"
+sung_text empty, or an empty piece ("Hen--ry")                         → name_syllables_mismatch
+sung_text without hyphens or spaces != name without spaces (case-insensitive) → name_syllables_mismatch
 for each word in sung_text.split(" "):
     phonemes = phonemize([word without hyphens], voicebank, language="en")   # the synthesis's own call
-        UnsupportedLyricTokenError → name_not_singable {message from the phonemizer}
+        UnsupportedLyricTokenError → name_not_singable {word, reason, message from the phonemizer}
     vowels = count(p for p in phonemes if phonemizer.is_vowel(p))
-    pieces = word.split("-")
-    vowels != len(pieces) → name_syllables_mismatch {word, expected_syllables: vowels}
+        vowels == 0 → name_not_singable {word}
 total = sum(vowels)
-total > 4 → name_too_long {syllables: total, suggestion: "a shorter name or nickname"}
-sung_text without hyphens or spaces != name without spaces (case-insensitive) → name_syllables_mismatch
+total > 4 → name_too_long {syllables: total, max_syllables: 4}      # checked before the split,
+                                                                      # so a long name is never asked to re-split
+for each word: vowels != len(word.split("-")) → name_syllables_mismatch {word, expected_syllables: vowels}
 ```
 
 Measured on both installed voicebanks (LIEE, Qixuan), with identical counts:
@@ -233,7 +244,7 @@ user: "sing it for Henry"
 LLM  → replace_birthday_name(name="Henry", sung_text="Hen-ry", voicebank=…)
 tool → writes score-name-<uuid>.xml, saves it as the active score (new version, refreshed summary)
      → §6.3 regenerates stale solfege lines
-     → follow-up (tools allowed): {status: "name_ready", sung_text: "Hen-ry", lyric_selection, …}
+     → follow-up (tools allowed): {status: "name_ready", sung_text: "Hen-ry", score_changed, message}
 LLM  → prepare_synthesis_quote(part Alto unless the user named one, lyric line 1, …)
      → message-only: "I've written Hen-ry into measure 7 — check the preview" + quote table + confirmation request
 UI   → the reply carries current_score → refreshScorePreview()
@@ -275,7 +286,7 @@ completed job → UI take record carries take_signature
 UI chat body score_player_takes: [{part_id, label, expand_repeats, take_signature}]
 
 quote → takes_removed_from_player.takes = [
-    {label, reason: "repeat_order"}    for takes rendered in the other repeat order   (existing rule)
+    {label, reason: "rendered_with_repeats" | "rendered_in_written_order"}  for takes in the other repeat order (existing rule)
     {label, reason: "score_edited"}    for takes whose take_signature != current take_signature of their part
 ]
 

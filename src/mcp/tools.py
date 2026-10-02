@@ -1605,6 +1605,47 @@ TOOLS: List[Tool] = [
         },
     ),
     Tool(
+        name="replace_birthday_name",
+        description=(
+            "Only for the Happy Birthday demo song. Writes a name into the song in place of "
+            "the held \"you\" at the start of the third line, in every vocal part. Call it when "
+            "the user asks to sing the song for someone, e.g. \"sing it for Henry\". Pass `name` "
+            "as the user wrote it, and `sung_text`: the name split into syllables with hyphens, "
+            "words separated by spaces, e.g. \"Hen-ry\", \"Jack\", \"An-na Ma-rie\". Pass "
+            "`name: null` and omit `sung_text` to restore \"you\". The backend checks the name "
+            "with the singing voice's pronunciation. On `name_syllables_mismatch`, call again "
+            "with the name split into `diagnostics.expected_syllables` pieces. On "
+            "`name_too_long`, ask the user for a shorter name or a nickname. On "
+            "`name_not_singable`, tell the user the voice can't sing that name and ask for it in "
+            "English letters. After `name_ready`, call `prepare_synthesis_quote` for the part "
+            "the user asked for, or the Alto (it carries the melody) if they named none, with "
+            "the verse 1 lyric line; in the quote message, tell the user the name now reads "
+            "`sung_text` in the score preview and ask them to check it before confirming."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": ["string", "null"], "maxLength": 80},
+                "sung_text": {"type": ["string", "null"], "maxLength": 120},
+                "voicebank": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "code": {"type": ["string", "null"]},
+                "sung_text": {"type": ["string", "null"]},
+                "diagnostics": {"type": ["object", "null"]},
+            },
+            "required": ["status"],
+            "additionalProperties": True,
+        },
+    ),
+    Tool(
         name="regenerate_solfege_verses",
         description=(
             "Internal: generate the given parts' SightSinger solfege verses again from "

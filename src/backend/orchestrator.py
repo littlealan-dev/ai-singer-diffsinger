@@ -152,6 +152,12 @@ LLM_TOOL_ALLOWLIST_BY_ROLE = {
     LlmRole.DEFAULT: DEFAULT_LLM_TOOL_ALLOWLIST,
     LlmRole.PREPROCESS: PREPROCESS_LLM_TOOL_ALLOWLIST,
 }
+TOOL_REPLACE_BIRTHDAY_NAME = "replace_birthday_name"
+# Tools offered to the default LLM role only when the current score allows them.
+# Their specs go in the per-request context, not the cached static prompt.
+SCORE_LLM_TOOLS: Dict[str, Callable[[Dict[str, Any]], bool]] = {
+    TOOL_REPLACE_BIRTHDAY_NAME: lambda summary: summary.get("demo_song") == "happy-birthday",
+}
 
 
 class SynthesisActionRequired(RuntimeError):
@@ -207,6 +213,7 @@ class Orchestrator:
             for role, tool_names in LLM_TOOL_ALLOWLIST_BY_ROLE.items()
         }
         self._llm_tools = self._llm_tools_by_role[LlmRole.DEFAULT]
+        self._score_tool_specs = list_tools(set(SCORE_LLM_TOOLS))
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
         self._billing_finalization_tasks: Dict[
@@ -5414,6 +5421,7 @@ class Orchestrator:
                 expand_repeats=expand_repeats,
                 synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
+                score_tools=self._score_tools(role, snapshot.get("score_summary")),
             )
             text = await asyncio.to_thread(
                 self._call_llm_client_generate,
@@ -5437,7 +5445,9 @@ class Orchestrator:
                 summarize_payload(text),
             )
             return None, "LLM returned an invalid response. Please try again."
-        invalid_tool = self._first_invalid_tool_for_role(response.tool_calls, role)
+        invalid_tool = self._first_invalid_tool_for_role(
+            response.tool_calls, role, snapshot.get("score_summary")
+        )
         if invalid_tool:
             self._logger.warning(
                 "llm_tool_not_allowed_for_role role=%s tool=%s",
@@ -5703,6 +5713,7 @@ class Orchestrator:
                 expand_repeats=expand_repeats,
                 synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
                 role=role,
+                score_tools=self._score_tools(role, snapshot.get("score_summary")),
             )
             text = await asyncio.to_thread(
                 self._call_llm_client_generate,
@@ -5736,7 +5747,9 @@ class Orchestrator:
                     None,
                 )
             return None, tool_summary
-        invalid_tool = self._first_invalid_tool_for_role(response.tool_calls, role)
+        invalid_tool = self._first_invalid_tool_for_role(
+            response.tool_calls, role, snapshot.get("score_summary")
+        )
         if invalid_tool:
             self._logger.warning(
                 "llm_followup_tool_not_allowed_for_role role=%s tool=%s",
@@ -5828,6 +5841,19 @@ class Orchestrator:
             return ""
         return f"Thought summary:\n{cleaned_summary}"
 
+    def _score_tools(
+        self, role: LlmRole, score_summary: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Tools offered only for the current score, such as the birthday name tool."""
+        if role != LlmRole.DEFAULT:
+            return []
+        summary = score_summary if isinstance(score_summary, dict) else {}
+        return [
+            tool
+            for tool in self._score_tool_specs
+            if SCORE_LLM_TOOLS[tool["name"]](summary)
+        ]
+
     def _llm_tools_for_role(self, role: LlmRole) -> List[Dict[str, Any]]:
         """Return the tool schemas exposed to a specific LLM role."""
         return self._llm_tools_by_role.get(role, self._llm_tools_by_role[LlmRole.DEFAULT])
@@ -5836,9 +5862,11 @@ class Orchestrator:
         self,
         tool_calls: List[ToolCall],
         role: LlmRole,
+        score_summary: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        """Return the first tool name that is not available to the role."""
-        allowed = LLM_TOOL_ALLOWLIST_BY_ROLE.get(role, DEFAULT_LLM_TOOL_ALLOWLIST)
+        """Return the first tool name that is not available to the role for this score."""
+        allowed = set(LLM_TOOL_ALLOWLIST_BY_ROLE.get(role, DEFAULT_LLM_TOOL_ALLOWLIST))
+        allowed |= {tool["name"] for tool in self._score_tools(role, score_summary)}
         for call in tool_calls:
             if call.name not in allowed:
                 return call.name
@@ -6350,9 +6378,81 @@ class Orchestrator:
                 TOOL_SYNTHESIZE,
                 TOOL_ADD_SOLFEGE_VERSE,
                 TOOL_MODIFY_SOLFEGE_SETTINGS,
+                TOOL_REPLACE_BIRTHDAY_NAME,
             }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name == TOOL_REPLACE_BIRTHDAY_NAME:
+                # Offered only for the Happy Birthday demo; the tool also checks the
+                # score itself. It edits the score only: the LLM then presents a quote.
+                snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+                output_path = self._sessions.session_dir(session_id) / f"score-name-{uuid.uuid4().hex}.xml"
+                name_args = await self._apply_forced_voicebank(dict(call.arguments), forced_voicebank_id)
+                if not name_args.get("voicebank"):
+                    name_args["voicebank"] = await self._resolve_voicebank()
+                voicebank_error = await self._validate_requested_voicebank(name_args)
+                if voicebank_error is not None:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(voicebank_error, sort_keys=True),
+                        action_required_payload=voicebank_error,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                active_score = (snapshot.get("current_score") or {}).get("score") or current_score
+                result = await asyncio.to_thread(
+                    self._router.call_tool,
+                    TOOL_REPLACE_BIRTHDAY_NAME,
+                    {
+                        "source_musicxml_path": self._mcp_musicxml_path(source_path),
+                        "output_musicxml_path": str(
+                            output_path.relative_to(self._settings.project_root)
+                        ),
+                        "name": name_args.get("name"),
+                        "sung_text": name_args.get("sung_text"),
+                        "voicebank": name_args["voicebank"],
+                        "selected_verse_number": active_score.get("selected_verse_number"),
+                        "selected_lyric_selection": active_score.get("selected_lyric_selection"),
+                    },
+                )
+                if not isinstance(result, dict):
+                    raise ValueError("Invalid replace-birthday-name tool result.")
+                if result.get("status") != "name_ready":
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(result, sort_keys=True),
+                        action_required_payload=result,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                score_changed = not result.get("unchanged")
+                if score_changed:
+                    current_score, score_summary, _ = await self._persist_solfege_result(
+                        session_id, result
+                    )
+                sung_text = result.get("sung_text")
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(
+                        {
+                            "status": "name_ready",
+                            "sung_text": sung_text,
+                            "score_changed": score_changed,
+                            "message": (
+                                "The score now sings the name as written in sung_text. Call "
+                                "prepare_synthesis_quote for the part the user asked for, or the "
+                                "Alto if they named none, with the verse 1 lyric line. In the quote "
+                                f"message, tell the user the name now reads \"{sung_text}\" in the "
+                                "score preview and ask them to check it before confirming."
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                    explicit_verse_number=selected_explicit_verse_number,
+                    session_state_changed=score_changed,
+                )
             if call.name == TOOL_ADD_SOLFEGE_VERSE:
                 snapshot = await self._sessions.get_snapshot(session_id, user_id)
                 source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
