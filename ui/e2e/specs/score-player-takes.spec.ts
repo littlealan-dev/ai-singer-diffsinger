@@ -158,6 +158,10 @@ test("takes replace, append and clear in the score player without mixing up thei
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "score-player-takes");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  // The cookie banner covers the composer, including the Send button.
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
   await uploadScore(page, "first-score.xml");
 
   // First take of "Voice": 3 s.

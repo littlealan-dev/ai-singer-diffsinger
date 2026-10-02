@@ -1944,38 +1944,6 @@ div[id^="fire_app_check_"] {
   padding: 0;
 }
 
-.composer-menu-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
-  align-items: stretch;
-  gap: 10px;
-  min-width: 0;
-}
-
-.composer-upload-button {
-  min-width: 0;
-  min-height: 60px;
-  justify-content: flex-start;
-  overflow: hidden;
-}
-
-.composer-upload-button span {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.composer-menu-bar .voice-picker,
-.composer-menu-bar .solfege-picker {
-  width: 100%;
-  max-width: none;
-}
-
-.composer-menu-bar .voice-picker-trigger {
-  max-width: none;
-}
-
 .voice-picker {
   position: relative;
   flex: 0 1 220px;
@@ -2272,63 +2240,128 @@ img.voice-picker-option-avatar {
   text-align: left;
 }
 
-.composer-repeat-toggle {
-  min-width: 0;
-  min-height: 60px;
-  border-radius: 14px;
+/* Composer toolbar: one bar of small icon controls under the chat input. */
+.composer-toolbar {
+  position: relative;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
   border: 1px solid var(--glass-border);
   background: rgba(255, 255, 255, 0.04);
-  color: var(--text-strong);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  cursor: pointer;
-  transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
-.composer-repeat-toggle:hover {
-  border-color: rgba(155, 134, 255, 0.55);
-  box-shadow: 0 0 0 3px rgba(155, 134, 255, 0.14);
+.composer-upload-button input {
+  display: none;
 }
 
-.composer-repeat-toggle.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  box-shadow: none;
-}
-
-.composer-repeat-toggle input {
-  appearance: none;
-  flex-shrink: 0;
-  width: 42px;
-  height: 24px;
-  margin: 0;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
-  cursor: inherit;
-  transition: background 160ms ease, border-color 160ms ease;
-}
-
-.composer-repeat-toggle input::after {
-  content: "";
-  display: block;
-  width: 18px;
+.composer-toolbar-divider {
+  width: 1px;
   height: 18px;
-  margin: 2px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 160ms ease;
+  margin: 0 3px;
+  background: var(--glass-border);
 }
 
-.composer-repeat-toggle input:checked {
-  border-color: rgba(167, 139, 250, 0.9);
-  background: rgba(139, 92, 246, 0.8);
+.composer-toolbar .voice-picker,
+.composer-toolbar .solfege-picker {
+  flex: none;
+  width: auto;
+  max-width: none;
 }
 
-.composer-repeat-toggle input:checked::after {
-  transform: translateX(18px);
+.composer-tool {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.composer-tool:hover,
+.composer-tool.open {
+  background: rgba(155, 134, 255, 0.16);
+  color: var(--text-strong);
+}
+
+.composer-tool:focus-visible {
+  outline: 2px solid rgba(155, 134, 255, 0.7);
+  outline-offset: 1px;
+}
+
+.composer-tool.active {
+  background: rgba(155, 134, 255, 0.24);
+  color: #c9bbff;
+}
+
+.composer-tool:disabled,
+.composer-tool.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+.composer-tool .voice-picker-trigger-avatar {
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+}
+
+/* Icon-only controls name themselves in a tooltip that shows at once on hover,
+   unlike the delayed native title tooltip. */
+.composer-tool[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(155, 134, 255, 0.24);
+  background: rgba(18, 21, 29, 0.96);
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.composer-tool[data-tooltip]:hover::after,
+.composer-tool[data-tooltip]:focus-visible::after {
+  visibility: visible;
+}
+
+/* The first control's tooltip starts at its left edge, inside the panel. */
+.composer-toolbar > .composer-tool:first-child::after {
+  left: 0;
+  transform: none;
+}
+
+/* An open menu replaces its control's tooltip. */
+.composer-tool.open::after {
+  display: none;
+}
+
+.composer-toolbar .solfege-feature-hint {
+  left: -8px;
+  right: auto;
+}
+
+.composer-toolbar .solfege-feature-hint::after {
+  left: 16px;
+  right: auto;
 }
 
 .solfege-picker-menu {
@@ -3291,20 +3324,6 @@ img.voice-picker-option-avatar {
     padding: 0;
   }
 
-  .composer-menu-bar {
-    grid-template-columns: 44px repeat(3, minmax(0, 1fr));
-  }
-
-  .composer-upload-button {
-    min-height: 60px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .composer-upload-button span {
-    display: none;
-  }
-
   .voice-picker,
   .solfege-picker {
     flex-basis: auto;
@@ -3318,9 +3337,7 @@ img.voice-picker-option-avatar {
   }
 
   .solfege-picker-menu {
-    right: 0;
-    left: auto;
-    width: min(310px, calc(200% + 10px));
+    width: min(310px, calc(100vw - 48px));
   }
 
   .send-button {

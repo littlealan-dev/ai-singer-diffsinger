@@ -94,6 +94,10 @@ test("stream-error performs bounded recovery and unlocks chat", async ({ page })
 
   await signInAsE2EUser(page, "synthesis-stream-recovery");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  // The cookie banner covers the composer, including the Send button.
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
   await page.getByTestId("score-upload-input").setInputFiles({
     name: "score.xml",
     mimeType: "application/xml",
@@ -248,6 +252,10 @@ async function uploadAndSing(page: Page, testId: string): Promise<void> {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   await signInAsE2EUser(page, testId);
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  // The cookie banner covers the composer, including the Send button.
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
   await page.getByTestId("score-upload-input").setInputFiles({
     name: "score.xml",
     mimeType: "application/xml",

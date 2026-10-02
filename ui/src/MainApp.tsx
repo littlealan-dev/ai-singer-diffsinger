@@ -19,7 +19,7 @@ import {
   register as registerExtendableMediaRecorderEncoder,
 } from "extendable-media-recorder";
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
-import { UploadCloud, Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
+import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -3012,6 +3012,8 @@ export default function MainApp() {
       : solfegeMode === "minor_la_based"
         ? "Minor (La)"
         : "Minor (Do)";
+  const solfegeTriggerValue =
+    solfegeSystem === "movable_do" ? `${solfegeSystemLabel} · ${solfegeModeLabel}` : solfegeSystemLabel;
   const multiTrackExportPercent =
     multiTrackExportProgress !== null
       ? `${Math.round(Math.max(0, Math.min(1, multiTrackExportProgress)) * 100)}%`
@@ -5784,11 +5786,15 @@ export default function MainApp() {
                 <Send size={18} />
               </button>
             </div>
-            <div className="composer-menu-bar" aria-label="Composer settings">
+            {/* One compact toolbar of icon controls. Each control names itself
+                and its current value in an instant tooltip (data-tooltip). */}
+            <div className="composer-menu-bar composer-toolbar" role="toolbar" aria-label="Composer settings">
               <label
-                className="upload-button composer-upload-button"
-                title="Upload Score"
-                aria-label={uploading ? "Uploading score" : "Upload Score"}
+                className={clsx("composer-tool composer-upload-button", {
+                  disabled: uploading || creditsLocked || browserMixBounceActive,
+                })}
+                data-tooltip={uploading ? "Uploading score…" : "Upload score"}
+                aria-label={uploading ? "Uploading score" : "Upload score"}
                 onClick={(event) => {
                   if (creditsLocked) {
                     event.preventDefault();
@@ -5796,8 +5802,7 @@ export default function MainApp() {
                   }
                 }}
               >
-                <UploadCloud size={18} />
-                <span>{uploading ? "Uploading..." : "Upload Score"}</span>
+                <Plus size={16} aria-hidden="true" />
                 <input
                   type="file"
                   data-testid="score-upload-input"
@@ -5809,6 +5814,7 @@ export default function MainApp() {
                   }}
                 />
               </label>
+              <span className="composer-toolbar-divider" aria-hidden="true" />
               <div className="voice-picker" ref={voicePickerRef}>
                 {voiceMenuOpen ? (
                   <div className="voice-picker-menu" role="listbox" aria-label="Select AI voice">
@@ -5853,9 +5859,11 @@ export default function MainApp() {
                 ) : null}
                 <button
                   type="button"
-                  className={clsx("voice-picker-trigger", { open: voiceMenuOpen })}
+                  className={clsx("composer-tool", { open: voiceMenuOpen })}
                   aria-haspopup="listbox"
                   aria-expanded={voiceMenuOpen}
+                  aria-label={`Voice: ${voicebanksLoading ? "Loading voices" : selectedVoiceLabel}`}
+                  data-tooltip={`Voice: ${voicebanksLoading ? "Loading voices…" : selectedVoiceLabel}`}
                   onClick={() => {
                     setVoiceMenuOpen((open) => !open);
                     setSolfegeMenuOpen(false);
@@ -5868,16 +5876,9 @@ export default function MainApp() {
                       className="voice-picker-trigger-avatar recommended"
                       aria-hidden="true"
                     >
-                      <Sparkles size={15} />
+                      <Sparkles size={13} />
                     </span>
                   )}
-                  <span className="voice-picker-trigger-copy">
-                    <span className="voice-picker-trigger-label">Voice</span>
-                    <span className="voice-picker-trigger-name">
-                      {voicebanksLoading ? "Loading voices..." : selectedVoiceLabel}
-                    </span>
-                  </span>
-                  <ChevronsUpDown size={16} aria-hidden="true" />
                 </button>
               </div>
               <div className="solfege-picker" ref={solfegePickerRef}>
@@ -5984,9 +5985,11 @@ export default function MainApp() {
                 ) : null}
                 <button
                   type="button"
-                  className={clsx("solfege-picker-trigger", { open: solfegeMenuOpen })}
+                  className={clsx("composer-tool", { open: solfegeMenuOpen })}
                   aria-haspopup="dialog"
                   aria-expanded={solfegeMenuOpen}
+                  aria-label={`Solfege: ${solfegeTriggerValue}`}
+                  data-tooltip={`Solfege: ${solfegeTriggerValue}`}
                   disabled={solfegeSettingsSaving}
                   onClick={() => {
                     setShowSolfegeHint(false);
@@ -5998,46 +6001,27 @@ export default function MainApp() {
                     setVoiceMenuOpen(false);
                   }}
                 >
-                  <span className="solfege-picker-trigger-icon" aria-hidden="true">
-                    <Music2 size={16} />
-                  </span>
-                  <span className="solfege-picker-trigger-copy">
-                    <span className="solfege-picker-trigger-label">Solfege</span>
-                    <span className="solfege-picker-trigger-name">
-                      {solfegeSystemLabel}
-                      {solfegeSystem === "movable_do" ? ` · ${solfegeModeLabel}` : ""}
-                    </span>
-                  </span>
-                  <ChevronsUpDown size={16} aria-hidden="true" />
+                  <Music2 size={16} aria-hidden="true" />
                 </button>
               </div>
               {/* A render setting, like the voice and solfege: it applies to the
                   next take. The player keeps playing the takes it has. */}
-              <label
-                className={clsx("composer-repeat-toggle", {
-                  disabled: !score || browserMixBounceActive,
-                })}
-                title="Render the next take with repeats, or in written order"
+              <button
+                type="button"
+                role="switch"
+                aria-checked={expandRepeats}
+                aria-label="With Repeats"
+                className={clsx("composer-tool composer-repeat-toggle", { active: expandRepeats })}
+                data-tooltip={
+                  expandRepeats
+                    ? "Repeats: on. The next take sings the repeats"
+                    : "Repeats: off. The next take sings in written order"
+                }
+                disabled={!score || browserMixBounceActive}
+                onClick={() => setExpandRepeats((current) => !current)}
               >
-                <span className="solfege-picker-trigger-icon" aria-hidden="true">
-                  <Repeat size={16} />
-                </span>
-                <span className="solfege-picker-trigger-copy">
-                  <span className="solfege-picker-trigger-label">Repeats</span>
-                  <span className="solfege-picker-trigger-name">
-                    {expandRepeats ? "With repeats" : "Written order"}
-                  </span>
-                </span>
-                <input
-                  id="expand-repeats-toggle"
-                  type="checkbox"
-                  role="switch"
-                  aria-label="With Repeats"
-                  checked={expandRepeats}
-                  disabled={!score || browserMixBounceActive}
-                  onChange={(event) => setExpandRepeats(event.target.checked)}
-                />
-              </label>
+                <Repeat size={16} aria-hidden="true" />
+              </button>
             </div>
           </div>
         </section>
