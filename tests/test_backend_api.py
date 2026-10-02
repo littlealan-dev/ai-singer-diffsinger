@@ -3987,6 +3987,74 @@ def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, mo
     assert results == ["solfege_verse_ready", "quote_ready"], llm_client.tool_results
 
 
+def test_a_turn_that_keeps_calling_the_llm_stops_at_the_limit(client, caplog):
+    """A model that never stops calling tools is cut off at the per-turn limit.
+
+    Each round here gets an action_required result and answers it with the same
+    tool call, as the solfege quote loop did. The turn must end with a fixed
+    message instead of calling the model again, and the next message starts a
+    new count.
+    """
+    from src.backend.orchestrator import LLM_CALLS_PER_TURN_LIMIT
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("score.xml", VERSED_SCORE_XML, "application/xml")},
+    )
+    assert upload.status_code == 200
+
+    class RepeatingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            self.calls += 1
+            # An incomplete lyric selection is always answered with
+            # lyric_selection_required, which the model may act on again.
+            return json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "name": "prepare_synthesis_quote",
+                            "arguments": {"part_index": 0, "voicebank": "Dummy"},
+                        }
+                    ],
+                    "final_message": "Preparing a quote.",
+                    "include_score": False,
+                }
+            )
+
+    llm_client = RepeatingClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    with caplog.at_level("ERROR", logger="src.backend.orchestrator"):
+        response = test_client.post(
+            f"/sessions/{session_id}/chat",
+            json={"message": "sing the soprano part"},
+        )
+
+    assert response.status_code == 200
+    assert llm_client.calls == LLM_CALLS_PER_TURN_LIMIT
+    message = response.json()["message"]
+    assert message.startswith("I couldn't finish this request.")
+    assert "No credits were used." in message
+    assert "(Ref: " in message
+    assert any("llm_turn_limit_reached" in record.getMessage() for record in caplog.records)
+
+    # The next message is a new turn with its own count.
+    llm_client.calls = 0
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the soprano part"},
+    )
+    assert response.status_code == 200
+    assert llm_client.calls == LLM_CALLS_PER_TURN_LIMIT
+
+
 def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
     test_client, app = client
     session_id = _create_session(test_client)

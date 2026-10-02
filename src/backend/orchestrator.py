@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 import ast
 import asyncio
+import contextvars
 import hashlib
 import logging
 import copy
@@ -66,6 +67,30 @@ from src.mcp.tools import list_tools
 
 TOOL_RESULT_PREFIX = "Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"
 LLM_ERROR_FALLBACK = "LLM request failed. Please try again."
+# Normal turns make 1-4 LLM calls, and a part-splitting turn with every repair
+# attempt about 7. A turn that keeps calling the model past this without the
+# user sending another message is stuck in a loop.
+LLM_CALLS_PER_TURN_LIMIT = 10
+
+
+@dataclass
+class _LlmTurnBudget:
+    """LLM calls made for one user message, including the jobs it starts."""
+
+    reference: str
+    started_at: float
+    calls: int = 0
+
+
+class LlmTurnLimitReached(RuntimeError):
+    """The turn reached LLM_CALLS_PER_TURN_LIMIT; carries the user-facing message."""
+
+
+# Set when a user message arrives. Tasks and threads started for that turn copy
+# the context, so they share the same budget object.
+_llm_turn_budget: contextvars.ContextVar[Optional[_LlmTurnBudget]] = contextvars.ContextVar(
+    "llm_turn_budget", default=None
+)
 PREPROCESS_PLANNING_ERROR_MESSAGE = (
     "Couldn't create a line-preparation plan. Please retry the request."
 )
@@ -348,6 +373,9 @@ class Orchestrator:
                 session_id=session_id,
                 turn_id=turn_id,
                 user_id=user_id,
+            )
+            _llm_turn_budget.set(
+                _LlmTurnBudget(reference=str(turn_id)[:8], started_at=time.monotonic())
             )
             # Log the UI-side selections that silently rewrite synthesis arguments,
             # so a trace never has to infer them from the model's behaviour.
@@ -5146,6 +5174,8 @@ class Orchestrator:
 
     def _format_llm_error(self, exc: RuntimeError) -> str:
         """Return a user-facing LLM error message."""
+        if isinstance(exc, LlmTurnLimitReached):
+            return str(exc)
         message = str(exc).strip()
         if not message:
             return LLM_ERROR_FALLBACK
@@ -5182,6 +5212,19 @@ class Orchestrator:
         """Call the LLM client with role fallback for legacy test clients."""
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
+        budget = _llm_turn_budget.get()
+        if budget is not None:
+            if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
+                self._logger.error(
+                    "llm_turn_limit_reached calls=%s limit=%s elapsed_seconds=%.1f",
+                    budget.calls,
+                    LLM_CALLS_PER_TURN_LIMIT,
+                    time.monotonic() - budget.started_at,
+                )
+                raise LlmTurnLimitReached(
+                    backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
+                )
+            budget.calls += 1
         try:
             return self._llm_client.generate(prompt_bundle, history, role=role)
         except TypeError as exc:
