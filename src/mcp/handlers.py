@@ -16,6 +16,7 @@ from src.api import (
     save_audio,
     synthesize,
     modify_solfege_settings,
+    regenerate_solfege_verses,
 )
 from src.backend.progress import write_progress
 from src.backend.job_store import JobStore
@@ -106,6 +107,18 @@ def handle_modify_solfege_settings(params: Dict[str, Any], device: str) -> Dict[
         source_path,
         output_path,
         settings=settings,
+        selected_verse_number=params.get("selected_verse_number"),
+        selected_lyric_selection=params.get("selected_lyric_selection"),
+    )
+
+
+def handle_regenerate_solfege_verses(params: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Handle regenerating generated solfege verses after a part's notes changed."""
+    return regenerate_solfege_verses(
+        resolve_project_path(params["source_musicxml_path"]),
+        resolve_project_path(params["output_musicxml_path"]),
+        part_ids=list(params.get("part_ids") or []),
+        settings=dict(params.get("settings") or {}),
         selected_verse_number=params.get("selected_verse_number"),
         selected_lyric_selection=params.get("selected_lyric_selection"),
     )
@@ -322,6 +335,7 @@ HANDLERS = {
     "reparse": handle_reparse,
     "add_solfege_lyric_verse": handle_add_solfege_lyric_verse,
     "modify_solfege_settings": handle_modify_solfege_settings,
+    "regenerate_solfege_verses": handle_regenerate_solfege_verses,
     "preprocess_voice_parts": handle_preprocess_voice_parts,
     "save_audio": handle_save_audio,
     "synthesize": handle_synthesize,

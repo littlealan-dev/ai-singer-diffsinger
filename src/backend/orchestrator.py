@@ -2326,6 +2326,17 @@ class Orchestrator:
 
                 latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
                 if _snapshot_score_version(latest_snapshot) != score_version:
+                    if await self._regenerate_stale_solfege_lines(
+                        session_id,
+                        user_id,
+                        previous_summary=score_summary,
+                        current_summary=latest_snapshot.get("score_summary"),
+                    ):
+                        latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                        working_score = (
+                            (latest_snapshot.get("current_score") or {}).get("score") or working_score
+                        )
+                        include_score = True
                     score_version = _snapshot_score_version(latest_snapshot)
                     score_summary = latest_snapshot.get("score_summary")
                 repair_response, repair_error = await self._decide_followup_with_llm(
@@ -2450,6 +2461,17 @@ class Orchestrator:
 
             latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             if _snapshot_score_version(latest_snapshot) != score_version:
+                if await self._regenerate_stale_solfege_lines(
+                    session_id,
+                    user_id,
+                    previous_summary=score_summary,
+                    current_summary=latest_snapshot.get("score_summary"),
+                ):
+                    latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
+                    working_score = (
+                        (latest_snapshot.get("current_score") or {}).get("score") or working_score
+                    )
+                    include_score = True
                 score_version = _snapshot_score_version(latest_snapshot)
                 score_summary = latest_snapshot.get("score_summary")
             if tool_result.followup_message_only:
@@ -2765,6 +2787,71 @@ class Orchestrator:
             baseline=True, solfege_settings=update_settings,
         )
         return score, summary if isinstance(summary, dict) else None, version
+
+    async def _regenerate_stale_solfege_lines(
+        self,
+        session_id: str,
+        user_id: Optional[str],
+        *,
+        previous_summary: Optional[Dict[str, Any]],
+        current_summary: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Generate solfege lines again for parts whose music a tool round changed.
+
+        A generated solfege line is derived from its part's notes. When an edit
+        changes those notes, the line no longer matches them, so it is
+        generated again and saved as a further score version. Returns whether
+        anything was regenerated.
+        """
+        previous_signatures = {
+            str(part.get("part_id")): part.get("part_signature")
+            for part in (previous_summary or {}).get("parts") or []
+            if isinstance(part, dict) and part.get("part_signature")
+        }
+        stale_part_ids = sorted(
+            {
+                str(part.get("raw_part_id") or part.get("part_id"))
+                for part in (current_summary or {}).get("parts") or []
+                if isinstance(part, dict)
+                and str(part.get("part_id")) in previous_signatures
+                and part.get("part_signature") != previous_signatures[str(part.get("part_id"))]
+                and any(
+                    isinstance(verse, dict) and verse.get("is_generated_solfege")
+                    for verse in part.get("lyric_verses") or []
+                )
+            }
+        )
+        if not stale_part_ids:
+            return False
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        current_score = (snapshot.get("current_score") or {}).get("score") or {}
+        source_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
+        output_path = self._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
+        result = await asyncio.to_thread(
+            self._router.call_tool,
+            "regenerate_solfege_verses",
+            {
+                "source_musicxml_path": self._mcp_musicxml_path(source_path),
+                "output_musicxml_path": str(output_path.relative_to(self._settings.project_root)),
+                "part_ids": stale_part_ids,
+                "settings": dict(snapshot.get("solfege_settings") or {}),
+                "selected_verse_number": current_score.get("selected_verse_number"),
+                "selected_lyric_selection": current_score.get("selected_lyric_selection"),
+            },
+        )
+        if not isinstance(result, dict) or result.get("status") != "ready":
+            self._logger.warning(
+                "solfege_regeneration_failed session=%s parts=%s result=%s",
+                session_id,
+                stale_part_ids,
+                summarize_payload(result),
+            )
+            return False
+        await self._persist_solfege_result(session_id, result)
+        self._logger.info(
+            "solfege_regenerated session=%s parts=%s", session_id, stale_part_ids
+        )
+        return True
 
     def _mcp_musicxml_path(self, path: Path) -> str:
         """Return a project-relative path when possible for an MCP file request."""

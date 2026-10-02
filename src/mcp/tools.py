@@ -1605,6 +1605,38 @@ TOOLS: List[Tool] = [
         },
     ),
     Tool(
+        name="regenerate_solfege_verses",
+        description=(
+            "Internal: generate the given parts' SightSinger solfege verses again from "
+            "their current notes, after a score edit changed those notes. Backend only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_musicxml_path": {"type": "string"},
+                "output_musicxml_path": {"type": "string"},
+                "part_ids": {"type": "array", "items": {"type": "string"}},
+                "settings": {"type": "object"},
+                "selected_verse_number": {"type": ["string", "integer", "null"]},
+                "selected_lyric_selection": {"type": ["object", "null"]},
+            },
+            "required": ["source_musicxml_path", "output_musicxml_path", "part_ids"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "derived_score": {"type": "object"},
+                "score_summary": {"type": ["object", "null"]},
+                "derived_musicxml_path": {"type": "string"},
+                "regenerated_generated_verses": {"type": "array"},
+            },
+            "required": ["status"],
+            "additionalProperties": True,
+        },
+    ),
+    Tool(
         name="modify_solfege_settings",
         description=(
             "Change solfege system and/or mode, rewriting every SightSinger-generated "

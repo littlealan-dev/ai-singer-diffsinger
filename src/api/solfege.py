@@ -3,13 +3,14 @@ from __future__ import annotations
 """API boundary for deterministic generated-solfege MusicXML transforms."""
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from src.api.score import parse_score
 from src.musicxml.solfege import (
     GENERATED_LYRIC_NAME,
     add_solfege_lyric_verse as transform_add_solfege_lyric_verse,
     modify_generated_solfege_verses,
+    regenerate_generated_solfege_verses,
 )
 from src.musicxml.part_reference import resolve_part_reference
 
@@ -68,6 +69,32 @@ def modify_solfege_settings(
     result = modify_generated_solfege_verses(
         Path(source_musicxml_path),
         output_path,
+        settings=settings,
+    )
+    parsed = parse_score(
+        output_path,
+        verse_number=selected_verse_number,
+        lyric_selection=selected_lyric_selection,
+        expand_repeats=False,
+    )
+    return _attach_parsed_score(result, parsed)
+
+
+def regenerate_solfege_verses(
+    source_musicxml_path: str | Path,
+    output_musicxml_path: str | Path,
+    *,
+    part_ids: Iterable[str],
+    settings: Optional[Dict[str, Any]] = None,
+    selected_verse_number: Optional[str | int] = None,
+    selected_lyric_selection: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Generate the given parts' solfege verses again and return the reparsed score."""
+    output_path = Path(output_musicxml_path)
+    result = regenerate_generated_solfege_verses(
+        Path(source_musicxml_path),
+        output_path,
+        part_ids=part_ids,
         settings=settings,
     )
     parsed = parse_score(

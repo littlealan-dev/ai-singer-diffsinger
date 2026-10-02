@@ -287,6 +287,15 @@ def _make_router_call_tool():
                 part_id=arguments["part_id"],
                 settings=arguments.get("settings"),
             )
+        if name == "regenerate_solfege_verses":
+            from src.api.solfege import regenerate_solfege_verses
+
+            return regenerate_solfege_verses(
+                PROJECT_ROOT / arguments["source_musicxml_path"],
+                PROJECT_ROOT / arguments["output_musicxml_path"],
+                part_ids=arguments["part_ids"],
+                settings=arguments.get("settings"),
+            )
         if name == "modify_solfege_settings":
             from src.api.solfege import modify_solfege_settings
 
@@ -3620,6 +3629,62 @@ def test_a_take_records_the_signature_of_the_music_it_sings(client):
     assert app.state.orchestrator._build_synthesis_audio_track_metadata(
         score, {"part_id": "Men"}, score_summary={"parts": [{"part_id": "Men"}]}
     )["take_signature"] is None
+
+
+def test_solfege_lines_are_regenerated_only_for_parts_whose_music_changed(client, tmp_path):
+    from xml.etree import ElementTree as ET
+
+    from src.api.solfege import add_solfege_lyric_verse
+
+    test_client, app = client
+    demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+    with_solfege = tmp_path / "with-solfege.xml"
+    add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    # Drop one generated syllable, as a note edit leaves a new note without one.
+    text = with_solfege.read_text(encoding="utf-8")
+    generated = text.index('name="SightSinger Solfege"')
+    start = text.rindex("<lyric", 0, generated)
+    end = text.index("</lyric>", generated) + len("</lyric>")
+    stale_xml = (text[:start] + text[end:]).encode("utf-8")
+
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("happy-birthday.xml", stale_xml, "application/xml")},
+    )
+    assert upload.status_code == 200
+    orchestrator = app.state.orchestrator
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    alto_with_line = {
+        "part_id": "Alto", "raw_part_id": "P2", "part_signature": "alto-edited",
+        "lyric_verses": [{"verse_number": "SSSolfege", "is_generated_solfege": True}],
+    }
+
+    def regenerate(previous_signature, current_part):
+        return asyncio.run(orchestrator._regenerate_stale_solfege_lines(
+            session_id, None,
+            previous_summary={"parts": [{"part_id": "Alto", "part_signature": previous_signature}]},
+            current_summary={"parts": [current_part]},
+        ))
+
+    # Unchanged music, or a changed part without a solfege line: nothing to do.
+    assert regenerate("alto-edited", alto_with_line) is False
+    assert regenerate("alto-before", {**alto_with_line, "lyric_verses": []}) is False
+    assert asyncio.run(app.state.sessions.get_snapshot(session_id, None))["current_score"]["version"] == (
+        before["current_score"]["version"]
+    )
+
+    assert regenerate("alto-before", alto_with_line) is True
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert after["current_score"]["version"] == before["current_score"]["version"] + 1
+    active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
+    root = ET.parse(active).getroot()
+    alto_notes = [note for note in root.find("part[@id='P2']").iter("note") if note.find("pitch") is not None]
+    assert all(
+        any(lyric.get("name") == "SightSinger Solfege" for lyric in note.findall("lyric"))
+        for note in alto_notes
+    )
 
 
 def test_quote_charges_instrumentals_for_an_undeclared_part_only_if_the_llm_calls_it_one(

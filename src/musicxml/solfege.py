@@ -181,6 +181,58 @@ def modify_generated_solfege_verses(
     }
 
 
+def regenerate_generated_solfege_verses(
+    source_path: Path,
+    output_path: Path,
+    *,
+    part_ids: Iterable[str],
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate the given parts' solfege verses again from their current notes.
+
+    After a part's notes change (split, merged or re-pitched), its generated
+    line no longer matches them: some notes lack a syllable and others carry a
+    wrong one. Rewriting text in place cannot fix that, so the line is removed
+    and generated again. It keeps its verse number, and with it its lyric
+    selection id, so a selected solfege line stays selected.
+    """
+    root = _read_root(source_path)
+    normalized_settings = SolfegeSettings.from_mapping(settings)
+    wanted = {str(part_id) for part_id in part_ids}
+    regenerated: list[Dict[str, Any]] = []
+    for part_index, part in enumerate(_parts(root)):
+        part_id = str(part.attrib.get("id") or "")
+        if part_id not in wanted:
+            continue
+        for verse_number in sorted(_generated_verse_numbers(part), key=_verse_sort_key):
+            for note in _descendants(part, "note"):
+                for lyric in _children(note, "lyric"):
+                    if _is_generated_lyric(lyric, verse_number):
+                        note.remove(lyric)
+            annotated, extended = _append_generated_lyrics(
+                part,
+                verse_number=verse_number,
+                settings=normalized_settings,
+            )
+            regenerated.append(
+                {
+                    "part_id": part_id,
+                    "part_index": part_index,
+                    "verse_number": verse_number,
+                    "notes_annotated": annotated,
+                    "notes_extended": extended,
+                }
+            )
+    _write_root(root, output_path)
+    return {
+        "status": "ready",
+        "derived_musicxml_path": str(output_path),
+        "settings": normalized_settings.as_dict(),
+        "regenerated_generated_verses": regenerated,
+        "warnings": [],
+    }
+
+
 def _append_generated_lyrics(
     part: ElementTree.Element,
     *,

@@ -936,6 +936,7 @@ class McpRouter:
             "reparse": "cpu",
             "add_solfege_lyric_verse": "cpu",
             "modify_solfege_settings": "cpu",
+            "regenerate_solfege_verses": "cpu",
             "preprocess_voice_parts": "cpu",
             "list_voicebanks": "cpu",
             "get_voicebank_info": "cpu",

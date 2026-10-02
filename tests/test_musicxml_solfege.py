@@ -167,3 +167,68 @@ def test_chord_target_requires_preparation(tmp_path: Path) -> None:
     assert result["status"] == "action_required"
     assert result["code"] == "complex_target_requires_preparation"
     assert not output.exists()
+
+
+def _generated_lyrics_by_note(path: Path, part_id: str) -> list[tuple[str, str | None]]:
+    """(pitch, generated syllable) for every pitched note of one part, in order."""
+    root = ElementTree.parse(path).getroot()
+    part = root.find(f"part[@id='{part_id}']")
+    rows = []
+    for note in part.iter("note"):
+        pitch = note.find("pitch")
+        if pitch is None:
+            continue
+        generated = [
+            lyric.findtext("text")
+            for lyric in note.findall("lyric")
+            if lyric.get("name") == "SightSinger Solfege"
+        ]
+        rows.append((pitch.findtext("step") + pitch.findtext("octave"), generated[0] if generated else None))
+    return rows
+
+
+def test_regenerating_a_solfege_line_follows_edited_notes(tmp_path: Path) -> None:
+    from src.api.solfege import add_solfege_lyric_verse, regenerate_solfege_verses
+
+    demo = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+    with_solfege = tmp_path / "solfege.xml"
+    added = add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    alto_line = next(
+        selection
+        for part in added["score_summary"]["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["name"] == "SightSinger Solfege"
+    )
+    men_before = _generated_lyrics_by_note(with_solfege, "P3")
+
+    # Edit the Alto: re-pitch its first note, and drop one note's generated
+    # syllable, as splitting a note leaves the new note without one.
+    text = with_solfege.read_text(encoding="utf-8")
+    part_start = text.index('<part id="P2">')
+    first_step = text.index("<step>C</step>", part_start)
+    text = text[:first_step] + "<step>D</step>" + text[first_step + len("<step>C</step>"):]
+    first_generated = text.index('name="SightSinger Solfege"', part_start)
+    generated_lyric = text.index('name="SightSinger Solfege"', first_generated + 1)
+    lyric_start = text.rindex("<lyric", 0, generated_lyric)
+    lyric_end = text.index("</lyric>", generated_lyric) + len("</lyric>")
+    text = text[:lyric_start] + text[lyric_end:]
+    edited = tmp_path / "edited.xml"
+    edited.write_text(text, encoding="utf-8")
+    stale = _generated_lyrics_by_note(edited, "P2")
+    # F major, movable do: the re-pitched note still carries C's "so", and
+    # the second note has lost its syllable.
+    assert stale[0] == ("D4", "so")
+    assert stale[1][1] is None
+
+    regenerated = regenerate_solfege_verses(edited, tmp_path / "regenerated.xml", part_ids=["P2"])
+
+    rows = _generated_lyrics_by_note(tmp_path / "regenerated.xml", "P2")
+    assert all(syllable for _, syllable in rows)
+    assert rows[0] == ("D4", "la")
+    # The line keeps its verse number, so its lyric selection id is unchanged.
+    alto = next(part for part in regenerated["score_summary"]["parts"] if part["part_id"] == "Alto")
+    identity = lambda selection: (selection["id"], selection["number"], selection["name"])
+    assert identity(alto_line) in [identity(selection) for selection in alto["lyric_selections"]]
+    # Other parts are untouched.
+    assert _generated_lyrics_by_note(tmp_path / "regenerated.xml", "P3") == men_before

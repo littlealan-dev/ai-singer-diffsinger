@@ -11,7 +11,11 @@ from src.api.audio import save_audio
 from src.api.synthesize import align_phonemes_to_notes, synthesize
 from src.api.voicebank import list_voicebanks, get_voicebank_info
 from src.api.voice_parts import preprocess_voice_parts
-from src.api.solfege import add_solfege_lyric_verse, modify_solfege_settings
+from src.api.solfege import (
+    add_solfege_lyric_verse,
+    modify_solfege_settings,
+    regenerate_solfege_verses,
+)
 
 __all__ = [
     # Step 1: Score
@@ -32,6 +36,7 @@ __all__ = [
     "preprocess_voice_parts",
     "add_solfege_lyric_verse",
     "modify_solfege_settings",
+    "regenerate_solfege_verses",
     # Metadata
     "list_voicebanks",
     "get_voicebank_info",
