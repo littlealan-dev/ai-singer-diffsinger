@@ -8197,18 +8197,46 @@ def instrumental_midi_source_signature(
 
     The score version is not enough: it also advances on selection-only
     changes, such as switching lyric lines, which leave every instrumental note
-    unchanged. The MIDI depends on the uploaded score, the MusicXML content,
-    the playback presets and the MIDI format version, so it is keyed on those.
+    unchanged. The MIDI depends on the uploaded score, the instrumental parts'
+    music, the score-wide timing (its tempo map comes from the whole score and
+    it expands repeats), the playback presets and the MIDI format version, so
+    it is keyed on those. Vocal edits, lyric lines and solfege lines leave it
+    unchanged. A summary parsed before part signatures existed falls back to
+    the whole MusicXML file.
     """
     digest = hashlib.sha256()
     for field in (f"performance-midi-{PERFORMANCE_MIDI_VERSION}", str(score_id or "")):
         digest.update(field.encode("utf-8"))
         digest.update(b"\x1f")
-    digest.update(Path(musicxml_path).read_bytes())
-    digest.update(b"\x1f")
-    assignments = llm_program_assignments_from_summary(score_summary or {})
+    summary = score_summary or {}
+    timing = summary.get("timing_signature")
+    instrumental_signatures = [
+        part.get("part_signature")
+        for part in summary.get("parts") or []
+        if isinstance(part, dict) and _part_feeds_instrumental_midi(part)
+    ]
+    if timing and all(instrumental_signatures):
+        for field in [str(timing), *instrumental_signatures]:
+            digest.update(str(field).encode("utf-8"))
+            digest.update(b"\x1f")
+    else:
+        digest.update(Path(musicxml_path).read_bytes())
+        digest.update(b"\x1f")
+    assignments = llm_program_assignments_from_summary(summary)
     digest.update(json.dumps(assignments, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:24]
+
+
+def _part_feeds_instrumental_midi(part: Dict[str, Any]) -> bool:
+    """A part that can become an instrumental MIDI track: declared, or for the LLM to decide."""
+    return any(
+        isinstance(instrument, dict)
+        and (
+            instrument.get("eligible_for_instrumental_midi")
+            or instrument.get("instrumental_candidate")
+        )
+        for instrument in part.get("instruments") or []
+    )
 
 
 def _job_progress_url(session_id: str, job_id: str) -> str:

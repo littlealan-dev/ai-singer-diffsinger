@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Sequence
@@ -508,6 +509,7 @@ def _summarize_score(
                 "is_derived_part": _is_derived_part(part),
                 "has_lyrics": bool(lyric_numbers),
                 "note_count": note_count,
+                "part_signature": part_musical_signature(part),
                 "pitch_range": _summarize_weighted_pitch_range(weighted_pitches),
                 "lyric_verses": [
                     {
@@ -951,6 +953,42 @@ def _strip_redundant_verse_label(text: str, verse_number: str) -> str:
         rf"^\s*{re.escape(verse_number)}\s*[.．、:：)）]\s+"
     )
     return label.sub("", text, count=1)
+
+
+def part_musical_signature(part: stream.Part) -> str:
+    """Hash a part's musical content: what a take of it sings or plays.
+
+    Notes, rests, chords, ties and authored lyric lines, in order. Generated
+    solfege lines are left out: they are derived from the notes, not authored.
+    Layout and selection state, such as the chosen lyric line, are not part of
+    it, so only an edit to the music itself changes the signature.
+    """
+    events: List[List[Any]] = []
+    for element in part.recurse().notesAndRests:
+        try:
+            offset = float(element.getOffsetInHierarchy(part))
+        except Exception:
+            offset = float(element.offset)
+        length = round(float(element.duration.quarterLength), 6)
+        if element.isRest:
+            events.append(["r", round(offset, 6), length])
+            continue
+        if isinstance(element, chord.Chord):
+            sound: Any = sorted(round(float(item.midi), 3) for item in element.pitches)
+        elif isinstance(element, note.Note):
+            sound = round(float(element.pitch.midi), 3)
+        else:
+            # Unpitched percussion has a display position, not a pitch.
+            sound = f"{getattr(element, 'displayStep', '')}{getattr(element, 'displayOctave', '')}"
+        tie = element.tie.type if element.tie is not None else None
+        lyrics = [
+            [str(lyric.number or "1"), lyric.text or "", lyric.syllabic or ""]
+            for lyric in element.lyrics
+            if _extract_lyric_name(lyric) != GENERATED_LYRIC_NAME
+        ]
+        events.append(["n", round(offset, 6), length, sound, tie, lyrics])
+    payload = json.dumps(events, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _extract_lyric_name(lyric: Any) -> Optional[str]:

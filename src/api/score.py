@@ -3,6 +3,7 @@ Score parsing and modification APIs.
 """
 
 import dataclasses
+import hashlib
 import json
 import math
 import logging
@@ -99,6 +100,7 @@ def parse_score(
     # without mutating the score preview or reparsing the source file.
     _attach_variant_durations(original_score, expanded_score)
     _attach_performance_measure_map(original_score, Path(file_path))
+    _attach_score_signatures(original_score)
     if expand_repeats:
         expanded_score["original_score"] = original_score
         result = expanded_score
@@ -122,6 +124,30 @@ def _attach_performance_measure_map(score: Dict[str, Any], source_path: Path) ->
         # This visual aid must never make a valid score unavailable for preview
         # or synthesis. Playback still works if an unusual score lacks a map.
         logger.warning("performance_measure_map_failed path=%s error=%s", source_path, exc)
+
+
+def _attach_score_signatures(score: Dict[str, Any]) -> None:
+    """Expose the signatures that tell when derived audio no longer matches the score.
+
+    ``timing_signature`` covers what every part shares: the played-order
+    measure map, so tempo, measure lengths and repeat structure. A part's
+    ``take_signature`` adds its own musical content, so a take records exactly
+    what it was sung from. Selecting another lyric line or adding a solfege
+    line changes neither.
+    """
+    summary = score.get("score_summary")
+    if not isinstance(summary, dict):
+        return
+    timing = _signature_of(summary.get("performance_measure_map") or {})
+    summary["timing_signature"] = timing
+    for part in summary.get("parts") or []:
+        if isinstance(part, dict) and part.get("part_signature"):
+            part["take_signature"] = _signature_of([timing, part["part_signature"]])
+
+
+def _signature_of(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _attach_variant_durations(

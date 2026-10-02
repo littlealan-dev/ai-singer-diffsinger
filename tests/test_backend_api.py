@@ -9038,6 +9038,34 @@ def test_midi_source_signature_follows_what_the_midi_is_built_from(tmp_path):
     assert instrumental_midi_source_signature("score-a", musicxml, summary) != base
 
 
+def test_midi_source_signature_ignores_vocal_edits_when_parts_have_signatures(tmp_path):
+    """Only the instrumental parts' music and the shared timing rebuild the MIDI."""
+    musicxml = tmp_path / "input.xml"
+    musicxml.write_bytes(_PIANO_SATB_FIXTURE.read_bytes())
+
+    def summary(*, vocal="v1", piano="p1", candidate="c1", timing="t1"):
+        return {
+            "timing_signature": timing,
+            "parts": [
+                {"part_signature": vocal, "instruments": [{"score_instrument_id": "P1-I1"}]},
+                {"part_signature": piano, "instruments": [
+                    {"score_instrument_id": "P2-I1", "eligible_for_instrumental_midi": True},
+                ]},
+                {"part_signature": candidate, "instruments": [
+                    {"score_instrument_id": "P3:default", "instrumental_candidate": True},
+                ]},
+            ],
+        }
+
+    base = instrumental_midi_source_signature("score-a", musicxml, summary())
+    # A vocal edit, even one that rewrites the MusicXML file, keeps the MIDI.
+    musicxml.write_bytes(musicxml.read_bytes().replace(b"<step>C</step>", b"<step>D</step>", 1))
+    assert instrumental_midi_source_signature("score-a", musicxml, summary(vocal="v2")) == base
+    assert instrumental_midi_source_signature("score-a", musicxml, summary(piano="p2")) != base
+    assert instrumental_midi_source_signature("score-a", musicxml, summary(candidate="c2")) != base
+    assert instrumental_midi_source_signature("score-a", musicxml, summary(timing="t2")) != base
+
+
 def test_midi_preparation_failure_still_sings_an_acappella_score(client):
     """A score with no eligible instrumentals reserves vocal only.
 
