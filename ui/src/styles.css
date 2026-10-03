@@ -3830,6 +3830,18 @@ img.voice-picker-option-avatar {
   text-align: left;
 }
 
+/* A long sound name ends in "…" instead of overflowing the button. */
+.score-track-instrument-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-track-instrument-trigger svg {
+  flex: none;
+}
+
 .score-track-instrument-select:hover {
   background-color: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.18);

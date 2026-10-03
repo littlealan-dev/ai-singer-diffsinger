@@ -206,6 +206,26 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
   await expect(page.getByTestId("score-inst-track-P3").locator(".score-track-title")).toHaveText("Guitar");
   await expect.poll(() => playerTrackStates(page).then((states) => states?.length)).toBe(4);
 
+  // The sound picker shows the sound without its category, and a name too long
+  // for the button ends in "…" inside it.
+  const pianoSound = page.getByTestId("score-inst-track-P2").locator(".score-track-instrument-trigger");
+  const guitarSound = page.getByTestId("score-inst-track-P3").locator(".score-track-instrument-trigger");
+  await expect(pianoSound.locator(".score-track-instrument-label")).toHaveText("Acoustic Grand Piano");
+  await expect(guitarSound.locator(".score-track-instrument-label")).toHaveText("Acoustic Guitar (Nylon)");
+  for (const trigger of [pianoSound, guitarSound]) {
+    const fits = await trigger.evaluate((button) => {
+      const label = button.querySelector(".score-track-instrument-label") as HTMLElement;
+      const icon = button.querySelector("svg") as SVGElement;
+      const box = button.getBoundingClientRect();
+      return (
+        label.getBoundingClientRect().right <= box.right &&
+        icon.getBoundingClientRect().right <= box.right &&
+        getComputedStyle(label).textOverflow === "ellipsis"
+      );
+    });
+    expect(fits).toBe(true);
+  }
+
   // Muting the piano mutes both of its staves and leaves the guitar playing.
   const pianoMute = page.getByTestId("score-inst-track-P2").locator(".score-track-mute-btn");
   await pianoMute.click();

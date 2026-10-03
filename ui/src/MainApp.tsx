@@ -626,7 +626,7 @@ const GroupedInstrumentPicker = ({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span>{selectedGroup.label} · {selectedInstrument.label}</span>
+        <span className="score-track-instrument-label">{selectedInstrument.label}</span>
         <ChevronsUpDown size={13} aria-hidden="true" />
       </button>
       {typeof document !== "undefined" && pickerMenu && createPortal(pickerMenu, document.body)}
