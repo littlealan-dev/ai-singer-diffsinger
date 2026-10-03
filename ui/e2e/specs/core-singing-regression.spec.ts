@@ -166,7 +166,7 @@ test.describe("core singing regression", () => {
     expect(state.synthesis?.lyric_selection?.name).toBe("");
   });
 
-  test("loads the new instrumental MIDI when a later take of the same score republishes it", async ({ page, request }, testInfo) => {
+  test("loads the instrumental MIDI again for a later take after the score is edited", async ({ page, request }, testInfo) => {
     const midiStatuses: number[] = [];
     page.on("response", (response) => {
       if (new URL(response.url()).pathname.endsWith("/instrumental-midi")) midiStatuses.push(response.status());
@@ -179,9 +179,9 @@ test.describe("core singing regression", () => {
     const firstSignature = first.files?.instrumental_midi_source_signature;
     expect(firstSignature).toBeTruthy();
 
-    // Adding solfege edits the MusicXML of the same score, so the next take
-    // publishes new instrumental MIDI. (The edited score engraves on two pages,
-    // so this waits on the score version rather than on one preview page.)
+    // Adding solfege edits the MusicXML of the same score, which clears the
+    // player's MIDI until the next take. (The edited score engraves on two
+    // pages, so this waits on the score version rather than on one preview page.)
     await sendMessage(page, "[e2e:add-solfege] add solfege to the solo part");
     await expect.poll(async () => (await getE2EState(page, request, sessionId)).score_version ?? 0, {
       timeout: 120_000,
@@ -194,10 +194,11 @@ test.describe("core singing regression", () => {
     expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
     const second = await getE2EState(page, request, sessionId);
     expect(second.job?.status).toBe("completed");
-    expect(second.files?.instrumental_midi_source_signature).toBeTruthy();
-    expect(second.files?.instrumental_midi_source_signature).not.toBe(firstSignature);
+    // A solfege line is not instrumental music, so the take reuses the MIDI
+    // built for the first one instead of building it again.
+    expect(second.files?.instrumental_midi_source_signature).toBe(firstSignature);
 
-    // The player loads the republished MIDI rather than keeping the first one.
+    // The player loads the MIDI again for the new take.
     await expect.poll(() => midiStatuses.slice(fetchesBeforeSecondTake), { timeout: 15_000 }).toContain(200);
   });
 
@@ -368,6 +369,10 @@ test.describe("core singing regression", () => {
   test("returns the active highlight to repeated source measures", async ({ page, request }, testInfo) => {
     await page.setViewportSize({ width: 1920, height: 1080 });
     await uploadFixture(page, "active-measure-repeat.xml");
+    // Repeats are off by default; this take sings them.
+    const withRepeats = page.getByRole("switch", { name: "With Repeats" });
+    await withRepeats.click();
+    await expect(withRepeats).toHaveAttribute("aria-checked", "true");
     await requestScenario(page, "active-measure-repeat");
     const state = await waitForAudio(page, request, testInfo);
 
