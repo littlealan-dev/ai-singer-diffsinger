@@ -295,7 +295,7 @@ def test_build_system_prompt_routes_an_unsatisfiable_lyric_blocker_to_a_recovery
     assert "empty `available_lyric_selections`" in prompt
     assert "Never invent one and never repeat the same request" in prompt
     assert "reason=part_has_no_lyrics" in prompt
-    assert "Call `add_solfege_lyric_verse` for that exact `part_id`" in prompt
+    assert "Call `add_solfege_lyric_verse` with `parts` holding that exact `part_id`" in prompt
     assert "complex_target_requires_preparation" in prompt
     assert "reason=requested_part_not_found" in prompt
     assert "ask the user which one to sing" in prompt
@@ -755,10 +755,15 @@ def test_system_prompt_selects_existing_solfege_verse_and_enables_patch() -> Non
     )
     assert "Solfege lyric selection" in prompt
     assert "existing clearly solfege selection" in prompt
-    assert "copy the exact `score_summary.parts[].part_id` value" in prompt
+    assert "copy each exact `score_summary.parts[].part_id` value" in prompt
     assert "Never use part_index, raw_part_id, part_name" in prompt
-    assert "One `add_solfege_lyric_verse` invocation modifies exactly one part" in prompt
-    assert "successful tool result explicitly identifies that part" in prompt
+    assert "pass every part the request covers in one call, as `parts`" in prompt
+    # A group request covers the vocal parts, judged from named summary fields.
+    assert "A group request (\"all parts\", \"every part\", \"everyone\"): the vocal parts only" in prompt
+    assert "`has_lyrics` alone is not enough" in prompt
+    assert "`instruments[].is_explicit_vocal: true`" in prompt
+    assert "Leave out parts you cannot judge, and name them in the reply" in prompt
+    assert "do not call the tool again for any listed part" in prompt
     assert "`score_summary.parts[].lyric_selections[]`" in prompt
     assert "`id`, `number`, and `name`" in prompt
     assert "solfege_pronunciation_patch=true" in prompt
