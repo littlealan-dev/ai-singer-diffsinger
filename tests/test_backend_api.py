@@ -8725,6 +8725,52 @@ def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkey
     assert followup_payloads[0]["error"]["tool_names"] == ["reparse", "synthesize"]
 
 
+def test_a_reply_after_a_tool_error_keeps_the_picker_suppressed(client):
+    """A tool error inside the tool loop hides the part picker on the final reply.
+
+    The final reply is rebuilt from the LLM's message, so the flag is set once
+    the turn ends rather than on the reply in progress.
+    """
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    tool_results: list[str] = []
+
+    class ErrorInFollowupClient:
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if not (isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX)):
+                return json.dumps({
+                    "tool_calls": [{"name": "reparse", "arguments": {"verse_number": 1}}],
+                    "final_message": "Selecting verse 1.", "include_score": False,
+                })
+            tool_results.append(last)
+            if "multiple_tool_calls_not_allowed" in last:
+                return json.dumps({
+                    "tool_calls": [], "final_message": "Which part should I sing first?",
+                    "include_score": False,
+                })
+            return json.dumps({
+                "tool_calls": [
+                    {"name": "reparse", "arguments": {"verse_number": 1}},
+                    {"name": "synthesize", "arguments": {"part_index": 0, "voicebank": "Dummy"}},
+                ],
+                "final_message": "Singing every part.", "include_score": False,
+            })
+
+    app.state.llm_client = ErrorInFollowupClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing all parts"})
+
+    assert response.status_code == 200
+    assert any("multiple_tool_calls_not_allowed" in result for result in tool_results), tool_results
+    body = response.json()
+    assert body["message"] == "Which part should I sing first?"
+    assert body["suppress_selector"] is True
+    assert "selection_resolved" not in body
+
+
 def test_execute_tool_calls_blocks_multiple_tools_with_followup_prompt(client):
     _, app = client
     orchestrator = app.state.orchestrator

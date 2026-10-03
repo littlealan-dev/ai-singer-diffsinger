@@ -2045,6 +2045,7 @@ class Orchestrator:
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
         selection_resolved = False
+        selector_suppressed = False
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
         bootstrap_plan_baseline: Optional[BootstrapPlanBaseline] = None
@@ -2281,7 +2282,7 @@ class Orchestrator:
                 break
 
             if self._tool_payload_has_error(followup_prompt):
-                response["suppress_selector"] = True
+                selector_suppressed = True
 
             if preprocess_iteration:
                 if best_valid_candidate is not None and best_valid_candidate.quality_class == 3:
@@ -2654,9 +2655,11 @@ class Orchestrator:
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
             response["action_required"] = copy.deepcopy(last_action_required_payload)
+        # Set here: the reply dict is rebuilt when the LLM's final message arrives.
         if selection_resolved:
-            # Set here: the reply dict is rebuilt when the LLM's final message arrives.
             response["selection_resolved"] = True
+        if selector_suppressed:
+            response["suppress_selector"] = True
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
