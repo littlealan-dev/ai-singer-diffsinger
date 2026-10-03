@@ -8719,6 +8719,8 @@ def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkey
     body = response.json()
     assert body["type"] == "chat_text"
     assert body["message"] == "I can only do one action at a time. Which part should I sing first?"
+    # A reply to a tool error never carries the part picker.
+    assert body["suppress_selector"] is True
     assert reserve_calls["count"] == 0
     assert followup_payloads
     assert followup_payloads[0]["error"]["type"] == "multiple_tool_calls_not_allowed"

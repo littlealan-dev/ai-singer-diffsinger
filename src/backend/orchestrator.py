@@ -519,7 +519,8 @@ class Orchestrator:
                     elif followup_error:
                         response_message = followup_error
                     await self._sessions.append_history(session_id, "assistant", response_message)
-                    return {"type": "chat_text", "message": response_message}
+                    # A reply to a tool error never carries the part picker.
+                    return {"type": "chat_text", "message": response_message, "suppress_selector": True}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
