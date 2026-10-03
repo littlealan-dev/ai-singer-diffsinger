@@ -242,6 +242,12 @@ def _append_generated_lyrics(
     annotated = 0
     extended = 0
     fifths = 0
+    # The syllable a tie holds, by voice, staff and pitch: the note that starts
+    # the tie carries it, and the notes that continue the tie carry no lyric.
+    # A text-less lyric there would sing nothing, and a MusicXML reader such as
+    # music21 drops its name and number, mistaking it for an authored verse-1
+    # lyric.
+    held: Dict[tuple[str, str, str], ElementTree.Element] = {}
     for measure in _children(part, "measure"):
         fifths = _measure_fifths(measure, fifths)
         for note in _children(measure, "note"):
@@ -250,21 +256,42 @@ def _append_generated_lyrics(
             pitch = _note_pitch(note)
             if pitch is None:
                 continue
+            key = (
+                _child_text(note, "voice") or "1",
+                _child_text(note, "staff") or "1",
+                _pitch_key(note),
+            )
+            if _is_tie_continuation(note):
+                # The extender line is drawn from the held syllable.
+                held_lyric = held.get(key)
+                if held_lyric is not None and _child(held_lyric, "extend") is None:
+                    ElementTree.SubElement(held_lyric, _qualified(note, "extend"))
+                extended += 1
+                continue
             lyric = ElementTree.Element(_qualified(note, "lyric"), {
                 "number": verse_number,
                 "name": GENERATED_LYRIC_NAME,
             })
-            if _is_tie_continuation(note):
-                ElementTree.SubElement(lyric, _qualified(note, "extend"))
-                extended += 1
-            else:
-                syllabic = ElementTree.SubElement(lyric, _qualified(note, "syllabic"))
-                syllabic.text = "single"
-                text = ElementTree.SubElement(lyric, _qualified(note, "text"))
-                text.text = _solfege_for_pitch(*pitch, fifths=fifths, settings=settings)
-                annotated += 1
+            syllabic = ElementTree.SubElement(lyric, _qualified(note, "syllabic"))
+            syllabic.text = "single"
+            text = ElementTree.SubElement(lyric, _qualified(note, "text"))
+            text.text = _solfege_for_pitch(*pitch, fifths=fifths, settings=settings)
+            annotated += 1
             note.append(lyric)
+            held[key] = lyric
     return annotated, extended
+
+
+def _child_text(element: ElementTree.Element, local_name: str) -> Optional[str]:
+    child = _child(element, local_name)
+    return child.text.strip() if child is not None and child.text else None
+
+
+def _pitch_key(note: ElementTree.Element) -> str:
+    pitch = _child(note, "pitch")
+    if pitch is None:
+        return ""
+    return "|".join(_child_text(pitch, name) or "" for name in ("step", "alter", "octave"))
 
 
 def _rewrite_generated_verse(

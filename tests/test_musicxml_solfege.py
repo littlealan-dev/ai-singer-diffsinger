@@ -67,10 +67,13 @@ def test_add_movable_major_uses_key_tonic_and_preserves_existing_lyrics(tmp_path
     ]
     assert [note.get("lyric") for note in solfege_notes[:5]] == ["do", "re", "mi", "fa", "so"]
     soprano_summary = parsed["score_summary"]["parts"][0]
+    # The summary lists the generated line under its own number, not under the
+    # position music21 gives it on each note.
+    assert [verse["verse_number"] for verse in soprano_summary["lyric_verses"]] == ["1", GENERATED_LYRIC_NUMBER]
     generated_verse = next(
         verse
         for verse in soprano_summary["lyric_verses"]
-        if verse["verse_number"] == "2"
+        if verse["verse_number"] == GENERATED_LYRIC_NUMBER
     )
     assert generated_verse["lyric_names"] == [GENERATED_LYRIC_NAME]
     assert generated_verse["is_generated_solfege"] is True
@@ -232,3 +235,101 @@ def test_regenerating_a_solfege_line_follows_edited_notes(tmp_path: Path) -> Non
     assert identity(alto_line) in [identity(selection) for selection in alto["lyric_selections"]]
     # Other parts are untouched.
     assert _generated_lyrics_by_note(tmp_path / "regenerated.xml", "P3") == men_before
+
+
+def _tied_three_verse_xml() -> str:
+    """Three verses on most notes, a melisma note, and a tie across the barline."""
+    def verses(*words: str) -> str:
+        return "".join(
+            f'<lyric number="{index}"><syllabic>single</syllabic><text>{word}</text></lyric>'
+            for index, word in enumerate(words, start=1)
+        )
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Sopran</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths><mode>major</mode></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type>{verses("A", "Twas", "Through")}</note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><tie type="start"/><voice>1</voice><type>half</type><notations><tied type="start"/></notations>{verses("me", "fear", "come")}</note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><tie type="stop"/><voice>1</voice><type>half</type><notations><tied type="stop"/></notations></note>
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>half</type>{verses("grace")}</note>
+    </measure>
+  </part>
+</score-partwise>"""
+
+
+def _generated_lyric_elements(path: Path) -> list[list[ElementTree.Element]]:
+    root = ElementTree.parse(path).getroot()
+    return [
+        [lyric for lyric in note.findall("lyric") if lyric.get("name") == GENERATED_LYRIC_NAME]
+        for note in root.iter("note")
+    ]
+
+
+def test_a_tie_holds_its_solfege_syllable_and_leaves_the_music_unchanged(tmp_path: Path) -> None:
+    source = tmp_path / "source.xml"
+    source.write_text(_tied_three_verse_xml(), encoding="utf-8")
+    output = tmp_path / "solfege.xml"
+    assert add_solfege_lyric_verse(source, output, part_id="Sopran")["status"] == "ready"
+
+    # The note that starts the tie carries the syllable and the extender line;
+    # the note that continues it carries no solfege lyric at all.
+    by_note = _generated_lyric_elements(output)
+    tie_start, tie_stop = by_note[2], by_note[3]
+    assert [lyric.findtext("text") for lyric in tie_start] == ["mi"]
+    assert tie_start[0].find("extend") is not None
+    assert tie_stop == []
+
+    before = parse_score(source)["score_summary"]["parts"][0]
+    after_summary = parse_score(output)["score_summary"]
+    after = after_summary["parts"][0]
+    # A generated line is not an edit to the music.
+    assert after["part_signature"] == before["part_signature"]
+    # Each lyric line is listed once: the three verses, then the solfege line,
+    # however many verses share a note with it.
+    assert [(verse["verse_number"], verse["is_generated_solfege"]) for verse in after["lyric_verses"]] == [
+        ("1", False), ("2", False), ("3", False), (GENERATED_LYRIC_NUMBER, True),
+    ]
+    assert after["lyric_verses"][0]["sample"] == ["A", "me", "grace"]
+    assert after["lyric_verses"][3]["sample"] == ["do", "re", "mi", "so"]
+
+    # Sung on the solfege line, the tie holds "mi".
+    selection = next(item for item in after["lyric_selections"] if item["is_generated_solfege"])
+    sung = parse_score(output, part_id="Sopran", lyric_selection={
+        key: selection[key] for key in ("id", "number", "name")
+    })["parts"][0]["notes"]
+    assert [note.get("lyric") for note in sung if not note.get("is_rest")] == ["do", "re", "mi", "+", "so"]
+
+
+def test_regenerating_drops_the_text_less_lyric_an_earlier_version_left_on_a_tie(tmp_path: Path) -> None:
+    from src.api.solfege import regenerate_solfege_verses
+
+    source = tmp_path / "source.xml"
+    source.write_text(_tied_three_verse_xml(), encoding="utf-8")
+    added = tmp_path / "solfege.xml"
+    add_solfege_lyric_verse(source, added, part_id="Sopran")
+    # Earlier versions wrote an extend-only lyric on the note continuing a tie.
+    text = added.read_text(encoding="utf-8")
+    stop = text.index('<tie type="stop"')
+    note_end = text.index("</note>", stop)
+    old_form = (
+        text[:note_end]
+        + f'<lyric number="{GENERATED_LYRIC_NUMBER}" name="{GENERATED_LYRIC_NAME}"><extend /></lyric>'
+        + text[note_end:]
+    )
+    old = tmp_path / "old.xml"
+    old.write_text(old_form, encoding="utf-8")
+    assert _generated_lyric_elements(old)[3] != []
+
+    regenerate_solfege_verses(old, tmp_path / "regenerated.xml", part_ids=["P1"])
+
+    assert _generated_lyric_elements(tmp_path / "regenerated.xml")[3] == []
+    assert (
+        parse_score(tmp_path / "regenerated.xml")["score_summary"]["parts"][0]["part_signature"]
+        == parse_score(source)["score_summary"]["parts"][0]["part_signature"]
+    )

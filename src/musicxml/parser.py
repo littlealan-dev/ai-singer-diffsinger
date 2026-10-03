@@ -17,7 +17,7 @@ from src.musicxml.part_reference import (
     load_musicxml_score,
     map_parser_part_indices_to_raw_part_ids,
 )
-from src.musicxml.solfege import GENERATED_LYRIC_NAME
+from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
 
 
 @dataclass(frozen=True)
@@ -447,6 +447,7 @@ def _summarize_score(
     available_verses: set[str] = set()
     for index, part in enumerate(score.parts):
         lyric_numbers: set[str] = set()
+        display_numbers: set[str] = set()
         lyric_samples: Dict[str, List[str]] = {}
         lyric_names: Dict[str, set[str]] = {}
         note_count = 0
@@ -484,10 +485,17 @@ def _summarize_score(
                 text = (lyric.text or "").strip()
                 if not text:
                     continue
-                number = lyric.number or "1"
-                verse_number = str(number)
-                lyric_numbers.add(verse_number)
+                display_numbers.add(str(lyric.number or "1"))
                 lyric_name = _extract_lyric_name(lyric)
+                # music21 renumbers a lyric whose MusicXML number is not an
+                # integer by its position on the note, so the generated
+                # solfege line would land in whichever verse that position
+                # matches. It is identified by its name instead.
+                if lyric_name == GENERATED_LYRIC_NAME:
+                    verse_number = GENERATED_LYRIC_NUMBER
+                else:
+                    verse_number = str(lyric.number or "1")
+                lyric_numbers.add(verse_number)
                 if lyric_name:
                     lyric_names.setdefault(verse_number, set()).add(lyric_name)
                 if text.startswith("+"):
@@ -496,8 +504,9 @@ def _summarize_score(
                 if len(sample) < 20:
                     sample.append(text)
 
-        if lyric_numbers:
-            available_verses.update(lyric_numbers)
+        # available_verses keeps music21's numbering, the ordinals the UI
+        # shows; exact selection uses lyric_selections.
+        available_verses.update(display_numbers)
 
         raw_part_id = (raw_part_ids_by_index or {}).get(index, str(part.id) if part.id is not None else "")
         parts_summary.append(
