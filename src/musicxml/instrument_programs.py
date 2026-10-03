@@ -135,6 +135,39 @@ def instrumental_programs_by_part(
     return result
 
 
+def drop_resolved_program_assignments(
+    score_summary: Mapping[str, Any], assignments: Any
+) -> tuple[Any, List[str]]:
+    """Remove assignments for score-instruments that already have a program.
+
+    Such an assignment changes nothing, so it is dropped rather than failing the
+    whole call. Assignments naming an instrument the score lacks, and malformed
+    ones, are kept for ``apply_llm_program_assignments`` to reject. Returns the
+    remaining assignments (``None`` when every one was dropped, the same as
+    omitting the field) and the dropped instrument IDs.
+    """
+    resolution = score_summary.get("instrument_program_resolution")
+    if not isinstance(resolution, Mapping) or not isinstance(assignments, list):
+        return assignments, []
+    awaiting = {
+        str(value)
+        for value in resolution.get("unresolved_score_instrument_ids") or []
+        if isinstance(value, str) and value
+    }
+    known = _summary_instrument_index(score_summary)
+    kept: List[Any] = []
+    dropped: List[str] = []
+    for item in assignments:
+        instrument_id = item.get("score_instrument_id") if isinstance(item, dict) else None
+        if isinstance(instrument_id, str) and instrument_id in known and instrument_id not in awaiting:
+            dropped.append(instrument_id)
+            continue
+        kept.append(item)
+    if not dropped:
+        return assignments, []
+    return (kept or None), dropped
+
+
 def apply_llm_program_assignments(
     score_summary: Mapping[str, Any], assignments: Any
 ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:

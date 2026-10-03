@@ -122,6 +122,8 @@ export type ChatResponse =
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
       suppress_selector?: boolean;
+      /** The turn produced a quote, which fixes the part and lyric line. */
+      selection_resolved?: boolean;
       details?: unknown;
       warning?: string;
       solfege_settings?: SolfegeSettings;

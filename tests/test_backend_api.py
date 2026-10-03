@@ -3699,6 +3699,88 @@ def test_solfege_lines_are_regenerated_only_for_parts_whose_music_changed(client
     )
 
 
+_HB_PIANO_ASSIGNMENT = {
+    "score_instrument_id": "P4-I1",
+    "playback_preset": {"soundfont_id": "FluidR3_GM", "bank": 0, "program": 0, "kind": "melodic"},
+    "source": "llm_inferred",
+    "evidence": ["instrument-name: Piano"],
+}
+
+
+def _upload_happy_birthday_with_real_parsing(test_client, app):
+    """Upload the Happy Birthday demo; parse_score runs for real so quotes price real durations."""
+    from src.mcp.handlers import handle_parse_score
+
+    stub_call_tool = _make_router_call_tool()
+
+    def call_tool(name, arguments):
+        if name == "parse_score":
+            return handle_parse_score(arguments, "cpu")
+        return stub_call_tool(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+    session_id = _create_session(test_client)
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        headers=_auth_headers(),
+        files={"file": ("happy-birthday.xml", demo.read_bytes(), "application/xml")},
+    )
+    assert upload.status_code == 200
+    summary = parse_score(demo)["score_summary"]
+    asyncio.run(app.state.sessions.set_score_summary(session_id, summary))
+    return session_id, summary
+
+
+def test_a_quote_settles_the_part_and_a_redundant_instrument_assignment_is_ignored(
+    client, monkeypatch
+):
+    """The quote reply tells the UI the part is chosen, and its confirmation still binds.
+
+    The LLM re-sends a program for the piano, which already has one. The quote
+    drops it instead of failing, and so does the synthesize call, so both bind
+    the same render choices.
+    """
+    test_client, app = client
+    session_id, summary = _upload_happy_birthday_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    llm_client = _RecordingQuoteClient({
+        "part_id": "Alto",
+        "voicebank": "Dummy",
+        "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+        "instrument_program_assignments": [_HB_PIANO_ASSIGNMENT],
+    })
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
+    assert quote.status_code == 200
+    assert '"status": "quote_ready"' in llm_client.tool_results[-1], llm_client.tool_results
+    assert quote.json()["selection_resolved"] is True
+
+    confirm = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes, go ahead"})
+    assert confirm.status_code == 200
+    assert "instrument_program_assignments" not in started["arguments"], confirm.json()
+    assert "selection_resolved" not in confirm.json()
+
+
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
     from src.backend.llm_prompt import build_prompt_bundle
 
@@ -3793,9 +3875,11 @@ def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, mo
             self.tool_results.append(payload)
             if payload.get("status") == "name_ready":
                 return json.dumps({
+                    # The piano already has a program; the assignment is redundant, not an error.
                     "tool_calls": [{"name": "prepare_synthesis_quote",
                                     "arguments": {"part_id": "Alto", "voicebank": "Dummy",
-                                                  "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")}}}],
+                                                  "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+                                                  "instrument_program_assignments": [_HB_PIANO_ASSIGNMENT]}}],
                     "final_message": "Preparing a quote.", "include_score": False,
                 })
             return json.dumps({"tool_calls": [], "final_message": "Here is the quote.", "include_score": False})
@@ -3811,6 +3895,7 @@ def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, mo
     assert statuses == ["name_ready", "quote_ready"], llm_client.tool_results
     assert llm_client.tool_results[0]["sung_text"] == "Hen-ry"
     assert "current_score" in response.json()
+    assert response.json()["selection_resolved"] is True
 
     active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
     root = ET.parse(active).getroot()

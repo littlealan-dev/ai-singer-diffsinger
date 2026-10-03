@@ -5225,7 +5225,11 @@ export default function MainApp() {
           "details" in response ? response.details : undefined
         ),
       };
-      if (
+      if (response.type === "chat_text" && response.selection_resolved) {
+        // A quote already fixes the part and verse: no picker now or later,
+        // and any picker shown earlier disappears.
+        setPendingSelection(false);
+      } else if (
         response.type === "chat_text" &&
         pendingSelection &&
         !selectorShown &&

@@ -10,6 +10,7 @@ from src.api.score import parse_score
 from src.backend.synthesis_pricing import score_has_instrumental_parts
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    drop_resolved_program_assignments,
     instrumental_programs_by_part,
     llm_program_assignments_from_summary,
 )
@@ -563,3 +564,43 @@ def test_a_declared_instrument_cannot_be_marked_not_instrumental() -> None:
     )
     assert action is not None
     assert "needs a playback_preset" in action["message"]
+
+
+HAPPY_BIRTHDAY_DEMO = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+
+
+def _piano_assignment(instrument_id: str = "P4-I1") -> dict[str, object]:
+    return {
+        "score_instrument_id": instrument_id,
+        "playback_preset": fluidr3_preset(program=0),
+        "source": "llm_inferred",
+        "evidence": ["instrument-name: Piano"],
+    }
+
+
+def test_an_assignment_for_an_instrument_that_already_has_a_program_is_dropped() -> None:
+    summary = parse_score(HAPPY_BIRTHDAY_DEMO)["score_summary"]
+    assert summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] == []
+
+    kept, dropped = drop_resolved_program_assignments(summary, [_piano_assignment()])
+    assert (kept, dropped) == (None, ["P4-I1"])
+    # What is left passes: the quote is not rejected for a redundant assignment.
+    assert apply_llm_program_assignments(summary, kept)[1] is None
+
+    # An instrument the score lacks is kept, so the call is still rejected.
+    unknown = _piano_assignment("P9-I1")
+    kept, dropped = drop_resolved_program_assignments(summary, [_piano_assignment(), unknown])
+    assert (kept, dropped) == ([unknown], ["P4-I1"])
+    assert apply_llm_program_assignments(summary, kept)[1] is not None
+
+
+def test_only_the_resolved_assignments_are_dropped_when_others_are_awaited() -> None:
+    summary = parse_score(HAPPY_BIRTHDAY_DEMO)["score_summary"]
+    summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] = ["P4-I1"]
+    awaited = _piano_assignment()
+    kept, dropped = drop_resolved_program_assignments(summary, [_piano_assignment("P2-I1"), awaited])
+    assert (kept, dropped) == ([awaited], ["P2-I1"])
+
+    # Nothing to drop: the assignments come back as they were.
+    assert drop_resolved_program_assignments(summary, [awaited]) == ([awaited], [])
+    assert drop_resolved_program_assignments(summary, None) == (None, [])

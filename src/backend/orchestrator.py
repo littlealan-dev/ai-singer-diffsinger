@@ -60,6 +60,7 @@ from src.musicxml.performance_midi import (
 )
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    drop_resolved_program_assignments,
     llm_program_assignments_from_summary,
 )
 from src.mcp.logging_utils import clear_log_context, get_logger, set_log_context, summarize_payload
@@ -2043,6 +2044,7 @@ class Orchestrator:
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
+        selection_resolved = False
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
         bootstrap_plan_baseline: Optional[BootstrapPlanBaseline] = None
@@ -2134,6 +2136,7 @@ class Orchestrator:
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
+            selection_resolved = selection_resolved or tool_result.selection_resolved
             if tool_result.explicit_verse_number is not None:
                 snapshot = dict(snapshot)
                 files = snapshot.get("files")
@@ -2651,6 +2654,9 @@ class Orchestrator:
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
             response["action_required"] = copy.deepcopy(last_action_required_payload)
+        if selection_resolved:
+            # Set here: the reply dict is rebuilt when the LLM's final message arrives.
+            response["selection_resolved"] = True
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
@@ -2859,6 +2865,30 @@ class Orchestrator:
             "solfege_regenerated session=%s parts=%s", session_id, stale_part_ids
         )
         return True
+
+    def _without_resolved_program_assignments(
+        self,
+        arguments: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
+        *,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Drop assignments for instruments that already have a program."""
+        kept, dropped = drop_resolved_program_assignments(
+            score_summary if isinstance(score_summary, dict) else {},
+            arguments.get("instrument_program_assignments"),
+        )
+        if not dropped:
+            return arguments
+        self._logger.info(
+            "instrument_program_assignments_ignored session=%s ids=%s", session_id, dropped
+        )
+        updated = dict(arguments)
+        if kept is None:
+            updated.pop("instrument_program_assignments", None)
+        else:
+            updated["instrument_program_assignments"] = kept
+        return updated
 
     def _mcp_musicxml_path(self, path: Path) -> str:
         """Return a project-relative path when possible for an MCP file request."""
@@ -6868,6 +6898,11 @@ class Orchestrator:
                     quote_args,
                     current_score=current_score,
                 )
+                # Before the render choices are hashed, so the quote and its
+                # synthesize call bind the same assignments.
+                quote_args = self._without_resolved_program_assignments(
+                    quote_args, score_summary, session_id=session_id
+                )
                 validated_summary, instrument_precheck = apply_llm_program_assignments(
                     score_summary if isinstance(score_summary, dict) else {},
                     quote_args.get("instrument_program_assignments"),
@@ -6996,6 +7031,7 @@ class Orchestrator:
                     followup_message_only=True,
                     explicit_verse_number=selected_explicit_verse_number,
                     session_state_changed=quote_reparsed,
+                    selection_resolved=True,
                 )
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
@@ -7239,6 +7275,9 @@ class Orchestrator:
                 # Missing GM programs are an LLM-planning concern, never a
                 # backend inference heuristic. Validate the assignments before
                 # any credit reservation or deferred MIDI/audio generation.
+                synth_args = self._without_resolved_program_assignments(
+                    synth_args, score_summary, session_id=session_id
+                )
                 updated_summary, instrument_precheck = apply_llm_program_assignments(
                     score_summary if isinstance(score_summary, dict) else {},
                     synth_args.get("instrument_program_assignments"),
@@ -8264,6 +8303,9 @@ class ToolExecutionResult:
     explicit_verse_number: Optional[str] = None
     session_state_changed: bool = False
     preprocess_execution: Optional[Dict[str, Any]] = None
+    # A billable quote fixes the part and lyric line, so the UI's part/verse
+    # picker has nothing left to ask.
+    selection_resolved: bool = False
 
 
 @dataclass(frozen=True)
