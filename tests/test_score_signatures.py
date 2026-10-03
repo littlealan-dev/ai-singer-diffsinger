@@ -86,7 +86,7 @@ def test_a_tempo_change_changes_every_take_but_no_part(tmp_path: Path) -> None:
 
 def test_solfege_lines_and_lyric_selection_leave_signatures_unchanged(tmp_path: Path) -> None:
     before, path = _summary(tmp_path, SCORE_XML)
-    derived = add_solfege_lyric_verse(path, tmp_path / "solfege.xml", part_id="Voice")
+    derived = add_solfege_lyric_verse(path, tmp_path / "solfege.xml", part_ids=["Voice"])
     with_solfege = derived["score_summary"]
     assert _by_part(with_solfege, "take_signature") == _by_part(before, "take_signature")
 

@@ -111,12 +111,13 @@ def test_solfege_tools_expose_add_and_modify_contracts() -> None:
     add_schema = schemas["add_solfege_lyric_verse"]["inputSchema"]
     modify_schema = schemas["modify_solfege_settings"]["inputSchema"]
 
-    assert "score_summary.parts[].part_id" in add_schema["properties"]["part_id"]["description"]
-    assert add_schema["properties"]["part_id"]["type"] == "string"
+    assert "score_summary.parts[].part_id" in add_schema["properties"]["parts"]["description"]
+    assert add_schema["properties"]["parts"]["type"] == "array"
+    assert add_schema["properties"]["parts"]["minItems"] == 1
+    assert "part_id" not in add_schema["properties"]
     assert "part_index" not in add_schema["properties"]
-    assert add_schema["required"] == ["part_id", "reason"]
-    assert "exactly one selected clean part" in schemas["add_solfege_lyric_verse"]["description"]
-    assert "one successful invocation per part" in schemas["add_solfege_lyric_verse"]["description"]
+    assert add_schema["required"] == ["parts", "reason"]
+    assert "in one call" in schemas["add_solfege_lyric_verse"]["description"]
     assert modify_schema["properties"]["system"]["enum"] == [
         "movable_do",
         "fixed_do",

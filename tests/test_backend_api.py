@@ -284,7 +284,7 @@ def _make_router_call_tool():
             return add_solfege_lyric_verse(
                 PROJECT_ROOT / arguments["source_musicxml_path"],
                 PROJECT_ROOT / arguments["output_musicxml_path"],
-                part_id=arguments["part_id"],
+                part_ids=arguments["parts"],
                 settings=arguments.get("settings"),
             )
         if name == "replace_birthday_name":
@@ -2872,7 +2872,7 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     llm_client = StaticLlmClient(
         response_text=(
             '{"tool_calls":[{"name":"add_solfege_lyric_verse",'
-            '"arguments":{"part_id":"Soprano","reason":"User requested solfege."}}],'
+            '"arguments":{"parts":["Soprano"],"reason":"User requested solfege."}}],'
             '"final_message":"Adding solfege.","include_score":false}'
         )
     )
@@ -2888,8 +2888,8 @@ def test_llm_add_solfege_tool_activates_generated_verse_and_returns_state(client
     assert response.status_code == 200
     payload = response.json()
     assert payload["type"] == "chat_text"
-    assert '"operation_scope": "exactly_one_part"' in payload["message"]
-    assert '"completed_target"' in payload["message"]
+    assert '"status": "solfege_verses_ready"' in payload["message"]
+    assert '"completed_targets"' in payload["message"]
     assert '"part_name": "Soprano"' in payload["message"]
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert payload["current_score"] == {"version": snapshot["current_score"]["version"]}
@@ -3651,7 +3651,7 @@ def test_solfege_lines_are_regenerated_only_for_parts_whose_music_changed(client
     test_client, app = client
     demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
     with_solfege = tmp_path / "with-solfege.xml"
-    add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    add_solfege_lyric_verse(demo, with_solfege, part_ids=["Alto"])
     # Drop one generated syllable, as a note edit leaves a new note without one.
     text = with_solfege.read_text(encoding="utf-8")
     generated = text.index('name="SightSinger Solfege"')
@@ -3707,8 +3707,8 @@ _HB_PIANO_ASSIGNMENT = {
 }
 
 
-def _upload_happy_birthday_with_real_parsing(test_client, app):
-    """Upload the Happy Birthday demo; parse_score runs for real so quotes price real durations."""
+def _upload_demo_with_real_parsing(test_client, app, demo_name="happy-birthday"):
+    """Upload a demo song; parse_score runs for real so quotes price real durations."""
     from src.mcp.handlers import handle_parse_score
 
     stub_call_tool = _make_router_call_tool()
@@ -3719,12 +3719,12 @@ def _upload_happy_birthday_with_real_parsing(test_client, app):
         return stub_call_tool(name, arguments)
 
     app.state.router.call_tool = call_tool
-    demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+    demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / f"{demo_name}.xml"
     session_id = _create_session(test_client)
     upload = test_client.post(
         f"/sessions/{session_id}/upload",
         headers=_auth_headers(),
-        files={"file": ("happy-birthday.xml", demo.read_bytes(), "application/xml")},
+        files={"file": (f"{demo_name}.xml", demo.read_bytes(), "application/xml")},
     )
     assert upload.status_code == 200
     summary = parse_score(demo)["score_summary"]
@@ -3742,7 +3742,7 @@ def test_a_quote_settles_the_part_and_a_redundant_instrument_assignment_is_ignor
     the same render choices.
     """
     test_client, app = client
-    session_id, summary = _upload_happy_birthday_with_real_parsing(test_client, app)
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
     monkeypatch.setattr(
         "src.backend.orchestrator.synthesize_preflight_action_required",
         lambda score, part_index: None,
@@ -3779,6 +3779,62 @@ def test_a_quote_settles_the_part_and_a_redundant_instrument_assignment_is_ignor
     assert confirm.status_code == 200
     assert "instrument_program_assignments" not in started["arguments"], confirm.json()
     assert "selection_resolved" not in confirm.json()
+
+
+def test_solfege_for_all_parts_is_one_tool_call_and_one_saved_version(client):
+    """The LLM lists every part in one call; the result says what was done, so it stops."""
+    from xml.etree import ElementTree as ET
+
+    test_client, app = client
+    session_id, _summary = _upload_demo_with_real_parsing(test_client, app, "amazing-grace")
+    version_before = asyncio.run(app.state.sessions.get_snapshot(session_id, None))["current_score"]["version"]
+
+    class AllPartsClient:
+        def __init__(self):
+            self.calls = 0
+            self.tool_results: list[dict] = []
+
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            self.calls += 1
+            last = history[-1].get("content", "") if history else ""
+            if not (isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX)):
+                return json.dumps({
+                    "tool_calls": [{"name": "add_solfege_lyric_verse", "arguments": {
+                        "parts": ["Sopran", "Alt", "Tenor", "Bass", "P5-Staff1"],
+                        "reason": "Solfege for every part.",
+                    }}],
+                    "final_message": "Adding solfege.", "include_score": True,
+                })
+            text = last[len(TOOL_RESULT_PREFIX):]
+            payload, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+            self.tool_results.append(payload)
+            return json.dumps({"tool_calls": [], "final_message": "Done.", "include_score": False})
+
+    llm_client = AllPartsClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "add solfege to all parts"})
+
+    assert response.status_code == 200
+    assert llm_client.calls == 2
+    [result] = llm_client.tool_results
+    assert result["status"] == "solfege_verses_ready"
+    assert [target["part_id"] for target in result["completed_targets"]] == ["Sopran", "Alt", "Tenor", "Bass"]
+    assert all(target["lyric_selection"]["name"] == "SightSinger Solfege" for target in result["completed_targets"])
+    assert [(entry["part_id"], entry["code"]) for entry in result["skipped"]] == [
+        ("P5-Staff1", "complex_target_requires_preparation"),
+    ]
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["current_score"]["version"] == version_before + 1
+    active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
+    root = ET.parse(active).getroot()
+    with_line = {
+        part.get("id")
+        for part in root.findall("part")
+        if any(lyric.get("name") == "SightSinger Solfege" for lyric in part.iter("lyric"))
+    }
+    assert with_line == {"P1", "P2", "P3", "P4"}
 
 
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
@@ -3839,7 +3895,7 @@ def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, mo
     )
     demo = PROJECT_ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
     with_solfege = tmp_path / "happy-birthday.xml"
-    add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    add_solfege_lyric_verse(demo, with_solfege, part_ids=["Alto"])
     session_id = _create_session(test_client)
     upload = test_client.post(
         f"/sessions/{session_id}/upload",
@@ -4261,7 +4317,7 @@ def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, mo
                         "tool_calls": [
                             {
                                 "name": "add_solfege_lyric_verse",
-                                "arguments": {"part_id": "Soprano", "reason": "Sing in solfege."},
+                                "arguments": {"parts": ["Soprano"], "reason": "Sing in solfege."},
                             }
                         ],
                         "final_message": "Adding solfege.",
@@ -4272,16 +4328,17 @@ def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, mo
             text = last[len(TOOL_RESULT_PREFIX):]
             payload, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
             self.tool_results.append(payload)
-            if payload.get("status") == "solfege_verse_ready":
+            if payload.get("status") == "solfege_verses_ready":
+                added = payload["completed_targets"][0]
                 return json.dumps(
                     {
                         "tool_calls": [
                             {
                                 "name": "prepare_synthesis_quote",
                                 "arguments": {
-                                    "part_index": payload["completed_target"]["part_index"],
+                                    "part_id": added["part_id"],
                                     "voicebank": "Dummy",
-                                    "lyric_selection": payload["lyric_selection"],
+                                    "lyric_selection": added["lyric_selection"],
                                     "require_solfege_lyrics": True,
                                 },
                             }
@@ -4306,7 +4363,7 @@ def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, mo
 
     assert response.status_code == 200
     results = [result.get("action") or result.get("status") for result in llm_client.tool_results]
-    assert results == ["solfege_verse_ready", "quote_ready"], llm_client.tool_results
+    assert results == ["solfege_verses_ready", "quote_ready"], llm_client.tool_results
 
 
 def test_a_turn_that_keeps_calling_the_llm_stops_at_the_limit(client, caplog):
@@ -4411,7 +4468,7 @@ def test_llm_modify_solfege_settings_updates_chat_and_ui_state(client):
     add_client = StaticLlmClient(
         response_text=(
             '{"tool_calls":[{"name":"add_solfege_lyric_verse",'
-            '"arguments":{"part_id":"Soprano","reason":"Create solfege."}}],'
+            '"arguments":{"parts":["Soprano"],"reason":"Create solfege."}}],'
             '"final_message":"Adding solfege.","include_score":false}'
         )
     )

@@ -58,14 +58,14 @@ def test_generated_solfege_uses_exact_raw_selection_per_part(tmp_path: Path) -> 
     source.write_text(_SCORE, encoding="utf-8")
 
     soprano = add_solfege_lyric_verse(
-        source, first, part_id=_parser_part_id(source, "P1")
+        source, first, part_ids=[_parser_part_id(source, "P1")]
     )
     alto = add_solfege_lyric_verse(
-        first, second, part_id=_parser_part_id(first, "P2")
+        first, second, part_ids=[_parser_part_id(first, "P2")]
     )
 
-    soprano_selection = soprano["lyric_selection"]
-    alto_selection = alto["lyric_selection"]
+    soprano_selection = soprano["completed_targets"][0]["lyric_selection"]
+    alto_selection = alto["completed_targets"][0]["lyric_selection"]
     assert soprano_selection["number"] == alto_selection["number"] == "SSSolfege"
     assert soprano_selection["name"] == alto_selection["name"] == "SightSinger Solfege"
     assert soprano_selection["id"] != alto_selection["id"]
@@ -82,7 +82,7 @@ def test_mixed_collision_cannot_pass_generated_solfege_validation(tmp_path: Path
     output = tmp_path / "output.xml"
     source.write_text(_SCORE, encoding="utf-8")
     add_solfege_lyric_verse(
-        source, output, part_id=_parser_part_id(source, "P1")
+        source, output, part_ids=[_parser_part_id(source, "P1")]
     )
 
     default_parse = parse_score(output)
@@ -120,17 +120,20 @@ def test_solfege_targets_each_derived_lane_after_staff_expansion(tmp_path: Path)
     source.write_text(_DERIVED_LANES_WITH_STAFF_SCORE, encoding="utf-8")
 
     upper_part_id = _parser_part_id(source, "P_DERIVED_1")
-    upper = add_solfege_lyric_verse(source, first, part_id=upper_part_id)
+    upper = add_solfege_lyric_verse(source, first, part_ids=[upper_part_id])
     lower_part_id = _parser_part_id(first, "P_DERIVED_2")
-    lower = add_solfege_lyric_verse(first, second, part_id=lower_part_id)
+    lower = add_solfege_lyric_verse(first, second, part_ids=[lower_part_id])
 
-    assert upper["target"] == {
+    target = lambda result: {
+        key: value for key, value in result["completed_targets"][0].items() if key != "lyric_selection"
+    }
+    assert target(upper) == {
         "part_id": upper_part_id,
         "raw_part_id": "P_DERIVED_1",
         "part_index": 2,
         "part_name": "Soprano - voice part 1 (Derived)",
     }
-    assert lower["target"] == {
+    assert target(lower) == {
         "part_id": lower_part_id,
         "raw_part_id": "P_DERIVED_2",
         "part_index": 3,

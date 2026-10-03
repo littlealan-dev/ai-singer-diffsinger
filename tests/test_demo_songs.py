@@ -53,7 +53,7 @@ def test_a_derived_demo_score_keeps_its_marker(tmp_path: Path) -> None:
     result = add_solfege_lyric_verse(
         DEMO_SCORES / "happy-birthday.xml",
         tmp_path / "solfege.xml",
-        part_id="Alto",
+        part_ids=["Alto"],
     )
     assert result["score_summary"]["demo_song"] == "happy-birthday"
 

@@ -6511,37 +6511,54 @@ class Orchestrator:
                         action_required_payload=result,
                         explicit_verse_number=selected_explicit_verse_number,
                     )
-                current_score, score_summary, _ = await self._persist_solfege_result(
-                    session_id, result
-                )
-                selected_explicit_verse_number = str(result["new_verse_number"])
-                await self._sessions.set_metadata(
-                    session_id,
-                    EXPLICIT_VERSE_METADATA_KEY,
-                    selected_explicit_verse_number,
-                )
+                # One call covers every listed part, so the score is saved once.
+                added = bool(result.get("completed_targets"))
+                if added:
+                    current_score, score_summary, _ = await self._persist_solfege_result(
+                        session_id, result
+                    )
+                    selected_explicit_verse_number = str(result["new_verse_number"])
+                    await self._sessions.set_metadata(
+                        session_id,
+                        EXPLICIT_VERSE_METADATA_KEY,
+                        selected_explicit_verse_number,
+                    )
+                line = lambda target: {
+                    "part_id": target.get("part_id"),
+                    "part_name": target.get("part_name"),
+                    "lyric_selection": target.get("lyric_selection"),
+                }
                 return ToolExecutionResult(
                     score=current_score,
                     audio_response={"type": "chat_text", "message": ""},
                     followup_prompt=json.dumps(
                         {
-                            "status": "solfege_verse_ready",
-                            "operation_scope": "exactly_one_part",
-                            "completed_target": result.get("target"),
+                            "status": "solfege_verses_ready",
+                            "completed_targets": [line(t) for t in result.get("completed_targets") or []],
+                            "already_present": [line(t) for t in result.get("already_present") or []],
+                            "skipped": [
+                                {
+                                    "part_id": entry.get("part_id"),
+                                    "code": entry.get("code"),
+                                    "message": entry.get("message"),
+                                }
+                                for entry in result.get("skipped") or []
+                            ],
                             "selected_verse_number": selected_explicit_verse_number,
-                            "lyric_selection": result.get("lyric_selection"),
                             "message": (
-                                "A generated solfege verse was added only to completed_target. "
-                                "If the original user request names any additional parts, call "
-                                "add_solfege_lyric_verse once for the next requested part that does "
-                                "not yet have a generated solfege verse. Do not claim another part "
-                                "was updated without its own successful completed_target result."
+                                "completed_targets now have a generated solfege line, "
+                                "already_present had one already, and skipped could not take "
+                                "one. Tell the user which parts are in each group and why a "
+                                "part was skipped. For a skipped part that needs preparing, "
+                                "offer to prepare it instead of preparing it. Do not call "
+                                "add_solfege_lyric_verse again for any part listed here. To "
+                                "sing a part in solfege, use that part's lyric_selection."
                             ),
                         },
                         sort_keys=True,
                     ),
                     explicit_verse_number=selected_explicit_verse_number,
-                    session_state_changed=True,
+                    session_state_changed=added,
                 )
             if call.name == TOOL_MODIFY_SOLFEGE_SETTINGS:
                 snapshot = await self._sessions.get_snapshot(session_id, user_id)

@@ -256,7 +256,7 @@ class RegressionLlmClient:
             return self._response(
                 "Adding solfege to the active score.",
                 "add_solfege_lyric_verse",
-                {"part_id": "Solo"},
+                {"parts": ["Solo"]},
                 include_score=True,
             )
         if latest.startswith("[e2e:render-derived]"):
@@ -275,7 +275,7 @@ class RegressionLlmClient:
                 return self._response(
                     "Adding solfege to the active score.",
                     "add_solfege_lyric_verse",
-                    {"part_id": "Solo"},
+                    {"parts": ["Solo"]},
                     include_score=True,
                 )
             return self._response(
@@ -289,7 +289,7 @@ class RegressionLlmClient:
             return self._response(
                 "Adding solfege to the active score.",
                 "add_solfege_lyric_verse",
-                {"part_id": "Solo"},
+                {"parts": ["Solo"]},
                 include_score=True,
             )
         return self._response(

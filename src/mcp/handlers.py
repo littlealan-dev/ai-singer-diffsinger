@@ -89,7 +89,7 @@ def handle_add_solfege_lyric_verse(params: Dict[str, Any], device: str) -> Dict[
     return add_solfege_lyric_verse(
         source_path,
         output_path,
-        part_id=str(params["part_id"]),
+        part_ids=[str(part_id) for part_id in params["parts"]],
         settings=params.get("settings"),
     )
 

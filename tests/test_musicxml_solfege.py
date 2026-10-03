@@ -195,7 +195,7 @@ def test_regenerating_a_solfege_line_follows_edited_notes(tmp_path: Path) -> Non
 
     demo = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
     with_solfege = tmp_path / "solfege.xml"
-    added = add_solfege_lyric_verse(demo, with_solfege, part_id="Alto")
+    added = add_solfege_lyric_verse(demo, with_solfege, part_ids=["Alto"])
     alto_line = next(
         selection
         for part in added["score_summary"]["parts"]

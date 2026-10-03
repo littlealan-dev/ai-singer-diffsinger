@@ -97,20 +97,9 @@ def add_solfege_lyric_verse(
             },
         )
     resolved_part_id = str(target.attrib.get("id") or "")
-    complexity = _part_complexity(target)
-    if complexity:
-        return _action_required(
-            "complex_target_requires_preparation",
-            "The selected target must be prepared as one clean singing line before solfege can be added.",
-            {"part_id": resolved_part_id, **complexity},
-        )
-    existing_generated = _generated_verse_numbers(target)
-    if existing_generated:
-        return _action_required(
-            "solfege_verse_already_exists",
-            "The selected part already contains a generated solfege verse.",
-            {"part_id": resolved_part_id, "verse_numbers": sorted(existing_generated, key=_verse_sort_key)},
-        )
+    blocker = _part_blocker(target)
+    if blocker is not None:
+        return _action_required(*blocker)
 
     # Keep this system-owned raw identifier independent of exporter-specific
     # lyric-number conventions. The parser selects the exact number/name pair.
@@ -143,6 +132,94 @@ def add_solfege_lyric_verse(
         "notes_extended": notes_extended,
         "warnings": [],
     }
+
+
+def add_solfege_lyric_verses(
+    source_path: Path,
+    output_path: Path,
+    *,
+    raw_part_ids: Iterable[str],
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Append a generated solfege line to each listed part, in one pass.
+
+    Each part gets the same checks as a single-part call, in the same order.
+    A part that already has a generated line is reported, not refused. The
+    output is written only when at least one line was added.
+    """
+    root = _read_root(source_path)
+    normalized_settings = SolfegeSettings.from_mapping(settings)
+    parts = {str(part.attrib.get("id") or ""): (index, part) for index, part in enumerate(_parts(root))}
+    completed: list[Dict[str, Any]] = []
+    already_present: list[Dict[str, Any]] = []
+    skipped: list[Dict[str, Any]] = []
+    for raw_part_id in dict.fromkeys(str(value) for value in raw_part_ids):
+        found = parts.get(raw_part_id)
+        if found is None:
+            skipped.append(_skipped(
+                "target_not_found", "The selected score part could not be found.", {"part_id": raw_part_id}
+            ))
+            continue
+        index, part = found
+        blocker = _part_blocker(part)
+        if blocker is not None and blocker[0] == "solfege_verse_already_exists":
+            already_present.append({"part_id": raw_part_id, "part_index": index})
+            continue
+        if blocker is not None:
+            skipped.append(_skipped(*blocker))
+            continue
+        annotated, extended = _append_generated_lyrics(
+            part, verse_number=GENERATED_LYRIC_NUMBER, settings=normalized_settings
+        )
+        if annotated == 0:
+            skipped.append(_skipped(
+                "no_pitched_notes",
+                "The selected target has no pitched notes that can receive solfege.",
+                {"part_id": raw_part_id},
+            ))
+            continue
+        completed.append({
+            "part_id": raw_part_id,
+            "part_index": index,
+            "part_name": _part_name(root, raw_part_id),
+            "notes_annotated": annotated,
+            "notes_extended": extended,
+        })
+    result: Dict[str, Any] = {
+        "completed": completed,
+        "already_present": already_present,
+        "skipped": skipped,
+        "new_verse_number": GENERATED_LYRIC_NUMBER,
+        "settings": normalized_settings.as_dict(),
+    }
+    if completed:
+        _write_root(root, output_path)
+        result["derived_musicxml_path"] = str(output_path)
+    return result
+
+
+def _part_blocker(part: ElementTree.Element) -> Optional[tuple[str, str, Dict[str, Any]]]:
+    """Why a solfege line cannot be added to this part, checked in this order."""
+    part_id = str(part.attrib.get("id") or "")
+    complexity = _part_complexity(part)
+    if complexity:
+        return (
+            "complex_target_requires_preparation",
+            "The selected target must be prepared as one clean singing line before solfege can be added.",
+            {"part_id": part_id, **complexity},
+        )
+    existing_generated = _generated_verse_numbers(part)
+    if existing_generated:
+        return (
+            "solfege_verse_already_exists",
+            "The selected part already contains a generated solfege verse.",
+            {"part_id": part_id, "verse_numbers": sorted(existing_generated, key=_verse_sort_key)},
+        )
+    return None
+
+
+def _skipped(code: str, message: str, diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    return {"part_id": diagnostics.get("part_id"), "code": code, "message": message, "diagnostics": diagnostics}
 
 
 def modify_generated_solfege_verses(
