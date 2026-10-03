@@ -1063,3 +1063,13 @@ def _make_mcp_process(*, startup_timeout_seconds=1.0):
         start_gate=threading.Lock(),
         stopping=threading.Event(),
     )
+
+
+def test_every_routed_tool_is_allowed_by_its_worker():
+    """A tool the router sends to a worker must be one that worker's mode serves."""
+    from src.mcp_server import _MODE_TOOL_ALLOWLIST
+
+    router = McpRouter(Settings.from_env())
+    for name, worker in router._tool_to_worker.items():
+        assert name in _MODE_TOOL_ALLOWLIST[worker], f"{name} is not served by the {worker} worker"
+        assert name in _MODE_TOOL_ALLOWLIST["all"], f"{name} is not served in all mode"
