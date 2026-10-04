@@ -29,7 +29,7 @@ refuses, so it knows both sides.
 | Topic | Decision |
 |---|---|
 | Refusal structure | Unchanged: `{status: "action_required", action: "synthesis_quote_refresh_required", message, reason}`, with two new **optional** fields |
-| New optional field `quote` | Whatever `prepare_synthesis_quote` returns for the request, as-is: its success payload (`status: "quote_ready"`) or its failure payload (`status: "action_required"`, e.g. `unsupported_lyric_language`) |
+| New optional field `quote` | Whatever `prepare_synthesis_quote` returns for the request, as-is: its success payload (`status: "quote_ready"`) or its failure payload (`status: "action_required"`, e.g. `unsupported_synthesis_language`) |
 | New optional field `changed_choices` | `{field: {quoted, requested}}` between the refused quote and the new one; present only when a new quote was made and the choices differ |
 | Who prices the request after a refusal | The backend, in the `synthesize` step, using the same code as `prepare_synthesis_quote` |
 | What it prices | The `synthesize` call's own arguments, without `quote_id` and `confirmed_voicebank_override` |
@@ -106,7 +106,7 @@ The quote tool's failure outputs that can appear in `quote`:
 | target error (`requested_part_not_found`, …) | LLM may retry with another part |
 | `verse_selection_required` | LLM asks the user for a verse |
 | voicebank error | LLM may pick another voice |
-| `unsupported_lyric_language` | LLM explains; offers a supported option |
+| `unsupported_synthesis_language` | LLM explains; offers a supported option |
 | `lyric_selection_required` | LLM may retry with a listed selection |
 | `instrument_program_resolution_required` | LLM may retry with assignments |
 
@@ -155,7 +155,7 @@ Re-quote failed:
   "reason": "ui_voicebank_changed",
   "quote": {
     "status": "action_required",
-    "action": "unsupported_lyric_language",
+    "action": "unsupported_synthesis_language",
     …exactly as the quote tool returns it…
   }
 }

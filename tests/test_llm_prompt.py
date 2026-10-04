@@ -273,9 +273,11 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
     ):
         assert template not in prompt
 
-    # A stale quote must be re-quoted, never retried.
+    # A refused quote carries the re-quote result: reply to it, call no tool.
     assert "action=synthesis_quote_refresh_required" in prompt
-    assert "do not retry `synthesize`" in prompt
+    assert "synthesis did not start; never say it is in progress" in prompt
+    assert "reply to its `quote` exactly as you would to a `prepare_synthesis_quote` result" in prompt
+    assert "Do not call any tool in that response" in prompt
 
 
 def test_build_system_prompt_routes_an_unsatisfiable_lyric_blocker_to_a_recovery() -> None:

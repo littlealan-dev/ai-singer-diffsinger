@@ -3241,14 +3241,20 @@ def test_confirmed_override_cannot_render_a_voice_the_quote_never_covered(
     # No render may start in the voice the quote covered but the user left.
     assert "arguments" not in started
     body = response.json()
-    assert body.get("action_required", {}).get("reason") == "ui_voicebank_changed"
+    refusal = body.get("action_required", {})
+    assert refusal.get("reason") == "ui_voicebank_changed"
+    # The refusal carries a new quote for the voice now selected in the UI.
+    assert refusal["quote"]["status"] == "quote_ready"
+    assert refusal["quote"]["render_choices"]["voicebank"] == "Switched"
+    assert refusal["changed_choices"]["voicebank"] == {"quoted": "Quoted", "requested": "Switched"}
 
 
-def test_stale_quote_blocker_lets_the_model_prepare_a_fresh_quote(client, monkeypatch):
-    """The refresh blocker must be actionable, not merely narratable.
+def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(client, monkeypatch):
+    """The backend re-quotes a refused confirmation itself, in the same step.
 
-    Returned message-only, the model's corrective prepare_synthesis_quote call
-    was stripped and it reported a refresh that never happened.
+    The refusal keeps its structure and nests the quote tool's result, so the
+    one reply that follows sees why the price changed and the new quote. It is
+    message-only: a model that still tries to re-quote changes nothing.
     """
     test_client, app = client
     session_id = _create_session(test_client)
@@ -3289,14 +3295,17 @@ def test_stale_quote_blocker_lets_the_model_prepare_a_fresh_quote(client, monkey
     )
     orchestrator = app.state.orchestrator
     calls: list[str] = []
+    refusals: list[dict] = []
 
     class StaleThenRequoteClient:
         def generate(self, prompt_bundle, history, *, role=None, **kwargs):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
-                # The follow-up after the blocker: correct the mistake.
                 if "synthesis_quote_refresh_required" in last:
-                    calls.append("requote")
+                    calls.append("reply")
+                    assert "No tools will be executed" in last
+                    refusals.append(json.loads(last.split("Message-only payload:\n", 1)[1]))
+                    # Try to re-quote anyway; a message-only follow-up drops it.
                     return json.dumps(
                         {
                             "tool_calls": [
@@ -3354,8 +3363,19 @@ def test_stale_quote_blocker_lets_the_model_prepare_a_fresh_quote(client, monkey
     )
 
     assert response.status_code == 200
-    # The stale quote was refused, and the corrective call actually ran.
-    assert calls == ["synthesize", "requote"]
+    # One reply after the refusal; the dropped re-quote call ran nothing.
+    assert calls == ["synthesize", "reply"]
+    [refusal] = refusals
+    assert refusal["action"] == "synthesis_quote_refresh_required"
+    assert refusal["reason"] == "quote_not_found"
+    assert "changed_choices" not in refusal
+    new_quote = refusal["quote"]
+    assert new_quote["status"] == "quote_ready"
+    assert new_quote["render_choices"]["part_id"] == "P1"
+    # The next "yes" confirms the new quote.
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["files"].get("active_synthesis_quote_id") == new_quote["quote_id"]
+    assert response.json()["selection_resolved"] is True
 
 
 def test_lyric_selection_blocker_names_recovery_when_part_has_no_lyrics(client):
@@ -3879,6 +3899,187 @@ def test_a_confirmation_that_states_a_default_flag_still_matches_its_quote(clien
 
     assert confirm.status_code == 200
     assert "arguments" in started, (confirm.json(), llm_client.tool_results[-1])
+
+
+def _message_only_payload(tool_result: str) -> dict:
+    return json.loads(tool_result.split("Message-only payload:\n", 1)[1])
+
+
+def _alto_quote_session(test_client, app, monkeypatch):
+    """The Happy Birthday demo, a client that quotes the Alto and then confirms it."""
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    llm_client = _RecordingQuoteClient({
+        "part_id": "Alto",
+        "voicebank": "Dummy",
+        "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+    })
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
+    assert quote.status_code == 200
+    first_quote = _message_only_payload(llm_client.tool_results[-1])
+    assert first_quote["status"] == "quote_ready"
+    return session_id, llm_client, started, first_quote
+
+
+def test_a_refused_confirmation_names_the_choice_that_changed(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client, started, first_quote = _alto_quote_session(test_client, app, monkeypatch)
+
+    # The user turned With Repeats on after the quote, then said yes.
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "yes", "expand_repeats": True}
+    )
+
+    assert response.status_code == 200
+    assert "arguments" not in started
+    refusal = _message_only_payload(llm_client.tool_results[-1])
+    assert refusal["action"] == "synthesis_quote_refresh_required"
+    assert refusal["reason"] == "render_choices_changed"
+    assert refusal["changed_choices"] == {"expand_repeats": {"quoted": False, "requested": True}}
+    new_quote = refusal["quote"]
+    assert new_quote["render_choices"]["expand_repeats"] is True
+    # The nested quote is the quote tool's own payload.
+    assert set(new_quote) == set(first_quote)
+    assert new_quote["quote_id"] != first_quote["quote_id"]
+
+
+@pytest.mark.parametrize("cause", ["score_version_changed", "quote_already_consumed"])
+def test_a_refusal_without_a_changed_choice_still_carries_a_new_quote(client, monkeypatch, cause):
+    test_client, app = client
+    session_id, llm_client, started, first_quote = _alto_quote_session(test_client, app, monkeypatch)
+    if cause == "score_version_changed":
+        snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+        asyncio.run(app.state.sessions.set_score(session_id, snapshot["current_score"]["score"]))
+    else:
+        # The quote already paid for a take.
+        from src.backend import credits
+
+        real_get = credits.get_synthesis_quote
+        monkeypatch.setattr(
+            credits, "get_synthesis_quote", lambda quote_id: {**real_get(quote_id), "status": "consumed"}
+        )
+        # A used quote leaves the dynamic context, so only a model reusing its id
+        # from the conversation reaches synthesize with it.
+        llm_client._quote_id_from_context = lambda prompt_bundle: first_quote["quote_id"]
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert response.status_code == 200
+    assert "arguments" not in started
+    refusal = _message_only_payload(llm_client.tool_results[-1])
+    assert refusal["reason"] == cause
+    assert "changed_choices" not in refusal
+    assert refusal["quote"]["status"] == "quote_ready"
+    assert refusal["quote"]["quote_id"] != first_quote["quote_id"]
+
+
+def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypatch):
+    """The voice now selected cannot sing the lyrics: the failed quote is final."""
+    test_client, app = client
+    session_id, _summary = _upload_demo_with_real_parsing(test_client, app)
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    orchestrator._start_synthesis_job = fake_start_synthesis_job
+    real_call_tool = app.state.router.call_tool
+
+    def call_tool(name, arguments):
+        if name == "list_voicebanks":
+            return [
+                {"id": "Quoted", "name": "Quoted Voice", "path": "assets/voicebanks/Quoted"},
+                {"id": "Switched", "name": "Switched Voice", "path": "assets/voicebanks/Switched"},
+            ]
+        if name == "get_voicebank_info" and arguments.get("voicebank") == "Switched":
+            return {**real_call_tool(name, arguments), "name": "Switched", "languages": ["ja"]}
+        return real_call_tool(name, arguments)
+
+    app.state.router.call_tool = call_tool
+    orchestrator._cached_voicebank_ids = None
+    orchestrator._cached_voicebank_details = None
+    alto = {"id": None}
+    calls: list[str] = []
+    results: list[dict] = []
+
+    class OverrideClient:
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                calls.append("reply")
+                results.append(_message_only_payload(last))
+                # Try to re-quote anyway; nothing may run.
+                return json.dumps({"tool_calls": [{"name": "prepare_synthesis_quote", "arguments": {}}],
+                                   "final_message": "Here it is.", "include_score": False})
+            summary = asyncio.run(app.state.sessions.get_snapshot(session_id, None))["score_summary"]
+            selection = next(
+                {key: item[key] for key in ("id", "number", "name")}
+                for part in summary["parts"] if part["part_id"] == "Alto"
+                for item in part["lyric_selections"] if item["number"] == "1"
+            )
+            base = {"part_id": "Alto", "voicebank": "Quoted", "language": "en", "lyric_selection": selection}
+            quote_id = _QuoteThenSynthesizeClient._quote_id_from_context(prompt_bundle)
+            if quote_id is None:
+                calls.append("quote")
+                return json.dumps({"tool_calls": [{"name": "prepare_synthesis_quote", "arguments": base}],
+                                   "final_message": "Quoting.", "include_score": False})
+            calls.append("synthesize")
+            return json.dumps({"tool_calls": [{"name": "synthesize", "arguments": {
+                **base, "quote_id": quote_id, "confirmed_voicebank_override": True}}],
+                "final_message": "Starting.", "include_score": False})
+
+    orchestrator._llm_client = OverrideClient()
+    app.state.llm_client = orchestrator._llm_client
+    assert test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the alto part", "selected_voicebank_id": "Quoted"},
+    ).status_code == 200
+    first_quote = results[-1]
+    assert first_quote["status"] == "quote_ready"
+    calls.clear()
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "yes", "selected_voicebank_id": "Switched"}
+    )
+
+    assert response.status_code == 200
+    assert "arguments" not in started
+    # One reply after the refusal; the re-quote it tried ran nothing.
+    assert calls == ["synthesize", "reply"]
+    refusal = results[-1]
+    assert refusal["reason"] == "ui_voicebank_changed"
+    assert refusal["quote"]["status"] == "action_required"
+    assert refusal["quote"]["action"] == "unsupported_synthesis_language"
+    assert "changed_choices" not in refusal
+    # No new quote was made: the old one is still the active one.
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["files"].get("active_synthesis_quote_id") == first_quote["quote_id"]
+    assert "selection_resolved" not in response.json()
 
 
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):

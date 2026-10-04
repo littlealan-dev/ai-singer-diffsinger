@@ -6357,6 +6357,297 @@ class Orchestrator:
             updated.append(tool_copy)
         return updated
 
+    async def _quote_synthesis(
+        self,
+        call: ToolCall,
+        *,
+        session_id: str,
+        user_id: str,
+        user_email: str,
+        current_score: Dict[str, Any],
+        score_summary: Optional[Dict[str, Any]],
+        selected_explicit_verse_number: Optional[str],
+        forced_voicebank_id: Optional[str],
+        forced_language: Optional[str],
+        expand_repeats: bool,
+        score_player_takes: Optional[List[Dict[str, Any]]],
+    ) -> "ToolExecutionResult":
+        """Price one synthesis request and record it as the active quote.
+
+        The prepare_synthesis_quote tool and a refused synthesize call both use
+        this, so both return the same success and failure payloads.
+        """
+        quote_args = dict(call.arguments)
+        quote_args["expand_repeats"] = expand_repeats
+        quote_args = self._canonicalize_active_synthesis_target(
+            quote_args,
+            current_score=current_score,
+            score_summary=score_summary,
+        )
+        target_error = self._validate_active_synthesis_target(
+            score_summary,
+            part_id=quote_args.get("part_id"),
+            part_index=quote_args.get("part_index"),
+        )
+        if target_error is not None:
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(target_error, sort_keys=True),
+                action_required_payload=target_error,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        if self._tool_calls_require_verse_selection(
+            [call],
+            score=current_score,
+            score_summary=score_summary,
+            explicit_verse_number=selected_explicit_verse_number,
+        ):
+            action_required = self._build_verse_selection_required_action(
+                score=current_score,
+                score_summary=score_summary,
+                tool_attempted=call.name,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(action_required, sort_keys=True),
+                action_required_payload=action_required,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        quote_args = await self._apply_forced_voicebank(
+            quote_args, forced_voicebank_id
+        )
+        # Validate after the forced selection may have replaced the value,
+        # and before anything resolves against it, so language resolution
+        # can trust the ID and both turns canonicalize identically.
+        voicebank_error = await self._validate_requested_voicebank(quote_args)
+        if voicebank_error is not None:
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(voicebank_error, sort_keys=True),
+                action_required_payload=voicebank_error,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        language_resolution = await self._resolve_synthesis_language(
+            current_score,
+            quote_args,
+            requested_language=forced_language,
+        )
+        if not language_resolution.is_supported:
+            action_required = self._build_unsupported_language_action(
+                language_resolution
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(action_required, sort_keys=True),
+                action_required_payload=action_required,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        quote_args["voicebank"] = language_resolution.voicebank_id
+        quote_args["language"] = language_resolution.selected_language
+        quote_args = await self._normalize_synthesize_voice_color(quote_args)
+        lyric_selection = quote_args.get("lyric_selection")
+        if not self._is_complete_lyric_selection(lyric_selection):
+            action_required = self._build_lyric_selection_required_action(
+                current_score, score_summary, quote_args
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(action_required, sort_keys=True),
+                action_required_payload=action_required,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        # The summary is required to map a derived/split-staff part_id
+        # back to its active score index, exactly as synthesize does.
+        # Without it a preprocessed target resolves to -1 and the user
+        # could never obtain a quote for it.
+        quote_part_index = self._resolve_synthesize_part_index(
+            current_score,
+            score_summary=score_summary,
+            part_id=quote_args.get("part_id"),
+            part_index=quote_args.get("part_index"),
+        )
+        if not self._lyric_selection_belongs_to_part(
+            score_summary, quote_part_index, lyric_selection
+        ):
+            action_required = self._build_lyric_selection_required_action(
+                current_score, score_summary, quote_args
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(action_required, sort_keys=True),
+                action_required_payload=action_required,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
+        # Selecting another lyric line reparses the score. Report it so the
+        # response carries the new score instead of leaving the UI on the
+        # old one until the confirmation turn.
+        quote_reparsed = False
+        if current_score.get("selected_lyric_selection") != lyric_selection:
+            quote_reparsed = True
+            reparsed_score = await self._reparse_score(
+                session_id,
+                part_id=None,
+                part_index=None,
+                verse_number=None,
+                lyric_selection=lyric_selection,
+                user_id=user_id,
+            )
+            if not isinstance(reparsed_score, dict):
+                raise ValueError("Unable to select the requested lyric line.")
+            current_score = reparsed_score
+            refreshed = await self._sessions.get_snapshot(session_id, user_id)
+            refreshed_summary = refreshed.get("score_summary")
+            if isinstance(refreshed_summary, dict):
+                score_summary = refreshed_summary
+        if quote_args.get("require_solfege_lyrics", False):
+            quote_args["solfege_pronunciation_patch"] = True
+        quote_args = self._auto_enable_generated_solfege_pronunciation(
+            quote_args,
+            current_score=current_score,
+        )
+        # Before the render choices are hashed, so the quote and its
+        # synthesize call bind the same assignments.
+        quote_args = self._without_resolved_program_assignments(
+            quote_args, score_summary, session_id=session_id
+        )
+        validated_summary, instrument_precheck = apply_llm_program_assignments(
+            score_summary if isinstance(score_summary, dict) else {},
+            quote_args.get("instrument_program_assignments"),
+        )
+        if instrument_precheck is not None:
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(instrument_precheck, sort_keys=True),
+                action_required_payload=instrument_precheck,
+                explicit_verse_number=selected_explicit_verse_number,
+                session_state_changed=quote_reparsed,
+            )
+        from src.backend.credits import (
+            create_synthesis_quote,
+            get_instrumental_charge_state,
+            instrumental_charge_scope,
+        )
+        from src.backend.synthesis_pricing import (
+            estimate_synthesis_credits,
+            score_has_instrumental_parts,
+            selected_score_duration,
+        )
+
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        score_id = snapshot.get("score_id")
+        current_score_snapshot = snapshot.get("current_score")
+        score_version_no = (
+            current_score_snapshot.get("version")
+            if isinstance(current_score_snapshot, dict)
+            else None
+        )
+        if not isinstance(score_id, str) or not score_id or not isinstance(score_version_no, int):
+            raise ValueError("The current score identity is unavailable for quoting.")
+        # Priced with the quote's assignments: a part that declares no
+        # instrument is instrumental only if the LLM gave it a preset.
+        has_instrumentals = score_has_instrumental_parts(validated_summary)
+        charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
+        charge_required = (
+            has_instrumentals
+            and await asyncio.to_thread(get_instrumental_charge_state, charge_scope)
+            != "paid"
+        )
+        duration_seconds = selected_score_duration(
+            score_summary or {}, expand_repeats=expand_repeats
+        )
+        estimate = estimate_synthesis_credits(
+            vocal_duration_seconds=duration_seconds,
+            vocal_part_id=str(quote_args.get("part_id") or "") or None,
+            expand_repeats=expand_repeats,
+            has_instrumental_parts=has_instrumentals,
+            instrumental_charge_required=charge_required,
+            instrumental_charge_scope=charge_scope,
+        )
+        render_choices = self._synthesis_render_choices(
+            quote_args, expand_repeats=expand_repeats
+        )
+        quote = await asyncio.to_thread(
+            create_synthesis_quote,
+            user_id=user_id,
+            session_id=session_id,
+            score_id=score_id,
+            score_version_no=score_version_no,
+            render_choices=render_choices,
+            estimate=estimate.to_dict(),
+            ui_voicebank_at_quote=forced_voicebank_id,
+        )
+        available_credits: Optional[int] = None
+        if not self._is_e2e_credit_bypass_enabled():
+            from src.backend.credits import get_or_create_credits
+
+            quote_credits = await asyncio.to_thread(
+                get_or_create_credits, user_id, user_email
+            )
+            available_credits = quote_credits.available_balance
+        # The tool result reaches the model through a message-only
+        # follow-up, so remember the id on the session: the confirmation
+        # turn reads it from dynamic prompt context.
+        await self._sessions.set_metadata(
+            session_id,
+            ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY,
+            str(quote["quote_id"]),
+        )
+        quote_payload = {
+            "status": "quote_ready",
+            "quote_id": quote["quote_id"],
+            "part_id": estimate.vocal_part_id,
+            "vocal_duration_seconds": estimate.vocal_duration_seconds,
+            "vocal_part_credits": estimate.vocal_part_credits,
+            "instrumental_credits": estimate.instrumental_credits,
+            "instrumental_pricing_expand_repeats": (
+                estimate.instrumental_pricing_expand_repeats
+            ),
+            "instrumental_pricing_duration_seconds": (
+                estimate.instrumental_pricing_duration_seconds
+            ),
+            "instrumental_already_generated": (
+                estimate.has_instrumental_parts
+                and not estimate.instrumental_charge_required
+            ),
+            "total_estimated_credits": estimate.total_estimated_credits,
+            "estimate": estimate.to_dict(),
+            "render_choices": render_choices,
+            "instruction": (
+                "Present this exact itemized quote and ask for explicit confirmation. "
+                "Do not call synthesize in this response. Final credits are based on "
+                "the generated audio length and may differ from this estimate."
+            ),
+        }
+        removed_takes = _score_player_takes_removed_by(
+            score_player_takes,
+            expand_repeats=expand_repeats,
+            score_summary=score_summary,
+        )
+        if removed_takes:
+            quote_payload["takes_removed_from_player"] = {"takes": removed_takes}
+        if available_credits is not None:
+            quote_payload["available_credits"] = available_credits
+            quote_payload["balance_after"] = (
+                available_credits - estimate.total_estimated_credits
+            )
+        return ToolExecutionResult(
+            score=current_score,
+            audio_response={"type": "chat_text", "message": ""},
+            followup_prompt=json.dumps(quote_payload, sort_keys=True),
+            followup_message_only=True,
+            explicit_verse_number=selected_explicit_verse_number,
+            session_state_changed=quote_reparsed,
+            selection_resolved=True,
+        )
+
     async def _execute_tool_calls(
         self,
         session_id: str,
@@ -6787,275 +7078,18 @@ class Orchestrator:
                     )
                 continue
             if call.name == TOOL_PREPARE_SYNTHESIS_QUOTE:
-                quote_args = dict(call.arguments)
-                quote_args["expand_repeats"] = expand_repeats
-                quote_args = self._canonicalize_active_synthesis_target(
-                    quote_args,
-                    current_score=current_score,
-                    score_summary=score_summary,
-                )
-                target_error = self._validate_active_synthesis_target(
-                    score_summary,
-                    part_id=quote_args.get("part_id"),
-                    part_index=quote_args.get("part_index"),
-                )
-                if target_error is not None:
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(target_error, sort_keys=True),
-                        action_required_payload=target_error,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                if self._tool_calls_require_verse_selection(
-                    [call],
-                    score=current_score,
-                    score_summary=score_summary,
-                    explicit_verse_number=selected_explicit_verse_number,
-                ):
-                    action_required = self._build_verse_selection_required_action(
-                        score=current_score,
-                        score_summary=score_summary,
-                        tool_attempted=call.name,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(action_required, sort_keys=True),
-                        action_required_payload=action_required,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                quote_args = await self._apply_forced_voicebank(
-                    quote_args, forced_voicebank_id
-                )
-                # Validate after the forced selection may have replaced the value,
-                # and before anything resolves against it, so language resolution
-                # can trust the ID and both turns canonicalize identically.
-                voicebank_error = await self._validate_requested_voicebank(quote_args)
-                if voicebank_error is not None:
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(voicebank_error, sort_keys=True),
-                        action_required_payload=voicebank_error,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                language_resolution = await self._resolve_synthesis_language(
-                    current_score,
-                    quote_args,
-                    requested_language=forced_language,
-                )
-                if not language_resolution.is_supported:
-                    action_required = self._build_unsupported_language_action(
-                        language_resolution
-                    )
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(action_required, sort_keys=True),
-                        action_required_payload=action_required,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                quote_args["voicebank"] = language_resolution.voicebank_id
-                quote_args["language"] = language_resolution.selected_language
-                quote_args = await self._normalize_synthesize_voice_color(quote_args)
-                lyric_selection = quote_args.get("lyric_selection")
-                if not self._is_complete_lyric_selection(lyric_selection):
-                    action_required = self._build_lyric_selection_required_action(
-                        current_score, score_summary, quote_args
-                    )
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(action_required, sort_keys=True),
-                        action_required_payload=action_required,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                # The summary is required to map a derived/split-staff part_id
-                # back to its active score index, exactly as synthesize does.
-                # Without it a preprocessed target resolves to -1 and the user
-                # could never obtain a quote for it.
-                quote_part_index = self._resolve_synthesize_part_index(
-                    current_score,
-                    score_summary=score_summary,
-                    part_id=quote_args.get("part_id"),
-                    part_index=quote_args.get("part_index"),
-                )
-                if not self._lyric_selection_belongs_to_part(
-                    score_summary, quote_part_index, lyric_selection
-                ):
-                    action_required = self._build_lyric_selection_required_action(
-                        current_score, score_summary, quote_args
-                    )
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(action_required, sort_keys=True),
-                        action_required_payload=action_required,
-                        explicit_verse_number=selected_explicit_verse_number,
-                    )
-                # Selecting another lyric line reparses the score. Report it so the
-                # response carries the new score instead of leaving the UI on the
-                # old one until the confirmation turn.
-                quote_reparsed = False
-                if current_score.get("selected_lyric_selection") != lyric_selection:
-                    quote_reparsed = True
-                    reparsed_score = await self._reparse_score(
-                        session_id,
-                        part_id=None,
-                        part_index=None,
-                        verse_number=None,
-                        lyric_selection=lyric_selection,
-                        user_id=user_id,
-                    )
-                    if not isinstance(reparsed_score, dict):
-                        raise ValueError("Unable to select the requested lyric line.")
-                    current_score = reparsed_score
-                    refreshed = await self._sessions.get_snapshot(session_id, user_id)
-                    refreshed_summary = refreshed.get("score_summary")
-                    if isinstance(refreshed_summary, dict):
-                        score_summary = refreshed_summary
-                if quote_args.get("require_solfege_lyrics", False):
-                    quote_args["solfege_pronunciation_patch"] = True
-                quote_args = self._auto_enable_generated_solfege_pronunciation(
-                    quote_args,
-                    current_score=current_score,
-                )
-                # Before the render choices are hashed, so the quote and its
-                # synthesize call bind the same assignments.
-                quote_args = self._without_resolved_program_assignments(
-                    quote_args, score_summary, session_id=session_id
-                )
-                validated_summary, instrument_precheck = apply_llm_program_assignments(
-                    score_summary if isinstance(score_summary, dict) else {},
-                    quote_args.get("instrument_program_assignments"),
-                )
-                if instrument_precheck is not None:
-                    return ToolExecutionResult(
-                        score=current_score,
-                        audio_response={"type": "chat_text", "message": ""},
-                        followup_prompt=json.dumps(instrument_precheck, sort_keys=True),
-                        action_required_payload=instrument_precheck,
-                        explicit_verse_number=selected_explicit_verse_number,
-                        session_state_changed=quote_reparsed,
-                    )
-                from src.backend.credits import (
-                    create_synthesis_quote,
-                    get_instrumental_charge_state,
-                    instrumental_charge_scope,
-                )
-                from src.backend.synthesis_pricing import (
-                    estimate_synthesis_credits,
-                    score_has_instrumental_parts,
-                    selected_score_duration,
-                )
-
-                snapshot = await self._sessions.get_snapshot(session_id, user_id)
-                score_id = snapshot.get("score_id")
-                current_score_snapshot = snapshot.get("current_score")
-                score_version_no = (
-                    current_score_snapshot.get("version")
-                    if isinstance(current_score_snapshot, dict)
-                    else None
-                )
-                if not isinstance(score_id, str) or not score_id or not isinstance(score_version_no, int):
-                    raise ValueError("The current score identity is unavailable for quoting.")
-                # Priced with the quote's assignments: a part that declares no
-                # instrument is instrumental only if the LLM gave it a preset.
-                has_instrumentals = score_has_instrumental_parts(validated_summary)
-                charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
-                charge_required = (
-                    has_instrumentals
-                    and await asyncio.to_thread(get_instrumental_charge_state, charge_scope)
-                    != "paid"
-                )
-                duration_seconds = selected_score_duration(
-                    score_summary or {}, expand_repeats=expand_repeats
-                )
-                estimate = estimate_synthesis_credits(
-                    vocal_duration_seconds=duration_seconds,
-                    vocal_part_id=str(quote_args.get("part_id") or "") or None,
-                    expand_repeats=expand_repeats,
-                    has_instrumental_parts=has_instrumentals,
-                    instrumental_charge_required=charge_required,
-                    instrumental_charge_scope=charge_scope,
-                )
-                render_choices = self._synthesis_render_choices(
-                    quote_args, expand_repeats=expand_repeats
-                )
-                quote = await asyncio.to_thread(
-                    create_synthesis_quote,
-                    user_id=user_id,
+                return await self._quote_synthesis(
+                    call,
                     session_id=session_id,
-                    score_id=score_id,
-                    score_version_no=score_version_no,
-                    render_choices=render_choices,
-                    estimate=estimate.to_dict(),
-                    ui_voicebank_at_quote=forced_voicebank_id,
-                )
-                available_credits: Optional[int] = None
-                if not self._is_e2e_credit_bypass_enabled():
-                    from src.backend.credits import get_or_create_credits
-
-                    quote_credits = await asyncio.to_thread(
-                        get_or_create_credits, user_id, user_email
-                    )
-                    available_credits = quote_credits.available_balance
-                # The tool result reaches the model through a message-only
-                # follow-up, so remember the id on the session: the confirmation
-                # turn reads it from dynamic prompt context.
-                await self._sessions.set_metadata(
-                    session_id,
-                    ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY,
-                    str(quote["quote_id"]),
-                )
-                quote_payload = {
-                    "status": "quote_ready",
-                    "quote_id": quote["quote_id"],
-                    "part_id": estimate.vocal_part_id,
-                    "vocal_duration_seconds": estimate.vocal_duration_seconds,
-                    "vocal_part_credits": estimate.vocal_part_credits,
-                    "instrumental_credits": estimate.instrumental_credits,
-                    "instrumental_pricing_expand_repeats": (
-                        estimate.instrumental_pricing_expand_repeats
-                    ),
-                    "instrumental_pricing_duration_seconds": (
-                        estimate.instrumental_pricing_duration_seconds
-                    ),
-                    "instrumental_already_generated": (
-                        estimate.has_instrumental_parts
-                        and not estimate.instrumental_charge_required
-                    ),
-                    "total_estimated_credits": estimate.total_estimated_credits,
-                    "estimate": estimate.to_dict(),
-                    "render_choices": render_choices,
-                    "instruction": (
-                        "Present this exact itemized quote and ask for explicit confirmation. "
-                        "Do not call synthesize in this response. Final credits are based on "
-                        "the generated audio length and may differ from this estimate."
-                    ),
-                }
-                removed_takes = _score_player_takes_removed_by(
-                    score_player_takes,
-                    expand_repeats=expand_repeats,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_score=current_score,
                     score_summary=score_summary,
-                )
-                if removed_takes:
-                    quote_payload["takes_removed_from_player"] = {"takes": removed_takes}
-                if available_credits is not None:
-                    quote_payload["available_credits"] = available_credits
-                    quote_payload["balance_after"] = (
-                        available_credits - estimate.total_estimated_credits
-                    )
-                return ToolExecutionResult(
-                    score=current_score,
-                    audio_response={"type": "chat_text", "message": ""},
-                    followup_prompt=json.dumps(quote_payload, sort_keys=True),
-                    followup_message_only=True,
-                    explicit_verse_number=selected_explicit_verse_number,
-                    session_state_changed=quote_reparsed,
-                    selection_resolved=True,
+                    selected_explicit_verse_number=selected_explicit_verse_number,
+                    forced_voicebank_id=forced_voicebank_id,
+                    forced_language=forced_language,
+                    expand_repeats=expand_repeats,
+                    score_player_takes=score_player_takes,
                 )
             if call.name == "synthesize":
                 synth_args = dict(call.arguments)
@@ -7415,17 +7449,52 @@ class Orchestrator:
                                 ui_voicebank_changed=ui_voicebank_changed,
                             ),
                         }
-                        # A stale quote has a concrete corrective tool call, unlike
-                        # a dead-end blocker such as insufficient credits. Leave the
-                        # follow-up able to execute prepare_synthesis_quote;
-                        # message-only stripped that call and left the model
-                        # narrating a refresh that never happened.
+                        # Price the request here, with the quote tool's own code, and
+                        # nest its result as-is: the reply then sees why the old
+                        # price no longer applied together with the new quote, or
+                        # with why none could be made. A failed quote is final for
+                        # this turn, so the follow-up allows no tool call that could
+                        # retry it in a loop.
+                        requote = await self._quote_synthesis(
+                            ToolCall(
+                                name=TOOL_PREPARE_SYNTHESIS_QUOTE,
+                                arguments={
+                                    key: value
+                                    for key, value in call.arguments.items()
+                                    # The override only vouches for the old quote's voice.
+                                    if key not in {"quote_id", "confirmed_voicebank_override"}
+                                },
+                            ),
+                            session_id=session_id,
+                            user_id=user_id,
+                            user_email=user_email,
+                            current_score=current_score,
+                            score_summary=score_summary,
+                            selected_explicit_verse_number=selected_explicit_verse_number,
+                            forced_voicebank_id=forced_voicebank_id,
+                            forced_language=forced_language,
+                            expand_repeats=expand_repeats,
+                            score_player_takes=score_player_takes,
+                        )
+                        new_quote = json.loads(requote.followup_prompt or "{}")
+                        action_required["quote"] = new_quote
+                        quoted = new_quote.get("status") == "quote_ready"
+                        if quoted:
+                            changed = _changed_render_choices(
+                                quote.get("renderChoices") if isinstance(quote, dict) else None,
+                                new_quote.get("render_choices"),
+                            )
+                            if changed:
+                                action_required["changed_choices"] = changed
                         return ToolExecutionResult(
-                            score=current_score,
+                            score=requote.score,
                             audio_response={"type": "chat_text", "message": ""},
                             followup_prompt=json.dumps(action_required, sort_keys=True),
+                            followup_message_only=True,
                             action_required_payload=action_required,
                             explicit_verse_number=selected_explicit_verse_number,
+                            session_state_changed=requote.session_state_changed,
+                            selection_resolved=quoted,
                         )
                     est_credits = int(quote.get("totalEstimatedCredits", 0) or 0)
                     billing_components = [
@@ -8514,6 +8583,19 @@ def instrumental_midi_source_signature(
     assignments = llm_program_assignments_from_summary(summary)
     digest.update(json.dumps(assignments, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:24]
+
+
+def _changed_render_choices(
+    quoted: Optional[Dict[str, Any]], requested: Optional[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """The render choices that differ between a refused quote and its replacement."""
+    if not isinstance(quoted, dict) or not isinstance(requested, dict):
+        return {}
+    return {
+        key: {"quoted": quoted.get(key), "requested": requested.get(key)}
+        for key in sorted(set(quoted) | set(requested))
+        if quoted.get(key) != requested.get(key)
+    }
 
 
 def _part_feeds_instrumental_midi(part: Dict[str, Any]) -> bool:
