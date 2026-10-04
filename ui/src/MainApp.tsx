@@ -139,9 +139,9 @@ const DEMO_SONGS: readonly DemoSong[] = [
     detail: "Alto & men + piano",
     file: "/demo-scores/happy-birthday.xml",
     prompts: [
-      "sing the alto part",
+      "sing happy birthday to Sarah",
       "sing the men's part",
-      "sing the alto part in solfege",
+      "add solfege to all parts",
     ],
   },
 ];

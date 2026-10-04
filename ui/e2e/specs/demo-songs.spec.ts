@@ -98,9 +98,9 @@ test("demo songs load like an upload and bring their own starter prompts", async
   ]);
   expect(backend.uploads()[1].body).toContain('<miscellaneous-field name="sightsinger-demo">happy-birthday</miscellaneous-field>');
   await expect.poll(() => starterPrompts(page)).toEqual([
-    "sing the alto part",
+    "sing happy birthday to Sarah",
     "sing the men's part",
-    "sing the alto part in solfege",
+    "add solfege to all parts",
   ]);
 
   // The user's own file brings back the generic prompts.
