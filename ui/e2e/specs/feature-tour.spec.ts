@@ -55,6 +55,9 @@ test("the tour steps through the controls once, with Next, Back and Done", async
 
   await expectStep(page, "1 / 5", "Solfege", "solfege");
   await expect(tour(page).getByRole("button", { name: "Back" })).toBeDisabled();
+  // Nothing else opens by itself on login: the user menu stays closed.
+  await page.waitForTimeout(1_000);
+  await expect(page.locator(".user-menu-dropdown")).toHaveCount(0);
   await tour(page).getByRole("button", { name: "Next" }).click();
   await expectStep(page, "2 / 5", "With Repeats", "repeats");
   await tour(page).getByRole("button", { name: "Back" }).click();

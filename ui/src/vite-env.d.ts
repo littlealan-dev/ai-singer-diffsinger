@@ -14,7 +14,6 @@ interface ImportMetaEnv {
     readonly VITE_APP_VERSION?: string
     readonly VITE_APP_BUILD_NUMBER?: string
     readonly VITE_STRIPE_PUBLISHABLE_KEY?: string
-    readonly VITE_GET_UPDATES_PROMPT_INTERVAL_DAYS?: string
     readonly VITE_BACKEND_READY_TIMEOUT_SECONDS?: string
     readonly VITE_API_REQUEST_TIMEOUT_SECONDS?: string
     // more env variables...
