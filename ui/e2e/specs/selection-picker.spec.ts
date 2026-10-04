@@ -80,10 +80,6 @@ const picker = (page: Page) => page.locator(".selection-panel");
 
 test("a quote reply settles the part and verse, so the picker is not offered", async ({ page }) => {
   test.setTimeout(120_000);
-  await page.addInitScript(() => {
-    localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true");
-    localStorage.setItem("sightsinger.solfege-guide-dismissed", "true");
-  });
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "selection-picker");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

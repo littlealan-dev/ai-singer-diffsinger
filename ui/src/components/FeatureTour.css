@@ -1,0 +1,109 @@
+.feature-tour-bubble {
+  position: fixed;
+  z-index: 1001;
+  width: min(280px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid rgba(230, 187, 91, 0.72);
+  border-radius: 14px;
+  background: linear-gradient(135deg, #12100c 0%, #2d220e 70%, #4a3714 100%);
+  color: #fff3c4;
+  padding: 12px 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.feature-tour-arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  background: #12100c;
+  border: 1px solid rgba(230, 187, 91, 0.72);
+  transform: rotate(45deg);
+}
+
+.feature-tour-bubble[data-side="below"] .feature-tour-arrow {
+  top: -7px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.feature-tour-bubble[data-side="above"] .feature-tour-arrow {
+  bottom: -7px;
+  border-left: 0;
+  border-top: 0;
+  background: #4a3714;
+}
+
+.feature-tour-count {
+  color: rgba(255, 243, 196, 0.62);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.feature-tour-title {
+  color: #ffe69a;
+  font-size: 13px;
+}
+
+.feature-tour-body {
+  margin: 0;
+}
+
+.feature-tour-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.feature-tour-spacer {
+  flex: 1;
+}
+
+.feature-tour-actions button {
+  border: 1px solid rgba(255, 243, 196, 0.28);
+  border-radius: 7px;
+  background: rgba(255, 243, 196, 0.08);
+  color: #fff3c4;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.feature-tour-actions button:hover:not(:disabled) {
+  background: rgba(255, 243, 196, 0.18);
+}
+
+.feature-tour-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.feature-tour-actions .feature-tour-skip {
+  border-color: transparent;
+  background: transparent;
+  color: rgba(255, 243, 196, 0.7);
+  padding-left: 0;
+}
+
+.feature-tour-actions .feature-tour-next {
+  border-color: rgba(230, 187, 91, 0.9);
+  background: #d4aa4d;
+  color: #1a1408;
+  font-weight: 600;
+}
+
+.feature-tour-actions .feature-tour-next:hover {
+  background: #e3bd63;
+}
+
+/* The control the current step points at. */
+.feature-tour-target {
+  outline: 2px solid rgba(230, 187, 91, 0.9);
+  outline-offset: 2px;
+  border-radius: 8px;
+}

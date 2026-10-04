@@ -184,7 +184,6 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
   test.setTimeout(120_000);
   const consoleMessages: string[] = [];
   page.on("console", (message) => consoleMessages.push(message.text()));
-  await page.addInitScript(() => localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true"));
   await mockBackend(page);
   await signInAsE2EUser(page, "score-player-instrument-rows");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

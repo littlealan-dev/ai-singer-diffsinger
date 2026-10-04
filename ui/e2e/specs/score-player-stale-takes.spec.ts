@@ -151,7 +151,6 @@ const vocalRows = (page: Page) => page.locator(".score-track-row.vocal-track");
 
 test("a take sung before its part was edited is replaced when the next take lands", async ({ page }) => {
   test.setTimeout(120_000);
-  await page.addInitScript(() => localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true"));
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "score-player-stale-takes");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

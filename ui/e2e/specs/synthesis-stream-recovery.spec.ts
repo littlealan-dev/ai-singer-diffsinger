@@ -6,9 +6,6 @@ import { signInAsE2EUser } from "../auth";
 
 
 test("stream-error performs bounded recovery and unlocks chat", async ({ page }) => {
-  await page.addInitScript(() => {
-    localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true");
-  });
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   let progressRequests = 0;
 

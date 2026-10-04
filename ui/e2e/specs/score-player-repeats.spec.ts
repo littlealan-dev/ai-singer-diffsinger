@@ -199,7 +199,6 @@ const repeatsToggle = (page: Page) =>
 
 test("the instrumental MIDI follows the takes' repeat order, not the toggle", async ({ page }) => {
   test.setTimeout(120_000);
-  await page.addInitScript(() => localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true"));
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "score-player-repeats");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

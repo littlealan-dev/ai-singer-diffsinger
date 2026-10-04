@@ -1,6 +1,14 @@
 import { expect, type Page } from "@playwright/test";
 
-export async function signInAsE2EUser(page: Page, testId: string): Promise<void> {
+export async function signInAsE2EUser(
+  page: Page,
+  testId: string,
+  { featureTour = false }: { featureTour?: boolean } = {},
+): Promise<void> {
+  if (!featureTour) {
+    // The one-time feature tour covers controls that other tests click.
+    await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+  }
   const uid = `e2e-${testId.replace(/[^a-z0-9-]/gi, "-")}`;
   const email = `${uid}@example.test`;
   await page.goto("/app");

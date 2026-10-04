@@ -60,10 +60,6 @@ const starterPrompts = (page: Page) =>
 
 test("demo songs load like an upload and bring their own starter prompts", async ({ page }) => {
   test.setTimeout(120_000);
-  await page.addInitScript(() => {
-    localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true");
-    localStorage.setItem("sightsinger.solfege-guide-dismissed", "true");
-  });
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "demo-songs");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

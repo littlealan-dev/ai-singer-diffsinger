@@ -154,7 +154,6 @@ const timeline = (page: Page) => page.locator(".score-player-seek-time");
 
 test("takes replace, append and clear in the score player without mixing up their audio", async ({ page }) => {
   test.setTimeout(180_000);
-  await page.addInitScript(() => localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true"));
   const backend = await mockBackend(page);
   await signInAsE2EUser(page, "score-player-takes");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });

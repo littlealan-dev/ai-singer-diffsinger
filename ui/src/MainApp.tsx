@@ -64,6 +64,7 @@ import { useAuth } from "./hooks/useAuth";
 import { useAnnouncements } from "./hooks/useAnnouncements";
 import { WaitlistModal } from "./components/WaitlistModal";
 import AnnouncementModal from "./components/AnnouncementModal";
+import FeatureTour from "./components/FeatureTour";
 import type { WaitlistSource } from "./components/WaitingListForm";
 import {
   BillingPaywallModal,
@@ -145,7 +146,6 @@ const DEMO_SONGS: readonly DemoSong[] = [
   },
 ];
 
-const SOLFEGE_GUIDE_DISMISSED_KEY = "sightsinger.solfege-guide-dismissed";
 const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 // The billable server-side export mix is retired: it mixed vocal tracks only,
 // while the real-time browser mix also includes the instrumental tracks. The
@@ -2662,11 +2662,6 @@ export default function MainApp() {
   const [failedVoiceImages, setFailedVoiceImages] = useState<Record<string, boolean>>({});
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
   const [solfegeMenuOpen, setSolfegeMenuOpen] = useState(false);
-  const [showSolfegeHint, setShowSolfegeHint] = useState(
-    () =>
-      typeof window === "undefined" ||
-      window.localStorage.getItem(SOLFEGE_GUIDE_DISMISSED_KEY) !== "true"
-  );
   const [solfegeSystem, setSolfegeSystem] = useState<SolfegeSystem>("movable_do");
   const [solfegeMode, setSolfegeMode] = useState<SolfegeMode>("major");
   const [draftSolfegeSystem, setDraftSolfegeSystem] = useState<SolfegeSystem>("movable_do");
@@ -2997,7 +2992,8 @@ export default function MainApp() {
   const {
       showAnnouncement,
       currentAnnouncement,
-      markAsSeen
+      markAsSeen,
+      loading: announcementsLoading,
   } = useAnnouncements();
 
   const estimatedDuration = expandRepeats
@@ -3052,7 +3048,7 @@ export default function MainApp() {
     : undefined;
   const hasScorePlayerTracks = Boolean(instrumentalMidiUrl || (instrumentalTracks.length > 0 && performanceMidi?.has_instrumental_parts)) || multiTrackAudioTracks.length > 0;
   const selectedVoice = voicebanks.find((voice) => voice.id === selectedVoicebankId) ?? null;
-  const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Use Recommended";
+  const selectedVoiceLabel = selectedVoice ? selectedVoice.name : "Auto";
   const starterPrompts =
     DEMO_SONGS.find((song) => song.id === activeDemoSongId)?.prompts ?? STARTING_CONVERSATIONS;
   const solfegeSystemLabel = solfegeSystem === "movable_do" ? "Movable Do" : "Fixed Do";
@@ -5608,6 +5604,7 @@ export default function MainApp() {
             <button
               type="button"
               className="panel-collapse-toggle chat-collapse-toggle"
+              data-tour="chat-collapse"
               onClick={() => setChatCollapsed((current) => !current)}
               aria-label={chatCollapsed ? "Expand Studio Chat" : "Collapse Studio Chat"}
               title={chatCollapsed ? "Expand Studio Chat" : "Collapse Studio Chat"}
@@ -6016,7 +6013,7 @@ export default function MainApp() {
                 ) : null}
                 <button
                   type="button"
-                  className={clsx("composer-tool", { open: voiceMenuOpen })}
+                  className={clsx("composer-tool", "composer-voice-tool", { open: voiceMenuOpen })}
                   aria-haspopup="listbox"
                   aria-expanded={voiceMenuOpen}
                   aria-label={`Voice: ${voicebanksLoading ? "Loading voices" : selectedVoiceLabel}`}
@@ -6027,34 +6024,13 @@ export default function MainApp() {
                     setScoreMenuOpen(false);
                   }}
                 >
-                  {selectedVoice ? (
-                    renderVoiceAvatar(selectedVoice, "voice-picker-trigger-avatar")
-                  ) : (
-                    <span
-                      className="voice-picker-trigger-avatar recommended"
-                      aria-hidden="true"
-                    >
-                      <Sparkles size={13} />
-                    </span>
-                  )}
+                  <Mic size={15} aria-hidden="true" />
+                  <span className="composer-voice-name">
+                    {voicebanksLoading ? "Loading…" : selectedVoiceLabel}
+                  </span>
                 </button>
               </div>
               <div className="solfege-picker" ref={solfegePickerRef}>
-                {showSolfegeHint && !solfegeMenuOpen ? (
-                  <div className="solfege-feature-hint" role="note">
-                    <span>Change the solfege system here</span>
-                    <button
-                      type="button"
-                      aria-label="Dismiss solfege settings hint"
-                      onClick={() => {
-                        window.localStorage.setItem(SOLFEGE_GUIDE_DISMISSED_KEY, "true");
-                        setShowSolfegeHint(false);
-                      }}
-                    >
-                      <X size={13} aria-hidden="true" />
-                    </button>
-                  </div>
-                ) : null}
                 {solfegeMenuOpen ? (
                   <div
                     className="solfege-picker-menu"
@@ -6147,10 +6123,10 @@ export default function MainApp() {
                   aria-haspopup="dialog"
                   aria-expanded={solfegeMenuOpen}
                   aria-label={`Solfege: ${solfegeTriggerValue}`}
+                  data-tour="solfege"
                   data-tooltip={`Solfege: ${solfegeTriggerValue}`}
                   disabled={solfegeSettingsSaving}
                   onClick={() => {
-                    setShowSolfegeHint(false);
                     if (!solfegeMenuOpen) {
                       setDraftSolfegeSystem(solfegeSystem);
                       setDraftSolfegeMode(solfegeMode);
@@ -6170,6 +6146,7 @@ export default function MainApp() {
                 role="switch"
                 aria-checked={expandRepeats}
                 aria-label="With Repeats"
+                data-tour="repeats"
                 className={clsx("composer-tool composer-repeat-toggle", { active: expandRepeats })}
                 data-tooltip={
                   expandRepeats
@@ -6304,6 +6281,7 @@ export default function MainApp() {
                       !scorePlayerAssetsReady)
                   }
                   aria-label={browserMixBounceActive ? "Cancel real-time mix download" : "Download mix in real time"}
+                  data-tour="export-mix"
                   title={
                     browserMixBounceActive
                       ? "Cancel real-time mix download"
@@ -6372,7 +6350,7 @@ export default function MainApp() {
                 </button>
               </div>
               <div className="score-action-controls" aria-label="Score export controls">
-                <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
+                <div className="score-layout-toggle" role="group" aria-label="Score preview layout" data-tour="score-layout">
                   <button
                     type="button"
                     className={clsx("score-layout-option", { selected: scorePreviewLayout === "page" })}
@@ -6554,11 +6532,14 @@ export default function MainApp() {
         </section>
         </div>
       </main>
-      {showAnnouncement && currentAnnouncement && (
+      {showAnnouncement && currentAnnouncement ? (
         <AnnouncementModal 
           announcement={currentAnnouncement} 
           onClose={() => markAsSeen(currentAnnouncement.id)} 
         />
+      ) : (
+        // Waits for the announcement check, so it never opens underneath one.
+        !announcementsLoading && <FeatureTour />
       )}
     </div>
   );

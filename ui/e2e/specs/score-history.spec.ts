@@ -22,7 +22,6 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
     } } } } }),
   });
   expect(seed.ok).toBeTruthy();
-  await page.addInitScript(() => localStorage.setItem("sightsinger.multitrack-tutorial-dismissed", "true"));
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   const wav = Buffer.alloc(44 + 16000);
   wav.write("RIFF"); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8);
