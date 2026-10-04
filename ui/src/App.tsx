@@ -1,6 +1,5 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import MainApp from "./MainApp";
-import DemoApp from "./DemoApp";
 import LandingPage from "./landing/LandingPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { MaintenanceGate } from "./components/MaintenanceGate";
@@ -31,7 +30,8 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route path="/demo" element={<DemoApp />} />
+        {/* The static demo is retired (DemoApp.tsx is kept); the studio has demo songs. */}
+        <Route path="/demo/*" element={<Navigate to="/app" replace />} />
         <Route path="/maintenance" element={<MaintenancePage />} />
         <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
         <Route path="/legal/terms" element={<LegalTerms />} />
