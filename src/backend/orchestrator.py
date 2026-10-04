@@ -6066,8 +6066,11 @@ class Orchestrator:
             if key in arguments and arguments[key] is not None
         }
         choices["expand_repeats"] = bool(expand_repeats)
+        # A flag left out means its default, so a call that states the default
+        # binds the same choices as one that omits it.
         choices.setdefault("require_solfege_lyrics", False)
         choices.setdefault("solfege_pronunciation_patch", False)
+        choices.setdefault("allow_lyric_propagation", False)
         return choices
 
     @staticmethod

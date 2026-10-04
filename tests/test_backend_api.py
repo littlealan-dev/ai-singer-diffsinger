@@ -3837,6 +3837,50 @@ def test_solfege_for_all_parts_is_one_tool_call_and_one_saved_version(client):
     assert with_line == {"P1", "P2", "P3", "P4"}
 
 
+def test_a_confirmation_that_states_a_default_flag_still_matches_its_quote(client, monkeypatch):
+    """The quote left allow_lyric_propagation out; the confirming call sends false, its default."""
+    test_client, app = client
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    men_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Men"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    llm_client = _RecordingQuoteClient({
+        "part_id": "Men",
+        "voicebank": "Dummy",
+        "lyric_selection": {key: men_verse_1[key] for key in ("id", "number", "name")},
+    })
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+
+    quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the men part"})
+    assert quote.status_code == 200
+    assert '"status": "quote_ready"' in llm_client.tool_results[-1]
+
+    # The model restates defaults when it confirms, as it did in a local session.
+    llm_client._arguments.update(
+        {"allow_lyric_propagation": False, "require_solfege_lyrics": False, "solfege_pronunciation_patch": False}
+    )
+    confirm = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert confirm.status_code == 200
+    assert "arguments" in started, (confirm.json(), llm_client.tool_results[-1])
+
+
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
     from src.backend.llm_prompt import build_prompt_bundle
 
