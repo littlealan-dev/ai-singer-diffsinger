@@ -5984,7 +5984,7 @@ export default function MainApp() {
                         <Sparkles size={15} />
                       </span>
                       <span className="voice-picker-option-copy">
-                        <span className="voice-picker-option-name">Use Recommended</span>
+                        <span className="voice-picker-option-name">Auto</span>
                         <span className="voice-picker-option-meta">Let the model choose</span>
                       </span>
                       {selectedVoicebankId === null ? <Check size={14} aria-hidden="true" /> : null}

@@ -106,7 +106,10 @@ test("the voice button shows a microphone and the voice name, cut short when too
   const autoWidth = await voiceButton.evaluate((button) => button.getBoundingClientRect().width);
 
   await voiceButton.click();
-  await page.getByRole("listbox", { name: "Select AI voice" }).getByText(LONG_VOICE).click();
+  const menu = page.getByRole("listbox", { name: "Select AI voice" });
+  // The menu names the default choice the way the button does.
+  await expect(menu.getByText("Auto", { exact: true })).toBeVisible();
+  await menu.getByText(LONG_VOICE).click();
 
   await expect(voiceButton.locator(".composer-voice-name")).toHaveText(LONG_VOICE);
   const fit = await voiceButton.evaluate((button) => {

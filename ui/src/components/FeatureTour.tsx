@@ -16,12 +16,12 @@ export const FEATURE_TOUR_STEPS: FeatureTourStep[] = [
   {
     target: "solfege",
     title: "Solfege",
-    body: "Choose the solfege system and mode used when you sing a part in solfege.",
+    body: "Choose how solfege is sung: movable-do (do follows the key) or fixed-do (do is always C), and the mode.",
   },
   {
     target: "repeats",
     title: "With Repeats",
-    body: "On: the next take sings the repeats. Off: it follows the score as written.",
+    body: "Off by default: the next take sings the score as written. Turn it on to follow repeats, voltas, D.C. and D.S.",
   },
   {
     target: "chat-collapse",
