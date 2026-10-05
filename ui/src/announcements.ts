@@ -14,6 +14,14 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: 'version_1_1_0',
+    title: 'SightSinger 1.1.0 Update',
+    content: '- Play vocal and instrument tracks together.\n\n- Support for repeat notations: repeat signs, 1st / 2nd endings, D.C., D.S. and more.\n\n- Download the full mix of vocals and instruments: what you hear is what you get.\n\n- Fewer AI hallucinations and improved stability.',
+    effect: 'none',
+    date: '2026-10-05',
+    effectiveFrom: '2026-10-05',
+  },
+  {
     id: 'version_1_0_3',
     title: 'SightSinger 1.0.3 Update',
     content: '- New AI Voice: DiffSinger LIEE: Immortal Idol, supporting English, Spanish, French, Italian, Japanese, Portuguese, European Portuguese, Mandarin Chinese, and Cantonese Chinese.\n\n- Support Bass voice through LIEE: Immortal Idol.\n\n- Bug fixes.',
