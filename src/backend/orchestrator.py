@@ -46,7 +46,14 @@ from src.backend.language_selection import (
     resolve_synthesis_language,
 )
 from src.backend.session import SessionStore
-from src.backend.storage_client import copy_blob, upload_bytes, upload_file
+from src.backend.storage_client import (
+    copy_blob,
+    delete_blob,
+    download_bytes,
+    upload_bytes,
+    upload_file,
+    upload_file_if_absent,
+)
 from src.api.audio import save_audio
 from src.api.voice_parts import (
     build_preprocessing_required_action,
@@ -135,6 +142,12 @@ TOOL_REPARSE = "reparse"
 TOOL_PREPARE_SYNTHESIS_QUOTE = "prepare_synthesis_quote"
 ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY = "active_synthesis_quote_id"
 INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY = "instrumental_midi_source_signature"
+# Where each published MIDI file lives in storage, so an instance whose disk
+# never had it can restore it. Keyed by kind: "written" or "expanded".
+INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS = {
+    "written": "instrumental_midi_original_storage_path",
+    "expanded": "instrumental_midi_expanded_storage_path",
+}
 TOOL_SYNTHESIZE = "synthesize"
 TOOL_ADD_SOLFEGE_VERSE = "add_solfege_lyric_verse"
 TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
@@ -1418,6 +1431,26 @@ class Orchestrator:
                     self._finalize_instrumental_midi_files,
                     midi_publication,
                 )
+                try:
+                    await asyncio.to_thread(
+                        self._upload_instrumental_midi_files,
+                        midi_publication,
+                        midi_paths,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                except Exception as exc:
+                    # A take charged for instruments must not settle with MIDI
+                    # that other instances cannot serve. A vocal-only take keeps
+                    # its local copy, as before storage was added.
+                    if midi_is_billable:
+                        raise
+                    self._logger.warning(
+                        "instrumental_midi_upload_skipped session=%s job=%s error=%s",
+                        session_id,
+                        job_id,
+                        exc,
+                    )
             if self._is_e2e_credit_bypass_enabled():
                 # Publish session MIDI state before the job reports success.
                 # The UI fetches the MIDI asset as soon as it sees a terminal
@@ -7760,6 +7793,17 @@ class Orchestrator:
         written_path = session_dir / f"instrumental-written-{signature}.mid"
         expanded_path = session_dir / f"instrumental-expanded-{signature}.mid"
         marker_matches = files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) == signature
+        if marker_matches:
+            # Another instance may have published this MIDI: restore it rather
+            # than build it again.
+            for kind, local_path in (("written", written_path), ("expanded", expanded_path)):
+                await self.restore_instrumental_midi(
+                    user_id=user_id,
+                    session_id=session_id,
+                    files=files,
+                    kind=kind,
+                    local_path=local_path,
+                )
         generated_without_parts = (
             isinstance(existing, dict)
             and existing.get("version") == PERFORMANCE_MIDI_VERSION
@@ -7844,6 +7888,95 @@ class Orchestrator:
             paths["expandedPath"] = str(publication["expanded_path"])
         return paths
 
+    def _upload_instrumental_midi_files(
+        self,
+        publication: Dict[str, Any],
+        paths: Dict[str, Any],
+        *,
+        user_id: Optional[str],
+        session_id: str,
+    ) -> None:
+        """Copy the finalized MIDI files to storage, so any instance can serve them.
+
+        The local files live only on this instance's disk. Uploads are
+        create-only: an object that already exists was published by an earlier
+        job for the same content, so this job records it but does not own it,
+        and its rollback leaves it in place. With storage in use, the job
+        record names the storage objects instead of this container's paths.
+        """
+        if not self._settings.backend_use_storage or not self._settings.storage_bucket:
+            return
+        if not user_id:
+            raise ValueError("Instrumental MIDI cannot be stored without a user id.")
+        bucket = self._settings.storage_bucket
+        performance_midi = publication["performance_midi"]
+        signature = str(publication["source_signature"])
+        publication["storage_bucket"] = bucket
+        owned: List[str] = publication.setdefault("uploaded_storage_paths", [])
+        storage_paths: Dict[str, str] = publication.setdefault("storage_paths", {})
+        for kind, available_key, local_key, path_key in (
+            ("written", "original_midi_available", "written_path", "originalPath"),
+            ("expanded", "expanded_midi_available", "expanded_path", "expandedPath"),
+        ):
+            if not performance_midi.get(available_key):
+                continue
+            object_path = instrumental_midi_storage_path(user_id, session_id, signature, kind)
+            if upload_file_if_absent(
+                bucket, publication[local_key], object_path, "audio/midi"
+            ):
+                owned.append(object_path)
+            storage_paths[kind] = object_path
+            paths.pop(path_key, None)
+            paths[path_key.replace("Path", "StoragePath")] = object_path
+
+    async def restore_instrumental_midi(
+        self,
+        *,
+        user_id: Optional[str],
+        session_id: str,
+        files: Dict[str, Any],
+        kind: str,
+        local_path: Path,
+    ) -> bool:
+        """Make a published MIDI file available on this instance's disk.
+
+        Returns True when the file is there, restoring it from storage when
+        another instance published it. Returns False when it cannot be had.
+        """
+        if local_path.is_file():
+            return True
+        if not self._settings.backend_use_storage or not self._settings.storage_bucket:
+            return False
+        object_path = files.get(INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS[kind])
+        if not user_id or not isinstance(object_path, str) or not object_path.startswith(
+            instrumental_midi_storage_prefix(user_id, session_id)
+        ):
+            return False
+        temporary_path = local_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        try:
+            data = await asyncio.to_thread(
+                download_bytes, self._settings.storage_bucket, object_path
+            )
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path.write_bytes(data)
+            temporary_path.replace(local_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            self._logger.warning(
+                "instrumental_midi_restore_failed session=%s object=%s",
+                session_id,
+                object_path,
+                exc_info=True,
+            )
+            return False
+        self._logger.info(
+            "instrumental_midi_restored session=%s object=%s bytes=%s",
+            session_id,
+            object_path,
+            len(data),
+        )
+        return True
+
     async def _publish_instrumental_midi_session_state(
         self,
         session_id: str,
@@ -7898,6 +8031,9 @@ class Orchestrator:
             )
         else:
             await self._sessions.set_metadata(session_id, "instrumental_midi_expanded_path", "")
+        storage_paths = publication.get("storage_paths") or {}
+        for kind, key in INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS.items():
+            await self._sessions.set_metadata(session_id, key, storage_paths.get(kind, ""))
 
     async def _retract_instrumental_midi_session_state(
         self,
@@ -7929,6 +8065,8 @@ class Orchestrator:
             await self._sessions.set_metadata(
                 session_id, "instrumental_midi_expanded_path", ""
             )
+            for key in INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS.values():
+                await self._sessions.set_metadata(session_id, key, "")
             summary = snapshot.get("score_summary")
             performance_midi = (
                 summary.get("performance_midi") if isinstance(summary, dict) else None
@@ -7952,11 +8090,12 @@ class Orchestrator:
 
     @staticmethod
     def _cleanup_instrumental_midi_publication(publication: Dict[str, Any]) -> None:
-        """Remove unpublished staging/final files owned by a failed job.
+        """Remove unpublished staging/final files and storage objects owned by a failed job.
 
         Staging paths are always this job's. Final paths are removed only when
         this job moved a file there; an identically named file left by an
         earlier job for the same score version is not this job's to delete.
+        Storage objects follow the same rule: only those this job created.
         """
         stale: List[Path] = []
         for key in ("written_staging_path", "expanded_staging_path"):
@@ -7968,6 +8107,18 @@ class Orchestrator:
             stale.extend(path for path in moved if isinstance(path, Path))
         for path in stale:
             path.unlink(missing_ok=True)
+        # Only objects this job created: one that already existed belongs to
+        # an earlier job for the same content.
+        bucket = publication.get("storage_bucket")
+        for object_path in publication.get("uploaded_storage_paths") or []:
+            try:
+                delete_blob(bucket, object_path)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "instrumental_midi_storage_cleanup_failed object=%s",
+                    object_path,
+                    exc_info=True,
+                )
 
     def _extract_preprocess_plan(self, preprocess_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Return the request.plan object from a preprocess tool call, if present."""
@@ -8544,6 +8695,22 @@ def _job_storage_output_path(
 def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str) -> str:
     """Build the storage path for a lossless job output used by mixdown."""
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
+
+
+def instrumental_midi_storage_prefix(user_id: str, session_id: str) -> str:
+    """Return the storage prefix every instrumental MIDI object of a session is under."""
+    return f"sessions/{user_id}/{session_id}/instrumental-midi/"
+
+
+def instrumental_midi_storage_path(
+    user_id: str, session_id: str, signature: str, kind: str
+) -> str:
+    """Return the storage object of one MIDI file, keyed by its source signature.
+
+    Identical content always maps to the same object, so a later job for the
+    same instrumental music finds the file already there.
+    """
+    return f"{instrumental_midi_storage_prefix(user_id, session_id)}{signature}/{kind}.mid"
 
 
 def instrumental_midi_source_signature(

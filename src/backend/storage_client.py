@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 import os
 
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage
 
@@ -71,6 +72,33 @@ def upload_bytes(
     bucket = get_bucket(bucket_name)
     blob = bucket.blob(dest_path)
     blob.upload_from_string(data, content_type=content_type)
+
+
+def upload_file_if_absent(
+    bucket_name: str, source_path: Path, dest_path: str, content_type: Optional[str] = None
+) -> bool:
+    """Upload a local file only if no object exists at dest_path yet.
+
+    Returns False, uploading nothing, when the object already exists.
+    """
+    bucket = get_bucket(bucket_name)
+    blob = bucket.blob(dest_path)
+    try:
+        blob.upload_from_filename(
+            str(source_path), content_type=content_type, if_generation_match=0
+        )
+    except PreconditionFailed:
+        return False
+    return True
+
+
+def delete_blob(bucket_name: str, object_path: str) -> None:
+    """Delete an object; an object that is already gone is not an error."""
+    bucket = get_bucket(bucket_name)
+    try:
+        bucket.blob(object_path).delete()
+    except NotFound:
+        pass
 
 
 def download_bytes(bucket_name: str, object_path: str) -> bytes:

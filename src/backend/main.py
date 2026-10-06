@@ -1646,7 +1646,14 @@ def create_app() -> FastAPI:
         if not isinstance(stored_path, str) or not stored_path:
             raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
         midi_path = _resolve_allowlisted_session_midi_path(settings, stored_path)
-        if not midi_path.is_file():
+        # Another instance may have published the file: restore it from storage.
+        if not await orchestrator.restore_instrumental_midi(
+            user_id=user_id,
+            session_id=session_id,
+            files=files,
+            kind="expanded" if expand_repeats else "written",
+            local_path=midi_path,
+        ):
             raise HTTPException(status_code=404, detail="Instrumental MIDI file not found.")
         return FileResponse(
             midi_path,

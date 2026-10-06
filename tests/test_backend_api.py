@@ -9650,6 +9650,300 @@ def test_switching_lyric_line_keeps_the_published_midi(client):
     assert midi_response.content.startswith(b"MThd")
 
 
+def _fake_midi_storage(monkeypatch):
+    """Stand in for the MIDI storage calls; returns the fake bucket's objects."""
+    objects: dict[str, bytes] = {}
+
+    def upload_if_absent(bucket, source_path, dest_path, content_type=None):
+        if dest_path in objects:
+            return False
+        objects[dest_path] = Path(source_path).read_bytes()
+        return True
+
+    def download(bucket, object_path):
+        return objects[object_path]
+
+    monkeypatch.setattr("src.backend.orchestrator.upload_file_if_absent", upload_if_absent)
+    monkeypatch.setattr("src.backend.orchestrator.download_bytes", download)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.delete_blob",
+        lambda bucket, object_path: objects.pop(object_path, None),
+    )
+    return objects
+
+
+def _publish_stored_instrumental_midi(orchestrator, session_id, job_id):
+    """Publish real MIDI the way a job does with storage in use."""
+    async def scenario():
+        _, publication = await orchestrator._ensure_instrumental_midi_artifacts(
+            session_id, score_summary=None, user_id="test-user", job_id=job_id
+        )
+        assert publication is not None
+        paths = orchestrator._finalize_instrumental_midi_files(publication)
+        orchestrator._upload_instrumental_midi_files(
+            publication, paths, user_id="test-user", session_id=session_id
+        )
+        await orchestrator._publish_instrumental_midi_session_state(
+            session_id, publication, user_id="test-user"
+        )
+        return publication, paths
+
+    return asyncio.run(scenario())
+
+
+def _remove_local_midi(publication):
+    """Simulate an instance whose disk never had the published MIDI."""
+    for key in ("written_path", "expanded_path"):
+        publication[key].unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_published_midi_is_stored_under_its_signature(client_with_env, monkeypatch):
+    """Both MIDI files go to storage, and the session and job record name them there."""
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    objects = _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+
+    publication, paths = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+
+    signature = publication["source_signature"]
+    prefix = f"sessions/test-user/{session_id}/instrumental-midi/{signature}"
+    assert objects[f"{prefix}/written.mid"] == publication["written_path"].read_bytes()
+    assert objects[f"{prefix}/expanded.mid"] == publication["expanded_path"].read_bytes()
+    # The job record names storage objects, not this container's paths.
+    assert paths["originalStoragePath"] == f"{prefix}/written.mid"
+    assert paths["expandedStoragePath"] == f"{prefix}/expanded.mid"
+    assert "originalPath" not in paths and "expandedPath" not in paths
+    files = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))["files"]
+    assert files["instrumental_midi_original_storage_path"] == f"{prefix}/written.mid"
+    assert files["instrumental_midi_expanded_storage_path"] == f"{prefix}/expanded.mid"
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_another_instance_serves_the_published_midi_from_storage(client_with_env, monkeypatch):
+    """An instance without the local files restores them and serves the same bytes."""
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    objects = _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication, paths = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+    _remove_local_midi(publication)
+
+    written = test_client.get(f"/sessions/{session_id}/instrumental-midi")
+    expanded = test_client.get(
+        f"/sessions/{session_id}/instrumental-midi", params={"expand_repeats": "true"}
+    )
+
+    assert written.status_code == 200
+    assert written.content == objects[paths["originalStoragePath"]]
+    assert expanded.status_code == 200
+    assert expanded.content == objects[paths["expandedStoragePath"]]
+    assert publication["written_path"].is_file()
+    assert publication["expanded_path"].is_file()
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_missing_storage_object_still_returns_404(client_with_env, monkeypatch):
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    objects = _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication, _ = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+    _remove_local_midi(publication)
+    objects.clear()
+
+    response = test_client.get(f"/sessions/{session_id}/instrumental-midi")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Instrumental MIDI file not found."
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_another_instance_reuses_stored_midi_instead_of_rebuilding(client_with_env, monkeypatch):
+    """A later take on an instance without the files restores, never rebuilds."""
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication, _ = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+    _remove_local_midi(publication)
+
+    def must_not_rebuild(*args, **kwargs):
+        raise AssertionError("published MIDI must be restored, not rebuilt")
+
+    monkeypatch.setattr(
+        "src.backend.orchestrator.build_instrumental_performance_midis", must_not_rebuild
+    )
+    _, next_publication = asyncio.run(
+        orchestrator._ensure_instrumental_midi_artifacts(
+            session_id, score_summary=None, user_id="test-user", job_id="job-2"
+        )
+    )
+
+    assert next_publication is None
+    assert publication["written_path"].is_file()
+    assert publication["expanded_path"].is_file()
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_midi_rollback_deletes_only_storage_objects_this_job_created(
+    client_with_env, monkeypatch
+):
+    """Objects are keyed by content, so a second job for the same content does not own them."""
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    objects = _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    first, first_paths = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+    stored = set(objects)
+
+    # A second job for identical content finds the objects already there.
+    second = {
+        key: value
+        for key, value in first.items()
+        if key not in {"uploaded_storage_paths", "storage_paths", "moved_final_paths"}
+    }
+    orchestrator._upload_instrumental_midi_files(
+        second, {}, user_id="test-user", session_id=session_id
+    )
+    assert second["uploaded_storage_paths"] == []
+    assert second["storage_paths"] == first["storage_paths"]
+    orchestrator._cleanup_instrumental_midi_publication(second)
+    assert set(objects) == stored
+
+    orchestrator._cleanup_instrumental_midi_publication(first)
+    assert objects == {}
+    assert first_paths["originalStoragePath"] in stored
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_retracting_midi_clears_its_storage_keys(client_with_env, monkeypatch):
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication, _ = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+
+    asyncio.run(
+        orchestrator._retract_instrumental_midi_session_state(
+            session_id, publication, user_id="test-user"
+        )
+    )
+
+    files = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))["files"]
+    assert files["instrumental_midi_original_storage_path"] == ""
+    assert files["instrumental_midi_expanded_storage_path"] == ""
+
+
+def test_midi_without_storage_stays_local(client):
+    """Local development without storage: no upload, and the job record keeps local paths."""
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+
+    publication, paths = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+
+    assert "storage_paths" not in publication
+    assert paths["originalPath"] == str(publication["written_path"])
+    files = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))["files"]
+    assert files["instrumental_midi_original_storage_path"] == ""
+    response = test_client.get(f"/sessions/{session_id}/instrumental-midi")
+    assert response.status_code == 200
+
+
+def _run_job_whose_midi_upload_fails(app, monkeypatch, *, session_id, job_id, billing_components):
+    orchestrator = app.state.orchestrator
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued",
+    )
+    settled: list[str] = []
+
+    async def fake_midi(session_id_arg, *, score_summary, user_id, job_id):
+        return {"performance_midi": {"has_instrumental_parts": True}}, {
+            "score_version_no": 1,
+            "performance_midi": {"has_instrumental_parts": True},
+        }
+
+    async def fake_synthesize(*args, **kwargs):
+        return {"duration_seconds": 1.0, "output_path": "out.mp3", "audio_url": "/out.mp3"}
+
+    async def fake_publish(session_id_arg, publication, *, user_id):
+        return None
+
+    def failing_upload(publication, paths, *, user_id, session_id):
+        raise OSError("storage unavailable")
+
+    def fake_settle(*args, **kwargs):
+        settled.append("settled")
+        return CompleteJobAndSettleCreditsResult(
+            status="completed_and_settled", actual_credits=1, overdrafted=False
+        )
+
+    orchestrator._ensure_instrumental_midi_artifacts = fake_midi
+    orchestrator._synthesize = fake_synthesize
+    monkeypatch.setattr(orchestrator, "_finalize_instrumental_midi_files", lambda publication: {})
+    monkeypatch.setattr(orchestrator, "_upload_instrumental_midi_files", failing_upload)
+    monkeypatch.setattr(orchestrator, "_publish_instrumental_midi_session_state", fake_publish)
+    monkeypatch.setattr("src.backend.credits.settle_credits_and_complete_job", fake_settle)
+
+    asyncio.run(
+        orchestrator._run_synthesis_job(
+            session_id, {}, {}, job_id, "test-user",
+            input_path=None,
+            storage_input_path=None,
+            job_input_storage_path=None,
+            output_storage_path=None,
+            billing_components=billing_components,
+        )
+    )
+    job = app.state.job_store.get_job_by_id(
+        job_id=job_id, user_id="test-user", session_id=session_id,
+    )
+    return settled, job[1]
+
+
+def test_midi_upload_failure_fails_a_take_charged_for_instruments(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+
+    settled, job = _run_job_whose_midi_upload_fails(
+        app, monkeypatch, session_id=session_id, job_id="job-upload-billable",
+        billing_components=["vocal", "instrumental"],
+    )
+
+    assert settled == []
+    assert job["status"] == "failed"
+
+
+def test_midi_upload_failure_does_not_fail_a_vocal_only_take(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+
+    settled, _ = _run_job_whose_midi_upload_fails(
+        app, monkeypatch, session_id=session_id, job_id="job-upload-vocal",
+        billing_components=["vocal"],
+    )
+
+    assert settled == ["settled"]
+
+
 def test_quote_that_switches_lyric_line_returns_the_new_score(client, monkeypatch):
     """The quote turn is where the score changes, so it must say so.
 
