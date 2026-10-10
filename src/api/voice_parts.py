@@ -6006,6 +6006,48 @@ def _resolve_divisions(reference_part: ET.Element, q: Any) -> int:
     return 1
 
 
+def _derived_lane_tie_types(
+    transformed_notes: Sequence[Dict[str, Any]],
+) -> Dict[int, Tuple[str, ...]]:
+    """Return the MusicXML tie types to write for each note, keyed by id(note).
+
+    A note keeps the tie it carried in the source only where the derived lane
+    still connects it: the neighbouring sung note must have the same pitch,
+    touch it, and carry the matching half of the tie. Splitting a chord can
+    pair a tied note with a different one, and that tie would join two pitches.
+    """
+    sung = sorted(
+        (note for note in transformed_notes if not note.get("is_rest")),
+        key=lambda note: (
+            int(note.get("measure_number") or 0),
+            float(note.get("offset_beats") or 0.0),
+        ),
+    )
+
+    def connected(first: Dict[str, Any], second: Dict[str, Any]) -> bool:
+        first_end = float(first.get("offset_beats") or 0.0) + float(
+            first.get("duration_beats") or 0.0
+        )
+        return (
+            first.get("tie_type") in {"start", "continue"}
+            and second.get("tie_type") in {"stop", "continue"}
+            and first.get("pitch_midi") is not None
+            and first.get("pitch_midi") == second.get("pitch_midi")
+            and abs(first_end - float(second.get("offset_beats") or 0.0)) <= 1e-6
+        )
+
+    tie_types: Dict[int, Tuple[str, ...]] = {}
+    for index, note in enumerate(sung):
+        types: List[str] = []
+        if index > 0 and connected(sung[index - 1], note):
+            types.append("stop")
+        if index + 1 < len(sung) and connected(note, sung[index + 1]):
+            types.append("start")
+        if types:
+            tie_types[id(note)] = tuple(types)
+    return tie_types
+
+
 def _append_transformed_measures(
     part_node: ET.Element,
     *,
@@ -6018,6 +6060,7 @@ def _append_transformed_measures(
     for note in transformed_notes:
         measure = int(note.get("measure_number") or 0)
         by_measure.setdefault(measure, []).append(note)
+    tie_types_by_note = _derived_lane_tie_types(transformed_notes)
     reference_measures = (
         [m for m in reference_part.findall(q("measure"))] if reference_part is not None else []
     )
@@ -6087,11 +6130,18 @@ def _append_transformed_measures(
                 1, int(round(duration_beats * float(divisions)))
             )
             ET.SubElement(note_node, q("duration")).text = str(duration_div)
+            tie_types = tie_types_by_note.get(id(note), ())
+            for tie_type in tie_types:
+                ET.SubElement(note_node, q("tie"), {"type": tie_type})
             ET.SubElement(note_node, q("voice")).text = "1"
             note_type = _duration_to_type(duration_beats)
             ET.SubElement(note_node, q("type")).text = note_type
             for _ in range(_coerce_dot_count(note.get("dot_count"))):
                 ET.SubElement(note_node, q("dot"))
+            if tie_types:
+                notations_node = ET.SubElement(note_node, q("notations"))
+                for tie_type in tie_types:
+                    ET.SubElement(notations_node, q("tied"), {"type": tie_type})
             lyric = note.get("lyric")
             if isinstance(lyric, str) and lyric.strip():
                 lyric_attributes: Dict[str, str] = {}

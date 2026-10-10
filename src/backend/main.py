@@ -446,8 +446,8 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     configure_logging()
     settings = Settings.from_env()
-    if settings.app_env.lower() in {"dev", "development", "local", "test"}:
-        # Use filesystem-backed sessions in development.
+    if settings.session_store == "memory":
+        # Filesystem-backed sessions held in this process: the development default.
         sessions = SessionStore(
             project_root=settings.project_root,
             sessions_dir=settings.sessions_dir,

@@ -125,6 +125,9 @@ class Settings:
     dev_user_id: str
     dev_user_email: str
     backend_use_storage: bool
+    # "memory" keeps sessions in this process; "firestore" lets any instance,
+    # or the same backend after a restart, load them.
+    session_store: str
     storage_bucket: str
     app_env: str
     project_id: str | None
@@ -322,6 +325,14 @@ class Settings:
         dev_user_id = os.getenv("BACKEND_DEV_USER_ID", "dev-user").strip()
         dev_user_email = os.getenv("BACKEND_DEV_USER_EMAIL", "user@example.com").strip()
         backend_use_storage = _env_bool("BACKEND_USE_STORAGE", False)
+        # Development keeps sessions in memory unless told otherwise; set
+        # "firestore" to test against the emulator what survives a restart.
+        session_store = os.getenv(
+            "SESSION_STORE",
+            "memory" if app_env_lower in {"dev", "development", "local", "test"} else "firestore",
+        ).strip().lower()
+        if session_store not in {"memory", "firestore"}:
+            raise ValueError("SESSION_STORE must be either 'memory' or 'firestore'.")
         project_id = _project_id()
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
         storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
@@ -494,6 +505,7 @@ class Settings:
             dev_user_id=dev_user_id,
             dev_user_email=dev_user_email,
             backend_use_storage=backend_use_storage,
+            session_store=session_store,
             storage_bucket=storage_bucket,
             app_env=app_env,
             project_id=project_id,
