@@ -153,6 +153,23 @@ const PLAYBACK_TOKEN_REFRESH_MARGIN_MS = 5_000;
 const BILLABLE_SERVER_EXPORT_MIX_ENABLED = false;
 const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
 const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
+const PROGRESS_POLL_INTERVAL_MS = 1200;
+// How long failed progress polls are retried before polling gives up. The
+// instance running a job can be replaced mid-job; the replacement takes about
+// 25 s to start, and the job record it serves then holds the outcome.
+const PROGRESS_POLL_FAILURE_RETRY_MS = 60_000;
+const PROGRESS_POLL_MAX_BACKOFF_MS = 10_000;
+
+// Retries back off so every client polling a lost instance does not keep
+// hitting a service that is short of capacity: 1.2 s, 2.4 s, 4.8 s, 9.6 s,
+// then 10 s.
+function progressPollDelayMs(consecutiveFailures: number): number {
+  if (consecutiveFailures === 0) return PROGRESS_POLL_INTERVAL_MS;
+  return Math.min(
+    PROGRESS_POLL_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+    PROGRESS_POLL_MAX_BACKOFF_MS
+  );
+}
 const SYNTHESIS_STREAM_RECONNECTING_MESSAGE =
   "Connection lost. Reconnecting to check your take";
 const SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE =
@@ -4532,8 +4549,14 @@ export default function MainApp() {
   useEffect(() => {
     if (!activeProgress) return;
     let cancelled = false;
-    let pollInFlight = false;
+    // Set once nothing more will be polled: a terminal status, the end of a
+    // bounded recovery, or giving up.
+    let stopped = false;
+    let timer: number | undefined;
     let completedAttempts = 0;
+    // The current run of failed polls; a successful poll ends it.
+    let failingSince: number | null = null;
+    let consecutiveFailures = 0;
     const generation = workspaceGenerationRef.current;
 
     const clearRecoveryError = () => {
@@ -4546,6 +4569,7 @@ export default function MainApp() {
     };
 
     const finishBoundedRecovery = () => {
+      stopped = true;
       setMessages((current) =>
         current.map((message) =>
           message.id === activeProgress.messageId
@@ -4563,16 +4587,17 @@ export default function MainApp() {
     };
 
     const poll = async () => {
-      if (pollInFlight) return;
-      pollInFlight = true;
       try {
         const payload = await fetchProgress(activeProgress.url);
         if (cancelled || generation !== workspaceGenerationRef.current) return;
+        failingSince = null;
+        consecutiveFailures = 0;
         const terminal = await handleProgressPayload(
           activeProgress.messageId,
           payload,
           generation
         );
+        if (terminal) stopped = true;
         if (terminal || activeProgress.boundedAttempts == null) {
           clearRecoveryError();
         }
@@ -4591,6 +4616,16 @@ export default function MainApp() {
             }
             return;
           }
+          // The job outlives a lost instance: its record still gets the
+          // outcome, so keep polling for a while, backing off, before giving up.
+          const now = Date.now();
+          if (failingSince === null) failingSince = now;
+          consecutiveFailures += 1;
+          if (now - failingSince < PROGRESS_POLL_FAILURE_RETRY_MS) {
+            setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
+            return;
+          }
+          stopped = true;
           setError(
             err?.message === "Failed to fetch"
               ? SYNTHESIS_STREAM_RECONNECTING_MESSAGE
@@ -4599,16 +4634,25 @@ export default function MainApp() {
           setActiveProgress(null);
           setChatTurnBusy(false);
         }
-      } finally {
-        pollInFlight = false;
       }
     };
 
-    void poll();
-    const interval = window.setInterval(() => void poll(), 1200);
+    // Each poll is timed from when the previous one started, as a fixed
+    // interval would be, so a slow reply does not slow down normal polling.
+    const pollThenSchedule = async () => {
+      const startedAt = Date.now();
+      await poll();
+      if (cancelled || stopped) return;
+      timer = window.setTimeout(
+        () => void pollThenSchedule(),
+        Math.max(0, progressPollDelayMs(consecutiveFailures) - (Date.now() - startedAt))
+      );
+    };
+
+    void pollThenSchedule();
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      window.clearTimeout(timer);
     };
   }, [activeProgress, handleProgressPayload]);
 
