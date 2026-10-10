@@ -1162,6 +1162,31 @@ const ScorePlayerEngine = ({
     () => [...configuredMidiTracks, ...stableAudioTracks],
     [configuredMidiTracks, stableAudioTracks]
   );
+  // The player is still catching up while the tracks it holds differ from the
+  // ones it should hold: a decoded take the audio loader has not built a track
+  // for yet, a removed take still present, or MIDI loaded for an older URL.
+  // These are values of this render, so the bridge's ready check sees them in
+  // the same render it runs in; no later effect can contradict its answer.
+  const takesNotYetInPlayer =
+    !audioError &&
+    (stableAudioTracks.length !== vocalSources.length ||
+      vocalSources.some(
+        (source, index) => stableAudioTracks[index]?.clips?.[0]?.audioBuffer !== source.audioBuffer
+      ));
+  const [loadedMidiUrl, setLoadedMidiUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!midiLoading) setLoadedMidiUrl(midiUrl ?? null);
+    // Recorded once the loader has settled on its tracks for the current URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [midiLoading, midiTracks]);
+  const midiNotYetInPlayer = !midiError && (midiUrl ?? null) !== loadedMidiUrl;
+  const engineLoading =
+    midiLoading ||
+    audioLoading ||
+    soundFontLoading ||
+    vocalsDecoding ||
+    takesNotYetInPlayer ||
+    midiNotYetInPlayer;
   const hasMountedPlayerRef = useRef(false);
 
   useEffect(() => {
@@ -1196,16 +1221,14 @@ const ScorePlayerEngine = ({
 
   // `useAudioTracks` and `useMidiTracks` can append decoded sources after the
   // provider's initial ready event. Keep the outer transport (and bounce
-  // action) disabled for the whole loader lifetime, not only when the source
-  // URL list itself changes. Otherwise a recorder can start just as the
-  // provider disposes/rebuilds its adapter for an incremental track add.
+  // action) disabled for the whole loader lifetime, including the gap before a
+  // loader starts on a new take or MIDI URL. Otherwise a recorder can start
+  // just as the provider disposes/rebuilds its adapter for an incremental track
+  // add. This effect only ever reports loading; the bridge alone reports ready,
+  // so the two cannot run in an order that leaves the player marked loading.
   useEffect(() => {
-    onEngineLoading();
-  }, [midiUrl, onEngineLoading, vocalSourceSignature]);
-
-  useEffect(() => {
-    if (midiLoading || audioLoading || soundFontLoading || vocalsDecoding) onEngineLoading();
-  }, [audioLoading, midiLoading, onEngineLoading, soundFontLoading, vocalsDecoding]);
+    if (engineLoading) onEngineLoading();
+  }, [engineLoading, onEngineLoading]);
 
   useEffect(() => {
     if (tracks.length !== 0 || !adapterRef.current) return;
@@ -1235,7 +1258,7 @@ const ScorePlayerEngine = ({
     >
       <ScorePlayerEngineBridge
         onControlsChange={onControlsChange}
-        loading={midiLoading || audioLoading || soundFontLoading || vocalsDecoding}
+        loading={engineLoading}
         onReady={handleProviderReady}
         onPlaybackStateChange={onPlaybackStateChange}
         onPlaybackPositionChange={onPlaybackPositionChange}
