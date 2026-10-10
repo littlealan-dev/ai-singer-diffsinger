@@ -38,7 +38,10 @@ from src.backend.mcp_client import (
 )
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
+    LLM_CALLS_PER_TURN_LIMIT,
     TOOL_RESULT_PREFIX,
+    _LlmTurnBudget,
+    _llm_turn_budget,
     SynthesisChatResponse,
     ToolExecutionResult,
     WorkflowCandidate,
@@ -3301,11 +3304,17 @@ def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(cli
         def generate(self, prompt_bundle, history, *, role=None, **kwargs):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                if '"reason": "message_only"' in last:
+                    calls.append("reply_retry")
+                    return json.dumps(
+                        {"tool_calls": [], "final_message": "Here it is.",
+                         "include_score": False}
+                    )
                 if "synthesis_quote_refresh_required" in last:
                     calls.append("reply")
                     assert "No tools will be executed" in last
                     refusals.append(json.loads(last.split("Message-only payload:\n", 1)[1]))
-                    # Try to re-quote anyway; a message-only follow-up drops it.
+                    # Try to re-quote anyway; the reply is rejected and nothing runs.
                     return json.dumps(
                         {
                             "tool_calls": [
@@ -3363,8 +3372,10 @@ def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(cli
     )
 
     assert response.status_code == 200
-    # One reply after the refusal; the dropped re-quote call ran nothing.
-    assert calls == ["synthesize", "reply"]
+    # The reply that tried to re-quote was rejected, ran nothing and was not
+    # shown; its retry answered in prose.
+    assert calls == ["synthesize", "reply", "reply_retry"]
+    assert response.json()["message"] == "Here it is."
     [refusal] = refusals
     assert refusal["action"] == "synthesis_quote_refresh_required"
     assert refusal["reason"] == "quote_not_found"
@@ -4031,11 +4042,15 @@ def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypa
         def generate(self, prompt_bundle, history, *, role=None, **kwargs):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                if '"reason": "message_only"' in last:
+                    calls.append("reply_retry")
+                    return json.dumps({"tool_calls": [], "final_message": "Here it is.",
+                                       "include_score": False})
                 calls.append("reply")
                 results.append(_message_only_payload(last))
-                # Try to re-quote anyway; nothing may run.
+                # Try to re-quote anyway; the reply is rejected and nothing runs.
                 return json.dumps({"tool_calls": [{"name": "prepare_synthesis_quote", "arguments": {}}],
-                                   "final_message": "Here it is.", "include_score": False})
+                                   "final_message": "Re-quoting.", "include_score": False})
             summary = asyncio.run(app.state.sessions.get_snapshot(session_id, None))["score_summary"]
             selection = next(
                 {key: item[key] for key in ("id", "number", "name")}
@@ -4069,8 +4084,10 @@ def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypa
 
     assert response.status_code == 200
     assert "arguments" not in started
-    # One reply after the refusal; the re-quote it tried ran nothing.
-    assert calls == ["synthesize", "reply"]
+    # The reply that tried to re-quote was rejected and ran nothing; its retry
+    # answered in prose.
+    assert calls == ["synthesize", "reply", "reply_retry"]
+    assert response.json()["message"] == "Here it is."
     refusal = results[-1]
     assert refusal["reason"] == "ui_voicebank_changed"
     assert refusal["quote"]["status"] == "action_required"
@@ -4080,6 +4097,116 @@ def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypa
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
     assert snapshot["files"].get("active_synthesis_quote_id") == first_quote["quote_id"]
     assert "selection_resolved" not in response.json()
+
+
+_CORRECTIVE_QUOTE_REPLY = {
+    # SIG-100: the reply that should present the quote tries to re-quote with
+    # another voice instead and promises work that would never run.
+    "tool_calls": [
+        {"name": "prepare_synthesis_quote",
+         "arguments": {"part_id": "Alto", "voicebank": "Qixuan"}}
+    ],
+    "final_message": "I am preparing a new quote for the Alto part using Qixuan.",
+    "include_score": False,
+}
+
+
+class _ScriptedQuoteReplyClient:
+    """Quote the Alto, then answer each message-only reply from a script."""
+
+    def __init__(self, quote_arguments: dict, replies: list[dict]):
+        self._quote_arguments = dict(quote_arguments)
+        self._replies = list(replies)
+        self.reply_histories: list[list[dict]] = []
+
+    def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+        last = history[-1].get("content", "") if history else ""
+        if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+            self.reply_histories.append(list(history))
+            reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
+            return json.dumps(reply)
+        return json.dumps(
+            {"tool_calls": [{"name": "prepare_synthesis_quote", "arguments": self._quote_arguments}],
+             "final_message": "Quoting.", "include_score": False}
+        )
+
+
+def _scripted_alto_quote_client(test_client, app, monkeypatch, replies):
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    llm_client = _ScriptedQuoteReplyClient(
+        {
+            "part_id": "Alto",
+            "voicebank": "Dummy",
+            "language": "en",
+            "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+        },
+        replies,
+    )
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    return session_id, llm_client
+
+
+def test_a_quote_reply_that_calls_a_tool_is_rejected_and_retried(client, monkeypatch):
+    test_client, app = client
+    honest_reply = {
+        "tool_calls": [],
+        "final_message": "This quote is for the Dummy voice, not Qixuan. Shall I re-quote?",
+        "include_score": False,
+    }
+    session_id, llm_client = _scripted_alto_quote_client(
+        test_client, app, monkeypatch, [_CORRECTIVE_QUOTE_REPLY, honest_reply]
+    )
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert response.status_code == 200
+    message = response.json()["message"]
+    assert message == honest_reply["final_message"]
+    assert "preparing a new quote" not in message
+    first, retry = llm_client.reply_histories
+    # The retry sees the rejected reply and why, in a history of fixed size so
+    # the quote payload stays within the entries the client sends.
+    assert len(retry) == len(first) + 2
+    assert retry[-2] == {"role": "assistant", "content": json.dumps(_CORRECTIVE_QUOTE_REPLY)}
+    rejection = _message_only_payload(retry[-1]["content"])
+    assert rejection["status"] == "rejected"
+    assert rejection["reason"] == "message_only"
+    assert rejection["rejected_tool_calls"] == ["prepare_synthesis_quote"]
+    # The quote the user was shown is the one awaiting confirmation.
+    quote = _message_only_payload(first[-1]["content"])
+    assert quote["status"] == "quote_ready"
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["files"].get("active_synthesis_quote_id") == quote["quote_id"]
+
+
+def test_a_quote_whose_reply_never_presents_it_is_not_awaiting_confirmation(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client = _scripted_alto_quote_client(
+        test_client, app, monkeypatch, [_CORRECTIVE_QUOTE_REPLY]
+    )
+
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert response.status_code == 200
+    message = response.json()["message"]
+    assert "preparing a new quote" not in message
+    assert message.startswith("I couldn't finish this request.")
+    # One decision call, then every remaining call of the turn rejected.
+    assert len(llm_client.reply_histories) == 9
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["files"].get("active_synthesis_quote_id") is None
 
 
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
@@ -10422,11 +10549,16 @@ def test_synthesize_action_required_marks_job_action_required_not_failed(
     assert "audio_url" not in payload
 
 
-def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
-    client, monkeypatch, caplog
+@pytest.mark.parametrize(
+    "scenario", ["recovered", "never_complies", "no_turn_budget", "session_unavailable"]
+)
+def test_synthesize_action_required_message_renderer_rejects_llm_tool_calls(
+    client, monkeypatch, caplog, scenario
 ):
     test_client, app = client
     session_id = _create_session(test_client)
+    # The session's owner depends on the test environment.
+    owner = app.state.sessions._sessions[session_id].user_id or "test-user"
     job_id = "job-synthesize-action-required-message-only"
     release_calls = {"count": 0}
 
@@ -10443,7 +10575,7 @@ def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
 
     app.state.job_store.create_job(
         job_id=job_id,
-        user_id="test-user",
+        user_id=owner,
         session_id=session_id,
         status="queued",
     )
@@ -10460,56 +10592,185 @@ def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
             "part_index": 2,
         },
     }
+    # Honest prose, but it comes with a tool call that would never run.
+    offer_with_tool_call = json.dumps(
+        {
+            "tool_calls": [
+                {
+                    "name": "add_solfege_lyric_verse",
+                    "arguments": {"part_index": 2},
+                }
+            ],
+            "final_message": "I'm adding a generated solfege verse now.",
+            "include_score": False,
+        }
+    )
     llm_message = (
         "I can't sing these Cyrillic lyrics with the current pronunciation engine. "
         "You can ask me to add a generated solfege verse."
     )
+    prose_reply = json.dumps(
+        {"tool_calls": [], "final_message": llm_message, "include_score": False}
+    )
 
-    class ToolCallingActionRequiredClient:
+    class ScriptedActionRequiredClient:
         def __init__(self):
-            self.prompt_text = ""
-            self.last_internal_prompt = ""
+            self.histories = []
+            self.prompt_texts = []
 
         def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
-            self.prompt_text = prompt_bundle.full_prompt_text
-            self.last_internal_prompt = history[-1].get("content", "")
-            return json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "name": "add_solfege_lyric_verse",
-                            "arguments": {"part_index": 2},
-                        }
-                    ],
-                    "final_message": llm_message,
-                    "include_score": False,
-                }
-            )
+            self.prompt_texts.append(prompt_bundle.full_prompt_text)
+            self.histories.append(list(history))
+            if scenario in {"recovered", "session_unavailable"} and (
+                scenario == "session_unavailable" or len(self.histories) > 1
+            ):
+                return prose_reply
+            return offer_with_tool_call
 
     def call_tool(name, arguments):
         if name == "synthesize":
             return action_required
         raise AssertionError(f"Unexpected tool call: {name}")
 
-    llm_client = ToolCallingActionRequiredClient()
+    llm_client = ScriptedActionRequiredClient()
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
     app.state.router.call_tool = call_tool
-    caplog.set_level("WARNING")
+    if scenario == "session_unavailable":
+        async def unavailable_snapshot(*args, **kwargs):
+            raise RuntimeError("Firestore unavailable")
 
-    asyncio.run(
-        app.state.orchestrator._run_synthesis_job(
+        monkeypatch.setattr(app.state.sessions, "get_snapshot", unavailable_snapshot)
+    caplog.set_level("INFO")
+
+    async def run_job():
+        if scenario != "no_turn_budget":
+            # A synthesis job runs inside the chat turn that started it.
+            _llm_turn_budget.set(
+                _LlmTurnBudget(reference="test", started_at=time.monotonic())
+            )
+        await app.state.orchestrator._run_synthesis_job(
             session_id,
             {"parts": []},
             {"voicebank": "Dummy", "part_index": 0},
             job_id,
-            "test-user",
+            owner,
             input_path=None,
             storage_input_path=None,
             job_input_storage_path=None,
             output_storage_path=None,
         )
+
+    asyncio.run(run_job())
+
+    latest = app.state.job_store.get_job_by_id(
+        job_id=job_id,
+        user_id=owner,
+        session_id=session_id,
     )
+    assert latest is not None
+    _, job_data = latest
+    assert job_data["status"] == "action_required"
+    assert job_data["actionRequired"] == action_required
+    assert release_calls["count"] == 1
+    # The text of a reply that called a tool is never shown.
+    assert job_data["message"] != "I'm adding a generated solfege verse now."
+    rejections = [r for r in caplog.records if "llm_message_only_rejected" in r.message]
+    if scenario == "recovered":
+        assert job_data["message"] == llm_message
+        assert len(llm_client.histories) == 2
+        assert len(rejections) == 1
+        rejection = _message_only_payload(llm_client.histories[1][-1]["content"])
+        assert rejection["rejected_tool_calls"] == ["add_solfege_lyric_verse"]
+        assert any("llm_message_only_recovered" in r.message for r in caplog.records)
+        assert "No tools will be executed from this response" in llm_client.histories[0][-1]["content"]
+        assert '"name": "add_solfege_lyric_verse"' not in llm_client.prompt_texts[0]
+    elif scenario == "never_complies":
+        assert job_data["message"] == backend_message("job.synthesis_action_required")
+        assert len(llm_client.histories) == LLM_CALLS_PER_TURN_LIMIT
+        assert len(rejections) == LLM_CALLS_PER_TURN_LIMIT
+    elif scenario == "no_turn_budget":
+        # Nothing would end a retry loop, so the reply is rejected once.
+        assert job_data["message"] == backend_message("job.synthesis_action_required")
+        assert len(llm_client.histories) == 1
+        assert len(rejections) == 1
+    else:
+        # Without the session, the reply is rendered from the payload alone.
+        assert job_data["message"] == llm_message
+        [history] = llm_client.histories
+        assert len(history) == 1
+        assert "Message-only payload:" in history[0]["content"]
+        assert any(
+            "llm_message_only_minimal_context reason=snapshot_unavailable" in r.message
+            for r in caplog.records
+        )
+
+    if scenario == "session_unavailable":
+        return
+    progress = test_client.get(
+        f"/sessions/{session_id}/progress?job_id={job_id}",
+        headers=_auth_headers(),
+    )
+    assert progress.status_code == 200
+    payload = progress.json()
+    assert payload["status"] == "action_required"
+    assert payload["message"] == job_data["message"]
+    assert payload["action_required"] == action_required
+    assert "audio_url" not in payload
+
+
+def test_a_preprocess_job_cancelled_by_shutdown_is_marked_failed(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    orchestrator = app.state.orchestrator
+    job_id = "job-preprocess-interrupted"
+    app.state.job_store.create_job(
+        job_id=job_id,
+        user_id="test-user",
+        session_id=session_id,
+        status="queued",
+    )
+
+    async def no_credit_context(user_id):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_get_current_credit_availability", no_credit_context)
+
+    async def scenario():
+        workflow_started = asyncio.Event()
+
+        async def workflow_waiting_on_the_llm(*args, **kwargs):
+            workflow_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(orchestrator, "_run_llm_tool_workflow", workflow_waiting_on_the_llm)
+        task = asyncio.create_task(
+            orchestrator._run_preprocess_job(
+                session_id,
+                {"parts": []},
+                [ToolCall(name="preprocess_voice_parts", arguments={})],
+                job_id,
+                # The session's owner depends on the test environment.
+                None,
+                "test@example.com",
+                initial_message="Preparing the Alto part.",
+                initial_thought_summary="",
+            )
+        )
+        orchestrator._preprocess_tasks[session_id] = task
+        started = asyncio.create_task(workflow_started.wait())
+        await asyncio.wait({started, task}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        if not started.done():
+            started.cancel()
+            job = app.state.job_store.get_job_by_id(
+                job_id=job_id, user_id="test-user", session_id=session_id
+            )
+            pytest.fail(f"The job ended before its workflow started: {job}")
+        complete = await orchestrator.shutdown_tasks(time.monotonic() + 5)
+        assert complete is True
+        assert task.cancelled()
+
+    asyncio.run(scenario())
 
     latest = app.state.job_store.get_job_by_id(
         job_id=job_id,
@@ -10518,27 +10779,10 @@ def test_synthesize_action_required_message_renderer_ignores_llm_tool_calls(
     )
     assert latest is not None
     _, job_data = latest
-    assert job_data["status"] == "action_required"
-    assert job_data["message"] == llm_message
-    assert job_data["actionRequired"] == action_required
-    assert release_calls["count"] == 1
-    assert "No tools will be executed from this response" in llm_client.last_internal_prompt
-    assert '"name": "add_solfege_lyric_verse"' not in llm_client.prompt_text
-    assert any(
-        "llm_message_only_tool_calls_ignored" in record.message
-        for record in caplog.records
-    )
-
-    progress = test_client.get(
-        f"/sessions/{session_id}/progress?job_id={job_id}",
-        headers=_auth_headers(),
-    )
-    assert progress.status_code == 200
-    payload = progress.json()
-    assert payload["status"] == "action_required"
-    assert payload["message"] == llm_message
-    assert payload["action_required"] == action_required
-    assert "audio_url" not in payload
+    assert job_data["status"] == "failed"
+    assert job_data["error"] == "interrupted"
+    assert job_data["message"] == backend_message("job.preprocess_interrupted")
+    assert job_data["progress"] == 1.0
 
 
 def test_unsupported_lyric_language_action_required_logs_error_for_triage(

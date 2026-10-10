@@ -107,6 +107,15 @@ MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS = (
     "this response, so return tool_calls as [] and do not claim that you are "
     "starting or completing further work."
 )
+MESSAGE_ONLY_REJECTION_DETAIL = (
+    "Your previous reply called a tool. Nothing you proposed was executed, and "
+    "that reply was not shown to the user. Reply in prose only, with tool_calls "
+    "as []. If the result does not match what the user asked for, say so and "
+    "ask the user how to proceed."
+)
+# A message-only reply that failed to parse but still carries a tool call. Its
+# final_message would describe work that never runs, so it is rejected too.
+_UNPARSED_TOOL_CALL_PATTERN = re.compile(r'"tool_calls"\s*:\s*\[\s*\{')
 SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS = (
     "This is a terminal synthesis action_required result for an already-started "
     "background job. Render only a concise user-facing status message. No tools "
@@ -1840,6 +1849,32 @@ class Orchestrator:
                     warningMessage=warning_message,
                     completedAt=datetime.now(timezone.utc),
                 )
+        except asyncio.CancelledError:
+            # Shutdown cancels this task. CancelledError is not an Exception,
+            # so without this the job would stay "running" forever.
+            self._logger.warning(
+                "preprocess_job_interrupted session=%s job=%s", session_id, job_id
+            )
+            interrupted_message = backend_message("job.preprocess_interrupted")
+            try:
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="failed",
+                    step="error",
+                    message=interrupted_message,
+                    errorMessage=interrupted_message,
+                    error="interrupted",
+                    progress=1.0,
+                    jobKind="preprocess",
+                )
+            except Exception as exc:
+                self._logger.error(
+                    "preprocess_job_interrupted_update_failed job=%s error=%s",
+                    job_id,
+                    exc,
+                )
+            raise
         except Exception as exc:
             if isinstance(exc, PreprocessPlanningError):
                 self._logger.warning(
@@ -1876,18 +1911,26 @@ class Orchestrator:
         """Ask the LLM to turn a synthesize action_required payload into user-facing prose."""
         if self._llm_client is None:
             return fallback_message
-        current_credit_availability = await self._get_current_credit_availability(
-            user_id,
-        )
         try:
-            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+            snapshot: Optional[Dict[str, Any]] = await self._sessions.get_snapshot(
+                session_id, user_id
+            )
+        except Exception as exc:
+            # The renderer falls back to a payload-only prompt.
+            self._logger.warning(
+                "synthesis_action_required_snapshot_unavailable session=%s error=%s",
+                session_id,
+                exc,
+            )
+            snapshot = None
+        try:
             followup_response, followup_error = (
                 await self._decide_message_only_followup_with_llm(
                     snapshot,
                     json.dumps(payload, sort_keys=True),
                     score,
                     session_id=session_id,
-                    current_credit_availability=current_credit_availability,
+                    user_id=user_id,
                     instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
                 )
             )
@@ -1897,108 +1940,22 @@ class Orchestrator:
                 session_id,
                 exc,
             )
-            return await self._render_synthesis_action_required_message_minimal(
-                session_id,
-                payload,
-                user_id=user_id,
-                current_credit_availability=current_credit_availability,
-                fallback_message=fallback_message,
-            )
+            return fallback_message
         if followup_error:
             self._logger.warning(
                 "synthesis_action_required_llm_message_unavailable session=%s error=%s",
                 session_id,
                 followup_error,
             )
-            return await self._render_synthesis_action_required_message_minimal(
-                session_id,
-                payload,
-                user_id=user_id,
-                current_credit_availability=current_credit_availability,
-                fallback_message=fallback_message,
-            )
-        if followup_response is None:
-            return await self._render_synthesis_action_required_message_minimal(
-                session_id,
-                payload,
-                user_id=user_id,
-                current_credit_availability=current_credit_availability,
-                fallback_message=fallback_message,
-            )
-        final_message = str(followup_response.final_message or "").strip()
-        if not final_message:
-            return await self._render_synthesis_action_required_message_minimal(
-                session_id,
-                payload,
-                user_id=user_id,
-                current_credit_availability=current_credit_availability,
-                fallback_message=fallback_message,
-            )
-        return self._format_followup_message_text(final_message)
-
-    async def _render_synthesis_action_required_message_minimal(
-        self,
-        session_id: str,
-        payload: Dict[str, Any],
-        *,
-        user_id: Optional[str] = None,
-        current_credit_availability: Optional[Dict[str, int]] = None,
-        fallback_message: str,
-    ) -> str:
-        """Fallback LLM rendering for background jobs when rich session context is unavailable."""
-        if self._llm_client is None:
             return fallback_message
-        history = [
-            {
-                "role": "user",
-                "content": (
-                    TOOL_RESULT_PREFIX
-                    + self._message_only_tool_summary(
-                        json.dumps(payload, sort_keys=True),
-                        instructions=SYNTHESIS_ACTION_REQUIRED_MESSAGE_ONLY_INSTRUCTIONS,
-                    )
-                ),
-            }
-        ]
-        prompt_bundle = build_prompt_bundle(
-            [],
-            score_available=False,
-            current_credit_availability=(
-                current_credit_availability
-                if current_credit_availability is not None
-                else await self._get_current_credit_availability(user_id)
-            ),
-            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
-            role=LlmRole.DEFAULT,
+        final_message = (
+            str(followup_response.final_message or "").strip()
+            if followup_response is not None
+            else ""
         )
-        try:
-            text = await asyncio.to_thread(
-                self._call_llm_client_generate,
-                prompt_bundle,
-                history,
-                LlmRole.DEFAULT,
-            )
-        except Exception as exc:
-            self._logger.warning(
-                "synthesis_action_required_minimal_llm_failed session=%s error=%s",
-                session_id,
-                exc,
-            )
+        if not final_message:
             return fallback_message
-        response = parse_llm_response(text)
-        if response is not None and str(response.final_message or "").strip():
-            if response.tool_calls:
-                self._logger.warning(
-                    "synthesis_action_required_message_only_tool_calls_ignored "
-                    "session=%s tools=%s",
-                    session_id,
-                    [call.name for call in response.tool_calls],
-                )
-            return self._format_followup_message_text(response.final_message)
-        prose_fallback = self._extract_followup_prose_fallback(text)
-        if prose_fallback:
-            return prose_fallback
-        return fallback_message
+        return self._format_followup_message_text(final_message)
 
     def _apply_preprocess_planning_context_defaults(
         self,
@@ -2546,6 +2503,14 @@ class Orchestrator:
                         instructions=message_only_instructions,
                     )
                 )
+                if (
+                    tool_result.metadata_on_presented
+                    and followup_error is None
+                    and followup_response is not None
+                    and str(followup_response.final_message or "").strip()
+                ):
+                    for key, value in tool_result.metadata_on_presented.items():
+                        await self._sessions.set_metadata(session_id, key, value)
             else:
                 followup_response, followup_error = await self._decide_followup_with_llm(
                     latest_snapshot,
@@ -5568,7 +5533,7 @@ class Orchestrator:
 
     async def _decide_message_only_followup_with_llm(
         self,
-        snapshot: Dict[str, Any],
+        snapshot: Optional[Dict[str, Any]],
         tool_summary: str,
         current_score: Optional[Dict[str, Any]] = None,
         *,
@@ -5580,118 +5545,234 @@ class Orchestrator:
         selected_language: Optional[str] = None,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
-        """Ask the LLM for prose only, with no executable follow-up tool affordance."""
+        """Ask the LLM for prose only; a reply that calls a tool is rejected, never shown.
+
+        Nothing runs from this phase, so the text of a reply that calls a tool
+        describes work that will not happen. The reply is sent back with the
+        reason until the model answers in prose; LLM_CALLS_PER_TURN_LIMIT ends
+        the loop. Without a turn budget nothing would end it, so the reply is
+        rejected once and the call fails.
+        """
         if self._llm_client is None:
             return None, tool_summary
-        history = list(snapshot.get("history", []))
-        history.append(
-            {
-                "role": "user",
-                "content": (
-                    TOOL_RESULT_PREFIX
-                    + self._message_only_tool_summary(
-                        tool_summary,
-                        instructions=instructions,
+        payload_entry = {
+            "role": "user",
+            "content": (
+                TOOL_RESULT_PREFIX
+                + self._message_only_tool_summary(
+                    tool_summary,
+                    instructions=instructions,
+                )
+            ),
+        }
+        prompt_bundle: Any = None
+        history: List[Dict[str, str]] = []
+        rich_context = False
+        if isinstance(snapshot, dict):
+            try:
+                prompt_bundle, current_credit_availability = (
+                    await self._build_message_only_rich_prompt(
+                        snapshot,
+                        current_score,
+                        user_id=user_id,
+                        current_credit_availability=current_credit_availability,
+                        selected_voicebank_id=selected_voicebank_id,
+                        selected_language=selected_language,
                     )
-                ),
-            }
+                )
+                history = [*snapshot.get("history", []), payload_entry]
+                rich_context = True
+            except Exception as exc:
+                self._logger.warning(
+                    "llm_message_only_minimal_context reason=rich_context_failed error=%s",
+                    exc,
+                )
+        else:
+            self._logger.warning(
+                "llm_message_only_minimal_context reason=snapshot_unavailable"
+            )
+        if not rich_context:
+            # Only the payload: whatever made the session context unavailable
+            # (Firestore, the MCP worker, a score file) cannot stop the reply.
+            try:
+                if current_credit_availability is None:
+                    current_credit_availability = (
+                        await self._get_current_credit_availability(user_id)
+                    )
+            except Exception as exc:
+                self._logger.warning(
+                    "llm_message_only_credits_unavailable error=%s", exc
+                )
+            try:
+                prompt_bundle = build_prompt_bundle(
+                    [],
+                    score_available=False,
+                    current_credit_availability=current_credit_availability,
+                    synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
+                    role=LlmRole.DEFAULT,
+                )
+            except Exception as exc:
+                self._logger.exception("llm_message_only_context_failed error=%s", exc)
+                return None, LLM_ERROR_FALLBACK
+            history = [payload_entry]
+
+        can_retry = _llm_turn_budget.get() is not None
+        rejected: Optional[tuple[str, List[str]]] = None
+        attempt = 0
+        while True:
+            attempt += 1
+            attempt_history = history
+            if rejected is not None:
+                # Rebuilt each time rather than appended to: the client sends
+                # only the most recent history entries, and the payload must
+                # stay among them.
+                rejected_text, rejected_tools = rejected
+                attempt_history = [
+                    *history,
+                    {"role": "assistant", "content": rejected_text},
+                    {
+                        "role": "user",
+                        "content": (
+                            TOOL_RESULT_PREFIX
+                            + self._message_only_tool_summary(
+                                json.dumps(
+                                    {
+                                        "status": "rejected",
+                                        "reason": "message_only",
+                                        "rejected_tool_calls": rejected_tools,
+                                        "detail": MESSAGE_ONLY_REJECTION_DETAIL,
+                                    },
+                                    sort_keys=True,
+                                ),
+                                instructions=instructions,
+                            )
+                        ),
+                    },
+                ]
+            try:
+                text = await asyncio.to_thread(
+                    self._call_llm_client_generate,
+                    prompt_bundle,
+                    attempt_history,
+                    LlmRole.DEFAULT,
+                )
+            except RuntimeError as exc:
+                self._logger.warning("llm_message_only_failed error=%s", exc)
+                return None, self._format_llm_error(exc)
+            except Exception as exc:
+                self._logger.exception("llm_message_only_unexpected error=%s", exc)
+                return None, LLM_ERROR_FALLBACK
+            response = parse_llm_response(text)
+            if response is None:
+                if _UNPARSED_TOOL_CALL_PATTERN.search(text):
+                    rejected_tools = ["<unparsed>"]
+                else:
+                    self._logger.warning(
+                        "llm_message_only_parse_failed raw_text=%s",
+                        summarize_payload(text),
+                    )
+                    prose_fallback = self._extract_followup_prose_fallback(text)
+                    if prose_fallback:
+                        return (
+                            LlmResponse(
+                                tool_calls=[],
+                                final_message=prose_fallback,
+                                include_score=False,
+                            ),
+                            None,
+                        )
+                    return None, tool_summary
+            elif response.tool_calls:
+                rejected_tools = [call.name for call in response.tool_calls]
+            else:
+                if attempt > 1:
+                    self._logger.info(
+                        "llm_message_only_recovered attempts=%s", attempt
+                    )
+                if (
+                    rich_context
+                    and isinstance(snapshot, dict)
+                    and snapshot.get("score_context_updated")
+                    and session_id
+                ):
+                    await self._sessions.acknowledge_score_context_updated(session_id)
+                return response, None
+            self._logger.warning(
+                "llm_message_only_rejected tools=%s attempt=%s can_retry=%s",
+                rejected_tools,
+                attempt,
+                can_retry,
+            )
+            if not can_retry:
+                return None, LLM_ERROR_FALLBACK
+            rejected = (text, rejected_tools)
+
+    async def _build_message_only_rich_prompt(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Optional[Dict[str, Any]],
+        *,
+        user_id: Optional[str],
+        current_credit_availability: Optional[Dict[str, int]],
+        selected_voicebank_id: Optional[str],
+        selected_language: Optional[str],
+    ) -> tuple[Any, Optional[Dict[str, int]]]:
+        """Build the full session prompt for a message-only reply."""
+        voicebank_ids = await self._get_voicebank_ids()
+        voicebank_details = await self._get_voicebank_details()
+        if current_credit_availability is None:
+            current_credit_availability = await self._get_current_credit_availability(
+                user_id,
+            )
+        planning_score = self._resolve_llm_planning_score(snapshot, current_score)
+        voice_part_signals = (
+            planning_score.get("voice_part_signals")
+            if isinstance(planning_score, dict)
+            else None
         )
-        try:
-            voicebank_ids = await self._get_voicebank_ids()
-            voicebank_details = await self._get_voicebank_details()
-            if current_credit_availability is None:
-                current_credit_availability = await self._get_current_credit_availability(
-                    user_id,
-                )
-            planning_score = self._resolve_llm_planning_score(snapshot, current_score)
-            voice_part_signals = (
-                planning_score.get("voice_part_signals")
-                if isinstance(planning_score, dict)
-                else None
-            )
-            last_preprocess_plan = snapshot.get("last_preprocess_plan")
-            preprocess_mapping_context = (
-                self._build_preprocess_mapping_context(
-                    current_score,
-                    score_summary=snapshot.get("score_summary"),
-                )
-                if isinstance(current_score, dict)
-                else None
-            )
-            prompt_bundle = build_prompt_bundle(
-                [],
-                score_available=True,
-                voicebank_ids=voicebank_ids,
+        last_preprocess_plan = snapshot.get("last_preprocess_plan")
+        preprocess_mapping_context = (
+            self._build_preprocess_mapping_context(
+                current_score,
                 score_summary=snapshot.get("score_summary"),
-                parsed_score_json=(
-                    planning_score
-                    if (
-                        self._settings.inject_full_parsed_score_json
-                        and isinstance(planning_score, dict)
-                    )
-                    else None
-                ),
-                voice_part_signals=voice_part_signals,
-                preprocess_mapping_context=preprocess_mapping_context,
-                last_preprocess_plan=(
-                    last_preprocess_plan
-                    if isinstance(last_preprocess_plan, dict)
-                    else None
-                ),
-                voicebank_details=voicebank_details,
-                selected_voicebank_id=selected_voicebank_id,
-                selected_language=selected_language,
-                score_context_updated=bool(snapshot.get("score_context_updated")),
-                solfege_settings=(
-                    snapshot.get("solfege_settings")
-                    if isinstance(snapshot.get("solfege_settings"), dict)
-                    else None
-                ),
-                current_credit_availability=current_credit_availability,
-                synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
-                role=LlmRole.DEFAULT,
             )
-            text = await asyncio.to_thread(
-                self._call_llm_client_generate,
-                prompt_bundle,
-                history,
-                LlmRole.DEFAULT,
-            )
-        except ValueError as exc:
-            self._logger.warning("llm_message_only_context_failed error=%s", exc)
-            return None, str(exc)
-        except RuntimeError as exc:
-            self._logger.warning("llm_message_only_failed error=%s", exc)
-            return None, self._format_llm_error(exc)
-        except Exception as exc:
-            self._logger.exception("llm_message_only_unexpected error=%s", exc)
-            return None, LLM_ERROR_FALLBACK
-        response = parse_llm_response(text)
-        if response is None:
-            self._logger.warning(
-                "llm_message_only_parse_failed raw_text=%s",
-                summarize_payload(text),
-            )
-            prose_fallback = self._extract_followup_prose_fallback(text)
-            if prose_fallback:
-                return (
-                    LlmResponse(
-                        tool_calls=[],
-                        final_message=prose_fallback,
-                        include_score=False,
-                    ),
-                    None,
+            if isinstance(current_score, dict)
+            else None
+        )
+        prompt_bundle = build_prompt_bundle(
+            [],
+            score_available=True,
+            voicebank_ids=voicebank_ids,
+            score_summary=snapshot.get("score_summary"),
+            parsed_score_json=(
+                planning_score
+                if (
+                    self._settings.inject_full_parsed_score_json
+                    and isinstance(planning_score, dict)
                 )
-            return None, tool_summary
-        if response.tool_calls:
-            self._logger.warning(
-                "llm_message_only_tool_calls_ignored tools=%s",
-                [call.name for call in response.tool_calls],
-            )
-            response = replace(response, tool_calls=[])
-        if snapshot.get("score_context_updated") and session_id:
-            await self._sessions.acknowledge_score_context_updated(session_id)
-        return response, None
+                else None
+            ),
+            voice_part_signals=voice_part_signals,
+            preprocess_mapping_context=preprocess_mapping_context,
+            last_preprocess_plan=(
+                last_preprocess_plan
+                if isinstance(last_preprocess_plan, dict)
+                else None
+            ),
+            voicebank_details=voicebank_details,
+            selected_voicebank_id=selected_voicebank_id,
+            selected_language=selected_language,
+            score_context_updated=bool(snapshot.get("score_context_updated")),
+            solfege_settings=(
+                snapshot.get("solfege_settings")
+                if isinstance(snapshot.get("solfege_settings"), dict)
+                else None
+            ),
+            current_credit_availability=current_credit_availability,
+            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
+            role=LlmRole.DEFAULT,
+        )
+        return prompt_bundle, current_credit_availability
 
     async def _decide_followup_with_llm(
         self,
@@ -6625,14 +6706,6 @@ class Orchestrator:
                 get_or_create_credits, user_id, user_email
             )
             available_credits = quote_credits.available_balance
-        # The tool result reaches the model through a message-only
-        # follow-up, so remember the id on the session: the confirmation
-        # turn reads it from dynamic prompt context.
-        await self._sessions.set_metadata(
-            session_id,
-            ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY,
-            str(quote["quote_id"]),
-        )
         quote_payload = {
             "status": "quote_ready",
             "quote_id": quote["quote_id"],
@@ -6679,6 +6752,14 @@ class Orchestrator:
             explicit_verse_number=selected_explicit_verse_number,
             session_state_changed=quote_reparsed,
             selection_resolved=True,
+            # The tool result reaches the model through a message-only
+            # follow-up, so the id is remembered on the session: the
+            # confirmation turn reads it from dynamic prompt context. Only once
+            # that reply presents the quote, so an unseen quote is never offered
+            # for confirmation.
+            metadata_on_presented={
+                ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY: str(quote["quote_id"]),
+            },
         )
 
     async def _execute_tool_calls(
@@ -7528,6 +7609,7 @@ class Orchestrator:
                             explicit_verse_number=selected_explicit_verse_number,
                             session_state_changed=requote.session_state_changed,
                             selection_resolved=quoted,
+                            metadata_on_presented=requote.metadata_on_presented,
                         )
                     est_credits = int(quote.get("totalEstimatedCredits", 0) or 0)
                     billing_components = [
@@ -8550,6 +8632,11 @@ class ToolExecutionResult:
     # A billable quote fixes the part and lyric line, so the UI's part/verse
     # picker has nothing left to ask.
     selection_resolved: bool = False
+    # Session metadata that holds only once the message-only reply presenting
+    # this result reaches the user, such as the quote awaiting confirmation.
+    # The workflow writes it after that reply succeeds; a failed reply leaves
+    # nothing behind that claims the user saw it.
+    metadata_on_presented: Optional[Dict[str, str]] = None
 
 
 @dataclass(frozen=True)
