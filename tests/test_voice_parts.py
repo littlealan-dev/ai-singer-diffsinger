@@ -364,6 +364,138 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
                 self.assertEqual(staves.text, "1")
             self.assertFalse(part.findall(".//clef[@number='2']"))
 
+    def test_chord_split_derived_parts_keep_ties_that_still_connect(self) -> None:
+        def note(step, octave, duration, note_type, *, chord=False, tie=None, lyric=None):
+            ties = "".join(f'<tie type="{t}"/>' for t in (tie or []))
+            tied = "".join(f'<tied type="{t}"/>' for t in (tie or []))
+            return (
+                "<note>"
+                + ("<chord/>" if chord else "")
+                + f"<pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+                + f"<duration>{duration}</duration>{ties}<voice>1</voice><type>{note_type}</type>"
+                + (f"<notations>{tied}</notations>" if tied else "")
+                + (
+                    f'<lyric number="1"><syllabic>single</syllabic><text>{lyric}</text></lyric>'
+                    if lyric
+                    else ""
+                )
+                + "</note>"
+            )
+
+        measures = [
+            # A chord tied over the barline in both notes.
+            note("E", 5, 8, "whole", tie=["start"], lyric="la")
+            + note("C", 5, 8, "whole", chord=True, tie=["start"]),
+            note("E", 5, 4, "half", tie=["stop"])
+            + note("C", 5, 4, "half", chord=True, tie=["stop"])
+            + note("G", 4, 2, "quarter", tie=["start"], lyric="la")
+            + note("G", 4, 2, "quarter", tie=["stop"]),
+            # Only the upper chord note is tied on: the lower lane would join F4 to A4.
+            note("A", 4, 4, "half", tie=["start"], lyric="la")
+            + note("F", 4, 4, "half", chord=True)
+            + note("A", 4, 4, "half", tie=["stop"]),
+        ]
+        body = "".join(
+            f'<measure number="{number}">'
+            + (
+                "<attributes><divisions>2</divisions><key><fifths>0</fifths></key>"
+                "<time><beats>4</beats><beat-type>4</beat-type></time>"
+                "<clef><sign>G</sign><line>2</line></clef></attributes>"
+                if number == 1
+                else ""
+            )
+            + content
+            + "</measure>"
+            for number, content in enumerate(measures, start=1)
+        )
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1">'
+            '<part-list><score-part id="P1"><part-name>Women</part-name></score-part></part-list>'
+            f'<part id="P1">{body}</part></score-partwise>'
+        )
+
+        def lane(rank_index):
+            source = {"part_id": "Women", "voice_part_id": "voice part 1"}
+            return {
+                "source": source,
+                "output": {"mode": "append_new_derived_lane"},
+                "split_coverage": "complete",
+                "sections": [
+                    {
+                        "start_measure": 1,
+                        "end_measure": 3,
+                        "mode": "derive",
+                        "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                        "method": "ranked",
+                        "rank_index": rank_index,
+                        "rank_fallback": "greedy",
+                        "melody_source": source,
+                        "lyric_source": source,
+                        "lyric_strategy": "strict_onset",
+                        "lyric_policy": "replace_all",
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "tied-chords.xml"
+            source_path.write_text(xml, encoding="utf-8")
+            score = parse_score(source_path, verse_number=1)
+            result = preprocess_voice_parts(
+                score=score,
+                request={"plan": {"targets": [lane(0), lane(1)]}},
+            )
+            self.assertEqual(result.get("status"), "ready", result)
+            root = ET.parse(result["modified_musicxml_path"]).getroot()
+            reparsed = parse_score(result["modified_musicxml_path"], verse_number=1)
+
+        def written_ties(part):
+            return [
+                (
+                    n.findtext("pitch/step") + n.findtext("pitch/octave"),
+                    [t.get("type") for t in n.findall("tie")],
+                    [t.get("type") for t in n.findall("notations/tied")],
+                )
+                for n in part.iter("note")
+                if n.find("rest") is None
+            ]
+
+        upper, lower = [
+            part for part in root.findall("part") if part.get("id", "").startswith("P_DERIVED_")
+        ]
+        self.assertEqual(
+            written_ties(upper),
+            [
+                ("E5", ["start"], ["start"]),
+                ("E5", ["stop"], ["stop"]),
+                ("G4", ["start"], ["start"]),
+                ("G4", ["stop"], ["stop"]),
+                ("A4", ["start"], ["start"]),
+                ("A4", ["stop"], ["stop"]),
+            ],
+        )
+        self.assertEqual(
+            written_ties(lower),
+            [
+                ("C5", ["start"], ["start"]),
+                ("C5", ["stop"], ["stop"]),
+                ("G4", ["start"], ["start"]),
+                ("G4", ["stop"], ["stop"]),
+                ("F4", [], []),
+                # Its source tie began on A4 in the upper lane, so nothing joins it here.
+                ("A4", [], []),
+            ],
+        )
+        lower_reparsed = [
+            (n["pitch_step"] + str(n["pitch_octave"]), n.get("tie_type"))
+            for n in reparsed["parts"][-1]["notes"]
+            if not n.get("is_rest")
+        ]
+        self.assertEqual(
+            lower_reparsed,
+            [("C5", "start"), ("C5", "stop"), ("G4", "start"), ("G4", "stop"), ("F4", None), ("A4", None)],
+        )
+
     def test_trivial_chord_split_maps_rank_to_rank_when_counts_match(self) -> None:
         grouped = {
             (1, 0.0): [
