@@ -1,3 +1,5 @@
+import pytest
+
 from src.backend.config import Settings
 
 
@@ -31,3 +33,32 @@ def test_synthesis_max_duration_seconds_env_override_is_preserved(monkeypatch):
     settings = Settings.from_env()
 
     assert settings.synthesis_max_duration_seconds == 240.0
+
+
+@pytest.mark.parametrize(
+    ("app_env", "expected"),
+    [("dev", "memory"), ("test", "memory"), ("prod", "firestore")],
+)
+def test_session_store_defaults_to_memory_only_in_development(monkeypatch, app_env, expected):
+    monkeypatch.setenv("APP_ENV", app_env)
+    monkeypatch.delenv("SESSION_STORE", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.session_store == expected
+
+
+def test_session_store_env_override_is_preserved(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.setenv("SESSION_STORE", "Firestore")
+
+    settings = Settings.from_env()
+
+    assert settings.session_store == "firestore"
+
+
+def test_session_store_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("SESSION_STORE", "redis")
+
+    with pytest.raises(ValueError, match="SESSION_STORE"):
+        Settings.from_env()

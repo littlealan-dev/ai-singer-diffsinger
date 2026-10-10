@@ -126,6 +126,35 @@ def test_firestore_session_store_roundtrip(monkeypatch, tmp_path):
     assert acknowledged_snapshot["score_context_updated"] is False
 
 
+def test_firestore_session_survives_a_backend_restart(monkeypatch, tmp_path):
+    """A new store, as after a restart or on another instance, finds the session."""
+    store = {}
+    monkeypatch.setattr(session_module, "get_firestore_client", lambda: _FakeClient(store))
+    monkeypatch.setattr(session_module.firestore, "ArrayUnion", _FakeArrayUnion)
+    monkeypatch.setattr(session_module.firestore, "SERVER_TIMESTAMP", _FakeServerTimestamp())
+
+    def new_store():
+        return session_module.FirestoreSessionStore(
+            project_root=tmp_path,
+            sessions_dir=tmp_path / "sessions",
+            ttl_seconds=3600,
+            max_sessions=100,
+        )
+
+    before = new_store()
+    session = asyncio.run(before.create_session(user_id="user-1"))
+    asyncio.run(before.append_history(session.id, "user", "sing the alto part"))
+    asyncio.run(before.set_metadata(session.id, "current_job_id", "job-1"))
+
+    after = new_store()
+    restored = asyncio.run(after.get_session(session.id, user_id="user-1"))
+    snapshot = asyncio.run(after.get_snapshot(session.id, user_id="user-1"))
+
+    assert restored.id == session.id
+    assert snapshot["history"][-1]["content"] == "sing the alto part"
+    assert snapshot["files"]["current_job_id"] == "job-1"
+
+
 @pytest.mark.parametrize("use_firestore", [False, True])
 def test_history_preserves_repeated_turns_with_ids_and_utc_timestamps(
     monkeypatch, tmp_path, use_firestore
