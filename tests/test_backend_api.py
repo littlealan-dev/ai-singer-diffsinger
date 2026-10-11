@@ -5923,6 +5923,158 @@ def test_workflow_reprompts_when_class1_candidate_stops_early(client):
     assert response["current_score"] == {"score": {"title": "Derived-clean"}, "version": 5}
 
 
+def test_workflow_publishes_repair_notice_before_repair_plan_returns(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    execute_calls = {"count": 0}
+    notice_text = "Some notes in bars 7 and 18 lost their words; re-matching the lyrics now."
+    plan_text = "Retrying the failing lyric ranges."
+    published: list[list[dict]] = []
+    notice_prompts: list[str] = []
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        execute_calls["count"] += 1
+        if execute_calls["count"] == 1:
+            return ToolExecutionResult(
+                score={"title": "Derived-reviewable"},
+                audio_response=None,
+                action_required_payload={
+                    "status": "action_required",
+                    "action": "validation_failed_needs_review",
+                    "message": "Coverage still needs review.",
+                    "failed_validation_rules": [
+                        {
+                            "rule": "validation_failed_needs_review",
+                            "rule_name": "Coverage Needs Review",
+                            "rule_severity": "P1",
+                            "rule_domain": "LYRIC",
+                            "impacted_measures": [7, 18],
+                            "impacted_ranges": [{"start": 7, "end": 7}, {"start": 18, "end": 18}],
+                        }
+                    ],
+                },
+                followup_prompt=json.dumps({"status": "action_required"}),
+            )
+        return ToolExecutionResult(
+            score={"title": "Derived-clean"},
+            audio_response=None,
+            followup_prompt=json.dumps(
+                {"status": "ready", "message": "Clean derived score ready.", "warnings": []}
+            ),
+            review_required=True,
+        )
+
+    async def progress_callback(attempt_messages):
+        published.append(copy.deepcopy(attempt_messages))
+
+    def notice_published() -> bool:
+        return any(
+            entry.get("attempt_number") == 2 and entry.get("message") == notice_text
+            for snapshot_entries in published
+            for entry in snapshot_entries
+        )
+
+    async def fake_repair_planning(snapshot, prompt, *args, **kwargs):
+        repair_prompts.append(prompt)
+        # The repair plan only returns once the notice is visible to the user.
+        for _ in range(200):
+            if notice_published():
+                break
+            await asyncio.sleep(0.01)
+        return (
+            LlmResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="preprocess_voice_parts",
+                        arguments={"request": {"plan": {"targets": []}}},
+                    )
+                ],
+                final_message=plan_text,
+                include_score=False,
+            ),
+            None,
+        )
+
+    notice_kwargs: list[dict] = []
+    repair_prompts: list[str] = []
+
+    async def fake_message_only(snapshot, tool_summary, *args, **kwargs):
+        if "PREPROCESS_REPAIR_STARTING" in tool_summary:
+            notice_prompts.append(tool_summary)
+            notice_kwargs.append(kwargs)
+            return LlmResponse(tool_calls=[], final_message=notice_text, include_score=False), None
+        return (
+            LlmResponse(
+                tool_calls=[],
+                final_message="The derived score is ready for review.",
+                include_score=False,
+            ),
+            None,
+        )
+
+    async def fake_get_snapshot(*args, **kwargs):
+        if execute_calls["count"] >= 2:
+            return {"current_score": {"score": {"title": "Derived-clean"}, "version": 5}}
+        return {"current_score": {"score": {"title": "Original"}, "version": 1}}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_repair_planning
+    orchestrator._decide_message_only_followup_with_llm = fake_message_only
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_preprocess_attempt_summary = lambda *args, **kwargs: asyncio.sleep(0)
+
+    response = asyncio.run(
+        orchestrator._run_llm_tool_workflow(
+            "session-repair-notice",
+            {"score_summary": {"title": "Test"}},
+            {"title": "Original"},
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            initial_response_message="Starting preprocess",
+            initial_include_score=False,
+            initial_thought_block="",
+            initial_thought_summary="",
+            user_id="test-user",
+            user_email="test@example.com",
+            progress_callback=progress_callback,
+        )
+    )
+
+    assert len(notice_prompts) == 1
+    notice_payload = json.loads(notice_prompts[0])
+    repair_envelope = json.loads(repair_prompts[0])
+    assert notice_payload["attempt_number"] == 2
+    # The notice gets the same failure fields as the repair call, but not its
+    # phase, which would make the model plan instead of writing a message.
+    for key in ("tool_result", "repair_constraints", "repair_context"):
+        assert notice_payload[key] == repair_envelope[key]
+    assert notice_payload["tool_result"]["action"] == "validation_failed_needs_review"
+    assert "phase" not in notice_payload
+    assert "baseline_plan" not in notice_payload
+    assert "do not ask the user anything" in notice_kwargs[0]["rejection_detail"]
+    assert notice_published()
+    attempt_2 = next(
+        entry for entry in response["details"]["attempt_messages"] if entry["attempt_number"] == 2
+    )
+    assert attempt_2["message"] == f"{notice_text}\n\n{plan_text}"
+    assert [entry["attempt_number"] for entry in response["details"]["attempt_messages"]] == [1, 2]
+
+
+def test_merge_repair_attempt_entry_without_notice_adds_plan_entry(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    attempt_messages = [{"attempt_number": 1, "message": "Starting"}]
+
+    orchestrator._merge_repair_attempt_entry(
+        attempt_messages,
+        {"attempt_number": 2, "message": "Retrying bar 10.", "thought_summary": "t"},
+    )
+
+    assert attempt_messages == [
+        {"attempt_number": 1, "message": "Starting"},
+        {"attempt_number": 2, "message": "Retrying bar 10.", "thought_summary": "t"},
+    ]
+
+
 def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
     _, app = client
     orchestrator = app.state.orchestrator

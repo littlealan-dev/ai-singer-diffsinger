@@ -113,6 +113,20 @@ MESSAGE_ONLY_REJECTION_DETAIL = (
     "as []. If the result does not match what the user asked for, say so and "
     "ask the user how to proceed."
 )
+REPAIR_NOTICE_INSTRUCTIONS = (
+    "This is a message-only notice that another attempt at preparing the selected "
+    "part has started. No tools will be executed from this response. In one or two "
+    "sentences, say what the problem with the previous attempt was and that another "
+    "attempt to fix it has started. Do not ask the user anything or offer choices. "
+    "Do not use the words preprocess or preprocessing. Do not claim the derived "
+    "score or audio is ready."
+)
+REPAIR_NOTICE_REJECTION_DETAIL = (
+    "Your previous reply called a tool. Nothing you proposed was executed, and that "
+    "reply was not shown to the user. The next attempt is already running "
+    "automatically. Reply in prose only, with tool_calls as [], and do not ask the "
+    "user anything."
+)
 # A message-only reply that failed to parse but still carries a tool call. Its
 # final_message would describe work that never runs, so it is rejected too.
 _UNPARSED_TOOL_CALL_PATTERN = re.compile(r'"tool_calls"\s*:\s*\[\s*\{')
@@ -2341,28 +2355,45 @@ class Orchestrator:
                         include_score = True
                     score_version = _snapshot_score_version(latest_snapshot)
                     score_summary = latest_snapshot.get("score_summary")
-                repair_response, repair_error = await self._decide_followup_with_llm(
+                repair_envelope = self._build_repair_planning_envelope(
+                    best_valid_candidate,
+                    bootstrap_plan_baseline,
+                    candidate,
+                    last_action_required_payload,
+                    attempt_number=attempt_number,
+                    max_attempts=max_attempts,
+                    fixed_structural_issue_keys=fixed_structural_issue_keys,
+                    fixed_other_issue_keys=fixed_other_issue_keys,
+                )
+                repair_notice_task = self._start_repair_notice(
+                    attempt_messages,
+                    progress_callback,
                     latest_snapshot,
-                    self._build_repair_planning_prompt(
-                        best_valid_candidate,
-                        bootstrap_plan_baseline,
-                        candidate,
-                        last_action_required_payload,
-                        attempt_number=attempt_number,
-                        max_attempts=max_attempts,
-                        fixed_structural_issue_keys=fixed_structural_issue_keys,
-                        fixed_other_issue_keys=fixed_other_issue_keys,
-                    ),
                     working_score,
-                    session_id=session_id,
+                    repair_envelope=repair_envelope,
+                    attempt_number=attempt_number + 1,
+                    max_attempts=max_attempts,
+                    selected_voicebank_id=forced_voicebank_id,
                     user_id=user_id,
                     user_email=user_email,
                     current_credit_availability=current_credit_availability,
-                    selected_voicebank_id=forced_voicebank_id,
-                    selected_language=forced_language,
-                    expand_repeats=expand_repeats,
-                    role=LlmRole.PREPROCESS,
                 )
+                try:
+                    repair_response, repair_error = await self._decide_followup_with_llm(
+                        latest_snapshot,
+                        json.dumps(repair_envelope, sort_keys=True),
+                        working_score,
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
+                        selected_voicebank_id=forced_voicebank_id,
+                        selected_language=forced_language,
+                        expand_repeats=expand_repeats,
+                        role=LlmRole.PREPROCESS,
+                    )
+                finally:
+                    await self._finish_repair_notice(repair_notice_task)
                 if repair_error:
                     best_valid_candidate = await self._materialize_review_candidate_if_needed(
                         session_id, best_valid_candidate
@@ -2446,7 +2477,7 @@ class Orchestrator:
                     thought_summary=repair_response.thought_summary,
                 )
                 if repair_attempt_entry is not None:
-                    attempt_messages.append(repair_attempt_entry)
+                    self._merge_repair_attempt_entry(attempt_messages, repair_attempt_entry)
                     if progress_callback is not None:
                         await progress_callback(attempt_messages)
                 current_repair_scopes = self._build_repair_scopes(
@@ -2912,6 +2943,33 @@ class Orchestrator:
         fixed_other_issue_keys: Optional[set[str]] = None,
     ) -> str:
         """Build the next repair-planning prompt for a non-terminal preprocess candidate."""
+        return json.dumps(
+            self._build_repair_planning_envelope(
+                best_candidate,
+                bootstrap_plan_baseline,
+                latest_candidate,
+                action_required_payload,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                fixed_structural_issue_keys=fixed_structural_issue_keys,
+                fixed_other_issue_keys=fixed_other_issue_keys,
+            ),
+            sort_keys=True,
+        )
+
+    def _build_repair_planning_envelope(
+        self,
+        best_candidate: Optional["WorkflowCandidate"],
+        bootstrap_plan_baseline: Optional["BootstrapPlanBaseline"],
+        latest_candidate: Optional["WorkflowCandidate"],
+        action_required_payload: Optional[Dict[str, Any]],
+        *,
+        attempt_number: int,
+        max_attempts: int,
+        fixed_structural_issue_keys: Optional[set[str]] = None,
+        fixed_other_issue_keys: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        """Build the repair-planning envelope; the repair notice reuses its failure fields."""
         payload = (
             action_required_payload
             if isinstance(action_required_payload, dict)
@@ -2947,7 +3005,7 @@ class Orchestrator:
             ),
             "repair_context": repair_context,
         }
-        return json.dumps(envelope, sort_keys=True)
+        return envelope
 
     def _build_repair_constraints(self, payload: Dict[str, Any]) -> List[str]:
         """Return hard planning constraints implied by the latest tool failure."""
@@ -4189,6 +4247,26 @@ class Orchestrator:
             entry["thought_summary"] = thought
         return entry
 
+    def _merge_repair_attempt_entry(
+        self,
+        attempt_messages: List[Dict[str, Any]],
+        repair_entry: Dict[str, Any],
+    ) -> None:
+        """Append the repair plan's message under that attempt's early notice, if one exists."""
+        for entry in attempt_messages:
+            if entry.get("attempt_number") != repair_entry.get("attempt_number"):
+                continue
+            notice = str(entry.get("message") or "").strip()
+            plan_message = str(repair_entry.get("message") or "").strip()
+            if notice and plan_message:
+                entry["message"] = f"{notice}\n\n{plan_message}"
+            elif plan_message:
+                entry["message"] = plan_message
+            if repair_entry.get("thought_summary"):
+                entry["thought_summary"] = repair_entry["thought_summary"]
+            return
+        attempt_messages.append(repair_entry)
+
     def _attach_attempt_diagnostics(
         self,
         attempt_messages: List[Dict[str, Any]],
@@ -5220,6 +5298,122 @@ class Orchestrator:
             return "", None
         return self._format_followup_message_text(response.final_message), None
 
+    async def _render_repair_start_message(
+        self,
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        repair_envelope: Dict[str, Any],
+        *,
+        attempt_number: int,
+        max_attempts: int,
+        selected_voicebank_id: Optional[str],
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
+        current_credit_availability: Optional[Dict[str, int]] = None,
+    ) -> str:
+        """Ask the default LLM role for a short notice as a line-preparation repair starts.
+
+        The repair plan takes minutes; this notice lets the user see the next
+        attempt begin instead of waiting for the plan's own message. It gets the
+        same failure fields as the repair call. The envelope's phase is left out:
+        the system prompt makes that phase demand a preprocess_voice_parts call.
+        """
+        payload = {
+            "message_intent": "PREPROCESS_REPAIR_STARTING",
+            "attempt_number": attempt_number,
+            "max_attempts": max_attempts,
+            "tool_result": repair_envelope.get("tool_result"),
+            "repair_constraints": repair_envelope.get("repair_constraints"),
+            "repair_context": repair_envelope.get("repair_context"),
+            "instructions": [
+                "In one or two sentences, tell the user what the problem with the "
+                "previous attempt was, from tool_result and repair_context, and that "
+                "another attempt to fix it has started.",
+                "The next attempt is already running automatically. Do not ask the "
+                "user anything or offer choices.",
+                "Do not use the words preprocess or preprocessing in the user-facing message.",
+                "Do not claim the derived score or audio is ready.",
+                "Return no tool calls.",
+            ],
+        }
+        response, error = await self._decide_message_only_followup_with_llm(
+            snapshot,
+            json.dumps(payload, sort_keys=True),
+            score,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            selected_voicebank_id=selected_voicebank_id,
+            instructions=REPAIR_NOTICE_INSTRUCTIONS,
+            rejection_detail=REPAIR_NOTICE_REJECTION_DETAIL,
+        )
+        if error or response is None:
+            if error:
+                self._logger.warning("preprocess_repair_notice_unavailable error=%s", error)
+            return ""
+        return self._format_followup_message_text(response.final_message)
+
+    def _start_repair_notice(
+        self,
+        attempt_messages: List[Dict[str, Any]],
+        progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]],
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        *,
+        repair_envelope: Dict[str, Any],
+        attempt_number: int,
+        max_attempts: int,
+        selected_voicebank_id: Optional[str],
+        user_id: Optional[str],
+        user_email: Optional[str],
+        current_credit_availability: Optional[Dict[str, int]],
+    ) -> Optional["asyncio.Task[None]"]:
+        """Publish the next attempt's notice while its repair plan is still being written.
+
+        Only a background job has a progress_callback; without one nobody sees
+        the notice before the plan, so no call is made.
+        """
+        if progress_callback is None:
+            return None
+
+        async def publish() -> None:
+            try:
+                message = await self._render_repair_start_message(
+                    snapshot,
+                    score,
+                    repair_envelope,
+                    attempt_number=attempt_number,
+                    max_attempts=max_attempts,
+                    selected_voicebank_id=selected_voicebank_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_credit_availability=current_credit_availability,
+                )
+                if not message:
+                    return
+                attempt_messages.append(
+                    {"attempt_number": attempt_number, "message": message}
+                )
+                await progress_callback(attempt_messages)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._logger.warning(
+                    "preprocess_repair_notice_failed attempt=%s error=%s",
+                    attempt_number,
+                    exc,
+                )
+
+        return asyncio.create_task(publish())
+
+    async def _finish_repair_notice(self, task: Optional["asyncio.Task[None]"]) -> None:
+        """Stop a notice that is still pending once its repair plan has returned."""
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def _plan_preprocess_with_llm(
         self,
         snapshot: Dict[str, Any],
@@ -5544,6 +5738,7 @@ class Orchestrator:
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
+        rejection_detail: str = MESSAGE_ONLY_REJECTION_DETAIL,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM for prose only; a reply that calls a tool is rejected, never shown.
 
@@ -5640,7 +5835,7 @@ class Orchestrator:
                                         "status": "rejected",
                                         "reason": "message_only",
                                         "rejected_tool_calls": rejected_tools,
-                                        "detail": MESSAGE_ONLY_REJECTION_DETAIL,
+                                        "detail": rejection_detail,
                                     },
                                     sort_keys=True,
                                 ),
