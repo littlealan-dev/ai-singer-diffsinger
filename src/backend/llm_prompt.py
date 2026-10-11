@@ -18,6 +18,19 @@ _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_promp
 _SYSTEM_PROMPT_LESSONS_PATH = (
     Path(__file__).resolve().parent / "config" / "system_prompt_lessons.txt"
 )
+# Line-preparation planning rules: only the preprocess role reads them, so the
+# default model is never told to return preprocess_voice_parts calls.
+_SYSTEM_PROMPT_PREPROCESS_PATH = (
+    Path(__file__).resolve().parent / "config" / "system_prompt_preprocess.txt"
+)
+_DEFAULT_ROLE_LINE = (
+    "You are the default model. The line-preparation model, a separate model, does all "
+    "line-preparation planning; never return `preprocess_voice_parts` tool calls."
+)
+_PREPROCESS_ROLE_LINE = (
+    "You are the line-preparation model. Your job is line-preparation planning: "
+    "return `preprocess_voice_parts` plans when asked to plan or repair a line."
+)
 
 
 @dataclass(frozen=True)
@@ -330,7 +343,16 @@ def _load_system_prompt(*, include_preprocess_guidance: bool = False) -> str:
     if not _SYSTEM_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
     base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-    prompt_sections = [base_prompt]
+    # The role line goes right after the opening identity line.
+    identity, _, rest = base_prompt.partition("\n")
+    role_line = _PREPROCESS_ROLE_LINE if include_preprocess_guidance else _DEFAULT_ROLE_LINE
+    prompt_sections = [f"{identity}\n{role_line}\n{rest}"]
+    if include_preprocess_guidance:
+        if not _SYSTEM_PROMPT_PREPROCESS_PATH.exists():
+            raise FileNotFoundError(
+                f"Missing system prompt template: {_SYSTEM_PROMPT_PREPROCESS_PATH}"
+            )
+        prompt_sections.append(_SYSTEM_PROMPT_PREPROCESS_PATH.read_text(encoding="utf-8"))
     if include_preprocess_guidance and _SYSTEM_PROMPT_LESSONS_PATH.exists():
         lessons_prompt = _SYSTEM_PROMPT_LESSONS_PATH.read_text(encoding="utf-8")
         prompt_sections.append(lessons_prompt)

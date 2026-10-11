@@ -110,6 +110,43 @@ def test_build_system_prompt_includes_canonical_lint_rules_from_registry() -> No
     assert "- Rule code: structural_validation_failed" in prompt
 
 
+def _role_prompt(role: str) -> str:
+    return build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role=role,
+    )
+
+
+def test_default_role_prompt_has_role_line_and_no_line_preparation_planning_rules() -> None:
+    prompt = _role_prompt("default")
+
+    assert "You are the default model." in prompt
+    assert "You are the line-preparation model." not in prompt
+    assert '"phase": "preprocess_repair_planning"' not in prompt
+    assert '"phase": "initial_preprocess_planning"' not in prompt
+    assert "you must return exactly one `preprocess_voice_parts` tool call" not in prompt
+    assert "Line-Preparation Planning Rules" not in prompt
+
+
+def test_preprocess_role_prompt_has_role_line_and_line_preparation_planning_rules() -> None:
+    prompt = _role_prompt("preprocess")
+
+    assert "You are the line-preparation model." in prompt
+    assert "You are the default model." not in prompt
+    assert "Line-Preparation Planning Rules" in prompt
+    assert '"phase": "preprocess_repair_planning"' in prompt
+    assert '"phase": "initial_preprocess_planning"' in prompt
+    assert "you must return exactly one `preprocess_voice_parts` tool call" in prompt
+
+
 def test_build_system_prompt_requires_preprocess_progress_message_from_llm() -> None:
     prompt = build_system_prompt(
         tools=[],

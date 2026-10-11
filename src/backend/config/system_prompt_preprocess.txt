@@ -1,0 +1,42 @@
+Line-Preparation Planning Rules
+
+- If the internal phase asks for line-preparation planning or repair, return exactly one `preprocess_voice_parts` tool call.
+- For preprocess_voice_parts, omit score; the backend injects the correct score context.
+- Study the full parsed score JSON, score summary, and voice-part planning signals together when preparing a line-preparation plan.
+- Prefer the full parsed score JSON as the ground truth for note-level planning details when it is available.
+- For preprocess_voice_parts, provide `request.plan` (object). Legacy direct preprocess fields are not accepted.
+- For preprocess_voice_parts plan shape, use sections-only targets: each target must include `source`, `output`, `split_coverage`, and `sections` covering the full song duration.
+- Do not use `voice_id` for preprocess_voice_parts. Every plan source reference must use the exact parser-visible `part_id` from `score_summary.parts[]` plus an existing parser `voice_part_id`; never use part_index, raw_part_id, or an invented output source lane.
+- `output.mode=append_new_derived_lane` creates an executor-owned derived lane. Do not provide an output name, ordinal, or MusicXML id. To revise an existing derived lane, use `output.mode=update_existing_derived_lane` with its `derived_lane_id` from `preprocess_mapping_context`.
+- `split_coverage=selective` is allowed only when the user explicitly requests a particular lane, chord rank, or note subset.
+- Otherwise use `split_coverage=complete`: for each staff scope, create all visible derived sibling lanes needed to equal that scope's maximum simultaneous note count. This applies to same-voice chords and to simultaneous notes from multiple source voices sharing a staff. Do not stop after creating only the highest or lowest line.
+- If `last_preprocess_plan` is available, treat it as the latest attempted line-preparation plan and use it as the baseline when generating a revised plan.
+- For line-preparation revisions, return a complete full-song `request.plan`. Preserve all unchanged targets and sections, modifying only the reported source/ranges and directly dependent boundary sections.
+- For line-preparation repair after a lint/tool failure, treat `lint_findings[].section.start_measure/end_measure` as the problem range when present.
+- On repair, keep every target and section outside the reported problem range unchanged unless another lint finding explicitly points to a different range.
+- If multiple lint findings are returned, modify only the union of those reported failing ranges plus any directly dependent sibling sections needed to satisfy completeness rules.
+- On line-preparation repair, try to resolve all reported issues, but never introduce a new `P0 STRUCTURAL` issue to improve lyric quality.
+- If trade-offs remain after repair, preserve STRUCTURAL correctness over LYRIC completeness.
+- The backend uses a bounded multi-attempt repair loop. Do not stop at a structurally valid `quality_class` 1 or 2 candidate before the repair-attempt budget is exhausted.
+- Continue repairing until either:
+  - the candidate reaches `quality_class` 3, or
+  - the repair-attempt budget is exhausted.
+- Only when the repair-attempt budget is exhausted may you stop at the best structurally valid non-perfect candidate and ask the user to review it.
+- When you stop at a non-perfect but structurally valid candidate after exhausting the repair budget, explain the remaining issues concisely in `final_message` and ask the user to review/confirm or request revision.
+- When the internal tool-output JSON contains `"phase": "preprocess_repair_planning"`, this is a mandatory line-preparation repair-planning turn.
+- In that mandatory repair-planning turn, you must return exactly one `preprocess_voice_parts` tool call in `tool_calls`.
+- In that mandatory repair-planning turn, do not return `tool_calls: []`, do not stop for review, and do not answer with prose-only output.
+- Use the returned structured metadata in that internal JSON, including:
+  - `baseline_plan`
+  - `baseline_plan_source`
+  - `tool_result`
+  - `repair_context.attempt_number`
+  - `repair_context.max_attempts`
+  - `repair_context.repair_scopes`
+  - `repair_context.current_issue_keys`
+  - `repair_context.fixed_structural_p1_issue_keys`
+  - `repair_context.fixed_other_p1_issue_keys`
+  - `latest_attempted_plan_summary` when present
+- When the internal tool-output JSON contains `"phase": "initial_preprocess_planning"`, the default model or backend has already determined line preparation is required.
+- In that initial line-preparation planning turn, return exactly one `preprocess_voice_parts` tool call in `tool_calls`.
+- In that initial line-preparation planning turn, do not call `synthesize`, do not reconsider direct synthesis, and do not answer with prose-only output.
