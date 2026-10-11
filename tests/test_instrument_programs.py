@@ -249,6 +249,40 @@ def test_banked_percussion_keeps_source_facts_and_requires_fluidr3_preset() -> N
     )
 
 
+def test_a_midi_device_without_an_id_applies_to_every_instrument_in_the_part(
+    tmp_path: Path,
+) -> None:
+    xml = BANKED_PERCUSSION_XML.replace(
+        '<midi-device id="P1-I1">Example Device</midi-device>',
+        "<midi-device>SmartMusic SoftSynth</midi-device>",
+    )
+    source = tmp_path / "part-wide-device.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+
+    drum = summary["parts"][0]["instruments"][0]
+    assert drum["midi_device"] == "SmartMusic SoftSynth"
+    # Firestore rejects an empty map key, so the part-wide device has none.
+    assert drum["midi_devices"] == {}
+
+
+def test_a_midi_device_for_the_instrument_wins_over_the_part_wide_device(
+    tmp_path: Path,
+) -> None:
+    xml = BANKED_PERCUSSION_XML.replace(
+        '<midi-device id="P1-I1">Example Device</midi-device>',
+        '<midi-device>SmartMusic SoftSynth</midi-device>'
+        '<midi-device id="P1-I1">Example Device</midi-device>',
+    )
+    source = tmp_path / "both-devices.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+
+    drum = summary["parts"][0]["instruments"][0]
+    assert drum["midi_device"] == "Example Device"
+    assert drum["midi_devices"] == {"P1-I1": "Example Device"}
+
+
 def test_banked_percussion_rejects_melodic_or_non_fluidr3_drum_presets() -> None:
     with TemporaryDirectory() as temp_dir:
         source = Path(temp_dir) / "banked-percussion.musicxml"

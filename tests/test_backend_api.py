@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from google.api_core.exceptions import InvalidArgument
 
 from src.api.score import parse_score
 from src.backend.main import (
@@ -2709,6 +2710,27 @@ def test_upload_parse_score_timeout_returns_bounded_client_error(client):
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["current_score"] is None
     assert snapshot["files"] == {}
+
+
+def test_upload_rejected_by_firestore_returns_score_structure_error(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+
+    async def reject_commit(*args, **kwargs):
+        raise InvalidArgument("Property scoreSummary contains an invalid nested entity.")
+
+    monkeypatch.setattr(app.state.sessions, "commit_uploaded_score", reject_commit)
+
+    response = _upload_score(test_client, session_id)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "unsupported_score_structure",
+        "message": (
+            "This score's file structure couldn't be processed. "
+            "Please try another score."
+        ),
+    }
 
 
 def test_upload_parse_error_returns_invalid_musicxml_and_preserves_score(client):

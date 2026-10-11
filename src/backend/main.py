@@ -16,6 +16,7 @@ import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from google.api_core.exceptions import InvalidArgument
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -823,9 +824,31 @@ def create_app() -> FastAPI:
         if isinstance(score, dict):
             score = dict(score)
             score.pop("score_summary", None)
-        version = await sessions.commit_uploaded_score(
-            session_id, score_id=score_id, score=score, summary=score_summary, files=files
-        )
+        try:
+            version = await sessions.commit_uploaded_score(
+                session_id, score_id=score_id, score=score, summary=score_summary, files=files
+            )
+        except InvalidArgument as exc:
+            # Firestore rejected the parsed score. Its error does not say which
+            # field, and retrying the same file fails the same way.
+            logger.exception(
+                "upload_commit_rejected session_id=%s user_id=%s score_id=%s "
+                "musicxml_name=%s",
+                session_id,
+                user_id,
+                score_id,
+                original_name,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "unsupported_score_structure",
+                    "message": (
+                        "This score's file structure couldn't be processed. "
+                        "Please try another score."
+                    ),
+                },
+            ) from exc
         return {
             "session_id": session_id,
             "score_id": score_id,
