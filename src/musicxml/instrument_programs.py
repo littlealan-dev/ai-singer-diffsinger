@@ -323,11 +323,20 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
     score_parts: Dict[str, Dict[str, Any]] = {}
     for score_part in _children_named(_first_child_named(root, "part-list"), "score-part"):
         raw_part_id = str(score_part.attrib.get("id") or "")
-        midi_devices = {
-            str(device.attrib.get("id") or ""): (device.text or "").strip()
-            for device in _children_named(score_part, "midi-device")
-            if (device.text or "").strip()
-        }
+        # A `midi-device` with no ID applies to every instrument in the part.
+        # Keeping it out of the ID map also keeps an empty key out of the
+        # summary, which Firestore rejects.
+        midi_devices: Dict[str, str] = {}
+        part_midi_device: str | None = None
+        for device in _children_named(score_part, "midi-device"):
+            device_name = (device.text or "").strip()
+            if not device_name:
+                continue
+            device_id = str(device.attrib.get("id") or "")
+            if device_id:
+                midi_devices[device_id] = device_name
+            else:
+                part_midi_device = device_name
         instruments: List[Dict[str, Any]] = []
         for score_instrument in _children_named(score_part, "score-instrument"):
             virtual = _first_child_named(score_instrument, "virtual-instrument")
@@ -352,6 +361,7 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
         score_parts[raw_part_id] = {
             "part_name": _child_text(score_part, "part-name"),
             "midi_devices": midi_devices,
+            "part_midi_device": part_midi_device,
             "instruments": instruments,
             "midi_by_id": midi_by_id,
             "direction_words": [],
@@ -463,7 +473,9 @@ def _part_instruments(
                 # The MusicXML `midi-device` ID directly identifies the same
                 # score-instrument route; preserve the complete source map as
                 # evidence instead of guessing a device from its display name.
-                "midi_device": (declaration.get("midi_devices") or {}).get(score_instrument_id),
+                # A device declared for this instrument wins over the part's.
+                "midi_device": (declaration.get("midi_devices") or {}).get(score_instrument_id)
+                or declaration.get("part_midi_device"),
                 "midi_devices": dict(declaration.get("midi_devices") or {}),
                 "virtual_instrument_library": source.get("virtual_instrument_library"),
                 "virtual_instrument_name": source.get("virtual_instrument_name"),
