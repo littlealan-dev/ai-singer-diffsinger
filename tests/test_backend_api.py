@@ -5976,6 +5976,96 @@ def test_build_repair_planning_prompt_returns_structured_json_envelope(client):
     assert payload["latest_attempted_plan_summary"]["outcome_stage"] == "postflight_reviewable"
 
 
+def _ready_candidate_with_score(quality_class: int) -> WorkflowCandidate:
+    return WorkflowCandidate(
+        attempt_number=1,
+        score={"title": "Derived"},
+        message="The derived line is ready.",
+        plan={"targets": [{"target": {"part_index": 0, "voice_part_id": "alto"}, "sections": []}]},
+        review_required=True,
+        outcome_stage="ready",
+        outcome_preference=0,
+        comparable=True,
+        quality_class=quality_class,
+        structurally_valid=True,
+        structural_p1_measures=0,
+        other_p1_measures=0,
+        p2_measures=0,
+        structural_issue_keys=[],
+        other_p1_issue_keys=[],
+        candidate_tuple=(0, 0, 0, 0, 0),
+        issues=[],
+        target_results=[],
+        result_payload={
+            "status": "ready",
+            "score": {"title": "Derived", "parts": [{"part_id": "P1", "notes": []}]},
+            "targets": [{"target_voice_part_id": "alto"}],
+            "validation": {"lyric_coverage_ratio": 1.0},
+        },
+    )
+
+
+def test_build_repair_planning_prompt_omits_result_score(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    candidate = _ready_candidate_with_score(quality_class=1)
+
+    prompt = orchestrator._build_repair_planning_prompt(
+        candidate,
+        None,
+        candidate,
+        None,
+        attempt_number=1,
+        max_attempts=3,
+    )
+    payload = json.loads(prompt)
+
+    assert "score" not in payload["tool_result"]
+    assert payload["tool_result"]["targets"] == [{"target_voice_part_id": "alto"}]
+    assert payload["tool_result"]["validation"] == {"lyric_coverage_ratio": 1.0}
+    assert "score" in candidate.result_payload
+
+
+def test_render_selected_candidate_response_omits_result_score_from_prompt(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    candidate = _ready_candidate_with_score(quality_class=3)
+    prompts: list[str] = []
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return {"current_score": {"score": {"title": "Derived"}, "version": 2}}
+
+    async def fake_message_only(snapshot, tool_summary, *args, **kwargs):
+        prompts.append(tool_summary)
+        return (
+            LlmResponse(tool_calls=[], final_message="Ready for review.", include_score=False),
+            None,
+        )
+
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    orchestrator._decide_message_only_followup_with_llm = fake_message_only
+
+    response = asyncio.run(
+        orchestrator._render_selected_candidate_response(
+            "session-terminal",
+            "test-user",
+            {"title": "Derived"},
+            candidate,
+            stop_reason="quality_class_3",
+        )
+    )
+
+    assert response is not None
+    assert len(prompts) == 1
+    serialized = prompts[0].split("\n\n", 1)[0]
+    payload = json.loads(serialized)
+    assert "score" not in payload
+    assert payload["targets"] == [{"target_voice_part_id": "alto"}]
+    assert payload["validation"] == {"lyric_coverage_ratio": 1.0}
+    assert payload["stop_reason"] == "quality_class_3"
+    assert "score" in candidate.result_payload
+
+
 def test_build_repair_planning_prompt_bootstraps_from_bootstrap_baseline(client):
     _, app = client
     orchestrator = app.state.orchestrator

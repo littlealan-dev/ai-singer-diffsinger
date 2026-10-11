@@ -2936,7 +2936,7 @@ class Orchestrator:
         envelope = {
             "tool": "preprocess_voice_parts",
             "phase": "preprocess_repair_planning",
-            "tool_result": payload,
+            "tool_result": _without_result_score(payload),
             "repair_constraints": self._build_repair_constraints(payload),
             "baseline_plan_source": baseline_source,
             "baseline_plan": copy.deepcopy(baseline_plan) if isinstance(baseline_plan, dict) else None,
@@ -4012,7 +4012,7 @@ class Orchestrator:
         candidate_response = self._build_candidate_response(candidate)
         if candidate_response is None:
             return None
-        summary_payload = dict(candidate.result_payload)
+        summary_payload = _without_result_score(candidate.result_payload)
         summary_payload["stop_reason"] = stop_reason
         summary_payload["quality_class"] = candidate.quality_class
         latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -8768,6 +8768,17 @@ def _without_execution_plan(result: Dict[str, Any]) -> Dict[str, Any]:
     """Remove audit-only plan data from normal LLM follow-up context."""
     payload = dict(result)
     payload.pop("execution_plan", None)
+    return payload
+
+
+def _without_result_score(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove the full parsed score from a preprocess result sent as LLM prompt text.
+
+    The session already holds the derived score; the prompt only needs the
+    targets, validation and quality fields.
+    """
+    payload = dict(result)
+    payload.pop("score", None)
     return payload
 
 
