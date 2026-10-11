@@ -66,7 +66,9 @@ class GeminiPromptCacheManager:
                 fingerprint[:12],
                 len(caches),
             )
-            display_name = prompt_cache_display_name(model, build_id, fingerprint)
+            display_name = prompt_cache_display_name(
+                self._settings.app_env, model, build_id, fingerprint
+            )
             matched = next(
                 (
                     cache
@@ -227,7 +229,9 @@ class GeminiPromptCacheManager:
     ) -> None:
         if not self._settings.gemini_prompt_cache_delete_stale:
             return
-        prefix = f"prompt-cache:{model}:"
+        # The cache list covers the whole Google Cloud project, so it includes
+        # caches made by other environments sharing it. Only delete our own.
+        prefix = prompt_cache_display_name_prefix(self._settings.app_env, model)
         for cache in caches:
             if cache.name == keep_name:
                 continue
@@ -302,9 +306,16 @@ def prompt_fingerprint(static_prompt_text: str) -> str:
     return hashlib.sha256(static_prompt_text.encode("utf-8")).hexdigest()
 
 
-def prompt_cache_display_name(model: str, build_id: str, fingerprint: str) -> str:
+def prompt_cache_display_name_prefix(app_env: str, model: str) -> str:
+    """Return the display-name prefix shared by one environment's caches for a model."""
+    return f"prompt-cache:{app_env.strip().lower()}:{model}:"
+
+
+def prompt_cache_display_name(
+    app_env: str, model: str, build_id: str, fingerprint: str
+) -> str:
     """Return the deterministic display name for a prompt cache."""
-    return f"prompt-cache:{model}:{build_id}:{fingerprint[:16]}"
+    return f"{prompt_cache_display_name_prefix(app_env, model)}{build_id}:{fingerprint[:16]}"
 
 
 def _model_resource_name(model: str) -> str:
