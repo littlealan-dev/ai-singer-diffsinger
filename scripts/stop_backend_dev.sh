@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PID_FILE="${ROOT_DIR}/logs/backend_dev.pid"
+PID_FILE="${ROOT_DIR}/logs/${BACKEND_DEV_NAME:-backend_dev}.pid"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 STOP_TIMEOUT_SECONDS="${BACKEND_STOP_TIMEOUT_SECONDS:-15}"
 

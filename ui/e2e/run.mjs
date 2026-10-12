@@ -97,6 +97,21 @@ try {
     VITE_FIREBASE_STORAGE_BUCKET: `${projectId}.appspot.com`,
     VITE_FIREBASE_MESSAGING_SENDER_ID: "1234567890",
     VITE_FIREBASE_APP_ID: "1:1234567890:web:e2e",
+    // Line preparation runs on a separate worker backend, as in Cloud Run;
+    // the main backend calls it over HTTP in place of Cloud Tasks.
+    PREPROCESS_DISPATCH_MODE: "http",
+    PREPROCESS_WORKER_URL: "http://127.0.0.1:8002",
+    // Both backends must see the same sessions.
+    SESSION_STORE: "firestore",
+    PREPROCESS_WORKER_TOKEN: "local-ui-regression-preprocess-worker",
+  };
+  const workerEnv = {
+    ...env,
+    // Its own data folder, as the worker service has its own disk.
+    BACKEND_DATA_DIR: "tests/output/ui-regression/preprocess-worker",
+    MCP_GPU_ENABLED: "false",
+    PREPROCESS_WORKER_ENABLED: "true",
+    PREPROCESS_DISPATCH_MODE: "inline",
   };
 
   start("firebase", ["emulators:start", "--only", "auth,firestore,storage", "--project", projectId], {
@@ -106,10 +121,15 @@ try {
   await waitFor("http://127.0.0.1:9099", "Firebase Auth Emulator");
 
   const python = process.env.REGRESSION_PYTHON || path.join(rootDir, ".venv310", "bin", "python");
+  start(python, ["-m", "uvicorn", "src.backend.main:app", "--host", "127.0.0.1", "--port", "8002"], {
+    cwd: rootDir,
+    env: workerEnv,
+  });
   start(python, ["-m", "uvicorn", "src.backend.main:app", "--host", "127.0.0.1", "--port", "8000"], {
     cwd: rootDir,
     env,
   });
+  await waitFor("http://127.0.0.1:8002/readyz", "line-preparation worker");
   await waitFor("http://127.0.0.1:8000/readyz", "backend");
 
   start("npm", ["run", "dev", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort"], {

@@ -3,10 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
-PID_FILE="${LOG_DIR}/backend_dev.pid"
-LOG_FILE="${LOG_DIR}/backend_dev.log"
+# BACKEND_DEV_NAME names this instance's PID and log files, so a second backend
+# (the local line-preparation worker) can run beside the main one.
+BACKEND_DEV_NAME="${BACKEND_DEV_NAME:-backend_dev}"
+PID_FILE="${LOG_DIR}/${BACKEND_DEV_NAME}.pid"
+LOG_FILE="${LOG_DIR}/${BACKEND_DEV_NAME}.log"
 ENV_FILE="${ROOT_DIR}/env/dev.env"
 LOCAL_ENV_FILE="${ROOT_DIR}/env/local.env"
+# Sourced last, so its values win over dev.env and local.env.
+EXTRA_ENV_FILE="${BACKEND_EXTRA_ENV_FILE:-}"
 BACKEND_AUTH_DISABLED_OVERRIDE="${BACKEND_AUTH_DISABLED_OVERRIDE-${BACKEND_AUTH_DISABLED-}}"
 BACKEND_DEV_USER_ID_OVERRIDE="${BACKEND_DEV_USER_ID-}"
 BACKEND_DEV_USER_EMAIL_OVERRIDE="${BACKEND_DEV_USER_EMAIL-}"
@@ -21,6 +26,12 @@ if [[ -f "${LOCAL_ENV_FILE}" ]]; then
   set -a
   # shellcheck source=/dev/null
   . "${LOCAL_ENV_FILE}"
+  set +a
+fi
+if [[ -n "${EXTRA_ENV_FILE}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "${EXTRA_ENV_FILE}"
   set +a
 fi
 
