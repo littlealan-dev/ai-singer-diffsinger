@@ -226,6 +226,10 @@ class PreprocessPlanningError(RuntimeError):
     """Raised when the preprocess planner cannot produce a valid initial plan."""
 
 
+class PreprocessToolError(RuntimeError):
+    """Raised when preprocess_voice_parts fails for a reason no new plan can fix."""
+
+
 class Orchestrator:
     """Coordinate sessions, LLM decisions, and synthesis tool calls."""
     def __init__(
@@ -5375,11 +5379,16 @@ class Orchestrator:
         user_id: Optional[str],
     ) -> Dict[str, Any]:
         """Return the score baseline to use for preprocess execution."""
-        await self._sessions.ensure_active_musicxml(session_id, user_id)
+        active_musicxml_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
         snapshot = await self._sessions.get_snapshot(session_id, user_id)
         current_score = snapshot.get("current_score")
         if isinstance(current_score, dict) and isinstance(current_score.get("score"), dict):
-            score = current_score["score"]
+            # The derived lanes are written into a copy of this file. The score's
+            # recorded source path may be on another instance's disk (the upload,
+            # or a worker's earlier derived file); the active file holds the same
+            # MusicXML and is restored from storage when it is not local.
+            score = dict(current_score["score"])
+            score["source_musicxml_path"] = str(active_musicxml_path)
             preprocess_score = await asyncio.to_thread(
                 self._resolve_preprocess_planning_score,
                 snapshot,
@@ -7609,6 +7618,20 @@ class Orchestrator:
                     session_id,
                     summarize_payload(result),
                 )
+                if result.get("status") == "error":
+                    # Not a plan problem (e.g. the MusicXML could not be written), so a
+                    # repair attempt would fail the same way. Fail the job without
+                    # saving a score version.
+                    self._logger.error(
+                        "preprocess_tool_error session=%s action=%s message=%s",
+                        session_id,
+                        result.get("action"),
+                        result.get("message"),
+                    )
+                    raise PreprocessToolError(
+                        f"preprocess_voice_parts failed: {result.get('action')}: "
+                        f"{result.get('message')}"
+                    )
                 if result.get("status") in {"ready", "ready_with_warnings"} and isinstance(
                     result.get("score"), dict
                 ):

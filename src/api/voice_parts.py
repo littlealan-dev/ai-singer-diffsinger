@@ -58,6 +58,11 @@ VALID_RANK_FALLBACKS = {"greedy", "skip"}
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _ARTIFACT_LOCKS: Dict[str, threading.Lock] = {}
 _TRANSFORM_ARTIFACT_INDEX: Dict[str, Dict[str, Any]] = {}
+MUSICXML_APPEND_FAILED_ACTION = "musicxml_append_failed"
+
+
+class MusicXmlAppendError(Exception):
+    """A derived lane could not be written into the source MusicXML."""
 _DERIVED_STEM_SUFFIX_RE = re.compile(r"\.derived_[0-9a-f]{10}$")
 _SOLFEGE_TOKENS = frozenset(
     {
@@ -488,7 +493,10 @@ def preprocess_voice_parts(
         resolved = _resolve_plan_output_lanes(score, parsed["plan"])
         if not resolved["ok"]:
             return resolved["error"]
-        result = _execute_preprocess_plan(score, resolved["plan"])
+        try:
+            result = _execute_preprocess_plan(score, resolved["plan"])
+        except MusicXmlAppendError as exc:
+            return _musicxml_append_error(exc)
         # Return the canonical plan that passed parsing so callers can retain an
         # authoritative execution record separately from the model's raw request.
         result["execution_plan"] = deepcopy(resolved["plan"])
@@ -516,20 +524,23 @@ def preprocess_voice_parts(
             f"Invalid propagation_policy: {propagation_policy}",
             code="invalid_plan_enum",
         )
-    result = _prepare_score_for_voice_part_legacy(
-        score,
-        part_index=part_index,
-        voice_part_id=normalized_voice_part_id,
-        allow_lyric_propagation=allow_lyric_propagation,
-        source_voice_part_id=source_voice_part_id,
-        source_part_index=source_part_index,
-        split_shared_note_policy=split_shared_note_policy,
-        propagation_strategy=propagation_strategy,
-        propagation_policy=propagation_policy,
-        verse_number=verse_number,
-        copy_all_verses=copy_all_verses,
-        section_overrides=section_overrides,
-    )
+    try:
+        result = _prepare_score_for_voice_part_legacy(
+            score,
+            part_index=part_index,
+            voice_part_id=normalized_voice_part_id,
+            allow_lyric_propagation=allow_lyric_propagation,
+            source_voice_part_id=source_voice_part_id,
+            source_part_index=source_part_index,
+            split_shared_note_policy=split_shared_note_policy,
+            propagation_strategy=propagation_strategy,
+            propagation_policy=propagation_policy,
+            verse_number=verse_number,
+            copy_all_verses=copy_all_verses,
+            section_overrides=section_overrides,
+        )
+    except MusicXmlAppendError as exc:
+        return _musicxml_append_error(exc)
     if voice_id and not voice_part_id and result.get("status") in {"ready", "action_required"}:
         metadata = result.setdefault("metadata", {})
         metadata["deprecated_inputs"] = ["voice_id"]
@@ -5379,9 +5390,14 @@ def _finalize_transform_result(
                 part_name=derived_part_name,
                 transform_hash=transform_hash,
             )
-            if materialized.get("status") == "ready":
-                appended_part_ref = materialized.get("appended_part_ref")
-                modified_musicxml_path = materialized.get("modified_musicxml_path")
+            if materialized.get("status") != "ready":
+                # Without the lane in the MusicXML, saving this score would keep
+                # a version whose JSON and MusicXML disagree.
+                raise MusicXmlAppendError(
+                    str(materialized.get("message") or "failed to write the derived part")
+                )
+            appended_part_ref = materialized.get("appended_part_ref")
+            modified_musicxml_path = materialized.get("modified_musicxml_path")
 
         if hidden_default_lane:
             modified_musicxml_path = None
@@ -6831,6 +6847,15 @@ def _plan_error(action: str, message: str) -> Dict[str, Any]:
     return {
         "ok": False,
         "error": _action_required(action, message, code=action),
+    }
+
+
+def _musicxml_append_error(exc: MusicXmlAppendError) -> Dict[str, Any]:
+    """Report a lane that could not be written; no score is returned to save."""
+    return {
+        "status": "error",
+        "action": MUSICXML_APPEND_FAILED_ACTION,
+        "message": str(exc),
     }
 
 

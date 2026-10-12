@@ -1636,12 +1636,12 @@ def create_app() -> FastAPI:
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
         snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
-        # Validate the persisted score payload before using the authoritative
-        # active-artifact pointer below. This preserves the endpoint's path
-        # traversal guard for corrupted session state.
-        score_payload_path = _resolve_session_score_path(settings, snapshot.get("current_score"))
+        # The score's recorded source path may be another backend's disk (the
+        # preprocess worker's), so it is never read here: a scored session serves
+        # its active artifact, which stays inside this session's folder or comes
+        # from storage.
         score_path: Path
-        if score_payload_path is None:
+        if not _current_score_has_source_path(snapshot.get("current_score")):
             files = snapshot.get("files")
             fallback_path = files.get("musicxml_path") if isinstance(files, dict) else None
             if not isinstance(fallback_path, str) or not fallback_path.strip():
@@ -2791,19 +2791,15 @@ def _read_musicxml_content(path: Path, *, max_mxl_uncompressed_bytes: int) -> st
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _resolve_session_score_path(
-    settings: Settings, current_score: Any
-) -> Optional[Path]:
-    """Resolve the current session score artifact path, preferring derived MusicXML."""
+def _current_score_has_source_path(current_score: Any) -> bool:
+    """Return True when the current score records the MusicXML it came from."""
     if not isinstance(current_score, dict):
-        return None
+        return False
     score_payload = current_score.get("score")
     if not isinstance(score_payload, dict):
-        return None
+        return False
     source_musicxml_path = score_payload.get("source_musicxml_path")
-    if not isinstance(source_musicxml_path, str) or not source_musicxml_path.strip():
-        return None
-    return _resolve_allowlisted_score_path(settings, source_musicxml_path)
+    return isinstance(source_musicxml_path, str) and bool(source_musicxml_path.strip())
 
 
 def _resolve_allowlisted_score_path(settings: Settings, candidate: str | Path) -> Path:

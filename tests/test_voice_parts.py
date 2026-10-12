@@ -3988,6 +3988,95 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertTrue(part_nodes)
         self.assertGreaterEqual(int(result["part_index"]), 1)
 
+    def test_missing_source_musicxml_returns_error_without_score(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / TEST_XML.name
+            shutil.copyfile(TEST_XML, source_path)
+            score = parse_score(source_path, part_index=0, verse_number=1)
+            # As on a worker whose disk lacks the file another instance parsed.
+            source_path.unlink()
+            result = preprocess_voice_parts(
+                score,
+                part_index=0,
+                voice_part_id="alto",
+                allow_lyric_propagation=True,
+                source_part_index=0,
+                source_voice_part_id="soprano",
+            )
+
+        self.assertEqual(result.get("status"), "error", result)
+        self.assertEqual(result.get("action"), "musicxml_append_failed")
+        self.assertIn("does not exist", result.get("message", ""))
+        self.assertNotIn("score", result)
+        self.assertNotIn("modified_musicxml_path", result)
+
+    def test_missing_source_musicxml_returns_error_for_plan_request(self) -> None:
+        notes = "".join(
+            f'<measure number="{number}">'
+            + (
+                "<attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
+                "<time><beats>4</beats><beat-type>4</beat-type></time>"
+                "<clef><sign>G</sign><line>2</line></clef></attributes>"
+                if number == 1
+                else ""
+            )
+            + "<note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration>"
+            "<voice>1</voice><type>whole</type>"
+            '<lyric number="1"><syllabic>single</syllabic><text>la</text></lyric></note>'
+            "<note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration>"
+            "<voice>1</voice><type>whole</type></note>"
+            "</measure>"
+            for number in (1, 2)
+        )
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1">'
+            '<part-list><score-part id="P1"><part-name>Women</part-name></score-part></part-list>'
+            f'<part id="P1">{notes}</part></score-partwise>'
+        )
+
+        def lane(rank_index):
+            source = {"part_id": "Women", "voice_part_id": "voice part 1"}
+            return {
+                "source": source,
+                "output": {"mode": "append_new_derived_lane"},
+                "split_coverage": "complete",
+                "sections": [
+                    {
+                        "start_measure": 1,
+                        "end_measure": 2,
+                        "mode": "derive",
+                        "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+                        "method": "ranked",
+                        "rank_index": rank_index,
+                        "rank_fallback": "greedy",
+                        "melody_source": source,
+                        "lyric_source": source,
+                        "lyric_strategy": "strict_onset",
+                        "lyric_policy": "replace_all",
+                    }
+                ],
+            }
+
+        plan = {"targets": [lane(0), lane(1)]}
+        # Separate folders: a derived file left next to the control's source
+        # would be reused instead of written.
+        with tempfile.TemporaryDirectory() as present_dir, tempfile.TemporaryDirectory() as missing_dir:
+            present_path = Path(present_dir) / "chords.xml"
+            present_path.write_text(xml, encoding="utf-8")
+            present = preprocess_voice_parts(
+                score=parse_score(present_path, verse_number=1), request={"plan": plan}
+            )
+            missing_path = Path(missing_dir) / "chords.xml"
+            missing_path.write_text(xml, encoding="utf-8")
+            score = parse_score(missing_path, verse_number=1)
+            missing_path.unlink()
+            missing = preprocess_voice_parts(score=score, request={"plan": plan})
+
+        self.assertEqual(present.get("status"), "ready", present)
+        self.assertEqual(missing.get("status"), "error", missing)
+        self.assertEqual(missing.get("action"), "musicxml_append_failed")
+        self.assertNotIn("score", missing)
+
     def test_materialize_preserves_syllabic_lyric_grouping(self) -> None:
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">

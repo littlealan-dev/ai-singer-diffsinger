@@ -1705,25 +1705,30 @@ def test_get_score_returns_derived_musicxml_after_reviewable_validation_candidat
         orchestrator_module.finalize_review_materialization = original_finalize
 
 
-def test_get_score_rejects_out_of_root_payload_path(client):
+def test_get_score_serves_the_active_file_when_the_source_path_is_another_backends(
+    client, tmp_path
+):
     test_client, app = client
     session_id = _create_session(test_client)
     upload_response = _upload_score(test_client, session_id)
     assert upload_response.status_code == 200
 
-    forbidden_path = Path("/tmp/sig14-outside.xml")
-    forbidden_path.write_text("<score-partwise version=\"4.0\"/>", encoding="utf-8")
-    try:
-        snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-        current_score = dict(snapshot["current_score"]["score"])
-        current_score["source_musicxml_path"] = str(forbidden_path)
-        asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    # As after a worker split: the derived file was saved from the worker's own
+    # data folder, outside this backend's roots, and does not exist here.
+    worker_file = tmp_path / "preprocess-worker" / "derived.xml"
+    worker_file.parent.mkdir()
+    derived_xml = '<score-partwise version="4.0"><part id="P_DERIVED_X"/></score-partwise>'
+    worker_file.write_text(derived_xml, encoding="utf-8")
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    current_score = dict(snapshot["current_score"]["score"])
+    current_score["source_musicxml_path"] = str(worker_file)
+    asyncio.run(app.state.sessions.set_score(session_id, current_score))
+    worker_file.unlink()
 
-        score_response = test_client.get(f"/sessions/{session_id}/score")
-        assert score_response.status_code == 403
-        assert score_response.json()["detail"] == "Score path is outside allowed roots."
-    finally:
-        forbidden_path.unlink(missing_ok=True)
+    score_response = test_client.get(f"/sessions/{session_id}/score")
+
+    assert score_response.status_code == 200
+    assert score_response.text == derived_xml
 
 
 def test_get_score_rejects_out_of_root_fallback_path(client):
@@ -2029,6 +2034,80 @@ def test_preprocess_job_retries_empty_initial_plan_response(client):
     assert preprocess_calls
     assert len(llm_client.preprocess_prompts) == 2
     assert "previous preprocess planning response did not include" in llm_client.preprocess_prompts[1]
+
+
+def test_preprocess_job_fails_without_repair_when_the_musicxml_cannot_be_written(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    version_before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))[
+        "current_score"
+    ]["version"]
+
+    preprocess_calls: list[dict] = []
+
+    def call_tool(name, arguments):
+        if name == "preprocess_voice_parts":
+            preprocess_calls.append(dict(arguments))
+            return {
+                "status": "error",
+                "action": "musicxml_append_failed",
+                "message": "source MusicXML does not exist: /elsewhere/score.xml",
+            }
+        return _make_router_call_tool()(name, arguments)
+
+    llm_client = WorkflowThenPreprocessClient(
+        workflow_response=_preprocess_workflow_response(
+            voice_part_id="soprano",
+            final_message="Preparing that line now.",
+        ),
+        preprocess_responses=[_preprocess_plan_response(voice_part_id="soprano")] * 3,
+    )
+    app.state.router.call_tool = call_tool
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "sing soprano"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "chat_progress"
+
+    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
+    assert progress_payload["status"] == "error"
+    assert progress_payload["message"] == "Couldn't finish preparing the selected singing line."
+    # One plan, one tool call: no repair attempt for a file problem.
+    assert len(preprocess_calls) == 1
+    assert len(llm_client.preprocess_prompts) == 1
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["current_score"]["version"] == version_before
+
+
+def test_resolve_preprocess_score_reads_the_active_musicxml_file(client, tmp_path):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    recorded = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))[
+        "current_score"
+    ]["score"]["source_musicxml_path"]
+    # As on a worker: the recorded path is another instance's disk, and the
+    # active file is a local copy restored from storage.
+    restored = tmp_path / "active-rehydrated.xml"
+    restored.write_text("<score-partwise/>", encoding="utf-8")
+
+    async def ensure_active_musicxml(session_id_arg, user_id):
+        return restored
+
+    app.state.sessions.ensure_active_musicxml = ensure_active_musicxml
+
+    preprocess_score = asyncio.run(
+        app.state.orchestrator._resolve_preprocess_score(session_id, user_id="test-user")
+    )
+
+    assert preprocess_score["source_musicxml_path"] == str(restored)
+    stored = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert stored["current_score"]["score"]["source_musicxml_path"] == recorded
 
 
 def test_preprocess_job_fails_controlled_after_repeated_empty_initial_plan_responses(client):
