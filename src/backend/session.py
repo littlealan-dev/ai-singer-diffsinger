@@ -11,6 +11,7 @@ import json
 import shutil
 import uuid
 import copy
+import hashlib
 
 from firebase_admin import firestore
 
@@ -992,30 +993,59 @@ def _ensure_active_musicxml_path(
     backend_use_storage: bool,
     storage_bucket: str,
 ) -> Path:
-    """Return a local active score, hydrating only the exact stored artifact."""
+    """Return a local active score, hydrating only the exact stored artifact.
+
+    With storage, the local copy sits at the stored object's path inside the
+    session folder (where _stage_score writes versions/N/input.xml). Stored
+    versions never change, so a file found there is that version. The recorded
+    musicxml_path is not trusted: another instance may have recorded a path
+    that holds an older version on this disk.
+    """
+    storage_path = _active_musicxml_storage_path(files, project_root)
+    if backend_use_storage and storage_bucket and storage_path:
+        suffix = Path(storage_path).suffix.lower()
+        if suffix not in {".xml", ".mxl"}:
+            raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
+        destination = stored_musicxml_local_path(session_dir, storage_path)
+        if not destination.is_file():
+            try:
+                data = download_bytes(storage_bucket, storage_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary_path = destination.with_suffix(f"{suffix}.tmp")
+                temporary_path.write_bytes(data)
+                temporary_path.replace(destination)
+            except Exception as exc:
+                raise SessionMusicXmlUnavailableError(
+                    SessionMusicXmlUnavailableError.user_message
+                ) from exc
+        files["musicxml_path"] = str(destination.relative_to(project_root))
+        return destination
+
     local_path = _session_musicxml_local_path(project_root, session_dir, files.get("musicxml_path"))
     if local_path is not None and local_path.is_file():
         return local_path
+    raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
 
-    storage_path = _active_musicxml_storage_path(files, project_root)
-    if not backend_use_storage or not storage_bucket or not storage_path:
-        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
 
-    suffix = Path(storage_path).suffix.lower()
-    if suffix not in {".xml", ".mxl"}:
-        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message)
-    destination = session_dir / f"active-rehydrated{suffix}"
-    try:
-        data = download_bytes(storage_bucket, storage_path)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        temporary_path = destination.with_suffix(f"{suffix}.tmp")
-        temporary_path.write_bytes(data)
-        temporary_path.replace(destination)
-    except Exception as exc:
-        raise SessionMusicXmlUnavailableError(SessionMusicXmlUnavailableError.user_message) from exc
+def stored_musicxml_local_path(session_dir: Path, storage_path: str) -> Path:
+    """Return where this session keeps its local copy of one stored MusicXML object.
 
-    files["musicxml_path"] = str(destination.relative_to(project_root))
-    return destination
+    sessions/<user>/<session>/scores/<score>/versions/<n>/input.xml maps to
+    <session_dir>/scores/<score>/versions/<n>/input.xml; a path outside that
+    layout gets a name derived from the whole object path.
+    """
+    session_root = session_dir.resolve()
+    marker = f"/{session_dir.name}/"
+    if marker in f"/{storage_path}":
+        relative = f"/{storage_path}".split(marker, 1)[1]
+        candidate = (session_root / relative).resolve()
+        try:
+            candidate.relative_to(session_root)
+            return candidate
+        except ValueError:
+            pass
+    digest = hashlib.sha256(storage_path.encode("utf-8")).hexdigest()[:16]
+    return session_root / "stored" / f"{digest}{Path(storage_path).suffix.lower()}"
 
 
 def _session_musicxml_local_path(

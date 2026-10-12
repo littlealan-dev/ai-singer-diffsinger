@@ -58,6 +58,7 @@ from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
     SessionStore,
+    stored_musicxml_local_path,
 )
 from src.backend.firebase_app import (
     get_firestore_client,
@@ -855,6 +856,14 @@ def create_app() -> FastAPI:
                         "application/vnd.recordare.musicxml+xml",
                     )
                 files["active_musicxml_storage_path"] = active_storage_path
+                # Keep this instance's copy where restoring the active score looks
+                # first, so it needs no download here.
+                stored_copy = stored_musicxml_local_path(
+                    sessions.session_dir(session_id), active_storage_path
+                )
+                if stored_copy != canonical_musicxml_path.resolve():
+                    stored_copy.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(canonical_musicxml_path, stored_copy)
             if isinstance(score, dict):
                 score = dict(score)
                 score["source_musicxml_path"] = str(canonical_musicxml_path)
