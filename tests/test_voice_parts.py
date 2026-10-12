@@ -3988,6 +3988,35 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertTrue(part_nodes)
         self.assertGreaterEqual(int(result["part_index"]), 1)
 
+    def test_derived_part_keeps_the_clef_of_the_staff_it_was_taken_from(self) -> None:
+        fixture = ROOT_DIR / "tests/fixtures/split/satb_two_bars.xml"
+        clefs = {}
+        for part_index in (0, 1):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                source_path = Path(temp_dir) / fixture.name
+                shutil.copyfile(fixture, source_path)
+                result = preprocess_voice_parts(
+                    parse_score(source_path, verse_number=1),
+                    part_index=part_index,
+                    voice_part_id="voice part 2",
+                    allow_lyric_propagation=True,
+                    source_part_index=0,
+                    source_voice_part_id="voice part 1",
+                )
+                self.assertEqual(result.get("status"), "ready", result)
+                root = ET.parse(result["modified_musicxml_path"]).getroot()
+                part_id = result["appended_part_ref"]["part_id"]
+                derived = root.find(f"part[@id='{part_id}']")
+                clefs[part_index] = [
+                    (clef.findtext("sign"), clef.findtext("line"), clef.get("number"))
+                    for clef in derived.iter("clef")
+                ]
+                self.assertEqual([s.text for s in derived.iter("staves")], ["1"])
+
+        # Staff 1 (soprano/alto) is treble; staff 2 (tenor/bass) is bass.
+        self.assertEqual(clefs[0], [("G", "2", None)])
+        self.assertEqual(clefs[1], [("F", "4", None)])
+
     def test_missing_source_musicxml_returns_error_without_score(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / TEST_XML.name

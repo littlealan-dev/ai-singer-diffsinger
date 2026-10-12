@@ -64,6 +64,8 @@ MUSICXML_APPEND_FAILED_ACTION = "musicxml_append_failed"
 class MusicXmlAppendError(Exception):
     """A derived lane could not be written into the source MusicXML."""
 _DERIVED_STEM_SUFFIX_RE = re.compile(r"\.derived_[0-9a-f]{10}$")
+# The parser (music21) names each staff of a multi-staff part "<part id>-Staff<n>".
+_SPLIT_STAFF_PART_ID_RE = re.compile(r"-Staff(\d+)$")
 _SOLFEGE_TOKENS = frozenset(
     {
         "do", "di", "ra", "re", "ri", "me", "mi", "fa", "fi", "se",
@@ -5849,6 +5851,7 @@ def _materialize_transformed_part(
         transformed_notes=transformed_part.get("notes") or [],
         divisions=divisions,
         reference_part=reference_part,
+        source_staff=_source_staff_number(transformed_part, raw_source_part_id),
         q=q,
     )
 
@@ -6071,6 +6074,7 @@ def _append_transformed_measures(
     divisions: int,
     reference_part: Optional[ET.Element],
     q: Any,
+    source_staff: int = 1,
 ) -> None:
     by_measure: Dict[int, List[Dict[str, Any]]] = {}
     for note in transformed_notes:
@@ -6096,7 +6100,7 @@ def _append_transformed_measures(
 
         ref_attributes = ref_measure.find(q("attributes"))
         if ref_attributes is not None:
-            measure_node.append(_single_staff_attributes_copy(ref_attributes, q))
+            measure_node.append(_single_staff_attributes_copy(ref_attributes, q, source_staff))
         elif idx == 0:
             attributes = ET.SubElement(measure_node, q("attributes"))
             ET.SubElement(attributes, q("divisions")).text = str(divisions)
@@ -6176,8 +6180,25 @@ def _append_transformed_measures(
                     ET.SubElement(lyric_node, q("extend"))
 
 
-def _single_staff_attributes_copy(attributes: ET.Element, q: Any) -> ET.Element:
-    """Copy measure attributes while forcing derived singing parts to one staff."""
+def _source_staff_number(
+    transformed_part: Dict[str, Any], raw_source_part_id: Optional[str]
+) -> int:
+    """Return which staff of its raw MusicXML part the source part was, from 1."""
+    source_part_id = str(transformed_part.get("_source_part_id") or "").strip()
+    if not source_part_id or source_part_id == (raw_source_part_id or ""):
+        return 1
+    match = _SPLIT_STAFF_PART_ID_RE.search(source_part_id)
+    return int(match.group(1)) if match else 1
+
+
+def _single_staff_attributes_copy(
+    attributes: ET.Element, q: Any, source_staff: int = 1
+) -> ET.Element:
+    """Copy measure attributes while forcing derived singing parts to one staff.
+
+    Staff-numbered attributes (clef, staff-details, ...) are kept only for the
+    staff the derived part was taken from, which becomes its only staff.
+    """
     copied = ET.fromstring(ET.tostring(attributes))
     for staves in list(copied.findall(q("staves"))):
         staves.text = "1"
@@ -6190,9 +6211,9 @@ def _single_staff_attributes_copy(attributes: ET.Element, q: Any) -> ET.Element:
             staff_number = int(str(number).strip())
         except ValueError:
             continue
-        if staff_number > 1:
+        if staff_number != source_staff:
             copied.remove(child)
-        elif staff_number == 1:
+        else:
             child.attrib.pop("number", None)
     return copied
 
