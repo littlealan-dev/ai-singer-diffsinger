@@ -674,6 +674,57 @@ def test_mcp_router_background_start_surfaces_startup_error():
         raise AssertionError("Expected McpError")
 
 
+def test_mcp_router_starts_again_after_a_failed_background_start():
+    class FailsOnceProcess(DummyProcess):
+        def start(self) -> None:
+            super().start()
+            if self.start_count == 1:
+                self.started = False
+                raise RuntimeError("tools/list timed out")
+
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    cpu = FailsOnceProcess()
+    router._cpu = cpu
+    router._gpu = DummyProcess()
+
+    router.start_background()
+    deadline = time.monotonic() + 1.0
+    while not router._startup_ready.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert router.readiness()["status"] == "error"
+
+    # The failure is not kept for the instance's lifetime: the next call
+    # starts MCP again.
+    assert router.call_tool("list_voicebanks", {}) == {
+        "ok": True,
+        "tool": "list_voicebanks",
+    }
+    assert cpu.start_count == 2
+    assert router.readiness()["ready"] is True
+
+
+def test_mcp_router_on_the_preprocess_worker_starts_on_its_first_call(monkeypatch):
+    monkeypatch.setenv("SESSION_STORE", "firestore")
+    monkeypatch.setenv("PREPROCESS_WORKER_ENABLED", "true")
+    monkeypatch.setenv("MCP_GPU_ENABLED", "false")
+    settings = Settings.from_env()
+    router = McpRouter(settings)
+    cpu = DummyProcess()
+    router._cpu = cpu
+    router._gpu = DummyProcess()
+
+    assert router.starts_on_first_call is True
+    readiness = router.readiness()
+    assert readiness["status"] == "on_demand"
+    assert readiness["ready"] is True
+    assert cpu.start_count == 0
+
+    assert router.call_tool("list_voicebanks", {})["ok"] is True
+    assert cpu.start_count == 1
+    assert router.readiness()["status"] == "ready"
+
+
 def test_mcp_router_background_start_timeout_is_typed(monkeypatch):
     class SlowProcess(DummyProcess):
         def start(self) -> None:

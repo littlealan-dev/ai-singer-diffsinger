@@ -11211,6 +11211,18 @@ def _worker_post(test_client, job_id, token="worker-secret"):
 
 
 @pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
+def test_the_preprocess_worker_is_ready_before_mcp_starts(client_with_env):
+    test_client, app = client_with_env
+
+    response = test_client.get("/readyz")
+
+    # Request-billed: no MCP start at boot, where its CPU is throttled.
+    assert response.status_code == 200
+    assert response.json()["mcp"]["status"] == "on_demand"
+    assert app.state.router._startup_future is None
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
 def test_preprocess_worker_endpoint_rejects_a_caller_without_the_token(client_with_env):
     test_client, _ = client_with_env
 

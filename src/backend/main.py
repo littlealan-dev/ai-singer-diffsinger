@@ -486,13 +486,17 @@ def create_app() -> FastAPI:
         shutdown_coordinator.initialize()
         try:
             settings.sessions_dir.mkdir(parents=True, exist_ok=True)
-            startup = router.start_background()
-            if settings.mcp_startup_blocking:
-                await asyncio.wrap_future(startup)
+            if router.starts_on_first_call:
+                logger.info("mcp_start_on_first_call")
                 asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
             else:
-                logger.info("mcp_start_deferred")
-                asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
+                startup = router.start_background()
+                if settings.mcp_startup_blocking:
+                    await asyncio.wrap_future(startup)
+                    asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
+                else:
+                    logger.info("mcp_start_deferred")
+                    asyncio.create_task(asyncio.to_thread(_log_onnx_providers))
             yield
         finally:
             shutdown_coordinator.http_drain_finished()

@@ -951,6 +951,10 @@ class McpRouter:
         self._startup_future: Future[None] | None = None
         self._startup_error: Optional[str] = None
         self._drain_established = threading.Event()
+        # The line-preparation worker is billed per request, so outside a
+        # request its CPU is throttled and a background start at boot cannot
+        # finish. It starts MCP on its first tool call, inside a job's request.
+        self.starts_on_first_call = settings.preprocess_worker_enabled
 
     def start(self) -> None:
         """Start both CPU and GPU MCP processes."""
@@ -960,8 +964,15 @@ class McpRouter:
         """Start both MCP processes once and return their completion future."""
         self._raise_if_stopping()
         with self._startup_lock:
-            if self._startup_future is not None:
-                return self._startup_future
+            previous = self._startup_future
+            if previous is not None:
+                if not _future_failed(previous):
+                    return previous
+                # A failed start is not final: its processes were stopped, so
+                # the next caller starts them again.
+                logging.getLogger(__name__).info(
+                    "mcp_start_retry previous_error=%s", self._startup_error
+                )
             self._startup_ready.clear()
             self._startup_error = None
             future: Future[None] = Future()
@@ -1110,6 +1121,10 @@ class McpRouter:
             status = "error"
         elif ready:
             status = "ready"
+        elif self.starts_on_first_call and self._startup_future is None:
+            # Nothing to wait for: MCP starts with the first tool call.
+            status = "on_demand"
+            ready = True
         elif starting:
             status = "starting"
         elif self._startup_ready.is_set():
@@ -1307,3 +1322,8 @@ class McpRouter:
     def _raise_if_stopping(self) -> None:
         if self._stopping.is_set():
             raise McpShuttingDownError("MCP router is shutting down.")
+
+
+def _future_failed(future: Future[None]) -> bool:
+    """Return True when a finished startup future ended with an error."""
+    return future.done() and not future.cancelled() and future.exception() is not None
