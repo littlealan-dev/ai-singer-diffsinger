@@ -168,6 +168,25 @@ class Settings:
     # browser renders the mix in real time with the instrumental tracks, which
     # the server mix never had. Its code stays, reachable only when enabled.
     export_mix_enabled: bool = False
+    # Line-preparation (preprocess) jobs. "inline" runs the job as a task in
+    # the process that started it; "http" posts it to a worker URL (the local
+    # stand-in for Cloud Tasks); "cloud_tasks" enqueues it on a Cloud Tasks
+    # queue that calls the worker.
+    preprocess_dispatch_mode: str = "inline"
+    preprocess_worker_url: str = ""
+    # Serve POST /internal/preprocess-jobs/{job_id} (the worker service only).
+    preprocess_worker_enabled: bool = False
+    # Shared secret for the worker endpoint when Cloud Tasks OIDC is not used.
+    preprocess_worker_token: str = ""
+    # Cloud Tasks signs its requests as this service account, for this audience.
+    preprocess_worker_invoker_service_account: str = ""
+    preprocess_worker_audience: str = ""
+    # projects/<project>/locations/<location>/queues/<queue>
+    preprocess_tasks_queue: str = ""
+    preprocess_job_max_dispatch_attempts: int = 3
+    preprocess_job_lease_seconds: float = 90.0
+    # The worker service has no GPU, so it starts only the CPU MCP worker.
+    mcp_gpu_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -290,6 +309,28 @@ class Settings:
         mcp_gpu_device = os.getenv("MCP_GPU_DEVICE", "cpu")
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
+        mcp_gpu_enabled = _env_bool("MCP_GPU_ENABLED", True)
+        preprocess_dispatch_mode = (
+            os.getenv("PREPROCESS_DISPATCH_MODE", "inline").strip().lower() or "inline"
+        )
+        if preprocess_dispatch_mode not in {"inline", "http", "cloud_tasks"}:
+            raise ValueError(
+                "PREPROCESS_DISPATCH_MODE must be one of inline, http, cloud_tasks."
+            )
+        preprocess_worker_url = os.getenv("PREPROCESS_WORKER_URL", "").strip().rstrip("/")
+        if preprocess_dispatch_mode != "inline" and not preprocess_worker_url:
+            raise ValueError(
+                "PREPROCESS_WORKER_URL is required when PREPROCESS_DISPATCH_MODE "
+                f"is {preprocess_dispatch_mode}."
+            )
+        preprocess_tasks_queue = os.getenv("PREPROCESS_TASKS_QUEUE", "").strip()
+        if preprocess_dispatch_mode == "cloud_tasks" and not preprocess_tasks_queue:
+            raise ValueError(
+                "PREPROCESS_TASKS_QUEUE is required when PREPROCESS_DISPATCH_MODE is cloud_tasks."
+            )
+        preprocess_worker_audience = (
+            os.getenv("PREPROCESS_WORKER_AUDIENCE", "").strip() or preprocess_worker_url
+        )
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         backend_ready_timeout_seconds = _env_float("BACKEND_READY_TIMEOUT_SECONDS", 240.0)
         backend_shutdown_total_seconds = _env_float(
@@ -333,6 +374,13 @@ class Settings:
         ).strip().lower()
         if session_store not in {"memory", "firestore"}:
             raise ValueError("SESSION_STORE must be either 'memory' or 'firestore'.")
+        if session_store == "memory" and (
+            preprocess_dispatch_mode != "inline" or _env_bool("PREPROCESS_WORKER_ENABLED", False)
+        ):
+            raise ValueError(
+                "A separate preprocess worker reads sessions written by another "
+                "process, so it needs SESSION_STORE=firestore."
+            )
         project_id = _project_id()
         default_bucket = f"{project_id}.appspot.com" if project_id else ""
         storage_bucket = os.getenv("STORAGE_BUCKET", default_bucket)
@@ -461,6 +509,22 @@ class Settings:
             backend_debug=backend_debug,
             export_mix_enabled=os.getenv("BACKEND_EXPORT_MIX_ENABLED", "").lower()
             in {"1", "true", "yes"},
+            preprocess_dispatch_mode=preprocess_dispatch_mode,
+            preprocess_worker_url=preprocess_worker_url,
+            preprocess_worker_enabled=_env_bool("PREPROCESS_WORKER_ENABLED", False),
+            preprocess_worker_token=os.getenv("PREPROCESS_WORKER_TOKEN", "").strip(),
+            preprocess_worker_invoker_service_account=os.getenv(
+                "PREPROCESS_WORKER_INVOKER_SERVICE_ACCOUNT", ""
+            ).strip().lower(),
+            preprocess_worker_audience=preprocess_worker_audience,
+            preprocess_tasks_queue=preprocess_tasks_queue,
+            preprocess_job_max_dispatch_attempts=max(
+                1, _env_int("PREPROCESS_JOB_MAX_DISPATCH_ATTEMPTS", 3)
+            ),
+            preprocess_job_lease_seconds=max(
+                15.0, _env_float("PREPROCESS_JOB_LEASE_SECONDS", 90.0)
+            ),
+            mcp_gpu_enabled=mcp_gpu_enabled,
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_api_key_secret=gemini_api_key_secret,

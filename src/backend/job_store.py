@@ -3,6 +3,7 @@ from __future__ import annotations
 """Firestore-backed job tracking helpers."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -13,6 +14,23 @@ from src.backend.firebase_app import get_firestore_client
 
 logger = logging.getLogger(__name__)
 _MUTABLE_PROGRESS_STATUSES = {"queued", "running"}
+
+
+@dataclass(frozen=True)
+class PreprocessClaim:
+    """Outcome of a worker's attempt to take a dispatched preprocess job.
+
+    outcome is one of:
+    - "claimed": this worker owns the job for `attempt` until its lease expires
+    - "missing": no such job
+    - "finished": the job is no longer queued or running
+    - "busy": another worker holds an unexpired lease; retry later
+    - "exhausted": the job already used every attempt it was allowed
+    """
+
+    outcome: str
+    job: Dict[str, Any]
+    attempt: int = 0
 
 
 @dataclass
@@ -140,6 +158,153 @@ class JobStore:
         except Exception:
             logger.exception("job_progress_update_failed job_id=%s", job_id)
             raise
+
+    def claim_preprocess_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+        max_attempts: int,
+    ) -> PreprocessClaim:
+        """Take a queued (or lease-expired) preprocess job for one worker attempt.
+
+        A worker that dies without releasing the job leaves it running; once
+        its lease expires, the next dispatch takes it over as a new attempt.
+        """
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _claim(transaction) -> PreprocessClaim:
+            snapshot = job_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return PreprocessClaim("missing", {})
+            data = snapshot.to_dict() or {}
+            status = str(data.get("status") or "")
+            if status not in _MUTABLE_PROGRESS_STATUSES:
+                return PreprocessClaim("finished", data)
+            now = datetime.now(timezone.utc)
+            lease_expires_at = data.get("leaseExpiresAt")
+            if (
+                status == "running"
+                and isinstance(lease_expires_at, datetime)
+                and lease_expires_at > now
+            ):
+                return PreprocessClaim("busy", data)
+            attempt = int(data.get("dispatchAttempt") or 0) + 1
+            if attempt > max_attempts:
+                return PreprocessClaim("exhausted", data, attempt=attempt - 1)
+            transaction.set(
+                job_ref,
+                {
+                    "status": "running",
+                    "dispatchAttempt": attempt,
+                    "leaseOwner": worker_id,
+                    "leaseExpiresAt": now + timedelta(seconds=lease_seconds),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            claimed = dict(data)
+            claimed.update(
+                {"status": "running", "dispatchAttempt": attempt, "leaseOwner": worker_id}
+            )
+            return PreprocessClaim("claimed", claimed, attempt=attempt)
+
+        return _claim(transaction)
+
+    def renew_preprocess_lease(
+        self, job_id: str, *, worker_id: str, lease_seconds: float
+    ) -> bool:
+        """Extend this worker's lease; False when the job is no longer its to run."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _renew(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            if data.get("status") != "running" or data.get("leaseOwner") != worker_id:
+                return False
+            transaction.set(
+                job_ref,
+                {
+                    "leaseExpiresAt": datetime.now(timezone.utc)
+                    + timedelta(seconds=lease_seconds)
+                },
+                merge=True,
+            )
+            return True
+
+        return _renew(transaction)
+
+    def release_preprocess_job_for_retry(
+        self, job_id: str, *, worker_id: str, message: str
+    ) -> bool:
+        """Put an interrupted job back in the queue so the next dispatch can take it."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _release(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            if data.get("status") != "running" or data.get("leaseOwner") != worker_id:
+                return False
+            transaction.set(
+                job_ref,
+                {
+                    "status": "queued",
+                    "message": message,
+                    "leaseOwner": firestore.DELETE_FIELD,
+                    "leaseExpiresAt": firestore.DELETE_FIELD,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return True
+
+        return _release(transaction)
+
+    def fail_job_if_active(
+        self, job_id: str, *, message: str, error: str, job_kind: str
+    ) -> bool:
+        """Mark a still queued or running job failed; leave a finished one alone."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _fail(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            if str(data.get("status") or "") not in _MUTABLE_PROGRESS_STATUSES:
+                return False
+            transaction.set(
+                job_ref,
+                {
+                    "status": "failed",
+                    "step": "error",
+                    "message": message,
+                    "errorMessage": message,
+                    "error": error,
+                    "progress": 1.0,
+                    "jobKind": job_kind,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return True
+
+        return _fail(transaction)
 
     def get_latest_job_by_session(
         self, *, user_id: str, session_id: str

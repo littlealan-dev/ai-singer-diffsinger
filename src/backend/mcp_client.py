@@ -1077,20 +1077,25 @@ class McpRouter:
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
         """Route a tool call to the appropriate MCP process."""
         self._raise_if_stopping()
-        self._ensure_started_for_call()
         worker = self._tool_to_worker.get(name, "cpu")
+        if worker == "gpu" and not self._settings.mcp_gpu_enabled:
+            raise McpWorkerUnavailableError(
+                f"Tool {name} needs the GPU MCP worker, which this service does not run."
+            )
+        self._ensure_started_for_call()
         return self._call_with_retry(worker, name, arguments)
 
     def readiness(self) -> Dict[str, Any]:
         """Return lightweight MCP startup state for diagnostics."""
         draining = self._stopping.is_set()
         cpu_ready = self._cpu.is_ready()
-        gpu_ready = self._gpu.is_ready()
+        gpu_enabled = self._settings.mcp_gpu_enabled
+        gpu_ready = self._gpu.is_ready() if gpu_enabled else None
         ready = bool(
             self._startup_ready.is_set()
             and self._startup_error is None
             and cpu_ready
-            and gpu_ready
+            and (gpu_ready or not gpu_enabled)
             and not draining
         )
         starting = (
@@ -1128,8 +1133,9 @@ class McpRouter:
         try:
             self._cpu.start()
             self._raise_if_stopping()
-            self._gpu.start()
-            self._raise_if_stopping()
+            if self._settings.mcp_gpu_enabled:
+                self._gpu.start()
+                self._raise_if_stopping()
         except McpShuttingDownError as exc:
             error = exc
             logging.getLogger(__name__).info("mcp_background_start_cancelled")

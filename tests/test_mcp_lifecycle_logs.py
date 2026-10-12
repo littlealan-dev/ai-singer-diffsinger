@@ -1073,3 +1073,20 @@ def test_every_routed_tool_is_allowed_by_its_worker():
     for name, worker in router._tool_to_worker.items():
         assert name in _MODE_TOOL_ALLOWLIST[worker], f"{name} is not served by the {worker} worker"
         assert name in _MODE_TOOL_ALLOWLIST["all"], f"{name} is not served in all mode"
+
+
+def test_router_without_gpu_starts_and_reports_ready_on_the_cpu_worker_alone():
+    router = McpRouter(replace(Settings.from_env(), mcp_gpu_enabled=False))
+    router._cpu = DummyProcess()
+    router._gpu = DummyProcess()
+
+    router.start()
+    readiness = router.readiness()
+
+    assert router._cpu.started is True
+    assert router._gpu.start_count == 0
+    assert readiness["ready"] is True
+    assert readiness["workers"] == {"cpu": True, "gpu": None}
+    assert router.call_tool("parse_score", {})["tool"] == "parse_score"
+    with pytest.raises(McpWorkerUnavailableError):
+        router.call_tool("synthesize", {})

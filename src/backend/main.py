@@ -43,6 +43,7 @@ from src.backend.orchestrator import (
 )
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
+from src.backend.preprocess_dispatch import WORKER_TOKEN_HEADER
 from src.backend.message_catalog import backend_message
 from src.backend.credits import (
     get_instrumental_charge_state,
@@ -554,6 +555,45 @@ def create_app() -> FastAPI:
             "mcp": mcp,
         }
         return JSONResponse(status_code=200 if mcp["ready"] else 503, content=payload)
+
+    @app.post("/internal/preprocess-jobs/{job_id}")
+    async def run_preprocess_job(job_id: str, request: Request) -> JSONResponse:
+        """Run one dispatched line-preparation job inside this request.
+
+        Only the worker service serves this. A non-2xx answer asks the
+        dispatcher (Cloud Tasks, or the local stand-in) to try again later.
+        """
+        if not settings.preprocess_worker_enabled:
+            raise HTTPException(status_code=404, detail="Not Found")
+        await _require_preprocess_worker_caller(request, settings)
+        job_store: JobStore = request.app.state.job_store
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        worker_id = f"{settings.backend_build_id}:{uuid.uuid4().hex[:12]}"
+        claim = await asyncio.to_thread(
+            job_store.claim_preprocess_job,
+            job_id,
+            worker_id=worker_id,
+            lease_seconds=settings.preprocess_job_lease_seconds,
+            max_attempts=settings.preprocess_job_max_dispatch_attempts,
+        )
+        logger.info(
+            "preprocess_worker_claim job=%s outcome=%s attempt=%s worker=%s",
+            job_id,
+            claim.outcome,
+            claim.attempt,
+            worker_id,
+        )
+        if claim.outcome == "busy":
+            return JSONResponse(status_code=409, content={"status": "busy"})
+        if claim.outcome == "exhausted":
+            await orchestrator.fail_exhausted_preprocess_job(job_id)
+            return JSONResponse(content={"status": "exhausted"})
+        if claim.outcome != "claimed":
+            return JSONResponse(content={"status": claim.outcome})
+        await orchestrator.run_dispatched_preprocess_job(
+            job_id, claim.job, attempt=claim.attempt, worker_id=worker_id
+        )
+        return JSONResponse(content={"status": "done", "attempt": claim.attempt})
 
     @app.get("/_e2e/sessions/{session_id}/state")
     async def e2e_session_state(session_id: str, request: Request) -> Dict[str, Any]:
@@ -2204,6 +2244,43 @@ async def _get_snapshot_or_404(
         raise HTTPException(status_code=404, detail="Session not found.") from exc
 
 
+async def _require_preprocess_worker_caller(request: Request, settings: Settings) -> None:
+    """Admit only the preprocess dispatcher.
+
+    In Cloud Run that is Cloud Tasks, signing as the configured service account
+    for this service's URL; locally it is the backend holding the shared token.
+    """
+    if settings.preprocess_worker_invoker_service_account:
+        token = _extract_bearer_token(request)
+        try:
+            claims = await asyncio.to_thread(
+                _verify_google_oidc_token, token, settings.preprocess_worker_audience
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="Invalid OIDC token.") from exc
+        email = str(claims.get("email") or "").strip().lower()
+        if (
+            email != settings.preprocess_worker_invoker_service_account
+            or claims.get("email_verified") is not True
+        ):
+            raise HTTPException(status_code=403, detail="Unexpected caller identity.")
+        return
+    if settings.preprocess_worker_token:
+        supplied = request.headers.get(WORKER_TOKEN_HEADER, "")
+        if not hmac.compare_digest(supplied, settings.preprocess_worker_token):
+            raise HTTPException(status_code=401, detail="Invalid worker token.")
+        return
+    raise HTTPException(status_code=503, detail="Preprocess worker caller is not configured.")
+
+
+def _verify_google_oidc_token(token: str, audience: str) -> Dict[str, Any]:
+    """Verify a Google-signed OIDC token issued for this service's URL."""
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
+
+    return dict(id_token.verify_oauth2_token(token, google_requests.Request(), audience=audience))
+
+
 def _extract_bearer_token(request: Request) -> str:
     """Extract a bearer token from the Authorization header."""
     auth_header = request.headers.get("authorization")
@@ -2420,6 +2497,8 @@ def _should_require_app_check(request: Request) -> bool:
     """Skip generic App Check where a route applies its own protection."""
     path = request.url.path
     if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
+        return False
+    if path.startswith("/internal/preprocess-jobs/"):
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 

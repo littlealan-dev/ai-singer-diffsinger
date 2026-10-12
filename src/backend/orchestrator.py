@@ -3,7 +3,7 @@ from __future__ import annotations
 """Chat orchestration layer that bridges LLM decisions and MCP tools."""
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 import ast
@@ -40,6 +40,7 @@ from src.backend.gpu_errors import (
     format_gpu_resource_error_message,
 )
 from src.backend.job_store import JobStore
+from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.language_selection import (
     collect_score_lyrics,
     normalize_language_code,
@@ -253,6 +254,11 @@ class Orchestrator:
         self._score_tool_specs = list_tools(set(SCORE_LLM_TOOLS))
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
+        # Outside "inline" mode a preprocess job runs on the worker service,
+        # inside the worker's request, rather than as a task in this process.
+        self._preprocess_dispatcher = PreprocessDispatcher(
+            settings, on_give_up=self._fail_undelivered_preprocess_job
+        )
         self._billing_finalization_tasks: Dict[
             str, asyncio.Task[_BillingFinalizationResult]
         ] = {}
@@ -377,15 +383,9 @@ class Orchestrator:
                 ),
             }
         async with chat_lock:
-            existing_preprocess = self._preprocess_tasks.get(session_id)
-            if existing_preprocess and not existing_preprocess.done():
-                return {
-                    "type": "chat_text",
-                    "message": (
-                        "I am still preparing the derived score from your previous request. "
-                        "Please wait for it to finish before sending another message."
-                    ),
-                }
+            busy = await self._preprocess_busy_response(session_id, user_id)
+            if busy is not None:
+                return busy
             if len(message) > self._settings.llm_max_message_chars:
                 return {
                     "type": "chat_text",
@@ -967,15 +967,9 @@ class Orchestrator:
         originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
-        existing = self._preprocess_tasks.get(session_id)
-        if existing and not existing.done():
-            return {
-                "type": "chat_text",
-                "message": (
-                    "I am still preparing the derived score from your previous request. "
-                    "Please wait for it to finish before sending another message."
-                ),
-            }
+        busy = await self._preprocess_busy_response(session_id, user_id)
+        if busy is not None:
+            return busy
         job_id = uuid.uuid4().hex
         input_path, storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
@@ -999,6 +993,17 @@ class Orchestrator:
             progress=0.0,
             jobKind="preprocess",
         )
+        if self._preprocess_dispatcher.mode != "inline":
+            return await self._dispatch_preprocess_job(
+                session_id,
+                job_id,
+                tool_calls,
+                user_email=user_email,
+                initial_message=initial_message,
+                initial_thought_summary=initial_thought_summary,
+                planning_context=planning_context,
+                originating_turn_id=originating_turn_id,
+            )
         task = asyncio.create_task(
             self._run_preprocess_job(
                 session_id,
@@ -1027,6 +1032,264 @@ class Orchestrator:
             "progress_url": _job_progress_url(session_id, job_id),
             "job_id": job_id,
         }
+
+    async def _preprocess_busy_response(
+        self, session_id: str, user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the "still preparing" reply while the session has a preprocess job running."""
+        busy = {
+            "type": "chat_text",
+            "message": (
+                "I am still preparing the derived score from your previous request. "
+                "Please wait for it to finish before sending another message."
+            ),
+        }
+        existing = self._preprocess_tasks.get(session_id)
+        if existing and not existing.done():
+            return busy
+        if self._preprocess_dispatcher.mode == "inline":
+            return None
+        # The job runs on the worker service, so only the job store knows.
+        latest = await asyncio.to_thread(
+            self._job_store.get_latest_job_by_session,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if latest is None:
+            return None
+        _, job = latest
+        if job.get("jobKind") != "preprocess" or job.get("status") not in {"queued", "running"}:
+            return None
+        if self._preprocess_job_is_abandoned(job):
+            return None
+        return busy
+
+    def _preprocess_job_is_abandoned(self, job: Dict[str, Any]) -> bool:
+        """True when a running job's worker stopped renewing its lease long ago.
+
+        A worker that is killed outright cannot mark its job failed. Its lease
+        then lapses, and after one more lease period nothing is retrying it, so
+        the session should not stay blocked behind it.
+        """
+        if job.get("status") != "running":
+            return False
+        lease_expires_at = job.get("leaseExpiresAt")
+        if not isinstance(lease_expires_at, datetime):
+            return False
+        grace = timedelta(seconds=self._settings.preprocess_job_lease_seconds)
+        return lease_expires_at + grace < datetime.now(timezone.utc)
+
+    async def _dispatch_preprocess_job(
+        self,
+        session_id: str,
+        job_id: str,
+        tool_calls: List[ToolCall],
+        *,
+        user_email: str,
+        initial_message: str,
+        initial_thought_summary: str,
+        planning_context: Optional[Dict[str, Any]],
+        originating_turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Save what the worker needs to run the job, then hand it to the worker."""
+        budget = _llm_turn_budget.get()
+        spec = {
+            "toolCalls": [
+                {"name": call.name, "arguments": call.arguments} for call in tool_calls
+            ],
+            "planningContext": planning_context if isinstance(planning_context, dict) else None,
+            "initialMessage": initial_message,
+            "initialThoughtSummary": initial_thought_summary,
+            "originatingTurnId": originating_turn_id,
+            "userEmail": user_email,
+            # The job's LLM calls count against the turn that started it.
+            "llmCallsUsed": budget.calls if budget is not None else 0,
+        }
+        # Stored as JSON text: Firestore cannot hold arrays nested in arrays.
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            preprocessSpecJson=json.dumps(spec, sort_keys=True),
+        )
+        try:
+            await self._preprocess_dispatcher.dispatch(job_id)
+        except PreprocessDispatchError as exc:
+            self._logger.error(
+                "preprocess_dispatch_failed session=%s job=%s error=%s",
+                session_id,
+                job_id,
+                exc,
+            )
+            await self._fail_undelivered_preprocess_job(job_id)
+            return {
+                "type": "chat_error",
+                "message": backend_message("job.preprocess_dispatch_failed"),
+            }
+        self._logger.info(
+            "preprocess_job_dispatched session=%s job=%s mode=%s",
+            session_id,
+            job_id,
+            self._preprocess_dispatcher.mode,
+        )
+        return {
+            "type": "chat_progress",
+            "message": initial_message,
+            "progress_url": _job_progress_url(session_id, job_id),
+            "job_id": job_id,
+        }
+
+    async def _fail_undelivered_preprocess_job(self, job_id: str) -> None:
+        """Fail a job the worker never finished running, unless it already finished."""
+        message = backend_message("job.preprocess_dispatch_failed")
+        try:
+            await asyncio.to_thread(
+                self._job_store.fail_job_if_active,
+                job_id,
+                message=message,
+                error="dispatch_failed",
+                job_kind="preprocess",
+            )
+        except Exception as exc:
+            self._logger.error(
+                "preprocess_dispatch_fail_update_failed job=%s error=%s", job_id, exc
+            )
+
+    async def run_dispatched_preprocess_job(
+        self,
+        job_id: str,
+        job: Dict[str, Any],
+        *,
+        attempt: int,
+        worker_id: str,
+    ) -> None:
+        """Run a claimed preprocess job inside the worker's request.
+
+        The worker's lease is renewed while the job runs. If the request is
+        cancelled (the instance is shutting down) and attempts remain, the job
+        goes back to the queue for the dispatcher's retry instead of failing.
+        """
+        session_id = str(job.get("sessionId") or "")
+        user_id = str(job.get("userId") or "")
+        try:
+            spec = json.loads(str(job.get("preprocessSpecJson") or ""))
+        except json.JSONDecodeError:
+            spec = None
+        if not session_id or not user_id or not isinstance(spec, dict):
+            self._logger.error("preprocess_dispatched_job_invalid job=%s", job_id)
+            await self._fail_undelivered_preprocess_job(job_id)
+            return
+        lease_seconds = self._settings.preprocess_job_lease_seconds
+        max_attempts = self._settings.preprocess_job_max_dispatch_attempts
+
+        async def release_for_retry() -> bool:
+            if attempt >= max_attempts:
+                return False
+            released = await asyncio.to_thread(
+                self._job_store.release_preprocess_job_for_retry,
+                job_id,
+                worker_id=worker_id,
+                message=backend_message("job.preprocess_retrying"),
+            )
+            self._logger.warning(
+                "preprocess_job_released_for_retry job=%s attempt=%s released=%s",
+                job_id,
+                attempt,
+                released,
+            )
+            return released
+
+        try:
+            snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        except (KeyError, PermissionError):
+            self._logger.error(
+                "preprocess_dispatched_job_session_missing session=%s job=%s",
+                session_id,
+                job_id,
+            )
+            await self._fail_undelivered_preprocess_job(job_id)
+            return
+        except Exception:
+            # Possibly transient (Firestore, Cloud Storage): hand the job back
+            # now, so the dispatcher's retry need not wait out this lease.
+            if not await release_for_retry():
+                await self._fail_undelivered_preprocess_job(job_id)
+            raise
+        current_score = snapshot.get("current_score")
+        score = current_score.get("score") if isinstance(current_score, dict) else None
+        if not isinstance(score, dict):
+            self._logger.error(
+                "preprocess_dispatched_job_missing_score session=%s job=%s",
+                session_id,
+                job_id,
+            )
+            await self._fail_undelivered_preprocess_job(job_id)
+            return
+        tool_calls = [
+            ToolCall(name=str(entry["name"]), arguments=dict(entry.get("arguments") or {}))
+            for entry in spec.get("toolCalls") or []
+            if isinstance(entry, dict) and entry.get("name")
+        ]
+        originating_turn_id = str(spec.get("originatingTurnId") or "") or None
+        _llm_turn_budget.set(
+            _LlmTurnBudget(
+                reference=str(originating_turn_id or job_id)[:8],
+                started_at=time.monotonic(),
+                calls=int(spec.get("llmCallsUsed") or 0),
+            )
+        )
+        async def renew_lease_until_cancelled() -> None:
+            while True:
+                await asyncio.sleep(lease_seconds / 3)
+                try:
+                    still_ours = await asyncio.to_thread(
+                        self._job_store.renew_preprocess_lease,
+                        job_id,
+                        worker_id=worker_id,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "preprocess_lease_renew_failed job=%s error=%s", job_id, exc
+                    )
+                    continue
+                if not still_ours:
+                    self._logger.warning(
+                        "preprocess_lease_lost job=%s worker=%s", job_id, worker_id
+                    )
+                    return
+
+        heartbeat = asyncio.create_task(
+            renew_lease_until_cancelled(), name=f"preprocess-lease-{job_id}"
+        )
+        try:
+            await self._run_preprocess_job(
+                session_id,
+                score,
+                tool_calls,
+                job_id,
+                user_id,
+                str(spec.get("userEmail") or ""),
+                initial_message=str(spec.get("initialMessage") or ""),
+                initial_thought_summary=str(spec.get("initialThoughtSummary") or ""),
+                planning_context=spec.get("planningContext")
+                if isinstance(spec.get("planningContext"), dict)
+                else None,
+                originating_turn_id=originating_turn_id,
+                on_interrupt=release_for_retry,
+            )
+        finally:
+            heartbeat.cancel()
+
+    async def fail_exhausted_preprocess_job(self, job_id: str) -> None:
+        """Fail a job that was interrupted on every attempt it was allowed."""
+        message = backend_message("job.preprocess_attempts_exhausted")
+        await asyncio.to_thread(
+            self._job_store.fail_job_if_active,
+            job_id,
+            message=message,
+            error="interrupted",
+            job_kind="preprocess",
+        )
 
     @staticmethod
     def _release_result_allows_terminal_status(status: str) -> bool:
@@ -1762,8 +2025,13 @@ class Orchestrator:
         initial_thought_summary: str,
         planning_context: Optional[Dict[str, Any]] = None,
         originating_turn_id: Optional[str] = None,
+        on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> None:
-        """Execute preprocess workflow in the background and publish completion message."""
+        """Execute preprocess workflow in the background and publish completion message.
+
+        on_interrupt runs when the job is cancelled; returning True means it put
+        the job back for another attempt, so the job is not marked failed.
+        """
         async def publish_attempt_messages(
             attempt_messages: List[Dict[str, Any]],
         ) -> None:
@@ -1869,6 +2137,18 @@ class Orchestrator:
             self._logger.warning(
                 "preprocess_job_interrupted session=%s job=%s", session_id, job_id
             )
+            released_for_retry = False
+            if on_interrupt is not None:
+                try:
+                    released_for_retry = await on_interrupt()
+                except Exception as exc:
+                    self._logger.error(
+                        "preprocess_job_interrupt_release_failed job=%s error=%s",
+                        job_id,
+                        exc,
+                    )
+            if released_for_retry:
+                raise
             interrupted_message = backend_message("job.preprocess_interrupted")
             try:
                 await asyncio.to_thread(

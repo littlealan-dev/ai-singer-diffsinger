@@ -764,7 +764,10 @@ def _prepare_app(monkeypatch, overrides=None):
     if overrides:
         for key, value in overrides.items():
             monkeypatch.setenv(key, value)
-    if overrides and str(overrides.get("APP_ENV", "")).lower() == "prod":
+    if overrides and (
+        str(overrides.get("APP_ENV", "")).lower() == "prod"
+        or str(overrides.get("SESSION_STORE", "")).lower() == "firestore"
+    ):
         monkeypatch.setattr("src.backend.main.FirestoreSessionStore", SessionStore)
     app = create_app()
     app.state.router.call_tool = _make_router_call_tool()
@@ -11047,6 +11050,423 @@ def test_a_preprocess_job_cancelled_by_shutdown_is_marked_failed(client, monkeyp
     assert job_data["error"] == "interrupted"
     assert job_data["message"] == backend_message("job.preprocess_interrupted")
     assert job_data["progress"] == 1.0
+
+
+def test_an_interrupted_preprocess_job_released_for_retry_is_not_marked_failed(
+    client, monkeypatch
+):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    orchestrator = app.state.orchestrator
+    job_id = "job-preprocess-released"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+
+    async def no_credit_context(user_id):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_get_current_credit_availability", no_credit_context)
+    released = []
+
+    async def release_for_retry():
+        released.append(job_id)
+        return True
+
+    async def scenario():
+        workflow_started = asyncio.Event()
+
+        async def workflow_waiting_on_the_llm(*args, **kwargs):
+            workflow_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(orchestrator, "_run_llm_tool_workflow", workflow_waiting_on_the_llm)
+        task = asyncio.create_task(
+            orchestrator._run_preprocess_job(
+                session_id,
+                {"parts": []},
+                [ToolCall(name="preprocess_voice_parts", arguments={})],
+                job_id,
+                None,
+                "test@example.com",
+                initial_message="Preparing the Alto part.",
+                initial_thought_summary="",
+                on_interrupt=release_for_retry,
+            )
+        )
+        await asyncio.wait_for(workflow_started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert released == [job_id]
+    _, job_data = app.state.job_store.get_job_by_id(
+        job_id=job_id, user_id="test-user", session_id=session_id
+    )
+    assert job_data["status"] == "running"
+    assert "error" not in job_data
+
+
+def test_preprocess_worker_endpoint_is_absent_unless_enabled(client):
+    test_client, _ = client
+
+    response = test_client.post("/internal/preprocess-jobs/job-1")
+
+    assert response.status_code == 404
+
+
+_PREPROCESS_WORKER_ENV = {
+    "SESSION_STORE": "firestore",
+    "PREPROCESS_WORKER_ENABLED": "true",
+    "PREPROCESS_WORKER_TOKEN": "worker-secret",
+}
+
+
+def _worker_post(test_client, job_id, token="worker-secret"):
+    return test_client.post(
+        f"/internal/preprocess-jobs/{job_id}",
+        headers={"X-Preprocess-Worker-Token": token},
+    )
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
+def test_preprocess_worker_endpoint_rejects_a_caller_without_the_token(client_with_env):
+    test_client, _ = client_with_env
+
+    assert _worker_post(test_client, "job-1", token="wrong").status_code == 401
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
+def test_preprocess_worker_endpoint_runs_a_claimed_job_in_the_request(
+    client_with_env, monkeypatch
+):
+    from src.backend.job_store import PreprocessClaim
+
+    test_client, app = client_with_env
+    job = {"sessionId": "s1", "userId": "u1", "status": "running"}
+    claims = []
+    runs = []
+
+    def claim(job_id, *, worker_id, lease_seconds, max_attempts):
+        claims.append((job_id, lease_seconds, max_attempts))
+        return PreprocessClaim("claimed", job, attempt=2)
+
+    async def run(job_id, claimed_job, *, attempt, worker_id):
+        runs.append((job_id, claimed_job, attempt))
+
+    monkeypatch.setattr(app.state.job_store, "claim_preprocess_job", claim)
+    monkeypatch.setattr(app.state.orchestrator, "run_dispatched_preprocess_job", run)
+
+    response = _worker_post(test_client, "job-1")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "done", "attempt": 2}
+    assert claims == [("job-1", 90.0, 3)]
+    assert runs == [("job-1", job, 2)]
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
+def test_preprocess_worker_endpoint_asks_for_a_retry_while_another_worker_runs_the_job(
+    client_with_env, monkeypatch
+):
+    from src.backend.job_store import PreprocessClaim
+
+    test_client, app = client_with_env
+    monkeypatch.setattr(
+        app.state.job_store,
+        "claim_preprocess_job",
+        lambda job_id, **kwargs: PreprocessClaim("busy", {}),
+    )
+
+    assert _worker_post(test_client, "job-1").status_code == 409
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_WORKER_ENV], indirect=True)
+def test_preprocess_worker_endpoint_fails_a_job_out_of_attempts(client_with_env, monkeypatch):
+    from src.backend.job_store import PreprocessClaim
+
+    test_client, app = client_with_env
+    failed = []
+
+    async def fail_exhausted(job_id):
+        failed.append(job_id)
+
+    monkeypatch.setattr(
+        app.state.job_store,
+        "claim_preprocess_job",
+        lambda job_id, **kwargs: PreprocessClaim("exhausted", {}, attempt=3),
+    )
+    monkeypatch.setattr(app.state.orchestrator, "fail_exhausted_preprocess_job", fail_exhausted)
+
+    response = _worker_post(test_client, "job-1")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "exhausted"}
+    assert failed == ["job-1"]
+
+
+_PREPROCESS_HTTP_DISPATCH_ENV = {
+    "SESSION_STORE": "firestore",
+    "PREPROCESS_DISPATCH_MODE": "http",
+    "PREPROCESS_WORKER_URL": "http://worker.test",
+    "PREPROCESS_WORKER_TOKEN": "worker-secret",
+}
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_HTTP_DISPATCH_ENV], indirect=True)
+def test_dispatching_a_preprocess_job_saves_its_spec_and_hands_it_to_the_worker(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    orchestrator = app.state.orchestrator
+    job_id = "job-dispatched"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+    dispatched = []
+
+    async def dispatch(dispatched_job_id):
+        dispatched.append(dispatched_job_id)
+
+    monkeypatch.setattr(orchestrator._preprocess_dispatcher, "dispatch", dispatch)
+    plan_call = ToolCall(
+        name="preprocess_voice_parts", arguments={"request": {"plan": {"targets": [[1, 2]]}}}
+    )
+
+    response = asyncio.run(
+        orchestrator._dispatch_preprocess_job(
+            session_id,
+            job_id,
+            [plan_call],
+            user_email="test@example.com",
+            initial_message="Preparing the Alto part.",
+            initial_thought_summary="thinking",
+            planning_context={"phase": "initial_preprocess_planning"},
+            originating_turn_id="turn-123",
+        )
+    )
+
+    assert response["type"] == "chat_progress"
+    assert response["job_id"] == job_id
+    assert dispatched == [job_id]
+    _, job_data = app.state.job_store.get_job_by_id(
+        job_id=job_id, user_id="test-user", session_id=session_id
+    )
+    spec = json.loads(job_data["preprocessSpecJson"])
+    assert spec == {
+        "initialMessage": "Preparing the Alto part.",
+        "initialThoughtSummary": "thinking",
+        "llmCallsUsed": 0,
+        "originatingTurnId": "turn-123",
+        "planningContext": {"phase": "initial_preprocess_planning"},
+        "toolCalls": [
+            {
+                "name": "preprocess_voice_parts",
+                "arguments": {"request": {"plan": {"targets": [[1, 2]]}}},
+            }
+        ],
+        "userEmail": "test@example.com",
+    }
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_HTTP_DISPATCH_ENV], indirect=True)
+def test_a_preprocess_job_that_cannot_be_dispatched_fails_with_a_message(
+    client_with_env, monkeypatch
+):
+    from src.backend.preprocess_dispatch import PreprocessDispatchError
+
+    test_client, app = client_with_env
+    session_id = _create_session(test_client)
+    orchestrator = app.state.orchestrator
+    app.state.job_store.create_job(
+        job_id="job-undelivered", user_id="test-user", session_id=session_id, status="queued"
+    )
+    failed = []
+
+    async def dispatch(job_id):
+        raise PreprocessDispatchError("queue refused")
+
+    def fail_job_if_active(job_id, **kwargs):
+        failed.append((job_id, kwargs["error"]))
+        return True
+
+    monkeypatch.setattr(orchestrator._preprocess_dispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(app.state.orchestrator._job_store, "fail_job_if_active", fail_job_if_active)
+
+    response = asyncio.run(
+        orchestrator._dispatch_preprocess_job(
+            session_id,
+            "job-undelivered",
+            [],
+            user_email="test@example.com",
+            initial_message="Preparing.",
+            initial_thought_summary="",
+            planning_context=None,
+            originating_turn_id=None,
+        )
+    )
+
+    assert response == {
+        "type": "chat_error",
+        "message": backend_message("job.preprocess_dispatch_failed"),
+    }
+    assert failed == [("job-undelivered", "dispatch_failed")]
+
+
+@pytest.mark.parametrize("client_with_env", [_PREPROCESS_HTTP_DISPATCH_ENV], indirect=True)
+def test_a_session_waits_for_its_dispatched_preprocess_job_unless_the_job_is_abandoned(
+    client_with_env, monkeypatch
+):
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    latest = {
+        "jobKind": "preprocess",
+        "status": "running",
+        "leaseExpiresAt": datetime.now(timezone.utc) + timedelta(seconds=30),
+    }
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "get_latest_job_by_session",
+        lambda **kwargs: ("job-1", latest),
+    )
+
+    busy = asyncio.run(orchestrator._preprocess_busy_response("s1", "u1"))
+    assert busy is not None and busy["type"] == "chat_text"
+
+    latest["leaseExpiresAt"] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    assert asyncio.run(orchestrator._preprocess_busy_response("s1", "u1")) is None
+
+    latest.update(status="completed")
+    assert asyncio.run(orchestrator._preprocess_busy_response("s1", "u1")) is None
+
+
+def test_a_dispatched_preprocess_job_runs_from_its_spec_and_releases_while_attempts_remain(
+    client, monkeypatch
+):
+    from src.backend.orchestrator import _llm_turn_budget
+
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    spec = {
+        "toolCalls": [{"name": "preprocess_voice_parts", "arguments": {"request": {}}}],
+        "planningContext": {"phase": "initial_preprocess_planning"},
+        "initialMessage": "Preparing the Alto part.",
+        "initialThoughtSummary": "thinking",
+        "originatingTurnId": "turn-123",
+        "userEmail": "test@example.com",
+        "llmCallsUsed": 2,
+    }
+    job = {"sessionId": "s1", "userId": "u1", "preprocessSpecJson": json.dumps(spec)}
+    runs = []
+    releases = []
+
+    async def get_snapshot(session_id, user_id):
+        return {"current_score": {"score": {"title": "Score"}, "version": 3}}
+
+    async def run_preprocess_job(session_id, score, tool_calls, job_id, user_id, user_email, **kwargs):
+        budget = _llm_turn_budget.get()
+        runs.append(
+            {
+                "args": (session_id, score, tool_calls, job_id, user_id, user_email),
+                "kwargs": {k: v for k, v in kwargs.items() if k != "on_interrupt"},
+                "budget_calls": budget.calls,
+                "released": await kwargs["on_interrupt"](),
+            }
+        )
+
+    def release(job_id, *, worker_id, message):
+        releases.append((job_id, worker_id, message))
+        return True
+
+    monkeypatch.setattr(orchestrator._sessions, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(orchestrator, "_run_preprocess_job", run_preprocess_job)
+    monkeypatch.setattr(orchestrator._job_store, "release_preprocess_job_for_retry", release)
+
+    asyncio.run(
+        orchestrator.run_dispatched_preprocess_job("job-1", job, attempt=1, worker_id="w1")
+    )
+    asyncio.run(
+        orchestrator.run_dispatched_preprocess_job("job-1", job, attempt=3, worker_id="w2")
+    )
+
+    first, last = runs
+    assert first["args"] == (
+        "s1",
+        {"title": "Score"},
+        [ToolCall(name="preprocess_voice_parts", arguments={"request": {}})],
+        "job-1",
+        "u1",
+        "test@example.com",
+    )
+    assert first["kwargs"] == {
+        "initial_message": "Preparing the Alto part.",
+        "initial_thought_summary": "thinking",
+        "planning_context": {"phase": "initial_preprocess_planning"},
+        "originating_turn_id": "turn-123",
+    }
+    assert first["budget_calls"] == 2
+    assert first["released"] is True
+    assert last["released"] is False
+    assert releases == [("job-1", "w1", backend_message("job.preprocess_retrying"))]
+
+
+def _dispatched_job():
+    spec = {"toolCalls": [], "initialMessage": "Preparing.", "userEmail": "test@example.com"}
+    return {"sessionId": "s1", "userId": "u1", "preprocessSpecJson": json.dumps(spec)}
+
+
+def test_a_dispatched_preprocess_job_fails_when_its_session_is_gone(client, monkeypatch):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    failed = []
+
+    async def get_snapshot(session_id, user_id):
+        raise KeyError(session_id)
+
+    def fail_job_if_active(job_id, **kwargs):
+        failed.append((job_id, kwargs["error"]))
+        return True
+
+    monkeypatch.setattr(orchestrator._sessions, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(orchestrator._job_store, "fail_job_if_active", fail_job_if_active)
+
+    asyncio.run(
+        orchestrator.run_dispatched_preprocess_job(
+            "job-1", _dispatched_job(), attempt=1, worker_id="w1"
+        )
+    )
+
+    assert failed == [("job-1", "dispatch_failed")]
+
+
+def test_a_dispatched_preprocess_job_hands_itself_back_on_an_unexpected_error(
+    client, monkeypatch
+):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    releases = []
+
+    async def get_snapshot(session_id, user_id):
+        raise RuntimeError("Firestore unavailable")
+
+    def release(job_id, *, worker_id, message):
+        releases.append((job_id, worker_id))
+        return True
+
+    monkeypatch.setattr(orchestrator._sessions, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(orchestrator._job_store, "release_preprocess_job_for_retry", release)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            orchestrator.run_dispatched_preprocess_job(
+                "job-1", _dispatched_job(), attempt=1, worker_id="w1"
+            )
+        )
+
+    assert releases == [("job-1", "w1")]
 
 
 def test_unsupported_lyric_language_action_required_logs_error_for_triage(
