@@ -1,0 +1,41 @@
+# CPU-only image for the line-preparation (preprocess) worker service.
+#
+# It runs the same backend as the GPU API with MCP_GPU_ENABLED=false, so it
+# leaves out what only synthesis needs: the CUDA base, onnxruntime-gpu, the
+# vocoder and the ffmpeg binary (the ffmpeg-python package is still imported,
+# but only synthesis and audio mixing run it). Same Python as the billing image.
+
+FROM python:3.11-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
+    && /opt/venv/bin/python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng', download_dir='/opt/nltk_data')"
+
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    PYTHONPATH=/app \
+    PATH=/opt/venv/bin:$PATH \
+    NLTK_DATA=/opt/nltk_data
+
+# libsndfile for soundfile, libgomp for onnxruntime.
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=build /opt/venv /opt/venv
+COPY --from=build /opt/nltk_data /opt/nltk_data
+COPY env/voicebank_manifest.dev.json /app/env/voicebank_manifest.dev.json
+COPY env/voicebank_manifest.prod.json /app/env/voicebank_manifest.prod.json
+COPY src /app/src
+
+CMD ["python3", "-m", "src.backend.server", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug", "--access-log"]

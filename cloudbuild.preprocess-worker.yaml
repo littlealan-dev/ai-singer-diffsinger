@@ -1,0 +1,23 @@
+steps:
+  - name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        mkdir -p /workspace/preprocess-worker-context/env
+        cp Dockerfile.preprocess-worker /workspace/preprocess-worker-context/Dockerfile.preprocess-worker
+        cp requirements.txt /workspace/preprocess-worker-context/requirements.txt
+        cp env/voicebank_manifest.dev.json env/voicebank_manifest.prod.json /workspace/preprocess-worker-context/env/
+        cp -R src /workspace/preprocess-worker-context/src
+  - name: gcr.io/cloud-builders/docker
+    dir: /workspace/preprocess-worker-context
+    args:
+      - build
+      - -f
+      - Dockerfile.preprocess-worker
+      - -t
+      - ${_PREPROCESS_WORKER_IMAGE}
+      - .
+
+images:
+  - ${_PREPROCESS_WORKER_IMAGE}

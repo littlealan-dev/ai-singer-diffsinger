@@ -1,0 +1,4 @@
+# Upload filter for scripts/build_preprocess_worker_prod.sh: the backend's,
+# plus the vocoder model, which only the GPU image needs.
+#!include:.gcloudignore
+bundled_assets/
