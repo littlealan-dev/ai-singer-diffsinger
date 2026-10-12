@@ -17,6 +17,7 @@ from src.api.diffsinger_linguistic_inputs import (
 )
 from src.api.voicebank import load_voicebank_config, load_speaker_embed
 from src.api.vocode import vocode
+from src.api import loaded_voices
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -67,9 +68,17 @@ def _load_stage_language_map(
     return load_language_map(candidate)
 
 
-def _get_model(model_class, model_path: Path, device: str = "cpu"):
-    """Get or create a cached model instance."""
+def _get_model(
+    model_class,
+    model_path: Path,
+    device: str = "cpu",
+    *,
+    voicebank: Optional[Path] = None,
+):
+    """Get or create a cached model instance, recording which voicebank uses it."""
     cache_key = f"{model_class.__name__}:{model_path}"
+    if voicebank is not None:
+        loaded_voices.use(voicebank, _model_cache, cache_key)
     start = time.monotonic()
     if cache_key not in _model_cache:
         # Cache instantiated models to avoid repeated disk loading.
@@ -115,7 +124,7 @@ def _load_linguistic_model(voicebank_path: Path, device: str = "cpu") -> Linguis
     if dsdur_path.exists():
         conf = yaml.safe_load((dsdur_path / "dsconfig.yaml").read_text())
         ling_path = dsdur_path / conf["linguistic"]
-        return _get_model(LinguisticModel, ling_path.resolve(), device)
+        return _get_model(LinguisticModel, ling_path.resolve(), device, voicebank=voicebank_path)
     raise FileNotFoundError("Linguistic model not found in voicebank")
 
 
@@ -125,7 +134,7 @@ def _load_duration_model(voicebank_path: Path, device: str = "cpu") -> DurationM
     if dsdur_path.exists():
         conf = yaml.safe_load((dsdur_path / "dsconfig.yaml").read_text())
         dur_path = dsdur_path / conf["dur"]
-        return _get_model(DurationModel, dur_path.resolve(), device)
+        return _get_model(DurationModel, dur_path.resolve(), device, voicebank=voicebank_path)
     raise FileNotFoundError("Duration model not found in voicebank")
 
 
@@ -135,7 +144,7 @@ def _load_pitch_model(voicebank_path: Path, device: str = "cpu") -> Optional[Pit
     if dspitch_path.exists():
         conf = yaml.safe_load((dspitch_path / "dsconfig.yaml").read_text())
         pitch_path = dspitch_path / conf["pitch"]
-        return _get_model(PitchModel, pitch_path.resolve(), device)
+        return _get_model(PitchModel, pitch_path.resolve(), device, voicebank=voicebank_path)
     return None
 
 
@@ -150,7 +159,7 @@ def _load_pitch_linguistic_model(
         ling_name = conf.get("linguistic")
         if ling_name:
             ling_path = dspitch_path / ling_name
-            return _get_model(LinguisticModel, ling_path.resolve(), device)
+            return _get_model(LinguisticModel, ling_path.resolve(), device, voicebank=voicebank_path)
     return None
 
 
@@ -161,7 +170,7 @@ def _load_variance_model(voicebank_path: Path, device: str = "cpu") -> Optional[
         conf = yaml.safe_load((dsvariance_path / "dsconfig.yaml").read_text())
         if "variance" in conf:
             variance_path = dsvariance_path / conf["variance"]
-            return _get_model(VarianceModel, variance_path.resolve(), device)
+            return _get_model(VarianceModel, variance_path.resolve(), device, voicebank=voicebank_path)
     return None
 
 
@@ -176,7 +185,7 @@ def _load_variance_linguistic_model(
         ling_name = conf.get("linguistic")
         if ling_name:
             ling_path = dsvariance_path / ling_name
-            return _get_model(LinguisticModel, ling_path.resolve(), device)
+            return _get_model(LinguisticModel, ling_path.resolve(), device, voicebank=voicebank_path)
     return None
 
 
@@ -220,11 +229,11 @@ def _load_acoustic_model(voicebank_path: Path, device: str = "cpu") -> AcousticM
     """Load acoustic model from voicebank."""
     conf = yaml.safe_load((voicebank_path / "dsconfig.yaml").read_text())
     if "acoustic" in conf:
-        return _get_model(AcousticModel, (voicebank_path / conf["acoustic"]).resolve(), device)
+        return _get_model(AcousticModel, (voicebank_path / conf["acoustic"]).resolve(), device, voicebank=voicebank_path)
     dsmain = voicebank_path / "dsmain"
     if dsmain.exists():
         conf = yaml.safe_load((dsmain / "dsconfig.yaml").read_text())
-        return _get_model(AcousticModel, (dsmain / conf["acoustic"]).resolve(), device)
+        return _get_model(AcousticModel, (dsmain / conf["acoustic"]).resolve(), device, voicebank=voicebank_path)
     raise FileNotFoundError("Acoustic model not found in voicebank")
 
 

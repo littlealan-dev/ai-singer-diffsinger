@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.vocoder.model import Vocoder
 from src.api.voicebank import load_voicebank_config, resolve_vocoder_model_path
+from src.api import loaded_voices
 from src.mcp.logging_utils import get_logger, summarize_payload
 
 logger = get_logger(__name__)
@@ -21,6 +22,7 @@ _vocoder_cache: Dict[str, Vocoder] = {}
 def _load_vocoder(voicebank_path: Path, device: str = "cpu") -> Vocoder:
     """Load vocoder from voicebank."""
     cache_key = f"vocoder:{voicebank_path}:{device}"
+    loaded_voices.use(voicebank_path, _vocoder_cache, cache_key)
     if cache_key in _vocoder_cache:
         return _vocoder_cache[cache_key]
 

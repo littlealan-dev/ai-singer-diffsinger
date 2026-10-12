@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 
+from src.ort_memory import cuda_provider, run_options_for
+
 
 class Vocoder:
     """
@@ -19,6 +21,7 @@ class Vocoder:
         self.model_path = model_path
         self.device = device
         self.session = self._load_session()
+        self._run_options = run_options_for(self.session)
         self.input_names = [node.name for node in self.session.get_inputs()]
         self.output_names = [node.name for node in self.session.get_outputs()]
 
@@ -32,7 +35,7 @@ class Vocoder:
         if self.device == "cuda":
             # Prefer CUDA when available.
             if "CUDAExecutionProvider" in available:
-                providers.insert(0, "CUDAExecutionProvider")
+                providers.insert(0, cuda_provider())
             else:
                 logging.warning(
                     "cuda_provider_unavailable model=%s available=%s",
@@ -80,5 +83,5 @@ class Vocoder:
             "mel": mel,
             "f0": f0,
         }
-        outputs = self.session.run(self.output_names, inputs)
+        outputs = self.session.run(self.output_names, inputs, self._run_options)
         return outputs[0]

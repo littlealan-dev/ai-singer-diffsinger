@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 
+from src.ort_memory import cuda_provider, run_options_for
+
 class DiffSingerModel:
     """Base class for DiffSinger ONNX models."""
     def __init__(self, model_path: Path, device: str = "cpu"):
@@ -14,6 +16,7 @@ class DiffSingerModel:
         self.model_path = model_path
         self.device = device
         self.session = self._load_session()
+        self._run_options = run_options_for(self.session)
         self.input_names = [node.name for node in self.session.get_inputs()]
         self.output_names = [node.name for node in self.session.get_outputs()]
 
@@ -27,7 +30,7 @@ class DiffSingerModel:
         if self.device == "cuda":
             # Prefer CUDA when available.
             if "CUDAExecutionProvider" in available:
-                providers.insert(0, "CUDAExecutionProvider")
+                providers.insert(0, cuda_provider())
             else:
                 logging.warning(
                     "cuda_provider_unavailable model=%s available=%s",
@@ -67,7 +70,7 @@ class DiffSingerModel:
         # Filter inputs that are not expected by the model.
         filtered_inputs = {k: v for k, v in inputs.items() if k in self.input_names}
         # Check for missing required inputs? (ONNX runtime will handle this, but we can warn.)
-        return self.session.run(self.output_names, filtered_inputs)
+        return self.session.run(self.output_names, filtered_inputs, self._run_options)
 
     def verify_input_names(self, inputs: Dict[str, Any]):
         """Log missing input names for debugging."""
