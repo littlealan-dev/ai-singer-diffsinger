@@ -39,6 +39,7 @@ from src.backend.mcp_client import (
 )
 from src.backend.orchestrator import (
     BootstrapPlanBaseline,
+    IGNORED_SYNTHESIS_TARGET_FIELDS,
     LLM_CALLS_PER_TURN_LIMIT,
     TOOL_RESULT_PREFIX,
     _LlmTurnBudget,
@@ -4075,6 +4076,78 @@ def test_a_refused_confirmation_names_the_choice_that_changed(client, monkeypatc
     # The nested quote is the quote tool's own payload.
     assert set(new_quote) == set(first_quote)
     assert new_quote["quote_id"] != first_quote["quote_id"]
+
+
+@pytest.mark.parametrize(
+    "quote_extras, confirm_extras",
+    [
+        # The shapes the model used in one production session (SIG-103): the same
+        # part, named with different optional selectors on each call.
+        (
+            {"voice_id": "P_DERIVED_87F991C3E8", "source_voice_part_id": "voice part 1"},
+            {
+                "voice_id": "P_DERIVED_87F991C3E8",
+                "source_voice_part_id": "voice part 1",
+                "voice_part_id": "Women - voice part 1 (Derived)",
+            },
+        ),
+        ({"voice_part_id": "Women - voice part 1 (Derived)"}, {}),
+        ({}, {"voice_part_id": "voice part 1", "allow_lyric_propagation": True}),
+    ],
+)
+def test_naming_the_part_differently_does_not_refuse_the_confirmation(
+    client, monkeypatch, quote_extras, confirm_extras
+):
+    test_client, app = client
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    target = {
+        "part_id": "Alto",
+        "voicebank": "Dummy",
+        "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+    }
+    llm_client = _RecordingQuoteClient({**target, **quote_extras})
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
+    assert quote.status_code == 200
+    first_quote = _message_only_payload(llm_client.tool_results[-1])
+    assert first_quote["status"] == "quote_ready"
+    assert not set(first_quote["render_choices"]) & set(IGNORED_SYNTHESIS_TARGET_FIELDS)
+
+    llm_client._arguments = {**target, **confirm_extras}
+    confirm = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert confirm.status_code == 200
+    assert "arguments" in started, (confirm.json(), llm_client.tool_results[-1:])
+    assert not set(started["arguments"]) & set(IGNORED_SYNTHESIS_TARGET_FIELDS)
+    assert llm_client.observed_quote_ids[-1] == first_quote["quote_id"]
+
+
+def test_the_synthesis_tools_offer_only_part_id_as_the_target():
+    from src.mcp.tools import list_tools
+
+    for tool in list_tools({"prepare_synthesis_quote", "synthesize"}):
+        properties = tool["inputSchema"]["properties"]
+        assert "part_id" in tool["inputSchema"]["required"]
+        assert not set(properties) & set(IGNORED_SYNTHESIS_TARGET_FIELDS), tool["name"]
 
 
 @pytest.mark.parametrize("cause", ["score_version_changed", "quote_already_consumed"])

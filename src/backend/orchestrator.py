@@ -165,6 +165,16 @@ MAX_MEASURE_CHANGE_RATIO = 0.8
 TOOL_REPARSE = "reparse"
 TOOL_PREPARE_SYNTHESIS_QUOTE = "prepare_synthesis_quote"
 ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY = "active_synthesis_quote_id"
+# A synthesis target is one part_id: synthesis accepts only single-line parts (a
+# multi-voice raw part must be split first), so these selectors name nothing more.
+# The model still sends them inconsistently between quote and synthesize, which
+# changed the quote's render-choice hash, so they are dropped, not resolved.
+IGNORED_SYNTHESIS_TARGET_FIELDS = (
+    "voice_id",
+    "voice_part_id",
+    "source_voice_part_id",
+    "allow_lyric_propagation",
+)
 INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY = "instrumental_midi_source_signature"
 # Where each published MIDI file lives in storage, so an instance whose disk
 # never had it can restore it. Keyed by kind: "written" or "expanded".
@@ -6643,10 +6653,6 @@ class Orchestrator:
             "voicebank",
             "language",
             "part_id",
-            "voice_id",
-            "voice_part_id",
-            "allow_lyric_propagation",
-            "source_voice_part_id",
             "lyric_selection",
             "voice_color",
             "articulation",
@@ -6668,7 +6674,6 @@ class Orchestrator:
         # binds the same choices as one that omits it.
         choices.setdefault("require_solfege_lyrics", False)
         choices.setdefault("solfege_pronunciation_patch", False)
-        choices.setdefault("allow_lyric_propagation", False)
         return choices
 
     @staticmethod
@@ -6975,7 +6980,9 @@ class Orchestrator:
         The prepare_synthesis_quote tool and a refused synthesize call both use
         this, so both return the same success and failure payloads.
         """
-        quote_args = dict(call.arguments)
+        quote_args = self._without_ignored_synthesis_target_fields(
+            call.arguments, session_id=session_id, tool=call.name
+        )
         quote_args["expand_repeats"] = expand_repeats
         quote_args = self._canonicalize_active_synthesis_target(
             quote_args,
@@ -7704,7 +7711,9 @@ class Orchestrator:
                     score_player_takes=score_player_takes,
                 )
             if call.name == "synthesize":
-                synth_args = dict(call.arguments)
+                synth_args = self._without_ignored_synthesis_target_fields(
+                    call.arguments, session_id=session_id, tool=call.name
+                )
                 # This is a UI-selected render option, not a notation edit or
                 # an LLM decision. It must override any tool-call default.
                 synth_args["expand_repeats"] = expand_repeats
@@ -8098,6 +8107,14 @@ class Orchestrator:
                             )
                             if changed:
                                 action_required["changed_choices"] = changed
+                        self._logger.info(
+                            "synthesis_quote_refresh_required session=%s reason=%s "
+                            "changed_choices=%s requoted=%s",
+                            session_id,
+                            action_required["reason"],
+                            ",".join(sorted(action_required.get("changed_choices") or [])),
+                            quoted,
+                        )
                         return ToolExecutionResult(
                             score=requote.score,
                             audio_response={"type": "chat_text", "message": ""},
@@ -8873,6 +8890,23 @@ class Orchestrator:
                 "detail": detail,
             },
         }
+
+    def _without_ignored_synthesis_target_fields(
+        self, arguments: Dict[str, Any], *, session_id: str, tool: str
+    ) -> Dict[str, Any]:
+        """Return the arguments with the target selectors part_id makes redundant removed."""
+        cleaned = dict(arguments)
+        ignored = [
+            field for field in IGNORED_SYNTHESIS_TARGET_FIELDS if cleaned.pop(field, None) is not None
+        ]
+        if ignored:
+            self._logger.info(
+                "synthesis_target_fields_ignored session=%s tool=%s fields=%s",
+                session_id,
+                tool,
+                ",".join(ignored),
+            )
+        return cleaned
 
     def _canonicalize_active_synthesis_target(
         self,

@@ -1970,11 +1970,14 @@ TOOLS: List[Tool] = [
                 },
                 "confirmed_voicebank_override": {"type": "boolean", "default": False},
                 "language": {"type": "string", "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$"},
-                "part_id": {"type": "string"},
-                "voice_id": {"type": ["string", "null"]},
-                "voice_part_id": {"type": ["string", "null"]},
-                "allow_lyric_propagation": {"type": "boolean"},
-                "source_voice_part_id": {"type": ["string", "null"]},
+                "part_id": {
+                    "type": "string",
+                    "description": (
+                        "The one target to sing: exact parser-visible score_summary.parts[].part_id "
+                        "(a derived lane's derived_part_id after line preparation). Do not use "
+                        "part_name, raw_part_id, or a positional index, and send no other target field."
+                    ),
+                },
                 "lyric_selection": {
                     "type": "object",
                     "properties": {
@@ -2128,25 +2131,10 @@ TOOLS: List[Tool] = [
                 "part_id": {
                     "type": "string",
                     "description": (
-                        "Exact parser-visible score_summary.parts[].part_id. "
+                        "The one target to sing: exact parser-visible score_summary.parts[].part_id, "
+                        "the same value as in the confirmed quote. "
                         "Do not use part_name, raw_part_id, or a positional index."
                     ),
-                },
-                "voice_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional original MusicXML voice id override when targeting a raw part.",
-                },
-                "voice_part_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional normalized voice-part id hint for line-preparation-aware flows.",
-                },
-                "allow_lyric_propagation": {
-                    "type": "boolean",
-                    "description": "Whether synth preflight may attempt lyric propagation on simple cases.",
-                },
-                "source_voice_part_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional source voice-part id hint for lyric propagation or derived-target reuse.",
                 },
                 "lyric_selection": {
                     "type": "object",
