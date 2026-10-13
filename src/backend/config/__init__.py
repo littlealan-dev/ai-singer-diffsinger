@@ -25,6 +25,25 @@ def _env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def _dispatch_route_env(prefix: str) -> tuple[str, str, str, str]:
+    """Read and check one job kind's dispatch settings: mode, worker URL, queue, audience."""
+    mode = os.getenv(f"{prefix}_DISPATCH_MODE", "inline").strip().lower() or "inline"
+    if mode not in {"inline", "http", "cloud_tasks"}:
+        raise ValueError(f"{prefix}_DISPATCH_MODE must be one of inline, http, cloud_tasks.")
+    worker_url = os.getenv(f"{prefix}_WORKER_URL", "").strip().rstrip("/")
+    if mode != "inline" and not worker_url:
+        raise ValueError(
+            f"{prefix}_WORKER_URL is required when {prefix}_DISPATCH_MODE is {mode}."
+        )
+    tasks_queue = os.getenv(f"{prefix}_TASKS_QUEUE", "").strip()
+    if mode == "cloud_tasks" and not tasks_queue:
+        raise ValueError(
+            f"{prefix}_TASKS_QUEUE is required when {prefix}_DISPATCH_MODE is cloud_tasks."
+        )
+    audience = os.getenv(f"{prefix}_WORKER_AUDIENCE", "").strip() or worker_url
+    return mode, worker_url, tasks_queue, audience
+
+
 def _env_bool(name: str, default: bool) -> bool:
     """Read a boolean env var with a default."""
     value = os.getenv(name)
@@ -185,8 +204,22 @@ class Settings:
     preprocess_tasks_queue: str = ""
     preprocess_job_max_dispatch_attempts: int = 3
     preprocess_job_lease_seconds: float = 90.0
+    # Synthesis jobs: the same modes and worker contract as line preparation,
+    # served by the GPU worker at POST /internal/synthesis-jobs/{job_id}.
+    synthesis_dispatch_mode: str = "inline"
+    synthesis_worker_url: str = ""
+    synthesis_worker_enabled: bool = False
+    synthesis_worker_token: str = ""
+    synthesis_worker_invoker_service_account: str = ""
+    synthesis_worker_audience: str = ""
+    synthesis_tasks_queue: str = ""
+    synthesis_job_max_dispatch_attempts: int = 3
+    synthesis_job_lease_seconds: float = 90.0
     # The worker service has no GPU, so it starts only the CPU MCP worker.
     mcp_gpu_enabled: bool = True
+    # Start MCP on the first tool call rather than at boot: for request-billed
+    # services, whose CPU is throttled outside requests.
+    mcp_start_on_first_call: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -310,27 +343,20 @@ class Settings:
         mcp_timeout_seconds = _env_float("MCP_TIMEOUT_SECONDS", 60.0)
         mcp_gpu_timeout_seconds = _env_float("MCP_GPU_TIMEOUT_SECONDS", 300.0)
         mcp_gpu_enabled = _env_bool("MCP_GPU_ENABLED", True)
-        preprocess_dispatch_mode = (
-            os.getenv("PREPROCESS_DISPATCH_MODE", "inline").strip().lower() or "inline"
-        )
-        if preprocess_dispatch_mode not in {"inline", "http", "cloud_tasks"}:
-            raise ValueError(
-                "PREPROCESS_DISPATCH_MODE must be one of inline, http, cloud_tasks."
-            )
-        preprocess_worker_url = os.getenv("PREPROCESS_WORKER_URL", "").strip().rstrip("/")
-        if preprocess_dispatch_mode != "inline" and not preprocess_worker_url:
-            raise ValueError(
-                "PREPROCESS_WORKER_URL is required when PREPROCESS_DISPATCH_MODE "
-                f"is {preprocess_dispatch_mode}."
-            )
-        preprocess_tasks_queue = os.getenv("PREPROCESS_TASKS_QUEUE", "").strip()
-        if preprocess_dispatch_mode == "cloud_tasks" and not preprocess_tasks_queue:
-            raise ValueError(
-                "PREPROCESS_TASKS_QUEUE is required when PREPROCESS_DISPATCH_MODE is cloud_tasks."
-            )
-        preprocess_worker_audience = (
-            os.getenv("PREPROCESS_WORKER_AUDIENCE", "").strip() or preprocess_worker_url
-        )
+        (
+            preprocess_dispatch_mode,
+            preprocess_worker_url,
+            preprocess_tasks_queue,
+            preprocess_worker_audience,
+        ) = _dispatch_route_env("PREPROCESS")
+        (
+            synthesis_dispatch_mode,
+            synthesis_worker_url,
+            synthesis_tasks_queue,
+            synthesis_worker_audience,
+        ) = _dispatch_route_env("SYNTHESIS")
+        preprocess_worker_enabled = _env_bool("PREPROCESS_WORKER_ENABLED", False)
+        synthesis_worker_enabled = _env_bool("SYNTHESIS_WORKER_ENABLED", False)
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         backend_ready_timeout_seconds = _env_float("BACKEND_READY_TIMEOUT_SECONDS", 240.0)
         backend_shutdown_total_seconds = _env_float(
@@ -375,10 +401,17 @@ class Settings:
         if session_store not in {"memory", "firestore"}:
             raise ValueError("SESSION_STORE must be either 'memory' or 'firestore'.")
         if session_store == "memory" and (
-            preprocess_dispatch_mode != "inline" or _env_bool("PREPROCESS_WORKER_ENABLED", False)
+            preprocess_dispatch_mode != "inline" or preprocess_worker_enabled
         ):
             raise ValueError(
                 "A separate preprocess worker reads sessions written by another "
+                "process, so it needs SESSION_STORE=firestore."
+            )
+        if session_store == "memory" and (
+            synthesis_dispatch_mode != "inline" or synthesis_worker_enabled
+        ):
+            raise ValueError(
+                "A separate synthesis worker reads sessions written by another "
                 "process, so it needs SESSION_STORE=firestore."
             )
         project_id = _project_id()
@@ -511,7 +544,7 @@ class Settings:
             in {"1", "true", "yes"},
             preprocess_dispatch_mode=preprocess_dispatch_mode,
             preprocess_worker_url=preprocess_worker_url,
-            preprocess_worker_enabled=_env_bool("PREPROCESS_WORKER_ENABLED", False),
+            preprocess_worker_enabled=preprocess_worker_enabled,
             preprocess_worker_token=os.getenv("PREPROCESS_WORKER_TOKEN", "").strip(),
             preprocess_worker_invoker_service_account=os.getenv(
                 "PREPROCESS_WORKER_INVOKER_SERVICE_ACCOUNT", ""
@@ -524,7 +557,27 @@ class Settings:
             preprocess_job_lease_seconds=max(
                 15.0, _env_float("PREPROCESS_JOB_LEASE_SECONDS", 90.0)
             ),
+            synthesis_dispatch_mode=synthesis_dispatch_mode,
+            synthesis_worker_url=synthesis_worker_url,
+            synthesis_worker_enabled=synthesis_worker_enabled,
+            synthesis_worker_token=os.getenv("SYNTHESIS_WORKER_TOKEN", "").strip(),
+            synthesis_worker_invoker_service_account=os.getenv(
+                "SYNTHESIS_WORKER_INVOKER_SERVICE_ACCOUNT", ""
+            ).strip().lower(),
+            synthesis_worker_audience=synthesis_worker_audience,
+            synthesis_tasks_queue=synthesis_tasks_queue,
+            synthesis_job_max_dispatch_attempts=max(
+                1, _env_int("SYNTHESIS_JOB_MAX_DISPATCH_ATTEMPTS", 3)
+            ),
+            synthesis_job_lease_seconds=max(
+                15.0, _env_float("SYNTHESIS_JOB_LEASE_SECONDS", 90.0)
+            ),
             mcp_gpu_enabled=mcp_gpu_enabled,
+            # Unset keeps the earlier behaviour: only the preprocess worker
+            # starts MCP on its first call.
+            mcp_start_on_first_call=_env_bool(
+                "MCP_START_ON_FIRST_CALL", preprocess_worker_enabled
+            ),
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_api_key_secret=gemini_api_key_secret,

@@ -12,7 +12,7 @@ import pytest
 from src.backend.config import Settings
 import src.backend.job_store as job_store_module
 from src.backend.job_store import JobStore
-import src.backend.preprocess_dispatch as dispatch_module
+import src.backend.job_dispatch as dispatch_module
 from src.backend.preprocess_dispatch import (
     WORKER_TOKEN_HEADER,
     PreprocessDispatchError,

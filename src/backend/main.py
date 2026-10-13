@@ -43,7 +43,7 @@ from src.backend.orchestrator import (
 )
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
-from src.backend.preprocess_dispatch import WORKER_TOKEN_HEADER
+from src.backend.job_dispatch import PREPROCESS_JOB_KIND, JobRoute, job_route
 from src.backend.message_catalog import backend_message
 from src.backend.credits import (
     get_instrumental_charge_state,
@@ -2258,32 +2258,35 @@ async def _get_snapshot_or_404(
 
 
 async def _require_preprocess_worker_caller(request: Request, settings: Settings) -> None:
-    """Admit only the preprocess dispatcher.
+    """Admit only the preprocess dispatcher."""
+    await _require_worker_caller(request, job_route(settings, PREPROCESS_JOB_KIND))
 
-    In Cloud Run that is Cloud Tasks, signing as the configured service account
-    for this service's URL; locally it is the backend holding the shared token.
+
+async def _require_worker_caller(request: Request, route: JobRoute) -> None:
+    """Admit only the dispatcher of this job kind.
+
+    In Cloud Run that is Cloud Tasks, signing as the kind's invoker service
+    account for this service's URL; locally it is the backend holding the
+    shared token.
     """
-    if settings.preprocess_worker_invoker_service_account:
+    if route.invoker_service_account:
         token = _extract_bearer_token(request)
         try:
-            claims = await asyncio.to_thread(
-                _verify_google_oidc_token, token, settings.preprocess_worker_audience
-            )
+            claims = await asyncio.to_thread(_verify_google_oidc_token, token, route.audience)
         except Exception as exc:
             raise HTTPException(status_code=401, detail="Invalid OIDC token.") from exc
         email = str(claims.get("email") or "").strip().lower()
-        if (
-            email != settings.preprocess_worker_invoker_service_account
-            or claims.get("email_verified") is not True
-        ):
+        if email != route.invoker_service_account or claims.get("email_verified") is not True:
             raise HTTPException(status_code=403, detail="Unexpected caller identity.")
         return
-    if settings.preprocess_worker_token:
-        supplied = request.headers.get(WORKER_TOKEN_HEADER, "")
-        if not hmac.compare_digest(supplied, settings.preprocess_worker_token):
+    if route.worker_token:
+        supplied = request.headers.get(route.token_header, "")
+        if not hmac.compare_digest(supplied, route.worker_token):
             raise HTTPException(status_code=401, detail="Invalid worker token.")
         return
-    raise HTTPException(status_code=503, detail="Preprocess worker caller is not configured.")
+    raise HTTPException(
+        status_code=503, detail=f"{route.kind.capitalize()} worker caller is not configured."
+    )
 
 
 def _verify_google_oidc_token(token: str, audience: str) -> Dict[str, Any]:

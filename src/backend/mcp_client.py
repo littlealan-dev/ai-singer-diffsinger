@@ -951,10 +951,10 @@ class McpRouter:
         self._startup_future: Future[None] | None = None
         self._startup_error: Optional[str] = None
         self._drain_established = threading.Event()
-        # The line-preparation worker is billed per request, so outside a
-        # request its CPU is throttled and a background start at boot cannot
-        # finish. It starts MCP on its first tool call, inside a job's request.
-        self.starts_on_first_call = settings.preprocess_worker_enabled
+        # A request-billed service (the line-preparation worker, a CPU API) has
+        # its CPU throttled outside requests, so a background start at boot
+        # cannot finish. It starts MCP on its first tool call, inside a request.
+        self.starts_on_first_call = settings.mcp_start_on_first_call
 
     def start(self) -> None:
         """Start both CPU and GPU MCP processes."""

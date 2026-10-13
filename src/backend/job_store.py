@@ -17,8 +17,8 @@ _MUTABLE_PROGRESS_STATUSES = {"queued", "running"}
 
 
 @dataclass(frozen=True)
-class PreprocessClaim:
-    """Outcome of a worker's attempt to take a dispatched preprocess job.
+class DispatchedJobClaim:
+    """Outcome of a worker's attempt to take a dispatched job (any kind).
 
     outcome is one of:
     - "claimed": this worker owns the job for `attempt` until its lease expires
@@ -31,6 +31,9 @@ class PreprocessClaim:
     outcome: str
     job: Dict[str, Any]
     attempt: int = 0
+
+
+PreprocessClaim = DispatchedJobClaim
 
 
 @dataclass
@@ -159,15 +162,15 @@ class JobStore:
             logger.exception("job_progress_update_failed job_id=%s", job_id)
             raise
 
-    def claim_preprocess_job(
+    def claim_dispatched_job(
         self,
         job_id: str,
         *,
         worker_id: str,
         lease_seconds: float,
         max_attempts: int,
-    ) -> PreprocessClaim:
-        """Take a queued (or lease-expired) preprocess job for one worker attempt.
+    ) -> DispatchedJobClaim:
+        """Take a queued (or lease-expired) dispatched job for one worker attempt.
 
         A worker that dies without releasing the job leaves it running; once
         its lease expires, the next dispatch takes it over as a new attempt.
@@ -178,14 +181,14 @@ class JobStore:
         transaction = self._client.transaction()
 
         @firestore.transactional
-        def _claim(transaction) -> PreprocessClaim:
+        def _claim(transaction) -> DispatchedJobClaim:
             snapshot = job_ref.get(transaction=transaction)
             if not snapshot.exists:
-                return PreprocessClaim("missing", {})
+                return DispatchedJobClaim("missing", {})
             data = snapshot.to_dict() or {}
             status = str(data.get("status") or "")
             if status not in _MUTABLE_PROGRESS_STATUSES:
-                return PreprocessClaim("finished", data)
+                return DispatchedJobClaim("finished", data)
             now = datetime.now(timezone.utc)
             lease_expires_at = data.get("leaseExpiresAt")
             if (
@@ -193,10 +196,10 @@ class JobStore:
                 and isinstance(lease_expires_at, datetime)
                 and lease_expires_at > now
             ):
-                return PreprocessClaim("busy", data)
+                return DispatchedJobClaim("busy", data)
             attempt = int(data.get("dispatchAttempt") or 0) + 1
             if attempt > max_attempts:
-                return PreprocessClaim("exhausted", data, attempt=attempt - 1)
+                return DispatchedJobClaim("exhausted", data, attempt=attempt - 1)
             transaction.set(
                 job_ref,
                 {
@@ -212,11 +215,11 @@ class JobStore:
             claimed.update(
                 {"status": "running", "dispatchAttempt": attempt, "leaseOwner": worker_id}
             )
-            return PreprocessClaim("claimed", claimed, attempt=attempt)
+            return DispatchedJobClaim("claimed", claimed, attempt=attempt)
 
         return _claim(transaction)
 
-    def renew_preprocess_lease(
+    def renew_job_lease(
         self, job_id: str, *, worker_id: str, lease_seconds: float
     ) -> bool:
         """Extend this worker's lease; False when the job is no longer its to run."""
@@ -243,7 +246,7 @@ class JobStore:
 
         return _renew(transaction)
 
-    def release_preprocess_job_for_retry(
+    def release_job_for_retry(
         self, job_id: str, *, worker_id: str, message: str
     ) -> bool:
         """Put an interrupted job back in the queue so the next dispatch can take it."""
@@ -352,6 +355,12 @@ class JobStore:
             return None
         doc = docs[0]
         return doc.id, doc.to_dict() or {}
+
+    # Line-preparation names, kept for existing callers.
+    claim_preprocess_job = claim_dispatched_job
+    renew_preprocess_lease = renew_job_lease
+    release_preprocess_job_for_retry = release_job_for_retry
+
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize job data into a progress payload for clients."""
