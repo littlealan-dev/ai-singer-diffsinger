@@ -70,7 +70,12 @@ from src.backend.firebase_app import (
     initialize_firebase_app,
     verify_id_token_claims,
 )
-from src.backend.storage_client import download_bytes, upload_file
+from src.backend.storage_client import (
+    download_byte_range,
+    download_bytes,
+    object_size,
+    upload_file,
+)
 from src.backend.waitlist import subscribe_to_waitlist, verify_app_check_token
 from src.backend.turnstile import verify_turnstile_token
 from src.backend.playback_tokens import (
@@ -95,6 +100,8 @@ from firebase_admin import app_check
 
 _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 _SYNTHESIS_STREAM_POLL_SECONDS = 1.2
+# Stored audio is read from Cloud Storage this many bytes at a time.
+_STORAGE_AUDIO_CHUNK_BYTES = 1024 * 1024
 _SYNTHESIS_STREAM_HEARTBEAT_SECONDS = 15.0
 _TERMINAL_PROGRESS_STATUSES = {"done", "error", "action_required"}
 _SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE = (
@@ -2827,25 +2834,40 @@ async def _stream_storage_audio(
     download: bool = False,
     file_name: str | None = None,
 ) -> Response:
-    """Fetch audio bytes from storage and return a typed response."""
+    """Serve stored audio, reading only the requested bytes from storage, in chunks."""
     media_type = _audio_media_type(storage_path)
-    data = await asyncio.to_thread(download_bytes, settings.storage_bucket, storage_path)
-    size = len(data)
+    bucket = settings.storage_bucket
+    size = await asyncio.to_thread(object_size, bucket, storage_path)
     headers = _audio_response_headers(download=download, file_name=file_name)
     byte_range = _parse_byte_range(request.headers.get("range"), size)
-    if byte_range is None:
-        headers["Content-Length"] = str(size)
-        return Response(content=data, media_type=media_type, headers=headers)
-    start, end = byte_range
-    content = data[start : end + 1]
-    headers["Content-Length"] = str(len(content))
-    headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    return Response(
-        content=content,
-        status_code=206,
+    start, end = byte_range if byte_range is not None else (0, size - 1)
+    headers["Content-Length"] = str(end - start + 1)
+    status_code = 200
+    if byte_range is not None:
+        status_code = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return StreamingResponse(
+        _iter_storage_range(bucket, storage_path, start, end),
+        status_code=status_code,
         media_type=media_type,
         headers=headers,
     )
+
+
+async def _iter_storage_range(
+    bucket: str, storage_path: str, start: int, end: int
+) -> AsyncIterator[bytes]:
+    """Yield bytes start..end of a stored object, one bounded download at a time."""
+    position = start
+    while position <= end:
+        chunk_end = min(position + _STORAGE_AUDIO_CHUNK_BYTES - 1, end)
+        chunk = await asyncio.to_thread(
+            download_byte_range, bucket, storage_path, position, chunk_end
+        )
+        if not chunk:
+            return
+        yield chunk
+        position += len(chunk)
 
 
 def _read_musicxml_content(path: Path, *, max_mxl_uncompressed_bytes: int) -> str:

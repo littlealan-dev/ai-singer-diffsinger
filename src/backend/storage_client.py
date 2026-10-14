@@ -107,6 +107,20 @@ def download_bytes(bucket_name: str, object_path: str) -> bytes:
     blob = bucket.blob(object_path)
     return blob.download_as_bytes()
 
+
+def object_size(bucket_name: str, object_path: str) -> int:
+    """Return an object's size in bytes; raise NotFound when it is missing."""
+    blob = get_bucket(bucket_name).get_blob(object_path)
+    if blob is None:
+        raise NotFound(object_path)
+    return int(blob.size or 0)
+
+
+def download_byte_range(bucket_name: str, object_path: str, start: int, end: int) -> bytes:
+    """Download bytes start..end (both inclusive) of an object."""
+    blob = get_bucket(bucket_name).blob(object_path)
+    return blob.download_as_bytes(start=start, end=end)
+
 def list_blobs(bucket_name: str, prefix: str) -> list[storage.Blob]:
     """List blobs in a bucket matching the prefix."""
     bucket = get_bucket(bucket_name)
