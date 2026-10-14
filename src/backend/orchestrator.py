@@ -41,6 +41,12 @@ from src.backend.gpu_errors import (
 )
 from src.backend.job_store import JobStore
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
+from src.backend.job_dispatch import (
+    SYNTHESIS_JOB_KIND,
+    JobDispatchError,
+    JobDispatcher,
+    job_route,
+)
 from src.backend.language_selection import (
     collect_score_lyrics,
     normalize_language_code,
@@ -219,9 +225,13 @@ class SynthesisActionRequired(RuntimeError):
 
 
 class SynthesisChatResponse(dict[str, Any]):
-    """Chat payload retaining the exact detached synthesis task for streaming."""
+    """Chat payload retaining the exact detached synthesis task for streaming.
 
-    def __init__(self, payload: Dict[str, Any], task: asyncio.Task[Any]) -> None:
+    The task is None when the job was dispatched to the synthesis worker: the
+    stream then follows only the job document.
+    """
+
+    def __init__(self, payload: Dict[str, Any], task: Optional[asyncio.Task[Any]]) -> None:
         super().__init__(payload)
         self.synthesis_task = task
 
@@ -266,8 +276,20 @@ class Orchestrator:
         }
         self._llm_tools = self._llm_tools_by_role[LlmRole.DEFAULT]
         self._score_tool_specs = list_tools(set(SCORE_LLM_TOOLS))
+        # Running synthesis jobs in this process, by job ID: inline jobs, and on
+        # the worker the dispatched job its request is running (so shutdown can
+        # hand it back for a retry).
         self._synthesis_tasks: Dict[str, asyncio.Task] = {}
         self._preprocess_tasks: Dict[str, asyncio.Task] = {}
+        # Outside "inline" mode a synthesis job runs on the GPU worker service,
+        # inside the worker's request.
+        self._synthesis_dispatcher = JobDispatcher(
+            job_route(settings, SYNTHESIS_JOB_KIND),
+            on_give_up=self._fail_undelivered_synthesis_job,
+        )
+        # Renders on this instance's GPU run one at a time (the GPU MCP worker
+        # serves one call at a time); a job waiting for it says so.
+        self._gpu_render_lock = asyncio.Lock()
         # Outside "inline" mode a preprocess job runs on the worker service,
         # inside the worker's request, rather than as a task in this process.
         self._preprocess_dispatcher = PreprocessDispatcher(
@@ -292,11 +314,11 @@ class Orchestrator:
 
     def _remove_synthesis_task_if_current(
         self,
-        session_id: str,
+        job_id: str,
         done: asyncio.Task[Any],
     ) -> None:
-        if self._synthesis_tasks.get(session_id) is done:
-            self._synthesis_tasks.pop(session_id, None)
+        if self._synthesis_tasks.get(job_id) is done:
+            self._synthesis_tasks.pop(job_id, None)
 
     async def shutdown_tasks(self, deadline: float) -> bool:
         """Cancel tracked background jobs and wait within the shared deadline."""
@@ -714,6 +736,35 @@ class Orchestrator:
             synth_args["voice_id"] = self._settings.default_voice_id
         if job_id is not None:
             synth_args["progress_job_id"] = job_id
+        if self._gpu_render_lock.locked() and job_id is not None:
+            await asyncio.to_thread(
+                self._job_store.update_job,
+                job_id,
+                status="running",
+                step="waiting",
+                message=backend_message("job.synthesis_waiting_for_singer"),
+            )
+        async with self._gpu_render_lock:
+            return await self._render_and_save_audio(
+                session_id,
+                score,
+                synth_args,
+                job_id=job_id,
+                user_id=user_id,
+                output_storage_path=output_storage_path,
+            )
+
+    async def _render_and_save_audio(
+        self,
+        session_id: str,
+        score: Dict[str, Any],
+        synth_args: Dict[str, Any],
+        *,
+        job_id: Optional[str],
+        user_id: Optional[str],
+        output_storage_path: Optional[str],
+    ) -> Dict[str, Any]:
+        """Render on the GPU MCP worker, encode the take and store it."""
         self._logger.info("mcp_call tool=synthesize session=%s", session_id)
         # Run synthesis on the MCP worker.
         synth_result = await asyncio.to_thread(
@@ -807,10 +858,11 @@ class Orchestrator:
                     lossless_storage_path,
                     "audio/wav",
                 )
-            await self._sessions.set_audio(
-                session_id, output_path, duration, storage_path=output_storage_path
-            )
-        else:
+            if await self._is_current_job(session_id, user_id, job_id):
+                await self._sessions.set_audio(
+                    session_id, output_path, duration, storage_path=output_storage_path
+                )
+        elif await self._is_current_job(session_id, user_id, job_id):
             await self._sessions.set_audio(session_id, output_path, duration)
         response = {
             "type": "chat_audio",
@@ -826,6 +878,28 @@ class Orchestrator:
         }
         self._write_e2e_synthesis_record(session_id, score, synth_args, response)
         return response
+
+    async def _is_current_job(
+        self, session_id: str, user_id: Optional[str], job_id: Optional[str]
+    ) -> bool:
+        """True unless a newer job has become the session's current one.
+
+        A take that finishes after a newer one started still completes (its own
+        job keeps its audio), but must not replace the session's current take.
+        """
+        if job_id is None:
+            return True
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        current_job_id = snapshot.get("current_job_id")
+        if current_job_id and current_job_id != job_id:
+            self._logger.info(
+                "synthesis_current_audio_kept session=%s job=%s current_job=%s",
+                session_id,
+                job_id,
+                current_job_id,
+            )
+            return False
+        return True
 
     def _write_e2e_synthesis_record(
         self,
@@ -895,10 +969,11 @@ class Orchestrator:
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a Firestore job and kick off synthesis in the background."""
-        existing = self._synthesis_tasks.get(session_id)
-        if existing and not existing.done():
-            existing.cancel()
+        """Create a Firestore job and start it: here, or on the synthesis worker.
+
+        A job already running in the session keeps running; the newer job
+        becomes the session's current one.
+        """
         if job_id is None:
             job_id = uuid.uuid4().hex
         render_type = arguments.get("render_type")
@@ -936,6 +1011,25 @@ class Orchestrator:
             message="Got it, getting ready to sing...",
             progress=0.0,
         )
+        accepted = {
+            "type": "chat_progress",
+            "message": "Give me a moment to prepare the take...",
+            "progress_url": _job_progress_url(session_id, job_id),
+            "job_id": job_id,
+        }
+        if self._synthesis_dispatcher.mode != "inline":
+            await self._dispatch_synthesis_job(
+                session_id,
+                job_id,
+                user_id=user_id,
+                score=score,
+                arguments=arguments,
+                input_path=input_path,
+                output_storage_path=output_storage_path,
+                billing_components=billing_components,
+                originating_turn_id=originating_turn_id,
+            )
+            return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
             self._run_synthesis_job(
                 session_id,
@@ -951,21 +1045,13 @@ class Orchestrator:
                 originating_turn_id=originating_turn_id,
             )
         )
-        self._synthesis_tasks[session_id] = task
+        self._synthesis_tasks[job_id] = task
 
         def _cleanup(done: asyncio.Task) -> None:
-            self._remove_synthesis_task_if_current(session_id, done)
+            self._remove_synthesis_task_if_current(job_id, done)
 
         task.add_done_callback(_cleanup)
-        return SynthesisChatResponse(
-            {
-                "type": "chat_progress",
-                "message": "Give me a moment to prepare the take...",
-                "progress_url": _job_progress_url(session_id, job_id),
-                "job_id": job_id,
-            },
-            task,
-        )
+        return SynthesisChatResponse(accepted, task)
 
     async def _start_preprocess_job(
         self,
@@ -1293,6 +1379,277 @@ class Orchestrator:
             )
         finally:
             heartbeat.cancel()
+
+    async def _dispatch_synthesis_job(
+        self,
+        session_id: str,
+        job_id: str,
+        *,
+        user_id: str,
+        score: Dict[str, Any],
+        arguments: Dict[str, Any],
+        input_path: Optional[str],
+        output_storage_path: Optional[str],
+        billing_components: Optional[List[str]],
+        originating_turn_id: Optional[str],
+    ) -> None:
+        """Save what the worker needs to run the job, then hand it to the worker.
+
+        The score is the exact one this request quoted and confirmed, so it is
+        stored with the job rather than re-read from the session, which may
+        change before the worker runs. Raises when the job cannot be handed
+        over; the caller then releases the reservation.
+        """
+        spec: Dict[str, Any] = {
+            "arguments": arguments,
+            "billingComponents": list(billing_components or []),
+            "originatingTurnId": originating_turn_id,
+            "outputStoragePath": output_storage_path,
+        }
+        if self._settings.backend_use_storage:
+            score_storage_path = _job_storage_score_path(user_id, session_id, job_id)
+            await asyncio.to_thread(
+                upload_bytes,
+                self._settings.storage_bucket,
+                json.dumps(score, sort_keys=True, default=str).encode("utf-8"),
+                score_storage_path,
+                "application/json",
+            )
+            spec["scoreStoragePath"] = score_storage_path
+        else:
+            # Only without storage (tests): the score travels in the job itself.
+            spec["score"] = score
+            spec["inputPath"] = input_path
+        # Stored as JSON text: Firestore cannot hold arrays nested in arrays.
+        await asyncio.to_thread(
+            self._job_store.update_job,
+            job_id,
+            jobKind="synthesis",
+            synthesisSpecJson=json.dumps(spec, sort_keys=True, default=str),
+        )
+        try:
+            await self._synthesis_dispatcher.dispatch(job_id)
+        except JobDispatchError as exc:
+            self._logger.error(
+                "synthesis_dispatch_failed session=%s job=%s error=%s",
+                session_id,
+                job_id,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._job_store.fail_job_if_active,
+                job_id,
+                message=backend_message("job.synthesis_dispatch_failed"),
+                error="dispatch_failed",
+                job_kind="synthesis",
+            )
+            raise
+        self._logger.info(
+            "synthesis_job_dispatched session=%s job=%s mode=%s",
+            session_id,
+            job_id,
+            self._synthesis_dispatcher.mode,
+        )
+
+    async def _fail_undelivered_synthesis_job(self, job_id: str) -> None:
+        """Release and fail a job no worker ran to the end, unless it finished."""
+        await self._release_and_fail_synthesis_job(
+            job_id,
+            message_key="job.synthesis_dispatch_failed",
+            error="dispatch_failed",
+        )
+
+    async def fail_exhausted_synthesis_job(self, job_id: str) -> None:
+        """Release and fail a job that was interrupted on every attempt it was allowed."""
+        await self._release_and_fail_synthesis_job(
+            job_id,
+            message_key="job.synthesis_attempts_exhausted",
+            error="interrupted",
+        )
+
+    async def _release_and_fail_synthesis_job(
+        self, job_id: str, *, message_key: str, error: str
+    ) -> None:
+        try:
+            job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        except Exception as exc:
+            self._logger.error("synthesis_job_read_failed job=%s error=%s", job_id, exc)
+            return
+        if not job or job.get("status") not in {"queued", "running"}:
+            return
+        user_id = str(job.get("userId") or "")
+        message = backend_message(message_key)
+        if not user_id or self._is_e2e_credit_bypass_enabled():
+            await asyncio.to_thread(
+                self._job_store.fail_job_if_active,
+                job_id,
+                message=message,
+                error=error,
+                job_kind="synthesis",
+            )
+            return
+        await self._release_and_finalize_synthesis_job(
+            user_id=user_id,
+            job_id=job_id,
+            terminal_fields={
+                "status": "failed",
+                "step": "error",
+                "message": message,
+                "progress": 1.0,
+                "errorMessage": f"Synthesis job not completed: {error}.",
+            },
+            reconciliation_fields=lambda release_status: {
+                "status": "failed",
+                "step": "error",
+                "message": backend_message(
+                    "job.audio_generation_and_billing_rollback_failed"
+                ),
+                "progress": 1.0,
+                "errorMessage": (
+                    f"Synthesis job not completed: {error}; "
+                    f"billing_rollback_status={release_status}"
+                ),
+            },
+            reservation_error=f"release_failed_after_{error}",
+            reservation_error_message=lambda release_status: (
+                f"Synthesis job not completed: {error}; "
+                f"billing_rollback_status={release_status}"
+            ),
+        )
+
+    async def run_dispatched_synthesis_job(
+        self,
+        job_id: str,
+        job: Dict[str, Any],
+        *,
+        attempt: int,
+        worker_id: str,
+    ) -> None:
+        """Run a claimed synthesis job inside the worker's request.
+
+        The worker's lease is renewed while the job runs. If the request is
+        cancelled (the instance is shutting down) and attempts remain, the job
+        goes back to the queue, keeping its reservation, for the dispatcher's
+        retry; otherwise it closes as the inline job always did.
+        """
+        session_id = str(job.get("sessionId") or "")
+        user_id = str(job.get("userId") or "")
+        try:
+            spec = json.loads(str(job.get("synthesisSpecJson") or ""))
+        except json.JSONDecodeError:
+            spec = None
+        if not session_id or not user_id or not isinstance(spec, dict):
+            self._logger.error("synthesis_dispatched_job_invalid job=%s", job_id)
+            await self._fail_undelivered_synthesis_job(job_id)
+            return
+        route = self._synthesis_dispatcher.route
+        lease_seconds = route.lease_seconds
+
+        async def release_for_retry() -> bool:
+            """Hand the job back unless this was its last attempt.
+
+            True even when the handback fails: the lease then lapses, or
+            another worker already holds it, so the job is not this run's to
+            close.
+            """
+            if attempt >= route.max_dispatch_attempts:
+                return False
+            released = await asyncio.to_thread(
+                self._job_store.release_job_for_retry,
+                job_id,
+                worker_id=worker_id,
+                message=backend_message("job.synthesis_retrying"),
+            )
+            self._logger.warning(
+                "synthesis_job_released_for_retry job=%s attempt=%s released=%s",
+                job_id,
+                attempt,
+                released,
+            )
+            return True
+
+        try:
+            score = await self._load_dispatched_synthesis_score(spec)
+        except Exception:
+            # Possibly transient (Cloud Storage): hand the job back now, so the
+            # dispatcher's retry need not wait out this lease.
+            self._logger.exception("synthesis_dispatched_score_unavailable job=%s", job_id)
+            if not await release_for_retry():
+                await self._fail_undelivered_synthesis_job(job_id)
+            raise
+        if not isinstance(score, dict):
+            self._logger.error("synthesis_dispatched_job_missing_score job=%s", job_id)
+            await self._fail_undelivered_synthesis_job(job_id)
+            return
+
+        heartbeat = asyncio.create_task(
+            self._renew_job_lease_until_cancelled(
+                "synthesis", job_id, worker_id=worker_id, lease_seconds=lease_seconds
+            ),
+            name=f"synthesis-lease-{job_id}",
+        )
+        current = asyncio.current_task()
+        if current is not None:
+            # Lets shutdown cancel this run, so it is handed back for a retry.
+            self._synthesis_tasks[job_id] = current
+        try:
+            await self._run_synthesis_job(
+                session_id,
+                score,
+                dict(spec.get("arguments") or {}),
+                job_id,
+                user_id,
+                input_path=spec.get("inputPath") if isinstance(spec.get("inputPath"), str) else None,
+                storage_input_path=None,
+                # The job input was stored when the job was dispatched.
+                job_input_storage_path=None,
+                output_storage_path=spec.get("outputStoragePath")
+                if isinstance(spec.get("outputStoragePath"), str)
+                else None,
+                billing_components=list(spec.get("billingComponents") or []),
+                originating_turn_id=str(spec.get("originatingTurnId") or "") or None,
+                on_interrupt=release_for_retry,
+            )
+        finally:
+            heartbeat.cancel()
+            if current is not None and self._synthesis_tasks.get(job_id) is current:
+                self._synthesis_tasks.pop(job_id, None)
+
+    async def _load_dispatched_synthesis_score(
+        self, spec: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        path = spec.get("scoreStoragePath")
+        if isinstance(path, str) and path:
+            data = await asyncio.to_thread(
+                download_bytes, self._settings.storage_bucket, path
+            )
+            return json.loads(data.decode("utf-8"))
+        score = spec.get("score")
+        return score if isinstance(score, dict) else None
+
+    async def _renew_job_lease_until_cancelled(
+        self, kind: str, job_id: str, *, worker_id: str, lease_seconds: float
+    ) -> None:
+        """Keep a dispatched job's lease while its worker runs it."""
+        while True:
+            await asyncio.sleep(lease_seconds / 3)
+            try:
+                still_ours = await asyncio.to_thread(
+                    self._job_store.renew_job_lease,
+                    job_id,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "%s_lease_renew_failed job=%s error=%s", kind, job_id, exc
+                )
+                continue
+            if not still_ours:
+                self._logger.warning(
+                    "%s_lease_lost job=%s worker=%s", kind, job_id, worker_id
+                )
+                return
 
     async def fail_exhausted_preprocess_job(self, job_id: str) -> None:
         """Fail a job that was interrupted on every attempt it was allowed."""
@@ -1646,8 +2003,14 @@ class Orchestrator:
         output_storage_path: Optional[str],
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
+        on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> None:
-        """Execute a synthesis job and update status in Firestore."""
+        """Execute a synthesis job and update status in Firestore.
+
+        on_interrupt runs when the job is cancelled; returning True means it put
+        the job back for another attempt, so its reservation is kept and the
+        job is not closed.
+        """
         midi_publication: Optional[Dict[str, Any]] = None
         midi_paths: Optional[Dict[str, Any]] = None
         midi_committed = False
@@ -1858,6 +2221,8 @@ class Orchestrator:
             )
             return
         except asyncio.CancelledError:
+            if on_interrupt is not None and await on_interrupt():
+                raise
             if self._is_e2e_credit_bypass_enabled():
                 await asyncio.to_thread(
                     self._job_store.update_job,
@@ -9312,6 +9677,11 @@ def _without_result_score(result: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(result)
     payload.pop("score", None)
     return payload
+
+
+def _job_storage_score_path(user_id: str, session_id: str, job_id: str) -> str:
+    """Build the storage path for the exact score a dispatched job renders."""
+    return f"sessions/{user_id}/{session_id}/jobs/{job_id}/score.json"
 
 
 def _job_storage_output_path(

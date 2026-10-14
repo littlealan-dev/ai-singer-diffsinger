@@ -43,7 +43,12 @@ from src.backend.orchestrator import (
 )
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
-from src.backend.job_dispatch import PREPROCESS_JOB_KIND, JobRoute, job_route
+from src.backend.job_dispatch import (
+    PREPROCESS_JOB_KIND,
+    SYNTHESIS_JOB_KIND,
+    JobRoute,
+    job_route,
+)
 from src.backend.message_catalog import backend_message
 from src.backend.credits import (
     get_instrumental_charge_state,
@@ -160,12 +165,16 @@ async def _stream_synthesis_events(
     request: Request,
     accepted_payload: Dict[str, Any],
     *,
-    synthesis_task: asyncio.Task[Any],
+    synthesis_task: Optional[asyncio.Task[Any]],
     session_id: str,
     user_id: str,
     job_id: str,
 ) -> AsyncIterator[str]:
-    """Stream one accepted synthesis job from its original chat request."""
+    """Stream one accepted synthesis job from its original chat request.
+
+    synthesis_task is None when the job runs on the synthesis worker; the
+    stream then ends when the job document reaches a terminal status.
+    """
     log = get_logger("backend.api")
     job_store: JobStore = request.app.state.job_store
     last_payload_json: str | None = None
@@ -198,13 +207,18 @@ async def _stream_synthesis_events(
                 "task_done=%s final_read=%s",
                 session_id,
                 job_id,
-                synthesis_task.done(),
+                task_done(),
                 final,
                 exc_info=True,
             )
             return None
 
+    def task_done() -> bool:
+        return synthesis_task is not None and synthesis_task.done()
+
     async def observe_finished_task(status: str | None) -> None:
+        if synthesis_task is None:
+            return
         try:
             await asyncio.shield(synthesis_task)
         except asyncio.CancelledError:
@@ -227,7 +241,7 @@ async def _stream_synthesis_events(
                     "synthesis_stream_draining session_id=%s job_id=%s task_done=%s",
                     session_id,
                     job_id,
-                    synthesis_task.done(),
+                    task_done(),
                 )
                 return
             if await request.is_disconnected():
@@ -235,7 +249,7 @@ async def _stream_synthesis_events(
                     "synthesis_stream_disconnected session_id=%s job_id=%s task_done=%s",
                     session_id,
                     job_id,
-                    synthesis_task.done(),
+                    task_done(),
                 )
                 return
 
@@ -257,7 +271,7 @@ async def _stream_synthesis_events(
                     if terminal_status is not None:
                         break
 
-            if synthesis_task.done() and terminal_status is None:
+            if task_done() and terminal_status is None:
                 final_payload = await try_read_progress_payload(final=True)
                 final_status = str((final_payload or {}).get("status") or "running")
                 if final_payload is not None and final_status in _TERMINAL_PROGRESS_STATUSES:
@@ -297,7 +311,7 @@ async def _stream_synthesis_events(
             "synthesis_stream_cancelled session_id=%s job_id=%s task_done=%s",
             session_id,
             job_id,
-            synthesis_task.done(),
+            task_done(),
         )
         raise
     finally:
@@ -306,7 +320,7 @@ async def _stream_synthesis_events(
             session_id,
             job_id,
             terminal_status,
-            synthesis_task.done(),
+            task_done(),
         )
 
 
@@ -596,6 +610,46 @@ def create_app() -> FastAPI:
         if claim.outcome != "claimed":
             return JSONResponse(content={"status": claim.outcome})
         await orchestrator.run_dispatched_preprocess_job(
+            job_id, claim.job, attempt=claim.attempt, worker_id=worker_id
+        )
+        return JSONResponse(content={"status": "done", "attempt": claim.attempt})
+
+    @app.post("/internal/synthesis-jobs/{job_id}")
+    async def run_synthesis_job(job_id: str, request: Request) -> JSONResponse:
+        """Run one dispatched synthesis job inside this request.
+
+        Only the GPU synthesis worker serves this. A non-2xx answer asks the
+        dispatcher (Cloud Tasks, or the local stand-in) to try again later.
+        """
+        if not settings.synthesis_worker_enabled:
+            raise HTTPException(status_code=404, detail="Not Found")
+        route = job_route(settings, SYNTHESIS_JOB_KIND)
+        await _require_worker_caller(request, route)
+        job_store: JobStore = request.app.state.job_store
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        worker_id = f"{settings.backend_build_id}:{uuid.uuid4().hex[:12]}"
+        claim = await asyncio.to_thread(
+            job_store.claim_dispatched_job,
+            job_id,
+            worker_id=worker_id,
+            lease_seconds=route.lease_seconds,
+            max_attempts=route.max_dispatch_attempts,
+        )
+        logger.info(
+            "synthesis_worker_claim job=%s outcome=%s attempt=%s worker=%s",
+            job_id,
+            claim.outcome,
+            claim.attempt,
+            worker_id,
+        )
+        if claim.outcome == "busy":
+            return JSONResponse(status_code=409, content={"status": "busy"})
+        if claim.outcome == "exhausted":
+            await orchestrator.fail_exhausted_synthesis_job(job_id)
+            return JSONResponse(content={"status": "exhausted"})
+        if claim.outcome != "claimed":
+            return JSONResponse(content={"status": claim.outcome})
+        await orchestrator.run_dispatched_synthesis_job(
             job_id, claim.job, attempt=claim.attempt, worker_id=worker_id
         )
         return JSONResponse(content={"status": "done", "attempt": claim.attempt})
@@ -2514,7 +2568,7 @@ def _should_require_app_check(request: Request) -> bool:
     path = request.url.path
     if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
         return False
-    if path.startswith("/internal/preprocess-jobs/"):
+    if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/")):
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 

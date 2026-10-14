@@ -719,6 +719,10 @@ def _prepare_app(monkeypatch, overrides=None):
         _fake_get_latest_job_by_session,
     )
     monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.get_job",
+        lambda self, job_id: dict(fake_jobs[job_id]) if job_id in fake_jobs else None,
+    )
 
     def _fake_complete_and_settle(
         user_id: str,
@@ -10626,18 +10630,15 @@ def test_midi_preparation_failure_fails_a_combined_job_before_vocal_work(client)
     assert job[1]["status"] == "failed"
 
 
-def test_replaced_synthesis_task_remains_tracked_through_shutdown(client, monkeypatch):
+def test_a_second_synthesis_in_a_session_runs_alongside_the_first(client, monkeypatch):
+    """A new take no longer cancels a running one: each was confirmed and quoted."""
     _test_client, app = client
     orchestrator = app.state.orchestrator
     session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
 
     async def scenario():
-        task_a_started = asyncio.Event()
-        task_a_cancelling = asyncio.Event()
-        allow_task_a_finish = asyncio.Event()
-        task_b_started = asyncio.Event()
-        task_b_stopped = asyncio.Event()
-        run_count = 0
+        started = {"replacement-task-a": asyncio.Event(), "replacement-task-b": asyncio.Event()}
+        stopped = {"replacement-task-a": asyncio.Event(), "replacement-task-b": asyncio.Event()}
 
         async def fake_voicebank_metadata(_arguments):
             return {}
@@ -10645,22 +10646,12 @@ def test_replaced_synthesis_task_remains_tracked_through_shutdown(client, monkey
         async def fake_capture_job_input(_session_id, _user_id, job_id):
             return f"sessions/{session_id}/jobs/{job_id}/input.xml", None, {}
 
-        async def fake_run_synthesis_job(*_args, **_kwargs):
-            nonlocal run_count
-            run_count += 1
-            if run_count == 1:
-                task_a_started.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    task_a_cancelling.set()
-                    await allow_task_a_finish.wait()
-                    raise
-            task_b_started.set()
+        async def fake_run_synthesis_job(_session_id, _score, _arguments, job_id, *_args, **_kwargs):
+            started[job_id].set()
             try:
                 await asyncio.Event().wait()
             finally:
-                task_b_stopped.set()
+                stopped[job_id].set()
 
         monkeypatch.setattr(
             orchestrator,
@@ -10676,34 +10667,26 @@ def test_replaced_synthesis_task_remains_tracked_through_shutdown(client, monkey
         monkeypatch.setattr(orchestrator, "_run_synthesis_job", fake_run_synthesis_job)
 
         first = await orchestrator._start_synthesis_job(
-            session_id,
-            {},
-            {},
-            user_id="test-user",
-            job_id="replacement-task-a",
+            session_id, {}, {}, user_id="test-user", job_id="replacement-task-a"
         )
-        task_a = first.synthesis_task
-        await task_a_started.wait()
-
+        await started["replacement-task-a"].wait()
         second = await orchestrator._start_synthesis_job(
-            session_id,
-            {},
-            {},
-            user_id="test-user",
-            job_id="replacement-task-b",
+            session_id, {}, {}, user_id="test-user", job_id="replacement-task-b"
         )
-        task_b = second.synthesis_task
-        await task_a_cancelling.wait()
-        await task_b_started.wait()
-
-        allow_task_a_finish.set()
-        await asyncio.gather(task_a, return_exceptions=True)
+        await started["replacement-task-b"].wait()
         await asyncio.sleep(0)
-        assert orchestrator._synthesis_tasks.get(session_id) is task_b
 
+        # Both keep running, tracked by job.
+        assert not first.synthesis_task.done()
+        assert orchestrator._synthesis_tasks["replacement-task-a"] is first.synthesis_task
+        assert orchestrator._synthesis_tasks["replacement-task-b"] is second.synthesis_task
+        snapshot = await app.state.sessions.get_snapshot(session_id, "test-user")
+        assert snapshot["current_job_id"] == "replacement-task-b"
+
+        # Shutdown still stops every tracked job.
         assert await orchestrator.shutdown_tasks(time.monotonic() + 1.0)
-        assert task_b.cancelled()
-        assert task_b_stopped.is_set()
+        assert first.synthesis_task.cancelled() and second.synthesis_task.cancelled()
+        assert stopped["replacement-task-a"].is_set() and stopped["replacement-task-b"].is_set()
 
     asyncio.run(scenario())
 
@@ -12322,3 +12305,465 @@ def test_chat_audio_lossless_wav_source_is_not_debug_gated(client_with_env):
     assert lossless_path.suffix == ".wav"
     assert lossless_path.exists()
     assert lossless_path != audio_path
+
+
+# --- Synthesis on the GPU worker (SIG-105 M2) ---------------------------------
+
+_SYNTHESIS_WORKER_ENV = {
+    "SESSION_STORE": "firestore",
+    "SYNTHESIS_WORKER_ENABLED": "true",
+    "SYNTHESIS_WORKER_TOKEN": "synthesis-secret",
+}
+
+
+class _FakeSynthesisDispatcher:
+    def __init__(self, *, mode="cloud_tasks", error=None, max_attempts=3, lease_seconds=90.0):
+        from types import SimpleNamespace
+
+        self.mode = mode
+        self.route = SimpleNamespace(
+            max_dispatch_attempts=max_attempts, lease_seconds=lease_seconds
+        )
+        self.dispatched: list[str] = []
+        self._error = error
+
+    async def dispatch(self, job_id):
+        if self._error is not None:
+            raise self._error
+        self.dispatched.append(job_id)
+
+
+def _patch_synthesis_start(monkeypatch, orchestrator, session_id):
+    async def fake_voicebank_metadata(_arguments):
+        return {}
+
+    async def fake_capture_job_input(_session_id, _user_id, job_id):
+        return f"sessions/{session_id}/jobs/{job_id}/input.xml", None, {}
+
+    monkeypatch.setattr(
+        orchestrator, "_build_synthesis_voicebank_metadata", fake_voicebank_metadata
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_synthesis_audio_track_metadata",
+        lambda _score, _arguments, **_kwargs: {},
+    )
+    monkeypatch.setattr(orchestrator, "_capture_job_input", fake_capture_job_input)
+
+
+def test_a_synthesis_job_is_dispatched_with_the_exact_score(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    _patch_synthesis_start(monkeypatch, orchestrator, session_id)
+    dispatcher = _FakeSynthesisDispatcher()
+    monkeypatch.setattr(orchestrator, "_synthesis_dispatcher", dispatcher)
+    object.__setattr__(app.state.settings, "backend_use_storage", True)
+    object.__setattr__(app.state.settings, "storage_bucket", "bucket")
+    uploads = {}
+    monkeypatch.setattr(
+        "src.backend.orchestrator.upload_bytes",
+        lambda bucket, data, path, content_type=None: uploads.__setitem__(path, data),
+    )
+    score = {"title": "Quoted", "parts": [{"part_id": "Alto", "notes": []}]}
+
+    response = asyncio.run(
+        orchestrator._start_synthesis_job(
+            session_id,
+            score,
+            {"part_id": "Alto", "language": "en"},
+            user_id="test-user",
+            job_id="job-dispatched",
+            billing_components=["vocal"],
+            originating_turn_id="turn-1",
+        )
+    )
+
+    assert response.synthesis_task is None
+    assert response["job_id"] == "job-dispatched"
+    assert dispatcher.dispatched == ["job-dispatched"]
+    assert "job-dispatched" not in orchestrator._synthesis_tasks
+    score_path = f"sessions/test-user/{session_id}/jobs/job-dispatched/score.json"
+    assert json.loads(uploads[score_path]) == score
+    job = app.state.job_store.get_job("job-dispatched")
+    assert job["jobKind"] == "synthesis"
+    spec = json.loads(job["synthesisSpecJson"])
+    assert spec["scoreStoragePath"] == score_path
+    assert spec["arguments"] == {"part_id": "Alto", "language": "en"}
+    assert spec["billingComponents"] == ["vocal"]
+    assert spec["originatingTurnId"] == "turn-1"
+    assert "score" not in spec
+
+
+def test_a_synthesis_job_that_cannot_be_dispatched_fails_and_raises(client, monkeypatch):
+    from src.backend.job_dispatch import JobDispatchError
+
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    _patch_synthesis_start(monkeypatch, orchestrator, session_id)
+    monkeypatch.setattr(
+        orchestrator,
+        "_synthesis_dispatcher",
+        _FakeSynthesisDispatcher(error=JobDispatchError("queue refused")),
+    )
+    failed = []
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "fail_job_if_active",
+        lambda job_id, **kwargs: failed.append((job_id, kwargs)) or True,
+    )
+
+    with pytest.raises(JobDispatchError):
+        asyncio.run(
+            orchestrator._start_synthesis_job(
+                session_id, {"title": "S"}, {}, user_id="test-user", job_id="job-undelivered"
+            )
+        )
+
+    (job_id, kwargs), = failed
+    assert job_id == "job-undelivered"
+    assert kwargs["job_kind"] == "synthesis"
+    assert kwargs["message"] == backend_message("job.synthesis_dispatch_failed")
+
+
+def _synthesis_worker_post(test_client, job_id, token="synthesis-secret"):
+    return test_client.post(
+        f"/internal/synthesis-jobs/{job_id}",
+        headers={"X-Synthesis-Worker-Token": token},
+    )
+
+
+def test_synthesis_worker_endpoint_is_absent_unless_enabled(client):
+    test_client, _ = client
+
+    assert _synthesis_worker_post(test_client, "job-1").status_code == 404
+
+
+@pytest.mark.parametrize("client_with_env", [_SYNTHESIS_WORKER_ENV], indirect=True)
+def test_synthesis_worker_endpoint_claims_and_runs_the_job(client_with_env, monkeypatch):
+    from src.backend.job_store import DispatchedJobClaim
+
+    test_client, app = client_with_env
+    job = {"sessionId": "s1", "userId": "u1", "status": "running"}
+    outcomes = iter(["claimed", "busy", "exhausted", "finished"])
+    runs, exhausted = [], []
+
+    def claim(job_id, *, worker_id, lease_seconds, max_attempts):
+        assert (lease_seconds, max_attempts) == (90.0, 3)
+        return DispatchedJobClaim(next(outcomes), job, attempt=2)
+
+    async def run(job_id, claimed_job, *, attempt, worker_id):
+        runs.append((job_id, attempt))
+
+    async def fail_exhausted(job_id):
+        exhausted.append(job_id)
+
+    monkeypatch.setattr(app.state.job_store, "claim_dispatched_job", claim)
+    monkeypatch.setattr(app.state.orchestrator, "run_dispatched_synthesis_job", run)
+    monkeypatch.setattr(app.state.orchestrator, "fail_exhausted_synthesis_job", fail_exhausted)
+
+    assert _synthesis_worker_post(test_client, "job-1", token="wrong").status_code == 401
+    claimed = _synthesis_worker_post(test_client, "job-1")
+    busy = _synthesis_worker_post(test_client, "job-1")
+    out_of_attempts = _synthesis_worker_post(test_client, "job-1")
+    finished = _synthesis_worker_post(test_client, "job-1")
+
+    assert claimed.json() == {"status": "done", "attempt": 2}
+    assert runs == [("job-1", 2)]
+    assert busy.status_code == 409
+    assert out_of_attempts.json() == {"status": "exhausted"}
+    assert exhausted == ["job-1"]
+    assert finished.json() == {"status": "finished"}
+
+
+def test_a_dispatched_synthesis_job_runs_its_stored_score_and_releases_while_attempts_remain(
+    client, monkeypatch
+):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(orchestrator, "_synthesis_dispatcher", _FakeSynthesisDispatcher())
+    object.__setattr__(app.state.settings, "storage_bucket", "bucket")
+    score = {"title": "Quoted"}
+    monkeypatch.setattr(
+        "src.backend.orchestrator.download_bytes",
+        lambda bucket, path: json.dumps(score).encode() if path == "jobs/j1/score.json" else b"",
+    )
+    spec = {
+        "arguments": {"part_id": "Alto"},
+        "billingComponents": ["vocal", "instrumental"],
+        "originatingTurnId": "turn-1",
+        "outputStoragePath": "jobs/j1/output.mp3",
+        "scoreStoragePath": "jobs/j1/score.json",
+    }
+    job = {"sessionId": "s1", "userId": "u1", "synthesisSpecJson": json.dumps(spec)}
+    runs, releases = [], []
+
+    async def run_synthesis_job(session_id, run_score, arguments, job_id, user_id, **kwargs):
+        runs.append(
+            {
+                "args": (session_id, run_score, arguments, job_id, user_id),
+                "kwargs": {k: v for k, v in kwargs.items() if k != "on_interrupt"},
+                "tracked": orchestrator._synthesis_tasks.get(job_id) is asyncio.current_task(),
+                "released": await kwargs["on_interrupt"](),
+            }
+        )
+
+    def release(job_id, *, worker_id, message):
+        releases.append((job_id, worker_id, message))
+        return True
+
+    monkeypatch.setattr(orchestrator, "_run_synthesis_job", run_synthesis_job)
+    monkeypatch.setattr(orchestrator._job_store, "release_job_for_retry", release)
+
+    asyncio.run(orchestrator.run_dispatched_synthesis_job("j1", job, attempt=1, worker_id="w1"))
+    asyncio.run(orchestrator.run_dispatched_synthesis_job("j1", job, attempt=3, worker_id="w2"))
+    # Another worker took the job over: the handback fails, but this run must
+    # still not close the job.
+    monkeypatch.setattr(
+        orchestrator._job_store, "release_job_for_retry", lambda job_id, **kwargs: False
+    )
+    asyncio.run(orchestrator.run_dispatched_synthesis_job("j1", job, attempt=2, worker_id="w3"))
+
+    first, last, taken_over = runs
+    assert taken_over["released"] is True
+    assert first["args"] == ("s1", score, {"part_id": "Alto"}, "j1", "u1")
+    assert first["kwargs"] == {
+        "input_path": None,
+        "storage_input_path": None,
+        "job_input_storage_path": None,
+        "output_storage_path": "jobs/j1/output.mp3",
+        "billing_components": ["vocal", "instrumental"],
+        "originating_turn_id": "turn-1",
+    }
+    assert first["tracked"] is True
+    assert "j1" not in orchestrator._synthesis_tasks
+    assert first["released"] is True
+    assert last["released"] is False
+    assert releases == [("j1", "w1", backend_message("job.synthesis_retrying"))]
+
+
+def _blocking_synthesis_job(app, monkeypatch, *, max_attempts):
+    """A real synthesis job whose render never ends, so it can be interrupted."""
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(
+        orchestrator, "_synthesis_dispatcher", _FakeSynthesisDispatcher(max_attempts=max_attempts)
+    )
+    rendering = asyncio.Event()
+
+    async def ensure_midi(*_args, **_kwargs):
+        return None, None
+
+    async def synthesize(*_args, **_kwargs):
+        rendering.set()
+        await asyncio.Event().wait()
+
+    released_credits = []
+    monkeypatch.setattr(orchestrator, "_ensure_instrumental_midi_artifacts", ensure_midi)
+    monkeypatch.setattr(orchestrator, "_synthesize", synthesize)
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda user_id, job_id, **kwargs: released_credits.append((user_id, job_id, kwargs))
+        or ReleaseCreditsResult(status="released"),
+    )
+    app.state.job_store.create_job(job_id="j1", user_id="u1", session_id="s1", status="queued")
+    spec = {"arguments": {}, "score": {"title": "S"}, "billingComponents": ["vocal"]}
+    job = {"sessionId": "s1", "userId": "u1", "synthesisSpecJson": json.dumps(spec)}
+    return orchestrator, rendering, released_credits, job
+
+
+@pytest.mark.parametrize(
+    "attempt, expect_retry",
+    [(1, True), (3, False)],
+)
+def test_an_interrupted_dispatched_synthesis_job_keeps_its_reservation_while_attempts_remain(
+    client, monkeypatch, attempt, expect_retry
+):
+    _, app = client
+    orchestrator, rendering, released_credits, job = _blocking_synthesis_job(
+        app, monkeypatch, max_attempts=3
+    )
+    releases = []
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "release_job_for_retry",
+        lambda job_id, *, worker_id, message: releases.append(job_id) or True,
+    )
+
+    async def scenario():
+        run = asyncio.create_task(
+            orchestrator.run_dispatched_synthesis_job("j1", job, attempt=attempt, worker_id="w1")
+        )
+        await rendering.wait()
+        # What instance shutdown does to the job its request is running.
+        assert await orchestrator.shutdown_tasks(time.monotonic() + 2.0)
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    if expect_retry:
+        assert releases == ["j1"]
+        assert released_credits == []
+    else:
+        assert releases == []
+        (user_id, job_id, kwargs), = released_credits
+        assert (user_id, job_id) == ("u1", "j1")
+        assert kwargs["terminal_job_fields"]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("status, expect_release", [("running", True), ("completed", False)])
+def test_an_exhausted_synthesis_job_releases_its_reservation_only_while_active(
+    client, monkeypatch, status, expect_release
+):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    app.state.job_store.create_job(job_id="j1", user_id="u1", session_id="s1", status=status)
+    released = []
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda user_id, job_id, **kwargs: released.append(kwargs)
+        or ReleaseCreditsResult(status="released"),
+    )
+
+    asyncio.run(orchestrator.fail_exhausted_synthesis_job("j1"))
+
+    if expect_release:
+        (kwargs,) = released
+        assert kwargs["terminal_job_fields"]["status"] == "failed"
+        assert kwargs["terminal_job_fields"]["message"] == backend_message(
+            "job.synthesis_attempts_exhausted"
+        )
+    else:
+        assert released == []
+
+
+def test_a_take_that_finishes_after_a_newer_job_started_keeps_the_newer_current_audio(
+    client, monkeypatch
+):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    sessions = app.state.sessions
+    session_id = asyncio.run(sessions.create_session("test-user")).id
+    asyncio.run(
+        sessions.create_current_job(
+            session_id, app.state.job_store, job_id="newer", user_id="test-user", status="queued"
+        )
+    )
+    object.__setattr__(app.state.settings, "audio_format", "wav")
+
+    def call_tool(name, arguments):
+        if name == "synthesize":
+            return {"waveform": [0.0] * 32, "sample_rate": 44100}
+        if name == "save_audio":
+            return {"duration_seconds": 1.5}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(orchestrator._router, "call_tool", call_tool)
+
+    asyncio.run(
+        orchestrator._synthesize(
+            session_id, {"title": "S"}, {"voicebank": "Dummy"}, job_id="older", user_id="test-user"
+        )
+    )
+    assert asyncio.run(sessions.get_snapshot(session_id, "test-user")).get("current_audio") is None
+
+    asyncio.run(
+        orchestrator._synthesize(
+            session_id, {"title": "S"}, {"voicebank": "Dummy"}, job_id="newer", user_id="test-user"
+        )
+    )
+    current = asyncio.run(sessions.get_snapshot(session_id, "test-user"))["current_audio"]
+    assert current["duration_s"] == 1.5
+
+
+def test_a_job_waiting_for_the_gpu_says_so(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    updates = []
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "update_job",
+        lambda job_id, **fields: updates.append((job_id, fields.get("step"))),
+    )
+    first_rendering = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def render(session_id_arg, score, synth_args, *, job_id, **kwargs):
+        if job_id == "first":
+            first_rendering.set()
+            await release_first.wait()
+        return {"job": job_id}
+
+    monkeypatch.setattr(orchestrator, "_render_and_save_audio", render)
+
+    async def scenario():
+        first = asyncio.create_task(
+            orchestrator._synthesize(session_id, {}, {"voicebank": "V"}, job_id="first")
+        )
+        await first_rendering.wait()
+        second = asyncio.create_task(
+            orchestrator._synthesize(session_id, {}, {"voicebank": "V"}, job_id="second")
+        )
+        await asyncio.sleep(0.05)
+        waiting_while_blocked = ("second", "waiting") in updates
+        release_first.set()
+        return waiting_while_blocked, await first, await second
+
+    waiting, first_result, second_result = asyncio.run(scenario())
+
+    assert waiting is True
+    assert ("first", "waiting") not in updates
+    assert first_result == {"job": "first"} and second_result == {"job": "second"}
+
+
+def test_the_stream_of_a_dispatched_job_ends_at_its_terminal_status(client, monkeypatch):
+    import src.backend.main as backend_main
+
+    _, app = client
+    statuses = iter(["running", "running", "done"])
+
+    def get_job_by_id(*, job_id, user_id, session_id):
+        return job_id, {"status": next(statuses, "done")}
+
+    monkeypatch.setattr(app.state.job_store, "get_job_by_id", get_job_by_id)
+    monkeypatch.setattr(backend_main, "_SYNTHESIS_STREAM_POLL_SECONDS", 0.0)
+    progress = iter([0.25, 0.5, 1.0])
+    monkeypatch.setattr(
+        backend_main,
+        "_build_signed_progress_payload",
+        lambda request, *, job_id, data, user_id: {
+            "job_id": job_id,
+            "status": data["status"],
+            "progress": next(progress),
+        },
+    )
+
+    class _Request:
+        def __init__(self):
+            self.app = app
+
+        async def is_disconnected(self):
+            return False
+
+    async def collect():
+        return [
+            chunk.split("\n", 1)[0]
+            async for chunk in backend_main._stream_synthesis_events(
+                _Request(),
+                {"type": "chat_progress", "job_id": "job-remote"},
+                synthesis_task=None,
+                session_id="s1",
+                user_id="test-user",
+                job_id="job-remote",
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events == [
+        "event: accepted",
+        "event: progress",
+        "event: progress",
+        "event: completed",
+    ]

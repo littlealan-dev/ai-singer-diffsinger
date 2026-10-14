@@ -328,6 +328,12 @@ class JobStore:
         data = doc.to_dict() or {}
         return doc.id, data
 
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return a job's data by ID alone (for workers and dispatchers)."""
+        self._ensure_client()
+        doc = self._client.collection(self.collection).document(job_id).get()
+        return (doc.to_dict() or {}) if doc.exists else None
+
     def get_job_by_id(
         self, *, job_id: str, user_id: str, session_id: str
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
