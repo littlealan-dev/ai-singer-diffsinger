@@ -170,7 +170,7 @@ test("a single failed poll does not end polling of a running job", async ({ page
   expect(progressRequests).toHaveLength(5);
 });
 
-test("failed polls back off, and a successful poll restores the normal interval", async ({
+test("failed polls back off, and a successful poll restarts the normal schedule", async ({
   page,
 }) => {
   const progressRequests = await startPolledPreprocessJob(page, "poll-recovery-backoff", [
@@ -198,8 +198,40 @@ test("failed polls back off, and a successful poll restores the normal interval"
   expect(progressRequests).toHaveLength(7);
   const gaps = progressRequests.slice(1).map((time, index) => time - progressRequests[index]);
   // After a success: 1.2 s. After the 1st, 2nd and 3rd failure in a row: 1.2,
-  // 2.4 and 4.8 s. After the next success: 1.2 s again.
-  const expected = [1200, 1200, 2400, 4800, 1200, 1200];
+  // 2.4 and 4.8 s. After the next successes: 1.2 s, then 2.4 s.
+  const expected = [1200, 1200, 2400, 4800, 1200, 2400];
+  gaps.forEach((gap, index) => {
+    expect(gap, `gap ${index + 1}`).toBeGreaterThanOrEqual(expected[index] - 200);
+    expect(gap, `gap ${index + 1}`).toBeLessThan(expected[index] + 1000);
+  });
+});
+
+test("polls of a running job back off to every 5 s", async ({ page }) => {
+  const done: ProgressReply = {
+    status: 200,
+    body: {
+      status: "done",
+      job_id: JOB_ID,
+      job_kind: "preprocess",
+      score_id: SCORE_ID,
+      step: "done",
+      message: "The Alto part is ready to sing.",
+      progress: 1,
+    },
+  };
+  const progressRequests = await startPolledPreprocessJob(page, "poll-backoff", [
+    running,
+    running,
+    running,
+    running,
+    running,
+    done,
+  ]);
+
+  await expect(page.getByText("The Alto part is ready to sing.")).toBeVisible();
+  expect(progressRequests).toHaveLength(6);
+  const gaps = progressRequests.slice(1).map((time, index) => time - progressRequests[index]);
+  const expected = [1200, 2400, 4800, 5000, 5000];
   gaps.forEach((gap, index) => {
     expect(gap, `gap ${index + 1}`).toBeGreaterThanOrEqual(expected[index] - 200);
     expect(gap, `gap ${index + 1}`).toBeLessThan(expected[index] + 1000);

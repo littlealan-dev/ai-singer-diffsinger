@@ -154,17 +154,25 @@ const BILLABLE_SERVER_EXPORT_MIX_ENABLED = false;
 const SYNTHESIS_STREAM_LIVENESS_TIMEOUT_MS = 35_000;
 const SYNTHESIS_STREAM_ERROR_POLL_ATTEMPTS = 3;
 const PROGRESS_POLL_INTERVAL_MS = 1200;
+// A job that is still running is polled less and less often, up to this.
+const PROGRESS_POLL_MAX_INTERVAL_MS = 5_000;
 // How long failed progress polls are retried before polling gives up. The
 // instance running a job can be replaced mid-job; the replacement takes about
 // 25 s to start, and the job record it serves then holds the outcome.
 const PROGRESS_POLL_FAILURE_RETRY_MS = 60_000;
 const PROGRESS_POLL_MAX_BACKOFF_MS = 10_000;
 
-// Retries back off so every client polling a lost instance does not keep
-// hitting a service that is short of capacity: 1.2 s, 2.4 s, 4.8 s, 9.6 s,
-// then 10 s.
-function progressPollDelayMs(consecutiveFailures: number): number {
-  if (consecutiveFailures === 0) return PROGRESS_POLL_INTERVAL_MS;
+// Polls of a running job back off: 1.2 s, 2.4 s, 4.8 s, then every 5 s. A
+// failed poll restarts that and retries on its own schedule, so every client
+// polling a lost instance does not keep hitting a service that is short of
+// capacity: 1.2 s, 2.4 s, 4.8 s, 9.6 s, then 10 s.
+function progressPollDelayMs(successfulPolls: number, consecutiveFailures: number): number {
+  if (consecutiveFailures === 0) {
+    return Math.min(
+      PROGRESS_POLL_INTERVAL_MS * 2 ** Math.max(0, successfulPolls - 1),
+      PROGRESS_POLL_MAX_INTERVAL_MS
+    );
+  }
   return Math.min(
     PROGRESS_POLL_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
     PROGRESS_POLL_MAX_BACKOFF_MS
@@ -4580,6 +4588,7 @@ export default function MainApp() {
     // The current run of failed polls; a successful poll ends it.
     let failingSince: number | null = null;
     let consecutiveFailures = 0;
+    let successfulPolls = 0;
     const generation = workspaceGenerationRef.current;
 
     const clearRecoveryError = () => {
@@ -4615,6 +4624,7 @@ export default function MainApp() {
         if (cancelled || generation !== workspaceGenerationRef.current) return;
         failingSince = null;
         consecutiveFailures = 0;
+        successfulPolls += 1;
         const terminal = await handleProgressPayload(
           activeProgress.messageId,
           payload,
@@ -4644,6 +4654,7 @@ export default function MainApp() {
           const now = Date.now();
           if (failingSince === null) failingSince = now;
           consecutiveFailures += 1;
+          successfulPolls = 0;
           if (now - failingSince < PROGRESS_POLL_FAILURE_RETRY_MS) {
             setError(SYNTHESIS_STREAM_RECONNECTING_MESSAGE);
             return;
@@ -4668,7 +4679,10 @@ export default function MainApp() {
       if (cancelled || stopped) return;
       timer = window.setTimeout(
         () => void pollThenSchedule(),
-        Math.max(0, progressPollDelayMs(consecutiveFailures) - (Date.now() - startedAt))
+        Math.max(
+          0,
+          progressPollDelayMs(successfulPolls, consecutiveFailures) - (Date.now() - startedAt)
+        )
       );
     };
 
