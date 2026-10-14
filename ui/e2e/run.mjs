@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -63,6 +63,13 @@ process.once("SIGTERM", () => {
 
 try {
   await mkdir(outputDir, { recursive: true });
+  const provenanceDir = path.join(outputDir, "backend", "e2e-synthesis");
+  const workerProvenanceLink = path.join(outputDir, "synthesis-worker", "e2e-synthesis");
+  await mkdir(provenanceDir, { recursive: true });
+  await mkdir(path.dirname(workerProvenanceLink), { recursive: true });
+  // Share only test provenance; the API and worker keep separate data folders.
+  await rm(workerProvenanceLink, { recursive: true, force: true });
+  await symlink(path.join("..", "backend", "e2e-synthesis"), workerProvenanceLink, "dir");
   const env = {
     ...process.env,
     APP_ENV: "test",
@@ -86,6 +93,7 @@ try {
     LLM_PROVIDER: "regression",
     MCP_CPU_DEVICE: "cpu",
     MCP_GPU_DEVICE: process.env.REGRESSION_SYNTHESIS_DEVICE || "gpu",
+    MCP_GPU_ENABLED: "false",
     E2E_MANAGED_WEB_SERVER: "1",
     VITE_APP_ENV: "dev",
     VITE_E2E_AUTH: "1",
@@ -101,9 +109,12 @@ try {
     // the main backend calls it over HTTP in place of Cloud Tasks.
     PREPROCESS_DISPATCH_MODE: "http",
     PREPROCESS_WORKER_URL: "http://127.0.0.1:8002",
-    // Both backends must see the same sessions.
+    // The API and workers must see the same sessions.
     SESSION_STORE: "firestore",
     PREPROCESS_WORKER_TOKEN: "local-ui-regression-preprocess-worker",
+    SYNTHESIS_DISPATCH_MODE: "http",
+    SYNTHESIS_WORKER_URL: "http://127.0.0.1:8003",
+    SYNTHESIS_WORKER_TOKEN: "local-ui-regression-synthesis-worker",
   };
   const workerEnv = {
     ...env,
@@ -112,6 +123,15 @@ try {
     MCP_GPU_ENABLED: "false",
     PREPROCESS_WORKER_ENABLED: "true",
     PREPROCESS_DISPATCH_MODE: "inline",
+  };
+  const synthesisWorkerEnv = {
+    ...env,
+    BACKEND_DATA_DIR: "tests/output/ui-regression/synthesis-worker",
+    SYNTHESIS_WORKER_ENABLED: "true",
+    SYNTHESIS_DISPATCH_MODE: "inline",
+    PREPROCESS_DISPATCH_MODE: "inline",
+    MCP_GPU_ENABLED: "true",
+    MCP_GPU_DEVICE: process.env.REGRESSION_SYNTHESIS_DEVICE || "gpu",
   };
 
   start("firebase", ["emulators:start", "--only", "auth,firestore,storage", "--project", projectId], {
@@ -125,11 +145,16 @@ try {
     cwd: rootDir,
     env: workerEnv,
   });
+  start(python, ["-m", "uvicorn", "src.backend.main:app", "--host", "127.0.0.1", "--port", "8003"], {
+    cwd: rootDir,
+    env: synthesisWorkerEnv,
+  });
   start(python, ["-m", "uvicorn", "src.backend.main:app", "--host", "127.0.0.1", "--port", "8000"], {
     cwd: rootDir,
     env,
   });
   await waitFor("http://127.0.0.1:8002/readyz", "line-preparation worker");
+  await waitFor("http://127.0.0.1:8003/readyz", "synthesis worker");
   await waitFor("http://127.0.0.1:8000/readyz", "backend");
 
   start("npm", ["run", "dev", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort"], {
