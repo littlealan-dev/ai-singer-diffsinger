@@ -3,14 +3,25 @@ set -euo pipefail
 
 # Prepare only: run this production deploy after the synthesis worker has been
 # deployed and verified. Build the CPU image first with build_cpu_backend_prod.sh.
+#
+# DEPLOY_TRAFFIC=none (default): the new revision gets no traffic, and a "cpu"
+#   tag with its own URL to check it on; the serving revision keeps every user.
+#   Send all traffic to it afterwards with:
+#     gcloud run services update-traffic sightsinger-api \
+#       --project=sightsinger-app --region=us-east4 --to-latest
+# DEPLOY_TRAFFIC=all: deploy and send all traffic to the new revision at once.
 # DRY_RUN=1 prints commands without contacting Google Cloud or deploying.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="sightsinger-app"
 REGION="us-east4"
 SERVICE="sightsinger-api"
 IMAGE="${CPU_BACKEND_IMAGE:-gcr.io/${PROJECT}/sightsinger-cpu-backend:latest}"
-CONCURRENCY="${BACKEND_CPU_CONCURRENCY:-20}"
+# 10 per instance to start (SIG-105 M4 load test): score tools run two at a
+# time per instance, so fewer users per instance means more instances' tools.
+CONCURRENCY="${BACKEND_CPU_CONCURRENCY:-10}"
 MAX_INSTANCES="${BACKEND_CPU_MAX_INSTANCES:-10}"
+DEPLOY_TRAFFIC="${DEPLOY_TRAFFIC:-none}"
+TAG="cpu"
 DRY_RUN="${DRY_RUN:-0}"
 
 for setting in CONCURRENCY MAX_INSTANCES; do
@@ -22,6 +33,10 @@ for setting in CONCURRENCY MAX_INSTANCES; do
 done
 if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
   printf 'DRY_RUN must be 0 or 1.\n' >&2
+  exit 1
+fi
+if [[ "${DEPLOY_TRAFFIC}" != "none" && "${DEPLOY_TRAFFIC}" != "all" ]]; then
+  printf 'DEPLOY_TRAFFIC must be none or all.\n' >&2
   exit 1
 fi
 
@@ -76,9 +91,10 @@ traffic_args=(
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf 'Read the previous serving revision(s) before deploying:\n'
   print_command "${traffic_args[@]}"
+  previous_serving="<previous revision>"
 else
   previous_traffic="$(gcloud "${traffic_args[@]}")"
-  printf '%s' "${previous_traffic}" | python3 -c '
+  previous_serving="$(printf '%s' "${previous_traffic}" | python3 -c '
 import json, sys
 status = json.load(sys.stdin).get("status", {})
 serving = [
@@ -89,8 +105,9 @@ serving = [
     for entry in status.get("traffic", [])
     if entry.get("percent", 0) > 0
 ]
-print("Previous serving revision(s): " + (", ".join(serving) or "none"))
-'
+print(", ".join(serving) or "none")
+')"
+  printf 'Previous serving revision(s): %s\n' "${previous_serving}"
 fi
 
 deploy_args=(
@@ -113,9 +130,30 @@ deploy_args=(
   --args=-m,src.backend.server,--host,0.0.0.0,--port,8080,--log-level,debug,--access-log
   --startup-probe='httpGet.path=/readyz,httpGet.port=8080,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=2,failureThreshold=24'
 )
+if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
+  # Traffic that followed LATEST is pinned to the revision serving it now.
+  deploy_args+=(--no-traffic --tag="${TAG}")
+fi
 run_gcloud "${deploy_args[@]}"
-run_gcloud run services update-traffic "${SERVICE}" \
-  --project="${PROJECT}" --region="${REGION}" --to-latest
+if [[ "${DEPLOY_TRAFFIC}" == "all" ]]; then
+  run_gcloud run services update-traffic "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" --to-latest
+fi
 run_gcloud run services describe "${SERVICE}" \
   --project="${PROJECT}" --region="${REGION}" \
   --format='yaml(status.latestReadyRevisionName,status.traffic)'
+
+if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    project_number="${GCP_PROJECT_NUMBER:-373752827978}"
+  else
+    project_number="$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')"
+  fi
+  printf '\nThe new revision serves no traffic. Check it on its own URL:\n'
+  printf '  curl -s https://%s---%s-%s.%s.run.app/readyz\n' \
+    "${TAG}" "${SERVICE}" "${project_number}" "${REGION}"
+  printf 'Then send all traffic to it:\n'
+  printf '  gcloud run services update-traffic %s --project=%s --region=%s --to-latest\n' \
+    "${SERVICE}" "${PROJECT}" "${REGION}"
+fi
+printf 'To roll back: scripts/rollback_backend_to_revision.sh %s\n' "${previous_serving%%:*}"
