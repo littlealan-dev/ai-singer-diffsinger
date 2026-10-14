@@ -314,6 +314,10 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
     assert "action=synthesis_quote_refresh_required" in prompt
     assert "synthesis did not start; never say it is queued or in progress" in prompt
     assert "saying the take is queued and will start as soon as a singer is free" in prompt
+    assert (
+        "That message must name the selected part, verse/lyric selection, resolved singing "
+        "language, selected AI voice" in prompt
+    )
     assert "reply to its `quote` exactly as you would to a `prepare_synthesis_quote` result" in prompt
     assert "Do not call any tool in that response" in prompt
 
