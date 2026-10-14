@@ -92,3 +92,64 @@ def test_delete_stale_caches_disabled_deletes_nothing(monkeypatch) -> None:  # t
     manager.ensure_prompt_cache(model=MODEL, build_id="dev-2", static_prompt_text=PROMPT)
 
     assert deleted == []
+
+
+def test_a_cold_burst_of_requests_creates_the_prompt_cache_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import threading
+    import time
+
+    manager = _manager("dev")
+    created: list[str] = []
+    remote: list[GeminiPromptCache] = []
+
+    def slow_list_caches():  # type: ignore[no-untyped-def]
+        # The answer reflects the caches that existed when the request was sent.
+        snapshot = list(remote)
+        time.sleep(0.05)
+        return snapshot
+
+    def fake_create_cache(*, model, display_name, static_prompt_text):  # type: ignore[no-untyped-def]
+        cache = _cache(f"cachedContents/new-{len(created)}", display_name)
+        created.append(cache.name)
+        remote.append(cache)
+        return cache
+
+    deleted: list[str] = []
+    monkeypatch.setattr(manager, "_list_caches", slow_list_caches)
+    monkeypatch.setattr(manager, "_create_cache", fake_create_cache)
+    monkeypatch.setattr(
+        manager, "_request_json", lambda method, url, *a, **k: deleted.append(url) or {}
+    )
+    names: list[str | None] = []
+
+    def request() -> None:
+        names.append(
+            manager.ensure_prompt_cache(model=MODEL, build_id="dev-2", static_prompt_text=PROMPT)
+        )
+
+    threads = [threading.Thread(target=request) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert created == ["cachedContents/new-0"]
+    assert names == ["cachedContents/new-0"] * 6
+    assert deleted == []
+
+
+def test_a_duplicate_made_by_another_instance_is_not_deleted(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    manager = _manager("dev")
+    current = prompt_cache_display_name("dev", MODEL, "dev-2", prompt_fingerprint(PROMPT))
+    caches = [
+        _cache("first", current),
+        _cache("duplicate", current),
+        _cache("old-build", f"prompt-cache:dev:{MODEL}:dev-1:aaaa"),
+    ]
+    deleted = _install_fakes(manager, monkeypatch, caches)
+
+    name = manager.ensure_prompt_cache(model=MODEL, build_id="dev-2", static_prompt_text=PROMPT)
+
+    assert name == "first"
+    # Only the other build's cache is stale; the same-name duplicate may be in use.
+    assert deleted == ["old-build"]

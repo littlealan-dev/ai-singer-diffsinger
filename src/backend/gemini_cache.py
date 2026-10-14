@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+import threading
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -34,6 +35,10 @@ class GeminiPromptCacheManager:
         self._base_url = settings.gemini_base_url.rstrip("/")
         self._logger = logging.getLogger(__name__)
         self._cache_names_by_key: dict[tuple[str, str, str], str] = {}
+        # LLM calls run in threads: a cold burst for one prompt waits for a
+        # single lookup or creation instead of each creating a cache.
+        self._key_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._key_locks_guard = threading.Lock()
 
     def ensure_prompt_cache(
         self,
@@ -47,8 +52,27 @@ class GeminiPromptCacheManager:
             return None
         fingerprint = prompt_fingerprint(static_prompt_text)
         cache_key = (model, build_id, fingerprint)
+        cached_name = self._memory_hit(cache_key, fingerprint)
+        if cached_name:
+            return cached_name
+        with self._key_lock(cache_key):
+            # Another thread may have resolved it while this one waited.
+            cached_name = self._memory_hit(cache_key, fingerprint)
+            if cached_name:
+                return cached_name
+            return self._resolve_prompt_cache(
+                cache_key, model=model, build_id=build_id,
+                fingerprint=fingerprint, static_prompt_text=static_prompt_text,
+            )
+
+    def _key_lock(self, cache_key: tuple[str, str, str]) -> threading.Lock:
+        with self._key_locks_guard:
+            return self._key_locks.setdefault(cache_key, threading.Lock())
+
+    def _memory_hit(self, cache_key: tuple[str, str, str], fingerprint: str) -> str | None:
         cached_name = self._cache_names_by_key.get(cache_key)
         if cached_name:
+            model, build_id, _ = cache_key
             self._logger.info(
                 "gemini_prompt_cache_memory_hit model=%s build_id=%s fingerprint_prefix=%s cache_name=%s",
                 model,
@@ -56,7 +80,18 @@ class GeminiPromptCacheManager:
                 fingerprint[:12],
                 cached_name,
             )
-            return cached_name
+        return cached_name
+
+    def _resolve_prompt_cache(
+        self,
+        cache_key: tuple[str, str, str],
+        *,
+        model: str,
+        build_id: str,
+        fingerprint: str,
+        static_prompt_text: str,
+    ) -> str | None:
+        """Find this prompt's cache in Gemini, or create it; None means uncached."""
         try:
             caches = self._list_caches()
             self._logger.info(
@@ -86,7 +121,9 @@ class GeminiPromptCacheManager:
                     fingerprint[:12],
                     matched.name,
                 )
-                self._delete_stale_caches(caches, model=model, keep_name=matched.name)
+                self._delete_stale_caches(
+                    caches, model=model, keep_name=matched.name, keep_display_name=display_name
+                )
                 return matched.name
             created = self._create_cache(
                 model=model,
@@ -96,7 +133,10 @@ class GeminiPromptCacheManager:
             if created is None:
                 return None
             self._cache_names_by_key[cache_key] = created.name
-            self._delete_stale_caches(caches + [created], model=model, keep_name=created.name)
+            self._delete_stale_caches(
+                caches + [created], model=model, keep_name=created.name,
+                keep_display_name=display_name,
+            )
             return created.name
         except Exception as exc:
             self._logger.error(
@@ -226,6 +266,7 @@ class GeminiPromptCacheManager:
         *,
         model: str,
         keep_name: str,
+        keep_display_name: str,
     ) -> None:
         if not self._settings.gemini_prompt_cache_delete_stale:
             return
@@ -234,6 +275,10 @@ class GeminiPromptCacheManager:
         prefix = prompt_cache_display_name_prefix(self._settings.app_env, model)
         for cache in caches:
             if cache.name == keep_name:
+                continue
+            # Same build and prompt: a duplicate another instance created and
+            # may be using. It is not stale; it expires by its TTL.
+            if cache.display_name == keep_display_name:
                 continue
             if not cache.display_name.startswith(prefix):
                 continue
