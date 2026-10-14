@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 import asyncio
 import json
 import shutil
 import uuid
+import weakref
 import copy
 import hashlib
 
@@ -17,6 +18,8 @@ from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
 from src.backend.storage_client import download_bytes, upload_bytes
+
+_T = TypeVar("_T")
 
 _UNCHANGED = object()
 
@@ -143,7 +146,9 @@ class WorkspacePersistence:
 
     async def commit_uploaded_score(self, session_id, *, score_id, score, summary, files):
         snapshot = await self.get_snapshot(session_id, None)
-        path = self._stage_score(session_id, snapshot["user_id"], score_id, 1, score)
+        path = await asyncio.to_thread(
+            self._stage_score, session_id, snapshot["user_id"], score_id, 1, score
+        )
         def commit(data):
             return {
                 "jobHistorySchemaVersion": 2,
@@ -175,7 +180,9 @@ class WorkspacePersistence:
                 raise SessionMusicXmlUnavailableError("The transformed MusicXML artifact is missing.")
             score = copy.deepcopy(score)
             score["source_musicxml_path"] = str(await self.ensure_active_musicxml(session_id, None))
-        path = self._stage_score(session_id, snapshot["user_id"], score_id, version, score)
+        path = await asyncio.to_thread(
+            self._stage_score, session_id, snapshot["user_id"], score_id, version, score
+        )
         files = dict(snapshot.get("files") or {})
         xml_path = self.session_dir(session_id) / "scores" / str(score_id) / "versions" / str(version) / "input.xml"
         if xml_path.is_file():
@@ -575,7 +582,11 @@ class FirestoreSessionStore(WorkspacePersistence):
         self._storage_bucket = storage_bucket
         self._collection = "sessions"
         self._client = get_firestore_client()
-        self._lock = asyncio.Lock()
+        # One lock per session, held while that session's blocking calls run in
+        # a thread; a lock no coroutine holds is dropped.
+        self._session_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
 
     def session_dir(self, session_id: str) -> Path:
         """Return the session directory for a session ID."""
@@ -659,66 +670,84 @@ class FirestoreSessionStore(WorkspacePersistence):
             job_history_schema_version=int(data.get("jobHistorySchemaVersion") or 1),
         )
 
+    async def _run_session_io(self, session_id: str, work: Callable[[], _T]) -> _T:
+        """Run one session's blocking Firestore and Storage calls off the event loop.
+
+        Work on one session stays in order; other sessions never wait for it.
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        async with lock:
+            return await asyncio.to_thread(work)
+
+    def _update(self, session_id: str, fields: Dict[str, Any]) -> None:
+        self._doc_ref(session_id).update(
+            {**fields, "lastActiveAt": firestore.SERVER_TIMESTAMP}
+        )
+
+    def _read_owned(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
+        """Read a session document, enforcing ownership, and mark it active."""
+        doc = self._doc_ref(session_id).get()
+        if not doc.exists:
+            raise KeyError(session_id)
+        data = doc.to_dict() or {}
+        if user_id and data.get("userId") and data.get("userId") != user_id:
+            raise PermissionError(session_id)
+        self._update(session_id, {})
+        return data
+
     async def create_session(self, user_id: Optional[str]) -> SessionState:
         """Create a new session document and local directory."""
-        async with self._lock:
-            session_id = uuid.uuid4().hex
-            now = _utcnow()
-            payload = {
-                "userId": user_id,
-                "jobHistorySchemaVersion": 2,
-                "scoreId": None,
-                "currentJobId": None,
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                "history": [],
-                "files": {},
-                "originalScore": None,
-                "originalScorePath": None,
-                "preprocessPlanHistory": [],
-                "preprocessAttemptHistory": [],
-                "lastPreprocessPlan": None,
-                "currentScore": None,
-                "currentScorePath": None,
-                "currentScoreVersion": 0,
-                "scoreContextUpdated": False,
-                "scoreSummary": None,
-                "solfegeSettings": _default_solfege_settings(),
-                "currentAudio": None,
-            }
+        session_id = uuid.uuid4().hex
+        now = _utcnow()
+        payload = {
+            "userId": user_id,
+            "jobHistorySchemaVersion": 2,
+            "scoreId": None,
+            "currentJobId": None,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "lastActiveAt": firestore.SERVER_TIMESTAMP,
+            "history": [],
+            "files": {},
+            "originalScore": None,
+            "originalScorePath": None,
+            "preprocessPlanHistory": [],
+            "preprocessAttemptHistory": [],
+            "lastPreprocessPlan": None,
+            "currentScore": None,
+            "currentScorePath": None,
+            "currentScoreVersion": 0,
+            "scoreContextUpdated": False,
+            "scoreSummary": None,
+            "solfegeSettings": _default_solfege_settings(),
+            "currentAudio": None,
+        }
+
+        def run() -> None:
             self._doc_ref(session_id).set(payload)
-            session_dir = self.session_dir(session_id)
-            session_dir.mkdir(parents=True, exist_ok=True)
-            return SessionState(
-                id=session_id,
-                user_id=user_id,
-                created_at=now,
-                last_active_at=now,
-            )
+            self.session_dir(session_id).mkdir(parents=True, exist_ok=True)
+
+        await self._run_session_io(session_id, run)
+        return SessionState(
+            id=session_id,
+            user_id=user_id,
+            created_at=now,
+            last_active_at=now,
+        )
 
     async def get_session(self, session_id: str, user_id: Optional[str]) -> SessionState:
         """Fetch a session by ID, enforcing ownership and TTL."""
-        async with self._lock:
-            doc = self._doc_ref(session_id).get()
-            if not doc.exists:
-                raise KeyError(session_id)
-            data = doc.to_dict() or {}
-            if user_id and data.get("userId") and data.get("userId") != user_id:
-                raise PermissionError(session_id)
-            self._doc_ref(session_id).update({"lastActiveAt": firestore.SERVER_TIMESTAMP})
-            return self._state_from_doc(session_id, data)
+        def run() -> SessionState:
+            return self._state_from_doc(session_id, self._read_owned(session_id, user_id))
+
+        return await self._run_session_io(session_id, run)
 
     async def get_snapshot(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
         """Return a snapshot of a session for API responses."""
-        async with self._lock:
-            doc = self._doc_ref(session_id).get()
-            if not doc.exists:
-                raise KeyError(session_id)
-            data = doc.to_dict() or {}
-            if user_id and data.get("userId") and data.get("userId") != user_id:
-                raise PermissionError(session_id)
-            self._doc_ref(session_id).update({"lastActiveAt": firestore.SERVER_TIMESTAMP})
-            state = self._state_from_doc(session_id, data)
+        def run() -> Dict[str, Any]:
+            state = self._state_from_doc(session_id, self._read_owned(session_id, user_id))
             if self._backend_use_storage:
                 if state.original_score_path:
                     state.original_score = _load_score_from_storage(
@@ -730,44 +759,38 @@ class FirestoreSessionStore(WorkspacePersistence):
                     )
             return state.snapshot()
 
+        return await self._run_session_io(session_id, run)
+
     async def append_history(
         self, session_id: str, role: str, content: str
     ) -> Dict[str, str]:
         """Append a chat entry to Firestore history."""
-        async with self._lock:
-            entry = _new_history_entry(role, content)
-            self._doc_ref(session_id).update(
-                {
-                    "history": firestore.ArrayUnion([entry]),
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
-            return dict(entry)
+        entry = _new_history_entry(role, content)
+        await self._run_session_io(
+            session_id,
+            lambda: self._update(session_id, {"history": firestore.ArrayUnion([entry])}),
+        )
+        return dict(entry)
 
     async def set_file(self, session_id: str, key: str, path: Path) -> None:
         """Associate a file path with the session in Firestore."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    f"files.{key}": self._relative_path(path),
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        relative = self._relative_path(path)
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {f"files.{key}": relative})
+        )
 
     async def set_metadata(self, session_id: str, key: str, value: str) -> None:
         """Store metadata in the session files map."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {f"files.{key}": value, "lastActiveAt": firestore.SERVER_TIMESTAMP}
-            )
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {f"files.{key}": value})
+        )
 
     async def ensure_active_musicxml(
         self, session_id: str, user_id: Optional[str]
     ) -> Path:
         """Return the active MusicXML file, restoring it from storage when needed."""
-        async with self._lock:
-            doc_ref = self._doc_ref(session_id)
-            doc = doc_ref.get()
+        def run() -> Path:
+            doc = self._doc_ref(session_id).get()
             if not doc.exists:
                 raise KeyError(session_id)
             data = doc.to_dict() or {}
@@ -781,13 +804,15 @@ class FirestoreSessionStore(WorkspacePersistence):
                 backend_use_storage=self._backend_use_storage,
                 storage_bucket=self._storage_bucket,
             )
-            updates: Dict[str, Any] = {"lastActiveAt": firestore.SERVER_TIMESTAMP}
+            updates: Dict[str, Any] = {}
             restored_path = files.get("musicxml_path")
             persisted_path = (data.get("files") or {}).get("musicxml_path")
             if restored_path != persisted_path:
                 updates["files.musicxml_path"] = restored_path
-            doc_ref.update(updates)
+            self._update(session_id, updates)
             return path
+
+        return await self._run_session_io(session_id, run)
 
     async def set_score(self, session_id: str, score: Dict[str, Any], *,
                         summary: Any = _UNCHANGED, baseline: bool = False,
@@ -798,59 +823,49 @@ class FirestoreSessionStore(WorkspacePersistence):
 
     async def mark_score_context_updated(self, session_id: str) -> None:
         """Mark that the next LLM decision must re-evaluate score-derived context."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "scoreContextUpdated": True,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {"scoreContextUpdated": True})
+        )
 
     async def acknowledge_score_context_updated(self, session_id: str) -> None:
         """Clear the one-shot score-context update marker after LLM delivery."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "scoreContextUpdated": False,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {"scoreContextUpdated": False})
+        )
 
     async def set_original_score(self, session_id: str, score: Dict[str, Any]) -> None:
         """Persist the original parsed score baseline in Firestore."""
-        async with self._lock:
-            doc_ref = self._doc_ref(session_id)
-            if self._backend_use_storage:
-                data = doc_ref.get().to_dict() or {}
-                user_id = self._require_user_id(data, session_id)
-                storage_path = _original_score_storage_path(user_id, session_id, data.get("scoreId"))
-                _store_score_to_storage(self._storage_bucket, storage_path, score)
-                doc_ref.update(
-                    {
-                        "originalScorePath": storage_path,
-                        "originalScoreStorage": "gcs",
-                        "originalScoreByteSize": len(_serialize_score(score)),
-                        "originalScore": firestore.DELETE_FIELD,
-                        "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                    }
-                )
-            else:
-                doc_ref.update(
-                    {"originalScore": score, "lastActiveAt": firestore.SERVER_TIMESTAMP}
-                )
+        def run() -> None:
+            if not self._backend_use_storage:
+                self._update(session_id, {"originalScore": score})
+                return
+            data = self._doc_ref(session_id).get().to_dict() or {}
+            user_id = self._require_user_id(data, session_id)
+            storage_path = _original_score_storage_path(user_id, session_id, data.get("scoreId"))
+            _store_score_to_storage(self._storage_bucket, storage_path, score)
+            self._update(
+                session_id,
+                {
+                    "originalScorePath": storage_path,
+                    "originalScoreStorage": "gcs",
+                    "originalScoreByteSize": len(_serialize_score(score)),
+                    "originalScore": firestore.DELETE_FIELD,
+                },
+            )
+
+        await self._run_session_io(session_id, run)
 
     async def set_score_summary(self, session_id: str, summary: Optional[Dict[str, Any]]) -> None:
         """Update the score summary in Firestore."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {"scoreSummary": summary, "lastActiveAt": firestore.SERVER_TIMESTAMP}
-            )
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {"scoreSummary": summary})
+        )
 
     async def set_solfege_settings(
         self, session_id: str, settings: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Persist canonical solfege settings and atomically increment their revision."""
-        async with self._lock:
+        def run() -> Dict[str, Any]:
             doc_ref = self._doc_ref(session_id)
             transaction = self._client.transaction()
 
@@ -877,39 +892,35 @@ class FirestoreSessionStore(WorkspacePersistence):
 
             return dict(_update(transaction))
 
+        return await self._run_session_io(session_id, run)
+
     async def append_preprocess_plan(self, session_id: str, entry: Dict[str, Any]) -> None:
         """Append a generated preprocess plan entry in Firestore for debugging."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "preprocessPlanHistory": firestore.ArrayUnion([entry]),
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        await self._run_session_io(
+            session_id,
+            lambda: self._update(
+                session_id, {"preprocessPlanHistory": firestore.ArrayUnion([entry])}
+            ),
+        )
 
     async def append_preprocess_attempt_summary(
         self, session_id: str, entry: Dict[str, Any]
     ) -> None:
         """Append a preprocess attempt summary in Firestore for debugging."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "preprocessAttemptHistory": firestore.ArrayUnion([entry]),
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        await self._run_session_io(
+            session_id,
+            lambda: self._update(
+                session_id, {"preprocessAttemptHistory": firestore.ArrayUnion([entry])}
+            ),
+        )
 
     async def set_last_preprocess_plan(
         self, session_id: str, plan: Optional[Dict[str, Any]]
     ) -> None:
         """Persist the latest preprocess plan in Firestore."""
-        async with self._lock:
-            self._doc_ref(session_id).update(
-                {
-                    "lastPreprocessPlan": plan,
-                    "lastActiveAt": firestore.SERVER_TIMESTAMP,
-                }
-            )
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {"lastPreprocessPlan": plan})
+        )
 
     async def set_audio(
         self,
@@ -919,16 +930,15 @@ class FirestoreSessionStore(WorkspacePersistence):
         storage_path: Optional[str] = None,
     ) -> None:
         """Store audio output metadata for the session."""
-        async with self._lock:
-            payload = {
-                "path": self._relative_path(path),
-                "duration_s": duration_s,
-            }
-            if storage_path:
-                payload["storage_path"] = storage_path
-            self._doc_ref(session_id).update(
-                {"currentAudio": payload, "lastActiveAt": firestore.SERVER_TIMESTAMP}
-            )
+        payload = {
+            "path": self._relative_path(path),
+            "duration_s": duration_s,
+        }
+        if storage_path:
+            payload["storage_path"] = storage_path
+        await self._run_session_io(
+            session_id, lambda: self._update(session_id, {"currentAudio": payload})
+        )
 
     async def evict_expired(self) -> None:
         """Firestore-backed sessions rely on TTL policies; no-op here."""

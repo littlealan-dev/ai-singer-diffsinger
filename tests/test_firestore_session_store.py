@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -224,3 +225,73 @@ def test_firestore_history_keeps_legacy_entries_when_same_text_is_submitted(
     assert history[1]["content"] == "Yes"
     assert history[1]["id"]
     assert datetime.fromisoformat(history[1]["timestamp"]).tzinfo is not None
+
+
+def _slow_store(monkeypatch, tmp_path, delay):
+    """A Firestore store whose document reads block for `delay` seconds, like a slow network."""
+    store = {}
+    client = _FakeClient(store)
+    original_get = _FakeDocRef.get
+
+    def slow_get(self, transaction=None):
+        time.sleep(delay)
+        return original_get(self, transaction)
+
+    monkeypatch.setattr(_FakeDocRef, "get", slow_get)
+    monkeypatch.setattr(session_module, "get_firestore_client", lambda: client)
+    monkeypatch.setattr(session_module.firestore, "ArrayUnion", _FakeArrayUnion)
+    monkeypatch.setattr(session_module.firestore, "SERVER_TIMESTAMP", _FakeServerTimestamp())
+    return session_module.FirestoreSessionStore(
+        project_root=tmp_path,
+        sessions_dir=tmp_path / "sessions",
+        ttl_seconds=3600,
+        max_sessions=100,
+    )
+
+
+def test_a_slow_firestore_read_does_not_block_other_sessions_or_the_event_loop(
+    monkeypatch, tmp_path
+):
+    sessions = _slow_store(monkeypatch, tmp_path, delay=0.3)
+
+    async def run():
+        first = await sessions.create_session(user_id="user-1")
+        second = await sessions.create_session(user_id="user-2")
+        ticks = 0
+
+        async def tick():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        started = time.monotonic()
+        await asyncio.gather(
+            sessions.get_snapshot(first.id, "user-1"),
+            sessions.get_snapshot(second.id, "user-2"),
+        )
+        elapsed = time.monotonic() - started
+        ticker.cancel()
+        return elapsed, ticks
+
+    elapsed, ticks = asyncio.run(run())
+
+    # Two 0.3 s reads of different sessions overlap rather than queue (0.6 s).
+    assert elapsed < 0.5
+    # The event loop kept running other work during the reads.
+    assert ticks >= 10
+
+
+def test_one_sessions_calls_still_run_in_order(monkeypatch, tmp_path):
+    sessions = _slow_store(monkeypatch, tmp_path, delay=0.05)
+
+    async def run():
+        session = await sessions.create_session(user_id="user-1")
+        await asyncio.gather(
+            *(sessions.append_history(session.id, "user", f"turn {n}") for n in range(5))
+        )
+        return await sessions.get_snapshot(session.id, "user-1")
+
+    history = asyncio.run(run())["history"]
+    assert [entry["content"] for entry in history] == [f"turn {n}" for n in range(5)]
