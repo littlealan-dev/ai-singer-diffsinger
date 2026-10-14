@@ -1141,3 +1141,86 @@ def test_router_without_gpu_starts_and_reports_ready_on_the_cpu_worker_alone():
     assert router.call_tool("parse_score", {})["tool"] == "parse_score"
     with pytest.raises(McpWorkerUnavailableError):
         router.call_tool("synthesize", {})
+
+
+class _BlockingCpuProcess:
+    """A CPU MCP process whose calls wait until released, recording who ran."""
+
+    def __init__(self, label, calls, release):
+        self.label = label
+        self._calls = calls
+        self._release = release
+
+    def call_tool(self, name, arguments):
+        self._calls.append((self.label, arguments["n"]))
+        self._release.wait(timeout=2)
+        return {"by": self.label}
+
+    def is_ready(self):
+        return True
+
+
+def test_concurrent_cpu_calls_spread_over_the_cpu_worker_pool():
+    router = McpRouter(replace(Settings.from_env(), mcp_cpu_workers=2))
+    calls = []
+    release = threading.Event()
+    router._cpu_pool = [
+        _BlockingCpuProcess("a", calls, release),
+        _BlockingCpuProcess("b", calls, release),
+    ]
+    results = []
+
+    def call(n):
+        results.append(router._call_with_retry("cpu", "parse_score", {"n": n})["by"])
+
+    first = threading.Thread(target=call, args=(1,))
+    second = threading.Thread(target=call, args=(2,))
+    first.start()
+    second.start()
+    deadline = time.monotonic() + 1
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    # Both calls are running at once, one on each process.
+    assert sorted(label for label, _ in calls) == ["a", "b"]
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    # With both idle again, the next call goes to the first process.
+    assert router._call_with_retry("cpu", "parse_score", {"n": 3})["by"] == "a"
+    assert router._cpu_in_flight == [0, 0]
+    assert sorted(results) == ["a", "b"]
+
+
+def test_a_cpu_worker_pool_starts_reports_and_stops_every_process():
+    settings = replace(
+        Settings.from_env(), mcp_cpu_workers=2, mcp_gpu_enabled=False, mcp_debug=False
+    )
+    router = McpRouter(settings)
+    # MCP tools take project-relative paths.
+    fixture = "tests/fixtures/split/satb_two_bars.xml"
+    try:
+        router.start()
+        assert router.readiness()["workers"]["cpu"] is True
+        assert [process.lifecycle_state for process in router._cpu_pool] == [
+            McpWorkerState.READY,
+            McpWorkerState.READY,
+        ]
+        results = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(
+                    router.call_tool("parse_score", {"file_path": fixture})
+                )
+            )
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert len(results) == 2
+        assert all(result.get("title") == "Split Test SATB" for result in results)
+    finally:
+        router.stop(deadline=time.monotonic() + 10)
+    assert all(process._proc is None for process in router._cpu_pool)

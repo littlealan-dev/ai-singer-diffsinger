@@ -889,27 +889,36 @@ class McpRouter:
         self._stopping = threading.Event()
         pipe_stderr = settings.app_env.lower() in {"dev", "development", "local", "test"}
         python_exe = sys.executable
-        self._cpu = McpProcess(
-            name="mcp_cpu",
-            args=[
-                python_exe,
-                "-m",
-                "src.mcp_server",
-                "--device",
-                settings.mcp_cpu_device,
-                "--mode",
-                "cpu",
-                "--service-name",
-                "mcp_cpu",
-            ]
-            + (["--debug"] if settings.mcp_debug else []),
-            cwd=settings.project_root,
-            timeout_seconds=settings.mcp_timeout_seconds,
-            startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
-            pipe_stderr=pipe_stderr,
-            start_gate=self._start_gate,
-            stopping=self._stopping,
-        )
+        # Each MCP process serves one call at a time, so CPU tool calls go to
+        # the least busy of MCP_CPU_WORKERS processes.
+        self._cpu_pool: list[Any] = []
+        for index in range(max(1, settings.mcp_cpu_workers)):
+            service_name = "mcp_cpu" if index == 0 else f"mcp_cpu_{index + 1}"
+            self._cpu_pool.append(
+                McpProcess(
+                    name=service_name,
+                    args=[
+                        python_exe,
+                        "-m",
+                        "src.mcp_server",
+                        "--device",
+                        settings.mcp_cpu_device,
+                        "--mode",
+                        "cpu",
+                        "--service-name",
+                        service_name,
+                    ]
+                    + (["--debug"] if settings.mcp_debug else []),
+                    cwd=settings.project_root,
+                    timeout_seconds=settings.mcp_timeout_seconds,
+                    startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
+                    pipe_stderr=pipe_stderr,
+                    start_gate=self._start_gate,
+                    stopping=self._stopping,
+                )
+            )
+        self._cpu_in_flight = [0] * len(self._cpu_pool)
+        self._cpu_pick_lock = threading.Lock()
         self._gpu = McpProcess(
             name="mcp_gpu",
             args=[
@@ -955,6 +964,23 @@ class McpRouter:
         # its CPU throttled outside requests, so a background start at boot
         # cannot finish. It starts MCP on its first tool call, inside a request.
         self.starts_on_first_call = settings.mcp_start_on_first_call
+
+    @property
+    def _cpu(self) -> Any:
+        """The first CPU MCP process (the only one unless MCP_CPU_WORKERS > 1)."""
+        return self._cpu_pool[0]
+
+    @_cpu.setter
+    def _cpu(self, process: Any) -> None:
+        self._cpu_pool[0] = process
+
+    def _processes(self) -> list[tuple[str, Any]]:
+        """Every MCP process with its worker label: the CPU pool, then the GPU."""
+        cpu = [
+            ("cpu" if index == 0 else f"cpu_{index + 1}", process)
+            for index, process in enumerate(self._cpu_pool)
+        ]
+        return cpu + [("gpu", self._gpu)]
 
     def start(self) -> None:
         """Start both CPU and GPU MCP processes."""
@@ -1021,7 +1047,7 @@ class McpRouter:
                 name=f"mcp-stop-{worker}",
                 daemon=True,
             )
-            for worker, process in (("cpu", self._cpu), ("gpu", self._gpu))
+            for worker, process in self._processes()
         ]
         for thread in stop_threads:
             thread.start()
@@ -1063,7 +1089,7 @@ class McpRouter:
         if self._drain_established.is_set():
             return
         self._notify_startup_changed(deadline=deadline)
-        for process in (self._cpu, self._gpu):
+        for _, process in self._processes():
             notify = getattr(process, "notify_shutdown", None)
             if notify is not None:
                 if isinstance(process, McpProcess):
@@ -1099,7 +1125,7 @@ class McpRouter:
     def readiness(self) -> Dict[str, Any]:
         """Return lightweight MCP startup state for diagnostics."""
         draining = self._stopping.is_set()
-        cpu_ready = self._cpu.is_ready()
+        cpu_ready = all(process.is_ready() for process in self._cpu_pool)
         gpu_enabled = self._settings.mcp_gpu_enabled
         gpu_ready = self._gpu.is_ready() if gpu_enabled else None
         ready = bool(
@@ -1146,7 +1172,7 @@ class McpRouter:
         """Run startup from a daemon thread and keep any failure observable."""
         error: BaseException | None = None
         try:
-            self._cpu.start()
+            self._start_cpu_pool()
             self._raise_if_stopping()
             if self._settings.mcp_gpu_enabled:
                 self._gpu.start()
@@ -1162,7 +1188,7 @@ class McpRouter:
                 cleanup_deadline = (
                     time.monotonic() + self._settings.backend_shutdown_worker_seconds
                 )
-                for process in (self._cpu, self._gpu):
+                for _, process in self._processes():
                     try:
                         if isinstance(process, McpProcess):
                             process.stop(deadline=cleanup_deadline)
@@ -1179,6 +1205,37 @@ class McpRouter:
                     future.set_result(None)
                 else:
                     future.set_exception(error)
+
+    def _start_cpu_pool(self) -> None:
+        """Start every CPU process at once, so the pool starts as fast as one.
+
+        Each process spends its start importing in its own child, outside the
+        shared start gate, so the starts overlap.
+        """
+        if len(self._cpu_pool) == 1:
+            self._cpu_pool[0].start()
+            return
+        errors: list[BaseException] = []
+
+        def start(process: Any) -> None:
+            try:
+                process.start()
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(
+                target=start, args=(process,), name=f"mcp-start-{label}", daemon=True
+            )
+            for label, process in self._processes()
+            if process is not self._gpu
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise errors[0]
 
     def _ensure_started_for_call(self) -> None:
         """Wait for background startup before routing a real tool call."""
@@ -1221,7 +1278,27 @@ class McpRouter:
 
     def _call_with_retry(self, worker: str, name: str, arguments: Dict[str, Any]) -> Any:
         """Retry a tool call once after restarting a failed process."""
-        process = self._gpu if worker == "gpu" else self._cpu
+        if worker == "gpu":
+            return self._call_process_with_retry(worker, self._gpu, name, arguments)
+        index = self._checkout_cpu()
+        try:
+            return self._call_process_with_retry(
+                worker, self._cpu_pool[index], name, arguments
+            )
+        finally:
+            with self._cpu_pick_lock:
+                self._cpu_in_flight[index] -= 1
+
+    def _checkout_cpu(self) -> int:
+        """Pick the CPU process with the fewest calls in flight; count this one."""
+        with self._cpu_pick_lock:
+            index = min(range(len(self._cpu_pool)), key=self._cpu_in_flight.__getitem__)
+            self._cpu_in_flight[index] += 1
+            return index
+
+    def _call_process_with_retry(
+        self, worker: str, process: Any, name: str, arguments: Dict[str, Any]
+    ) -> Any:
         try:
             start = time.monotonic()
             result = process.call_tool(name, arguments)

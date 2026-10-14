@@ -17,6 +17,14 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _mcp_cpu_workers() -> int:
+    """Read MCP_CPU_WORKERS: at least 1."""
+    value = _env_int("MCP_CPU_WORKERS", 1)
+    if value < 1:
+        raise ValueError("MCP_CPU_WORKERS must be at least 1.")
+    return value
+
+
 def _env_float(name: str, default: float) -> float:
     """Read a float env var with a default."""
     value = os.getenv(name)
@@ -220,6 +228,9 @@ class Settings:
     # Start MCP on the first tool call rather than at boot: for request-billed
     # services, whose CPU is throttled outside requests.
     mcp_start_on_first_call: bool = False
+    # CPU MCP processes per instance. Each serves one call at a time, so more
+    # than one lets a busy API run several users' score tools at once.
+    mcp_cpu_workers: int = 1
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -578,6 +589,7 @@ class Settings:
             mcp_start_on_first_call=_env_bool(
                 "MCP_START_ON_FIRST_CALL", preprocess_worker_enabled
             ),
+            mcp_cpu_workers=_mcp_cpu_workers(),
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_api_key_secret=gemini_api_key_secret,
