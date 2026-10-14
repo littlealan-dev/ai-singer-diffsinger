@@ -12701,23 +12701,20 @@ def test_a_take_that_finishes_after_a_newer_job_started_keeps_the_newer_current_
     assert current["duration_s"] == 1.5
 
 
-def test_a_job_waiting_for_the_gpu_says_so(client, monkeypatch):
+def test_renders_on_one_instance_run_one_at_a_time(client, monkeypatch):
     _, app = client
     orchestrator = app.state.orchestrator
     session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
-    updates = []
-    monkeypatch.setattr(
-        orchestrator._job_store,
-        "update_job",
-        lambda job_id, **fields: updates.append((job_id, fields.get("step"))),
-    )
+    events = []
     first_rendering = asyncio.Event()
     release_first = asyncio.Event()
 
     async def render(session_id_arg, score, synth_args, *, job_id, **kwargs):
+        events.append(f"{job_id}-start")
         if job_id == "first":
             first_rendering.set()
             await release_first.wait()
+        events.append(f"{job_id}-end")
         return {"job": job_id}
 
     monkeypatch.setattr(orchestrator, "_render_and_save_audio", render)
@@ -12731,14 +12728,14 @@ def test_a_job_waiting_for_the_gpu_says_so(client, monkeypatch):
             orchestrator._synthesize(session_id, {}, {"voicebank": "V"}, job_id="second")
         )
         await asyncio.sleep(0.05)
-        waiting_while_blocked = ("second", "waiting") in updates
+        started_while_blocked = "second-start" in events
         release_first.set()
-        return waiting_while_blocked, await first, await second
+        return started_while_blocked, await first, await second
 
-    waiting, first_result, second_result = asyncio.run(scenario())
+    started_while_blocked, first_result, second_result = asyncio.run(scenario())
 
-    assert waiting is True
-    assert ("first", "waiting") not in updates
+    assert started_while_blocked is False
+    assert events == ["first-start", "first-end", "second-start", "second-end"]
     assert first_result == {"job": "first"} and second_result == {"job": "second"}
 
 

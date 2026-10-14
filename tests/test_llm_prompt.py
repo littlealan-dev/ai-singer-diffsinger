@@ -244,8 +244,8 @@ def test_prompt_forbids_claiming_synthesis_without_calling_synthesize() -> None:
     assert "the User-selected voicebank override" in prompt
     assert "rather than calling `synthesize` with a quote that does not cover them" in prompt
     assert (
-        "Never state or imply that synthesis has started, is running, or is in "
-        "progress unless this response actually calls `synthesize`." in prompt
+        "Never state or imply that synthesis has started, is queued, is running, or is "
+        "in progress unless this response actually calls `synthesize`." in prompt
     )
 
 
@@ -312,7 +312,8 @@ def test_build_system_prompt_requires_the_quote_substance_without_dictating_word
 
     # A refused quote carries the re-quote result: reply to it, call no tool.
     assert "action=synthesis_quote_refresh_required" in prompt
-    assert "synthesis did not start; never say it is in progress" in prompt
+    assert "synthesis did not start; never say it is queued or in progress" in prompt
+    assert "saying the take is queued and will start as soon as a singer is free" in prompt
     assert "reply to its `quote` exactly as you would to a `prepare_synthesis_quote` result" in prompt
     assert "Do not call any tool in that response" in prompt
 

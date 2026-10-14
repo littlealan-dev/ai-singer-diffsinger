@@ -287,8 +287,8 @@ class Orchestrator:
             job_route(settings, SYNTHESIS_JOB_KIND),
             on_give_up=self._fail_undelivered_synthesis_job,
         )
-        # Renders on this instance's GPU run one at a time (the GPU MCP worker
-        # serves one call at a time); a job waiting for it says so.
+        # Renders on this instance's GPU run one at a time: the GPU MCP worker
+        # serves one call at a time.
         self._gpu_render_lock = asyncio.Lock()
         # Outside "inline" mode a preprocess job runs on the worker service,
         # inside the worker's request, rather than as a task in this process.
@@ -736,14 +736,6 @@ class Orchestrator:
             synth_args["voice_id"] = self._settings.default_voice_id
         if job_id is not None:
             synth_args["progress_job_id"] = job_id
-        if self._gpu_render_lock.locked() and job_id is not None:
-            await asyncio.to_thread(
-                self._job_store.update_job,
-                job_id,
-                status="running",
-                step="waiting",
-                message=backend_message("job.synthesis_waiting_for_singer"),
-            )
         async with self._gpu_render_lock:
             return await self._render_and_save_audio(
                 session_id,
