@@ -121,12 +121,15 @@ export STORAGE_EMULATOR_HOST
 export PYTHONPATH="${ROOT_DIR}"
 
 cd "${ROOT_DIR}"
+# Append, so a restart keeps the previous run's log (e.g. what a worker did
+# while it was shutting down); each run starts with a marker line.
+echo "===== ${BACKEND_DEV_NAME} start $(date -u +%Y-%m-%dT%H:%M:%SZ) build=${BACKEND_BUILD_ID} =====" >> "${LOG_FILE}"
 nohup "${PYTHON_BIN}" -m src.backend.server \
   --host "${BACKEND_HOST}" \
   --port "${BACKEND_PORT}" \
   --log-level "${BACKEND_LOG_LEVEL}" \
   --access-log \
-  > "${LOG_FILE}" 2>&1 &
+  >> "${LOG_FILE}" 2>&1 &
 
 echo $! > "${PID_FILE}"
 pid="$(cat "${PID_FILE}")"
