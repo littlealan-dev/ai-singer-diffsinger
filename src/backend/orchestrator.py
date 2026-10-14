@@ -1447,7 +1447,7 @@ class Orchestrator:
         """Release and fail a job no worker ran to the end, unless it finished."""
         await self._release_and_fail_synthesis_job(
             job_id,
-            message_key="job.synthesis_dispatch_failed",
+            message_key="job.synthesis_not_finished",
             error="dispatch_failed",
         )
 

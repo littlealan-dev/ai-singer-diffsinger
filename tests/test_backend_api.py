@@ -12921,3 +12921,22 @@ def test_a_take_whose_mcp_worker_stops_for_shutdown_goes_back_for_a_retry(
         assert releases == []
         (_user_id, _job_id, kwargs), = released_credits
         assert kwargs["terminal_job_fields"]["status"] == "failed"
+
+
+def test_a_take_no_worker_finished_says_it_could_not_finish(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    app.state.job_store.create_job(job_id="j1", user_id="u1", session_id="s1", status="queued")
+    released = []
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda user_id, job_id, **kwargs: released.append(kwargs)
+        or ReleaseCreditsResult(status="released"),
+    )
+
+    # What the dispatcher calls when it gives up on reaching a worker.
+    asyncio.run(orchestrator._fail_undelivered_synthesis_job("j1"))
+
+    (kwargs,) = released
+    assert kwargs["terminal_job_fields"]["message"] == backend_message("job.synthesis_not_finished")
+    assert backend_message("job.synthesis_not_finished").startswith("Couldn't finish the take.")
