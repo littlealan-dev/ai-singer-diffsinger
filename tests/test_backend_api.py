@@ -10298,6 +10298,31 @@ def test_another_instance_serves_the_published_midi_from_storage(client_with_env
 
 
 @pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_midi_published_on_the_synthesis_worker_is_served_from_storage(client_with_env, monkeypatch):
+    """The recorded path names the worker's disk; this instance uses its own folder."""
+    test_client, app = client_with_env
+    orchestrator = app.state.orchestrator
+    objects = _fake_midi_storage(monkeypatch)
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    _upload_piano_satb(test_client, session_id)
+    publication, paths = _publish_stored_instrumental_midi(orchestrator, session_id, "job-1")
+    _remove_local_midi(publication)
+    worker_path = (
+        f"data/synthesis-worker/sessions/{session_id}/{publication['written_path'].name}"
+    )
+    asyncio.run(
+        app.state.sessions.set_metadata(session_id, "instrumental_midi_original_path", worker_path)
+    )
+
+    response = test_client.get(f"/sessions/{session_id}/instrumental-midi")
+
+    assert response.status_code == 200
+    assert response.content == objects[paths["originalStoragePath"]]
+    assert publication["written_path"].is_file()
+
+
+@pytest.mark.parametrize("client_with_env", [{"BACKEND_USE_STORAGE": "true"}], indirect=True)
 def test_missing_storage_object_still_returns_404(client_with_env, monkeypatch):
     test_client, app = client_with_env
     orchestrator = app.state.orchestrator

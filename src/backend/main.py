@@ -1775,7 +1775,7 @@ def create_app() -> FastAPI:
         stored_path = files.get(key) if isinstance(files, dict) else None
         if not isinstance(stored_path, str) or not stored_path:
             raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
-        midi_path = _resolve_allowlisted_session_midi_path(settings, stored_path)
+        midi_path = _session_midi_local_path(sessions, session_id, stored_path)
         # Another instance may have published the file: restore it from storage.
         if not await orchestrator.restore_instrumental_midi(
             user_id=user_id,
@@ -1795,17 +1795,17 @@ def create_app() -> FastAPI:
     return app
 
 
-def _resolve_allowlisted_session_midi_path(settings: Settings, stored_path: str) -> Path:
-    """Resolve a session MIDI path without allowing it to escape session storage."""
-    candidate = (settings.project_root / stored_path).resolve()
-    session_root = settings.sessions_dir.resolve()
-    try:
-        candidate.relative_to(session_root)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="Instrumental MIDI not found.") from exc
-    if candidate.suffix.lower() not in {".mid", ".midi"}:
+def _session_midi_local_path(sessions: SessionStore, session_id: str, stored_path: str) -> Path:
+    """Return this instance's path for a published session MIDI file.
+
+    The recorded path may be another backend's disk (the synthesis worker's),
+    so only its file name is used, inside this session's own folder; the file
+    is restored from storage when this instance does not have it.
+    """
+    name = Path(stored_path).name
+    if Path(name).suffix.lower() not in {".mid", ".midi"}:
         raise HTTPException(status_code=404, detail="Instrumental MIDI not found.")
-    return candidate
+    return sessions.session_dir(session_id) / name
 
 
 def _log_onnx_providers() -> None:
