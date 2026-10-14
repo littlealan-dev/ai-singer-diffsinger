@@ -12866,3 +12866,58 @@ def test_a_range_beyond_the_stored_audio_is_refused(monkeypatch):
         _serve_storage_audio(monkeypatch, b"0123456789", range_header="bytes=10-")
 
     assert refused.value.status_code == 416
+
+
+@pytest.mark.parametrize(
+    "attempt, during_shutdown, expect_retry",
+    [(1, True, True), (3, True, False), (1, False, False)],
+)
+def test_a_take_whose_mcp_worker_stops_for_shutdown_goes_back_for_a_retry(
+    client, monkeypatch, attempt, during_shutdown, expect_retry
+):
+    from src.backend.mcp_client import McpError, McpShuttingDownError
+
+    _, app = client
+    orchestrator, rendering, released_credits, job = _blocking_synthesis_job(
+        app, monkeypatch, max_attempts=3
+    )
+    fail_render = asyncio.Event()
+
+    async def synthesize(*_args, **_kwargs):
+        rendering.set()
+        await fail_render.wait()
+        if during_shutdown:
+            # What the MCP router raises once shutdown stops its workers.
+            raise McpShuttingDownError("MCP operation interrupted by shutdown.")
+        raise McpError("render failed")
+
+    monkeypatch.setattr(orchestrator, "_synthesize", synthesize)
+    releases = []
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "release_job_for_retry",
+        lambda job_id, *, worker_id, message: releases.append(job_id) or True,
+    )
+
+    async def scenario():
+        run = asyncio.create_task(
+            orchestrator.run_dispatched_synthesis_job("j1", job, attempt=attempt, worker_id="w1")
+        )
+        await rendering.wait()
+        if during_shutdown:
+            orchestrator.begin_shutdown(time.monotonic() + 2.0)
+        fail_render.set()
+        return (await asyncio.gather(run, return_exceptions=True))[0]
+
+    outcome = asyncio.run(scenario())
+
+    if expect_retry:
+        # Handed back with its reservation; the error reaches the worker's
+        # request, whose non-2xx answer makes the dispatcher retry.
+        assert isinstance(outcome, McpShuttingDownError)
+        assert releases == ["j1"]
+        assert released_credits == []
+    else:
+        assert releases == []
+        (_user_id, _job_id, kwargs), = released_credits
+        assert kwargs["terminal_job_fields"]["status"] == "failed"

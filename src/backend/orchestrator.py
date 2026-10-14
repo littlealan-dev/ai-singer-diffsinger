@@ -2313,6 +2313,21 @@ class Orchestrator:
                     exc.message,
                 )
         except Exception as exc:
+            # Shutdown stops this instance's MCP workers before it cancels
+            # running jobs, so a take interrupted mid-render fails here rather
+            # than being cancelled: hand it back for another attempt too.
+            if (
+                on_interrupt is not None
+                and self._shutdown_requested.is_set()
+                and await on_interrupt()
+            ):
+                self._logger.warning(
+                    "synthesis_interrupted_by_shutdown session=%s job=%s error=%s",
+                    session_id,
+                    job_id,
+                    exc,
+                )
+                raise
             if self._is_e2e_credit_bypass_enabled():
                 self._logger.exception("synthesis_failed session=%s error=%s", session_id, exc)
                 error_message = _format_synthesis_error(exc)
