@@ -2292,42 +2292,96 @@ def test_repreprocess_uses_original_uploaded_score_context(client):
     assert latest_plan["targets"][0]["target"]["voice_part_id"] == "soprano"
 
 
-def test_orchestrator_uses_active_score_for_preprocess_planning(client):
-    _, app = client
+class _ScriptedLlm:
+    """Answers each LLM call with the next scripted response; records every prompt."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.prompts = []
+
+    def generate(self, prompt_bundle, history, *, role=LlmRole.DEFAULT):
+        self.prompts.append(prompt_bundle)
+        return self._responses.pop(0) if self._responses else json.dumps(
+            {"tool_calls": [], "final_message": "OK.", "include_score": False}
+        )
+
+
+def test_singing_in_solfege_gives_the_llm_the_solfege_verses_stored_signals(client, monkeypatch):
+    """Solfege is one more verse: the chat LLM gets its stored signals, with no extra parse."""
+    import src.backend.orchestrator as orchestrator_module
+
+    test_client, app = client
     orchestrator = app.state.orchestrator
-    original_score = {
-        "source_musicxml_path": "/tmp/original.xml",
-        "voice_part_signals": {"source": "original"},
-    }
-    current_score = {
-        "source_musicxml_path": "/tmp/derived.xml",
-        "voice_part_signals": {"source": "derived"},
-        "voice_part_transforms": {"x": {}},
-    }
-    snapshot = {
-        "original_score": original_score,
-        "current_score": {"score": current_score, "version": 2},
-    }
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    fixture = PROJECT_ROOT / "ui" / "e2e" / "fixtures" / "solfege-source-piano.xml"
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.xml", fixture.read_bytes(), "application/xml")},
+    )
+    assert response.status_code == 200
+    # Add solfege to Solo through a real tool call (real add_solfege, real reparse).
+    orchestrator._llm_client = _ScriptedLlm(
+        [
+            json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "add_solfege_lyric_verse", "arguments": {"parts": ["Solo"]}}
+                    ],
+                    "final_message": "Adding solfege.",
+                    "include_score": False,
+                }
+            )
+        ]
+    )
+    assert test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "add solfege to Solo"}
+    ).status_code == 200
+    # "Sing in solfege" selects the generated verse, as a quote does: a reparse.
+    summary = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))["score_summary"]
+    solo = next(part for part in summary["parts"] if part["part_id"] == "Solo")
+    solfege = next(choice for choice in solo["lyric_selections"] if choice["is_generated_solfege"])
+    asyncio.run(
+        orchestrator._reparse_score(
+            session_id,
+            part_id=None,
+            part_index=None,
+            verse_number=None,
+            lyric_selection={key: solfege[key] for key in ("id", "number", "name")},
+            user_id="test-user",
+        )
+    )
+    stored = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    stored_signals = stored["current_score"]["score"]["voice_part_signals"]
 
-    planning_score = orchestrator._resolve_llm_planning_score(snapshot, current_score)
+    parses = []
+    real_call_tool = app.state.router.call_tool
+    app.state.router.call_tool = lambda name, arguments: (
+        parses.append(name) if name == "parse_score" else None
+    ) or real_call_tool(name, arguments)
+    prompt_signals = []
+    real_build = orchestrator_module.build_prompt_bundle
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_prompt_bundle",
+        lambda *args, **kwargs: prompt_signals.append(kwargs.get("voice_part_signals"))
+        or real_build(*args, **kwargs),
+    )
+    orchestrator._llm_client = _ScriptedLlm([])
 
-    assert planning_score == current_score
+    assert test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "which parts can I sing?"}
+    ).status_code == 200
 
-
-def test_orchestrator_uses_active_score_when_original_score_missing_for_preprocess_planning(client):
-    _, app = client
-    orchestrator = app.state.orchestrator
-    current_score = {
-        "source_musicxml_path": "/tmp/derived.xml",
-        "voice_part_signals": {"source": "derived"},
-    }
-    snapshot = {
-        "current_score": {"score": current_score, "version": 2},
-    }
-
-    planning_score = orchestrator._resolve_llm_planning_score(snapshot, current_score)
-
-    assert planning_score == current_score
+    # The LLM got the stored signals of the selected (solfege) verse, and nothing
+    # was parsed for it.
+    assert prompt_signals and all(signals == stored_signals for signals in prompt_signals)
+    assert parses == []
+    assert stored_signals["requested_verse_number"] == "SSSolfege"
+    by_part = {part["part_id"]: part for part in stored_signals["parts"]}
+    # Solo is sung in solfege: every note has a syllable, nothing is missing.
+    assert by_part["Solo"]["missing_lyric_voice_parts"] == []
+    assert by_part["Solo"]["is_potentially_complex_for_preprocess"] is False
 
 
 def test_resolve_preprocess_score_uses_active_score_when_original_score_missing(client):

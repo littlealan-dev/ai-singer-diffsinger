@@ -5601,16 +5601,6 @@ class Orchestrator:
             return score_summary
         return {**score_summary, "performance_midi": performance_midi}
 
-    def _resolve_llm_planning_score(
-        self,
-        snapshot: Dict[str, Any],
-        current_score: Optional[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Return the score context the LLM should use for preprocess planning."""
-        if not isinstance(current_score, dict):
-            return current_score
-        return self._resolve_preprocess_planning_score(snapshot, current_score)
-
     def _resolve_preprocess_planning_score(
         self,
         snapshot: Dict[str, Any],
@@ -6275,7 +6265,9 @@ class Orchestrator:
             last_preprocess_plan = snapshot.get("last_preprocess_plan")
             if isinstance(current_score, dict):
                 score_payload = current_score.get("score")
-                planning_score = self._resolve_llm_planning_score(snapshot, score_payload)
+                # The selected verse's stored signals, solfege included: a split
+                # that needs the real lyrics re-parses for itself (preprocess job).
+                planning_score = score_payload
                 if isinstance(planning_score, dict):
                     voice_part_signals = planning_score.get("voice_part_signals")
                     preprocess_mapping_context = self._build_preprocess_mapping_context(
@@ -6590,7 +6582,7 @@ class Orchestrator:
             current_credit_availability = await self._get_current_credit_availability(
                 user_id,
             )
-        planning_score = self._resolve_llm_planning_score(snapshot, current_score)
+        planning_score = current_score
         voice_part_signals = (
             planning_score.get("voice_part_signals")
             if isinstance(planning_score, dict)
@@ -6676,7 +6668,7 @@ class Orchestrator:
                 self._llm_tools_for_role(role),
                 voicebank_ids,
             )
-            planning_score = self._resolve_llm_planning_score(snapshot, current_score)
+            planning_score = current_score
             voice_part_signals = (
                 planning_score.get("voice_part_signals")
                 if isinstance(planning_score, dict)
