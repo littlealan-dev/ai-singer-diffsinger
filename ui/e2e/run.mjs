@@ -94,6 +94,8 @@ try {
     MCP_CPU_DEVICE: "cpu",
     MCP_GPU_DEVICE: process.env.REGRESSION_SYNTHESIS_DEVICE || "gpu",
     MCP_GPU_ENABLED: "false",
+    // Two CPU MCP processes, as the CPU-only API runs; the workers run one.
+    MCP_CPU_WORKERS: "2",
     E2E_MANAGED_WEB_SERVER: "1",
     VITE_APP_ENV: "dev",
     VITE_E2E_AUTH: "1",
@@ -123,6 +125,7 @@ try {
     MCP_GPU_ENABLED: "false",
     PREPROCESS_WORKER_ENABLED: "true",
     PREPROCESS_DISPATCH_MODE: "inline",
+    MCP_CPU_WORKERS: "1",
   };
   const synthesisWorkerEnv = {
     ...env,
@@ -132,6 +135,7 @@ try {
     PREPROCESS_DISPATCH_MODE: "inline",
     MCP_GPU_ENABLED: "true",
     MCP_GPU_DEVICE: process.env.REGRESSION_SYNTHESIS_DEVICE || "gpu",
+    MCP_CPU_WORKERS: "1",
   };
 
   start("firebase", ["emulators:start", "--only", "auth,firestore,storage", "--project", projectId], {
