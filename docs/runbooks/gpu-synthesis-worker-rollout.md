@@ -144,11 +144,19 @@ queued still finish on the worker.
 ## 6. Move the API to CPU
 
 Deploy the CPU revision **with no traffic**, check it on its own URL, then
-send everyone to it.
+send everyone to it. This first CPU deploy uses the one-off
+`convert_backend_to_cpu_prod.sh`: the GPU revisions left GPU settings on the
+service (a zonal-redundancy annotation `services update` cannot remove), so it
+writes the whole service definition once. Validate it first; nothing is applied:
 
 ```bash
-scripts/deploy_backend_cpu_prod.sh          # DEPLOY_TRAFFIC=none is the default
+DRY_RUN=1 scripts/convert_backend_to_cpu_prod.sh
+scripts/convert_backend_to_cpu_prod.sh      # DEPLOY_TRAFFIC=none is the default
 ```
+
+Later CPU deploys use `scripts/deploy_backend_cpu_prod.sh` (plain `services
+update` flags). It stops with a message if GPU settings are back on the
+service, which happens only if a GPU revision is deployed again.
 
 It prints the serving revision (the rollback target), the tagged URL, and the
 command that sends all traffic. Check the new revision first:

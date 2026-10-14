@@ -10,12 +10,12 @@ set -euo pipefail
 #     gcloud run services update-traffic sightsinger-api \
 #       --project=sightsinger-app --region=us-east4 --to-latest
 # DEPLOY_TRAFFIC=all: deploy and send all traffic to the new revision at once.
-# DRY_RUN=1 reads the service and has Cloud Run validate the new definition
-#   (services replace --dry-run); nothing is applied.
+# DRY_RUN=1 prints commands without contacting Google Cloud or deploying.
 #
-# The revision is written as a whole service definition (services replace),
-# not with services update: a GPU revision's zonal-redundancy setting cannot
-# be removed by update, and Cloud Run refuses it on a revision without a GPU.
+# Going from a GPU revision to CPU is done once with
+# convert_backend_to_cpu_prod.sh: a GPU revision's settings stay on the
+# service, and update cannot remove all of them. This script stops if they
+# are still there.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="sightsinger-app"
 REGION="us-east4"
@@ -45,26 +45,17 @@ if [[ "${DEPLOY_TRAFFIC}" != "none" && "${DEPLOY_TRAFFIC}" != "all" ]]; then
   exit 1
 fi
 
-# Keep production values private: the definition holds the merged env.
+# The .env suffix tells gcloud to parse KEY=VALUE rather than YAML. Keep the
+# merged production values private, including when printing a dry run.
 umask 077
-work_dir="$(mktemp -d)"
-trap 'rm -rf "${work_dir}"' EXIT
-
-gcloud run services describe "${SERVICE}" \
-  --project="${PROJECT}" --region="${REGION}" --format=json > "${work_dir}/current.json"
-
-python3 - "${work_dir}/current.json" "${ROOT_DIR}/env/prod.env" "${ROOT_DIR}/env/prod.api-cpu.env" \
-  "${IMAGE}" "${CONCURRENCY}" "${MAX_INSTANCES}" "${DEPLOY_TRAFFIC}" "${TAG}" \
-  "${work_dir}/service.json" "${work_dir}/summary.txt" <<'PY'
-import json
+merged_env_dir="$(mktemp -d)"
+merged_env="${merged_env_dir}/api-cpu.env"
+trap 'rm -rf "${merged_env_dir}"' EXIT
+python3 - "${ROOT_DIR}/env/prod.env" "${ROOT_DIR}/env/prod.api-cpu.env" > "${merged_env}" <<'PY'
 import sys
-import uuid
-
-(current_path, prod_env, overlay_env, image, concurrency, max_instances,
- traffic_mode, tag, out_path, summary_path) = sys.argv[1:]
 
 values = {}
-for path in (prod_env, overlay_env):
+for path in sys.argv[1:]:
     with open(path, encoding="utf-8") as source:
         for line in source:
             line = line.strip()
@@ -78,95 +69,102 @@ if not invoker:
 if values.get("SYNTHESIS_WORKER_INVOKER_SERVICE_ACCOUNT") != "__PREPROCESS_WORKER_INVOKER_SERVICE_ACCOUNT__":
     raise SystemExit("CPU API overlay must reuse the preprocess invoker")
 values["SYNTHESIS_WORKER_INVOKER_SERVICE_ACCOUNT"] = invoker
-
-service = json.load(open(current_path, encoding="utf-8"))
-status = service.pop("status", {})
-serving = [
-    {"revisionName": entry.get("revisionName") or status.get("latestReadyRevisionName"),
-     "percent": entry["percent"]}
-    for entry in status.get("traffic", [])
-    if entry.get("percent")
-]
-if not serving:
-    raise SystemExit("No revision of the service serves traffic.")
-
-metadata = service["metadata"]
-for key in ("uid", "resourceVersion", "generation", "creationTimestamp", "selfLink"):
-    metadata.pop(key, None)
-annotations = metadata.setdefault("annotations", {})
-for key in ("serving.knative.dev/creator", "serving.knative.dev/lastModifier",
-            "run.googleapis.com/operation-id", "run.googleapis.com/ingress-status",
-            "run.googleapis.com/urls"):
-    annotations.pop(key, None)
-# The service-level instance cap (gcloud --max).
-annotations["run.googleapis.com/maxScale"] = max_instances
-
-template = service["spec"]["template"]
-template_metadata = template["metadata"]
-template_metadata.pop("name", None)
-template_annotations = template_metadata.setdefault("annotations", {})
-# GPU-only settings a CPU revision must not carry.
-removed = [
-    key for key in ("run.googleapis.com/gpu-zonal-redundancy-disabled",)
-    if template_annotations.pop(key, None) is not None
-]
-template_annotations["run.googleapis.com/cpu-throttling"] = "true"
-template_annotations["autoscaling.knative.dev/maxScale"] = max_instances
-template_annotations.pop("autoscaling.knative.dev/minScale", None)
-template_metadata.setdefault("labels", {})["client.knative.dev/nonce"] = uuid.uuid4().hex[:10]
-
-spec = template["spec"]
-node_selector = spec.pop("nodeSelector", None)
-spec["containerConcurrency"] = int(concurrency)
-spec["timeoutSeconds"] = 900
-container = spec["containers"][0]
-container["image"] = image
-limits = container.setdefault("resources", {}).setdefault("limits", {})
-gpu_limit = limits.pop("nvidia.com/gpu", None)
-limits["cpu"] = "2"
-limits["memory"] = "4Gi"
-# As --env-vars-file does: every plain variable comes from the files; values
-# from Secret Manager stay unless the files set the same name.
-secrets = [e for e in container.get("env", []) if "valueFrom" in e and e["name"] not in values]
-container["env"] = [{"name": k, "value": v} for k, v in values.items()] + secrets
-
-if traffic_mode == "none":
-    # Users stay on the serving revision; the new one is reachable by its tag.
-    service["spec"]["traffic"] = serving + [{"latestRevision": True, "percent": 0, "tag": tag}]
-else:
-    service["spec"]["traffic"] = [{"latestRevision": True, "percent": 100}]
-
-json.dump(service, open(out_path, "w", encoding="utf-8"), indent=2)
-with open(summary_path, "w", encoding="utf-8") as summary:
-    summary.write(
-        "Serving now: " + ", ".join(f"{s['revisionName']}: {s['percent']}%" for s in serving) + "\n"
-        f"New revision: image={image} cpu=2 memory=4Gi gpu=none (removed: limit={gpu_limit}, "
-        f"selector={node_selector}, annotations={removed}) cpu-throttling=true "
-        f"concurrency={concurrency} max={max_instances} timeout=900s\n"
-        f"Env: {len(values)} plain variables from prod.env + prod.api-cpu.env, "
-        f"secrets kept: {[e['name'] for e in secrets]}\n"
-        f"Traffic: {service['spec']['traffic']}\n"
-    )
-    summary.write("ROLLBACK=" + serving[0]["revisionName"] + "\n")
+for key, value in values.items():
+    print(f"{key}={value}")
 PY
 
-grep -v '^ROLLBACK=' "${work_dir}/summary.txt"
-previous_serving="$(sed -n 's/^ROLLBACK=//p' "${work_dir}/summary.txt")"
+print_command() {
+  printf 'gcloud'
+  printf ' %q' "$@"
+  printf '\n'
+}
 
+run_gcloud() {
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    print_command "$@"
+  else
+    gcloud "$@"
+  fi
+}
+
+traffic_args=(
+  run services describe "${SERVICE}"
+  --project="${PROJECT}"
+  --region="${REGION}"
+  --format='json(status.traffic,status.latestReadyRevisionName)'
+)
 if [[ "${DRY_RUN}" == "1" ]]; then
-  printf 'Validating the definition (nothing is applied)...\n'
-  gcloud run services replace "${work_dir}/service.json" \
-    --project="${PROJECT}" --region="${REGION}" --dry-run
-  exit 0
+  printf 'Read the previous serving revision(s) before deploying:\n'
+  print_command "${traffic_args[@]}"
+  previous_serving="<previous revision>"
+else
+  previous_traffic="$(gcloud "${traffic_args[@]}")"
+  previous_serving="$(printf '%s' "${previous_traffic}" | python3 -c '
+import json, sys
+status = json.load(sys.stdin).get("status", {})
+serving = [
+    "{}: {}%".format(
+        entry.get("revisionName") or status.get("latestReadyRevisionName") or "unknown",
+        entry.get("percent", 0),
+    )
+    for entry in status.get("traffic", [])
+    if entry.get("percent", 0) > 0
+]
+print(", ".join(serving) or "none")
+')"
+  printf 'Previous serving revision(s): %s\n' "${previous_serving}"
 fi
 
-gcloud run services replace "${work_dir}/service.json" --project="${PROJECT}" --region="${REGION}"
-gcloud run services describe "${SERVICE}" \
+if [[ "${DRY_RUN}" != "1" ]]; then
+  gpu_settings="$(gcloud run services describe "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format="value(spec.template.spec.nodeSelector,spec.template.metadata.annotations.'run.googleapis.com/gpu-zonal-redundancy-disabled')")"
+  if [[ -n "${gpu_settings//[[:space:]]/}" ]]; then
+    printf 'The service still has GPU revision settings: %s\n' "${gpu_settings}" >&2
+    printf 'Run scripts/convert_backend_to_cpu_prod.sh once instead; later CPU deploys use this script.\n' >&2
+    exit 1
+  fi
+fi
+
+deploy_args=(
+  run services update "${SERVICE}"
+  --project="${PROJECT}"
+  --region="${REGION}"
+  --image="${IMAGE}"
+  --gpu=0
+  --cpu-throttling
+  --cpu=2
+  --memory=4Gi
+  --concurrency="${CONCURRENCY}"
+  --max="${MAX_INSTANCES}"
+  --max-instances="${MAX_INSTANCES}"
+  --min-instances=0
+  --timeout=900
+  --env-vars-file="${merged_env}"
+  --port=8080
+  --command=python3
+  --args=-m,src.backend.server,--host,0.0.0.0,--port,8080,--log-level,debug,--access-log
+  --startup-probe='httpGet.path=/readyz,httpGet.port=8080,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=2,failureThreshold=24'
+)
+if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
+  # Traffic that followed LATEST is pinned to the revision serving it now.
+  deploy_args+=(--no-traffic --tag="${TAG}")
+fi
+run_gcloud "${deploy_args[@]}"
+if [[ "${DEPLOY_TRAFFIC}" == "all" ]]; then
+  run_gcloud run services update-traffic "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" --to-latest
+fi
+run_gcloud run services describe "${SERVICE}" \
   --project="${PROJECT}" --region="${REGION}" \
   --format='yaml(status.latestReadyRevisionName,status.traffic)'
 
 if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
-  project_number="$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    project_number="${GCP_PROJECT_NUMBER:-373752827978}"
+  else
+    project_number="$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')"
+  fi
   printf '\nThe new revision serves no traffic. Check it on its own URL:\n'
   printf '  curl -s https://%s---%s-%s.%s.run.app/readyz\n' \
     "${TAG}" "${SERVICE}" "${project_number}" "${REGION}"
@@ -174,4 +172,4 @@ if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
   printf '  gcloud run services update-traffic %s --project=%s --region=%s --to-latest\n' \
     "${SERVICE}" "${PROJECT}" "${REGION}"
 fi
-printf 'To roll back: scripts/rollback_backend_to_revision.sh %s\n' "${previous_serving}"
+printf 'To roll back: scripts/rollback_backend_to_revision.sh %s\n' "${previous_serving%%:*}"
