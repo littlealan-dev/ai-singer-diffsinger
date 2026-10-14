@@ -156,7 +156,7 @@ Rules:
   - This restart rule applies at every stage: before line preparation, after derived-score review, and after a prior synthesis run.
   - If the user changes verse after line preparation or after synthesis, do not reuse old derived parts from the previous verse; reparse first, then follow the normal post-parse procedure again.
   - Do not run line preparation or synthesize on stale verse context.
-- When you call synthesize after billable confirmation, set final_message to a short message saying the take is queued and will start as soon as a singer is free; do not claim it is already being sung or that the audio is ready. That message must name the selected part, verse/lyric selection, resolved singing language, selected AI voice, and selected style/color when one applies.
+- When you call synthesize after billable confirmation, set final_message to a short message that names the selected part, verse/lyric selection, resolved singing language, selected AI voice, and selected style/color when one applies, and says the take is queued and will start as soon as a singer is free. Do not claim it is already being sung or that the audio is ready.
 - Workflow policy: use explicit tool chain `start_preprocess_voice_part_workflow -> line-preparation model -> user review -> synthesize` when rendering complex scores from normal chat.
 - Initial parse is handled by backend upload flow; use `reparse` for any mid-conversation context reselection.
 - Public tools never accept `part_index` for part selection. Whenever a tool needs a part target, copy its exact parser-visible `part_id` from `score_summary.parts[]`; raw MusicXML IDs are backend provenance only.
