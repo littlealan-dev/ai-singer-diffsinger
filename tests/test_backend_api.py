@@ -54,6 +54,7 @@ from src.backend.orchestrator import (
     instrumental_midi_source_signature,
 )
 from src.backend.llm_prompt import LlmResponse, ToolCall
+from src.backend.quote_presentation import presentation_for_quote, presented_quote
 from src.backend.session import SessionStore
 from src.mcp.resolve import PROJECT_ROOT, resolve_project_path
 from src.mcp.logging_utils import LoggingContextFilter
@@ -390,6 +391,25 @@ def _auth_headers(token="test-token"):
     return {"Authorization": f"Bearer {token}"}
 
 
+def _quote_presentation_reply(history) -> str:
+    """Present the quote of the latest message-only tool result, as the schema requires.
+
+    A real model answers a quote's tool result under QUOTE_PRESENTATION_SCHEMA,
+    so a stub must too; prose is rejected there.
+    """
+    for entry in reversed(history):
+        content = entry.get("content")
+        if (
+            isinstance(content, str)
+            and content.startswith(TOOL_RESULT_PREFIX)
+            and "Message-only payload:\n" in content
+        ):
+            quote = presented_quote(_message_only_payload(content))
+            if quote:
+                return json.dumps(presentation_for_quote(quote))
+    raise AssertionError("no quote to present in the history")
+
+
 class _QuoteThenSynthesizeClient:
     """Drive the two-turn billable flow the way a real model must.
 
@@ -434,8 +454,10 @@ class _QuoteThenSynthesizeClient:
     def generate(self, prompt_bundle, history, *, role=None, **kwargs):
         last = history[-1].get("content", "") if history else ""
         if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
-            # Tool results only ever get prose back; the quote is presented here.
+            # Tool results never get tool calls back; the quote is presented here.
             self.quoted = True
+            if kwargs.get("response_schema") is not None:
+                return _quote_presentation_reply(history)
             return json.dumps(
                 {"tool_calls": [], "final_message": "Here is the quote.",
                  "include_score": False}
@@ -3218,6 +3240,8 @@ def test_accepted_voice_suggestion_renders_although_the_ui_still_shows_another(
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
                 self.quoted = True
+                if kwargs.get("response_schema") is not None:
+                    return _quote_presentation_reply(history)
                 return json.dumps(
                     {"tool_calls": [], "final_message": "Here is the quote.",
                      "include_score": False}
@@ -3364,6 +3388,8 @@ def test_confirmed_override_cannot_render_a_voice_the_quote_never_covered(
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
                 self.quoted = True
+                if kwargs.get("response_schema") is not None:
+                    return _quote_presentation_reply(history)
                 return json.dumps(
                     {"tool_calls": [], "final_message": "Here is the quote.",
                      "include_score": False}
@@ -3480,12 +3506,9 @@ def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(cli
         def generate(self, prompt_bundle, history, *, role=None, **kwargs):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
-                if '"reason": "message_only"' in last:
+                if '"reason": "invalid_quote_presentation"' in last:
                     calls.append("reply_retry")
-                    return json.dumps(
-                        {"tool_calls": [], "final_message": "Here it is.",
-                         "include_score": False}
-                    )
+                    return _quote_presentation_reply(history)
                 if "synthesis_quote_refresh_required" in last:
                     calls.append("reply")
                     assert "No tools will be executed" in last
@@ -3548,10 +3571,10 @@ def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(cli
     )
 
     assert response.status_code == 200
-    # The reply that tried to re-quote was rejected, ran nothing and was not
-    # shown; its retry answered in prose.
+    # The reply that tried to re-quote did not present the quote: it was
+    # rejected, ran nothing and was not shown. Its retry presented the quote.
     assert calls == ["synthesize", "reply", "reply_retry"]
-    assert response.json()["message"] == "Here it is."
+    assert response.json()["message"].startswith("Here is the quote for this take.")
     [refusal] = refusals
     assert refusal["action"] == "synthesis_quote_refresh_required"
     assert refusal["reason"] == "quote_not_found"
@@ -4144,8 +4167,10 @@ def test_a_refused_confirmation_names_the_choice_that_changed(client, monkeypatc
     assert refusal["changed_choices"] == {"expand_repeats": {"quoted": False, "requested": True}}
     new_quote = refusal["quote"]
     assert new_quote["render_choices"]["expand_repeats"] is True
-    # The nested quote is the quote tool's own payload.
-    assert set(new_quote) == set(first_quote)
+    # The nested quote is the quote tool's own payload; it also names what
+    # changed since the quote awaiting confirmation.
+    assert set(new_quote) == set(first_quote) | {"changed_choices"}
+    assert new_quote["changed_choices"] == refusal["changed_choices"]
     assert new_quote["quote_id"] != first_quote["quote_id"]
 
 
@@ -4290,6 +4315,8 @@ def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypa
         def generate(self, prompt_bundle, history, *, role=None, **kwargs):
             last = history[-1].get("content", "") if history else ""
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                if '"reason": "invalid_quote_presentation"' in last:
+                    return _quote_presentation_reply(history)
                 if '"reason": "message_only"' in last:
                     calls.append("reply_retry")
                     return json.dumps({"tool_calls": [], "final_message": "Here it is.",
@@ -4359,6 +4386,10 @@ _CORRECTIVE_QUOTE_REPLY = {
 }
 
 
+# A scripted reply that presents the quote correctly under the schema.
+_PRESENT_THE_QUOTE = "present the quote"
+
+
 class _ScriptedQuoteReplyClient:
     """Quote the Alto, then answer each message-only reply from a script."""
 
@@ -4366,12 +4397,16 @@ class _ScriptedQuoteReplyClient:
         self._quote_arguments = dict(quote_arguments)
         self._replies = list(replies)
         self.reply_histories: list[list[dict]] = []
+        self.reply_prompts: list[str] = []
 
     def generate(self, prompt_bundle, history, *, role=None, **kwargs):
         last = history[-1].get("content", "") if history else ""
         if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
             self.reply_histories.append(list(history))
+            self.reply_prompts.append(prompt_bundle.dynamic_prompt_text)
             reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
+            if reply == _PRESENT_THE_QUOTE:
+                return _quote_presentation_reply(history)
             return json.dumps(reply)
         return json.dumps(
             {"tool_calls": [{"name": "prepare_synthesis_quote", "arguments": self._quote_arguments}],
@@ -4408,35 +4443,63 @@ def _scripted_alto_quote_client(test_client, app, monkeypatch, replies):
 
 def test_a_quote_reply_that_calls_a_tool_is_rejected_and_retried(client, monkeypatch):
     test_client, app = client
-    honest_reply = {
-        "tool_calls": [],
-        "final_message": "This quote is for the Dummy voice, not Qixuan. Shall I re-quote?",
-        "include_score": False,
-    }
     session_id, llm_client = _scripted_alto_quote_client(
-        test_client, app, monkeypatch, [_CORRECTIVE_QUOTE_REPLY, honest_reply]
+        test_client, app, monkeypatch, [_CORRECTIVE_QUOTE_REPLY, _PRESENT_THE_QUOTE]
     )
 
     response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
 
     assert response.status_code == 200
     message = response.json()["message"]
-    assert message == honest_reply["final_message"]
+    # The retry presented the quote, rendered from the checked structure.
+    assert message.startswith("Here is the quote for this take.")
     assert "preparing a new quote" not in message
     first, retry = llm_client.reply_histories
+    # The reply is asked for under the quote schema, which has no tool calls.
     # The retry sees the rejected reply and why, in a history of fixed size so
     # the quote payload stays within the entries the client sends.
     assert len(retry) == len(first) + 2
     assert retry[-2] == {"role": "assistant", "content": json.dumps(_CORRECTIVE_QUOTE_REPLY)}
     rejection = _message_only_payload(retry[-1]["content"])
     assert rejection["status"] == "rejected"
-    assert rejection["reason"] == "message_only"
-    assert rejection["rejected_tool_calls"] == ["prepare_synthesis_quote"]
-    # The quote the user was shown is the one awaiting confirmation.
+    assert rejection["reason"] == "invalid_quote_presentation"
+    assert rejection["problems"] == ["quote_presentation is missing"]
+    # The quote the user was shown is the one awaiting confirmation, presented
+    # in this turn so only a later one can confirm it.
     quote = _message_only_payload(first[-1]["content"])
     assert quote["status"] == "quote_ready"
+    assert f"| Total estimated credits | {quote['total_estimated_credits']} |" in message
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
     assert snapshot["files"].get("active_synthesis_quote_id") == quote["quote_id"]
+    assert snapshot["files"].get("active_synthesis_quote_turn_id")
+
+
+@pytest.mark.parametrize("expand_repeats", [True, False])
+def test_a_quote_reply_is_told_the_repeat_setting_of_its_turn(client, monkeypatch, expand_repeats):
+    # The reply presenting a quote must see the same repeat setting the quote
+    # was priced with; otherwise a quote with repeats reads as unchanged from a
+    # written-order one, and the reply cannot say what changed.
+    test_client, app = client
+    session_id, llm_client = _scripted_alto_quote_client(
+        test_client, app, monkeypatch, [_PRESENT_THE_QUOTE]
+    )
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "yes", "expand_repeats": expand_repeats},
+    )
+
+    assert response.status_code == 200
+    quote = _message_only_payload(llm_client.reply_histories[0][-1]["content"])
+    assert quote["status"] == "quote_ready"
+    assert quote["render_choices"]["expand_repeats"] is expand_repeats
+    repeat_setting = llm_client.reply_prompts[0].split(
+        "Repeat-expansion setting (authoritative):\n", 1
+    )[1]
+    assert repeat_setting.lstrip().startswith("{")
+    assert json.loads(repeat_setting[: repeat_setting.index("\n}") + 2])[
+        "expand_repeats"
+    ] is expand_repeats
 
 
 def test_a_quote_whose_reply_never_presents_it_is_not_awaiting_confirmation(client, monkeypatch):
@@ -4455,6 +4518,120 @@ def test_a_quote_whose_reply_never_presents_it_is_not_awaiting_confirmation(clie
     assert len(llm_client.reply_histories) == 9
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
     assert snapshot["files"].get("active_synthesis_quote_id") is None
+
+
+class _ConsentClient:
+    """Each turn makes the decision call it is given; quote replies present or fail.
+
+    `next_call` is the decision step's tool call for the coming turn. With
+    `present` false, every quote reply is prose, which the schema rejects, so the
+    quote is never shown.
+    """
+
+    def __init__(self):
+        self.next_call: dict | None = None
+        self.present = True
+        self.tool_results: list[dict] = []
+
+    def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+        last = history[-1].get("content", "") if history else ""
+        if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+            if '"reason": "invalid_quote_presentation"' not in last:
+                self.tool_results.append(_message_only_payload(last))
+            if self.present and kwargs.get("response_schema") is not None:
+                return _quote_presentation_reply(history)
+            return json.dumps({"tool_calls": [], "final_message": "Here is the quote.",
+                               "include_score": False})
+        return json.dumps({"tool_calls": [self.next_call], "final_message": "Working on it.",
+                           "include_score": False})
+
+
+def _consent_session(test_client, app, monkeypatch):
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        {key: selection[key] for key in ("id", "number", "name")}
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    target = {"part_id": "Alto", "voicebank": "Dummy", "lyric_selection": alto_verse_1}
+    llm_client = _ConsentClient()
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    started: dict[str, object] = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    return session_id, llm_client, started, target
+
+
+def test_a_quote_the_user_never_saw_cannot_be_confirmed(client, monkeypatch):
+    """SIG-105 follow-up: a reply that failed to show a quote, then "yes", sang it.
+
+    The quote's reply never presented it, so it is not awaiting confirmation;
+    a model that still confirms it by id is refused, and the fresh quote is shown.
+    """
+    test_client, app = client
+    session_id, llm_client, started, target = _consent_session(test_client, app, monkeypatch)
+    llm_client.next_call = {"name": "prepare_synthesis_quote", "arguments": target}
+    llm_client.present = False
+    unseen = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
+    assert unseen.json()["message"].startswith("I couldn't finish this request.")
+    unseen_quote = llm_client.tool_results[-1]
+    assert unseen_quote["status"] == "quote_ready"
+
+    llm_client.next_call = {
+        "name": "synthesize", "arguments": {**target, "quote_id": unseen_quote["quote_id"]},
+    }
+    llm_client.present = True
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert response.status_code == 200
+    assert "arguments" not in started
+    refusal = llm_client.tool_results[-1]
+    assert refusal["reason"] == "quote_not_presented"
+    assert refusal["quote"]["status"] == "quote_ready"
+    assert response.json()["message"].startswith("Here is the quote for this take.")
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert snapshot["files"]["active_synthesis_quote_id"] == refusal["quote"]["quote_id"]
+
+
+def test_a_new_quote_retires_the_old_one_and_names_what_changed(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client, started, target = _consent_session(test_client, app, monkeypatch)
+    llm_client.next_call = {"name": "prepare_synthesis_quote", "arguments": target}
+    test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
+    written_order = llm_client.tool_results[-1]
+    assert "changed_choices" not in written_order
+
+    # The user turns With Repeat on, and the model re-quotes.
+    test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "yes", "expand_repeats": True}
+    )
+    with_repeats = llm_client.tool_results[-1]
+    assert with_repeats["status"] == "quote_ready"
+    assert with_repeats["changed_choices"] == {
+        "expand_repeats": {"quoted": False, "requested": True}
+    }
+
+    # Back to written order, a model confirming the first quote is refused: its
+    # choices match again, but the quote awaiting confirmation is the newer one.
+    llm_client.next_call = {
+        "name": "synthesize", "arguments": {**target, "quote_id": written_order["quote_id"]},
+    }
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert response.status_code == 200
+    assert "arguments" not in started
+    assert llm_client.tool_results[-1]["reason"] == "quote_not_presented"
 
 
 def test_birthday_name_tool_is_offered_only_for_the_happy_birthday_demo(client):
@@ -4558,6 +4735,8 @@ def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, mo
                                                   "instrument_program_assignments": [_HB_PIANO_ASSIGNMENT]}}],
                     "final_message": "Preparing a quote.", "include_score": False,
                 })
+            if payload.get("status") == "quote_ready":
+                return _quote_presentation_reply(history)
             return json.dumps({"tool_calls": [], "final_message": "Here is the quote.", "include_score": False})
 
     llm_client = NameThenQuoteClient()
@@ -4967,6 +5146,8 @@ def test_quote_in_the_turn_that_added_solfege_sees_the_new_lyric_line(client, mo
                         "include_score": False,
                     }
                 )
+            if payload.get("status") == "quote_ready":
+                return _quote_presentation_reply(history)
             # Any other result ends the turn, so a regression fails instead of looping.
             return json.dumps(
                 {"tool_calls": [], "final_message": "Done.", "include_score": False}

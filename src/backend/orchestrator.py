@@ -22,6 +22,13 @@ from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient, LlmRole
+from src.backend.quote_presentation import (
+    QUOTE_PRESENTATION_INSTRUCTION,
+    presented_quote,
+    quote_presentation_schema,
+    quote_presentation_problems,
+    render_quote_presentation,
+)
 from src.backend.llm_prompt import (
     LlmResponse,
     ToolCall,
@@ -114,6 +121,11 @@ MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS = (
     "this response, so return tool_calls as [] and do not claim that you are "
     "starting or completing further work."
 )
+QUOTE_PRESENTATION_REJECTION_DETAIL = (
+    "Your quote_presentation did not match the quote payload, so nothing was shown "
+    "to the user. Return quote_presentation again, copying the ids and numbers "
+    "exactly from the payload."
+)
 MESSAGE_ONLY_REJECTION_DETAIL = (
     "Your previous reply called a tool. Nothing you proposed was executed, and "
     "that reply was not shown to the user. Reply in prose only, with tool_calls "
@@ -171,6 +183,10 @@ MAX_MEASURE_CHANGE_RATIO = 0.8
 TOOL_REPARSE = "reparse"
 TOOL_PREPARE_SYNTHESIS_QUOTE = "prepare_synthesis_quote"
 ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY = "active_synthesis_quote_id"
+# The chat turn whose reply presented the active quote. A quote can only be
+# confirmed by a later turn: a message sent before the quote existed is not
+# consent to it.
+ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY = "active_synthesis_quote_turn_id"
 # A synthesis target is one part_id: synthesis accepts only single-line parts (a
 # multi-voice raw part must be split first), so these selectors name nothing more.
 # The model still sends them inconsistently between quote and synthesize, which
@@ -576,6 +592,7 @@ class Orchestrator:
                         current_credit_availability=current_credit_availability,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
+                        expand_repeats=expand_repeats,
                         instructions=(
                             "This is a message-only correction for an invalid response "
                             "that contained multiple tool calls. No tools will be "
@@ -3197,7 +3214,11 @@ class Orchestrator:
                         current_credit_availability=current_credit_availability,
                         selected_voicebank_id=forced_voicebank_id,
                         selected_language=forced_language,
+                        expand_repeats=expand_repeats,
                         instructions=message_only_instructions,
+                        presentation_quote=presented_quote(
+                            _json_object_or_none(followup_prompt)
+                        ),
                     )
                 )
                 if (
@@ -3208,6 +3229,12 @@ class Orchestrator:
                 ):
                     for key, value in tool_result.metadata_on_presented.items():
                         await self._sessions.set_metadata(session_id, key, value)
+                    if ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY in tool_result.metadata_on_presented:
+                        await self._sessions.set_metadata(
+                            session_id,
+                            ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY,
+                            str(originating_turn_id or ""),
+                        )
             else:
                 followup_response, followup_error = await self._decide_followup_with_llm(
                     latest_snapshot,
@@ -6195,8 +6222,13 @@ class Orchestrator:
         prompt_bundle: Any,
         history: List[Dict[str, str]],
         role: LlmRole,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Call the LLM client with role fallback for legacy test clients."""
+        """Call the LLM client with role fallback for legacy test clients.
+
+        A response_schema is always passed through: a client that cannot honour
+        it must fail rather than answer without the structure.
+        """
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
         budget = _llm_turn_budget.get()
@@ -6212,6 +6244,10 @@ class Orchestrator:
                     backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
                 )
             budget.calls += 1
+        if response_schema is not None:
+            return self._llm_client.generate(
+                prompt_bundle, history, role=role, response_schema=response_schema
+            )
         try:
             return self._llm_client.generate(prompt_bundle, history, role=role)
         except TypeError as exc:
@@ -6400,10 +6436,16 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
+        expand_repeats: bool = False,
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
         rejection_detail: str = MESSAGE_ONLY_REJECTION_DETAIL,
+        presentation_quote: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM for prose only; a reply that calls a tool is rejected, never shown.
+
+        With presentation_quote, the reply must present that quote in its
+        quote_presentation_schema and match it exactly; it is then shown as the
+        rendered quote. A reply that does not is rejected the same way.
 
         Nothing runs from this phase, so the text of a reply that calls a tool
         describes work that will not happen. The reply is sent back with the
@@ -6436,6 +6478,7 @@ class Orchestrator:
                         current_credit_availability=current_credit_availability,
                         selected_voicebank_id=selected_voicebank_id,
                         selected_language=selected_language,
+                        expand_repeats=expand_repeats,
                     )
                 )
                 history = [*snapshot.get("history", []), payload_entry]
@@ -6475,7 +6518,14 @@ class Orchestrator:
             history = [payload_entry]
 
         can_retry = _llm_turn_budget.get() is not None
-        rejected: Optional[tuple[str, List[str]]] = None
+        # A quote is presented in a fixed structure the model cannot add tool
+        # calls to; the reply is shown only if it matches the quote exactly.
+        response_schema = (
+            quote_presentation_schema(presentation_quote)
+            if presentation_quote is not None
+            else None
+        )
+        rejected: Optional[tuple[str, Dict[str, Any]]] = None
         attempt = 0
         while True:
             attempt += 1
@@ -6484,7 +6534,7 @@ class Orchestrator:
                 # Rebuilt each time rather than appended to: the client sends
                 # only the most recent history entries, and the payload must
                 # stay among them.
-                rejected_text, rejected_tools = rejected
+                rejected_text, rejection = rejected
                 attempt_history = [
                     *history,
                     {"role": "assistant", "content": rejected_text},
@@ -6493,15 +6543,7 @@ class Orchestrator:
                         "content": (
                             TOOL_RESULT_PREFIX
                             + self._message_only_tool_summary(
-                                json.dumps(
-                                    {
-                                        "status": "rejected",
-                                        "reason": "message_only",
-                                        "rejected_tool_calls": rejected_tools,
-                                        "detail": rejection_detail,
-                                    },
-                                    sort_keys=True,
-                                ),
+                                json.dumps(rejection, sort_keys=True),
                                 instructions=instructions,
                             )
                         ),
@@ -6513,6 +6555,7 @@ class Orchestrator:
                     prompt_bundle,
                     attempt_history,
                     LlmRole.DEFAULT,
+                    response_schema,
                 )
             except RuntimeError as exc:
                 self._logger.warning("llm_message_only_failed error=%s", exc)
@@ -6520,6 +6563,53 @@ class Orchestrator:
             except Exception as exc:
                 self._logger.exception("llm_message_only_unexpected error=%s", exc)
                 return None, LLM_ERROR_FALLBACK
+            if presentation_quote is not None:
+                try:
+                    reply = json.loads(text)
+                except ValueError:
+                    reply = None
+                problems = quote_presentation_problems(reply, presentation_quote)
+                if not problems:
+                    if attempt > 1:
+                        self._logger.info(
+                            "llm_quote_presentation_recovered attempts=%s", attempt
+                        )
+                    await self._acknowledge_message_only_context(
+                        snapshot, session_id, rich_context
+                    )
+                    return (
+                        LlmResponse(
+                            tool_calls=[],
+                            final_message=render_quote_presentation(
+                                reply["quote_presentation"]
+                            ),
+                            include_score=False,
+                            thought_summary=str(reply.get("thought_summary") or ""),
+                        ),
+                        None,
+                    )
+                # A schema-constrained reply that still does not match the quote
+                # points at a bug, so it is never shown in any other form: the
+                # turn's call limit ends the retries with an error.
+                self._logger.warning(
+                    "llm_quote_presentation_rejected quote=%s problems=%s attempt=%s can_retry=%s",
+                    presentation_quote.get("quote_id"),
+                    problems,
+                    attempt,
+                    can_retry,
+                )
+                if not can_retry:
+                    return None, LLM_ERROR_FALLBACK
+                rejected = (
+                    text,
+                    {
+                        "status": "rejected",
+                        "reason": "invalid_quote_presentation",
+                        "problems": problems,
+                        "detail": QUOTE_PRESENTATION_REJECTION_DETAIL,
+                    },
+                )
+                continue
             response = parse_llm_response(text)
             if response is None:
                 if _UNPARSED_TOOL_CALL_PATTERN.search(text):
@@ -6547,13 +6637,9 @@ class Orchestrator:
                     self._logger.info(
                         "llm_message_only_recovered attempts=%s", attempt
                     )
-                if (
-                    rich_context
-                    and isinstance(snapshot, dict)
-                    and snapshot.get("score_context_updated")
-                    and session_id
-                ):
-                    await self._sessions.acknowledge_score_context_updated(session_id)
+                await self._acknowledge_message_only_context(
+                    snapshot, session_id, rich_context
+                )
                 return response, None
             self._logger.warning(
                 "llm_message_only_rejected tools=%s attempt=%s can_retry=%s",
@@ -6563,7 +6649,30 @@ class Orchestrator:
             )
             if not can_retry:
                 return None, LLM_ERROR_FALLBACK
-            rejected = (text, rejected_tools)
+            rejected = (
+                text,
+                {
+                    "status": "rejected",
+                    "reason": "message_only",
+                    "rejected_tool_calls": rejected_tools,
+                    "detail": rejection_detail,
+                },
+            )
+
+    async def _acknowledge_message_only_context(
+        self,
+        snapshot: Optional[Dict[str, Any]],
+        session_id: Optional[str],
+        rich_context: bool,
+    ) -> None:
+        """Mark a changed score as seen once a reply built on it succeeds."""
+        if (
+            rich_context
+            and isinstance(snapshot, dict)
+            and snapshot.get("score_context_updated")
+            and session_id
+        ):
+            await self._sessions.acknowledge_score_context_updated(session_id)
 
     async def _build_message_only_rich_prompt(
         self,
@@ -6574,6 +6683,7 @@ class Orchestrator:
         current_credit_availability: Optional[Dict[str, int]],
         selected_voicebank_id: Optional[str],
         selected_language: Optional[str],
+        expand_repeats: bool = False,
     ) -> tuple[Any, Optional[Dict[str, int]]]:
         """Build the full session prompt for a message-only reply."""
         voicebank_ids = await self._get_voicebank_ids()
@@ -6628,6 +6738,7 @@ class Orchestrator:
             ),
             current_credit_availability=current_credit_availability,
             synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
+            expand_repeats=expand_repeats,
             role=LlmRole.DEFAULT,
         )
         return prompt_bundle, current_credit_availability
@@ -6981,8 +7092,8 @@ class Orchestrator:
     ) -> str:
         """Name why a bound quote was rejected, for logs and LLM follow-up.
 
-        This is a diagnostic only. It never proves the user consented to the
-        price; confirmation stays prompt-enforced.
+        This is a diagnostic only. Consent is checked separately: synthesize
+        accepts only the presented quote, confirmed in a later turn.
         """
         if not isinstance(quote, dict):
             return "quote_not_found"
@@ -7502,6 +7613,7 @@ class Orchestrator:
         from src.backend.credits import (
             create_synthesis_quote,
             get_instrumental_charge_state,
+            get_synthesis_quote,
             instrumental_charge_scope,
         )
         from src.backend.synthesis_pricing import (
@@ -7553,6 +7665,32 @@ class Orchestrator:
             estimate=estimate.to_dict(),
             ui_voicebank_at_quote=forced_voicebank_id,
         )
+        # The new quote replaces the one awaiting confirmation: the old one can
+        # no longer be confirmed, and this one only once its reply presents it.
+        files = snapshot.get("files") if isinstance(snapshot.get("files"), dict) else {}
+        previous_quote_id = str(files.get(ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY) or "")
+        changed_choices: Dict[str, Dict[str, Any]] = {}
+        if previous_quote_id:
+            try:
+                previous_quote = await asyncio.to_thread(get_synthesis_quote, previous_quote_id)
+            except Exception as exc:
+                previous_quote = None
+                self._logger.warning(
+                    "synthesis_quote_previous_unavailable session=%s quote=%s error=%s",
+                    session_id,
+                    previous_quote_id,
+                    exc,
+                )
+            if isinstance(previous_quote, dict):
+                changed_choices = _changed_render_choices(
+                    previous_quote.get("renderChoices"), render_choices
+                )
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY, ""
+            )
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY, ""
+            )
         available_credits: Optional[int] = None
         if not self._is_e2e_credit_bypass_enabled():
             from src.backend.credits import get_or_create_credits
@@ -7581,12 +7719,10 @@ class Orchestrator:
             "total_estimated_credits": estimate.total_estimated_credits,
             "estimate": estimate.to_dict(),
             "render_choices": render_choices,
-            "instruction": (
-                "Present this exact itemized quote and ask for explicit confirmation. "
-                "Do not call synthesize in this response. Final credits are based on "
-                "the generated audio length and may differ from this estimate."
-            ),
+            "instruction": QUOTE_PRESENTATION_INSTRUCTION,
         }
+        if changed_choices:
+            quote_payload["changed_choices"] = changed_choices
         removed_takes = _score_player_takes_removed_by(
             score_player_takes,
             expand_repeats=expand_repeats,
@@ -8403,7 +8539,30 @@ class Orchestrator:
                     ui_voicebank_changed = ui_voicebank_conflicts_with_quote(
                         quote, forced_voicebank_id
                     )
-                    quote_valid = bool(
+                    # Consent is enforced here, not only in the prompt: only the
+                    # quote the user was shown can be confirmed, and only by a
+                    # turn after the one that showed it.
+                    billing_files = (
+                        billing_snapshot.get("files")
+                        if isinstance(billing_snapshot.get("files"), dict)
+                        else {}
+                    )
+                    presented_quote_id = str(
+                        billing_files.get(ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY) or ""
+                    )
+                    presented_turn_id = str(
+                        billing_files.get(ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY) or ""
+                    )
+                    consent_problem: Optional[str] = None
+                    if not presented_quote_id or presented_quote_id != quote_id:
+                        consent_problem = "quote_not_presented"
+                    elif (
+                        presented_turn_id
+                        and originating_turn_id
+                        and presented_turn_id == str(originating_turn_id)
+                    ):
+                        consent_problem = "quote_presented_this_turn"
+                    quote_matches = bool(
                         not ui_voicebank_changed
                         and isinstance(quote, dict)
                         and quote.get("userId") == user_id
@@ -8417,6 +8576,7 @@ class Orchestrator:
                             or quote_expires_at > datetime.now(timezone.utc)
                         )
                     )
+                    quote_valid = quote_matches and consent_problem is None
                     if not quote_valid:
                         action_required = {
                             "status": "action_required",
@@ -8424,7 +8584,11 @@ class Orchestrator:
                             "message": backend_message(
                                 "synthesis.quote_refresh_required"
                             ),
-                            "reason": self._synthesis_quote_mismatch_reason(
+                            # A quote that is wrong in itself says so; a valid one
+                            # can still lack consent.
+                            "reason": consent_problem
+                            if quote_matches
+                            else self._synthesis_quote_mismatch_reason(
                                 quote,
                                 user_id=user_id,
                                 session_id=session_id,
@@ -9749,6 +9913,15 @@ def instrumental_midi_source_signature(
     assignments = llm_program_assignments_from_summary(summary)
     digest.update(json.dumps(assignments, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:24]
+
+
+def _json_object_or_none(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The JSON object in text, or None when it holds none."""
+    try:
+        value = json.loads(text or "")
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _changed_render_choices(

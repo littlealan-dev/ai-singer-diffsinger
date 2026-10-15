@@ -38,8 +38,13 @@ class GeminiRestClient:
         history: List[Dict[str, str]],
         *,
         role: LlmRole = LlmRole.DEFAULT,
+        response_schema: Dict[str, Any] | None = None,
     ) -> str:
-        """Generate a response from Gemini using the REST API."""
+        """Generate a response from Gemini using the REST API.
+
+        response_schema constrains this one reply to that structure; it is for
+        replies with a fixed shape, such as presenting a quote.
+        """
         if isinstance(prompt_bundle, str):
             prompt_bundle = PromptBundle(
                 static_prompt_text=prompt_bundle,
@@ -68,12 +73,14 @@ class GeminiRestClient:
             payload["cachedContent"] = cached_content_name
         else:
             payload["system_instruction"] = {"parts": [{"text": prompt_bundle.static_prompt_text}]}
-        # Ask Gemini for JSON, but deliberately do not impose a response schema:
-        # our tool-call arguments are intentionally flexible and schema-constrained
-        # generation previously produced empty argument objects.
+        # Ask Gemini for JSON. Tool-calling replies carry no response schema: their
+        # arguments are intentionally flexible, and schema-constrained generation
+        # previously produced empty argument objects. Fixed-shape replies pass one.
         generation_config: Dict[str, Any] = {
             "responseMimeType": "application/json",
         }
+        if response_schema is not None:
+            generation_config["responseSchema"] = response_schema
         thinking_config: Dict[str, Any] = {}
         if thinking_level:
             thinking_config["thinkingLevel"] = thinking_level

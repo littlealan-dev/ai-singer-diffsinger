@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 import json
 
 from src.backend.llm_prompt import PromptBundle
@@ -27,8 +27,12 @@ class LlmClient(Protocol):
         history: List[Dict[str, str]],
         *,
         role: LlmRole = LlmRole.DEFAULT,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Return a model response given prompt and chat history."""
+        """Return a model response given prompt and chat history.
+
+        response_schema, when given, is the structure this reply must follow.
+        """
         raise NotImplementedError
 
 
@@ -46,12 +50,15 @@ class StaticLlmClient:
         history: List[Dict[str, str]],
         *,
         role: LlmRole = LlmRole.DEFAULT,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Return the configured static response."""
         if history:
             last = history[-1].get("content", "")
             if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
                 tool_output = last[len(TOOL_RESULT_PREFIX):].strip()
+                if response_schema is not None:
+                    return json.dumps(_presentation_for_tool_output(tool_output))
                 return json.dumps(
                     {
                         "tool_calls": [],
@@ -94,8 +101,9 @@ class RegressionLlmClient:
         history: List[Dict[str, str]],
         *,
         role: LlmRole = LlmRole.DEFAULT,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        del prompt_bundle
+        del prompt_bundle, response_schema
         contents = [str(item.get("content") or "") for item in history]
         # Background preprocessing may append its assistant summary after a new
         # browser message. Drive this deterministic harness from the latest user
@@ -313,3 +321,16 @@ class RegressionLlmClient:
                 "include_score": include_score,
             }
         )
+
+
+def _presentation_for_tool_output(tool_output: str) -> Dict[str, Any]:
+    """Present the quote in a message-only tool output, as a real model would."""
+    from src.backend.quote_presentation import presentation_for_quote, presented_quote
+
+    payload_text = tool_output.split("Message-only payload:", 1)[-1]
+    payload_text = payload_text.split("</TOOL_OUTPUT", 1)[0].strip()
+    try:
+        quote = presented_quote(json.loads(payload_text))
+    except ValueError:
+        quote = None
+    return presentation_for_quote(quote) if quote else {}

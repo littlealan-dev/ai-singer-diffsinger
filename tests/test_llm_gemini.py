@@ -553,3 +553,41 @@ def test_gemini_generate_includes_thoughts_without_explicit_level(
     assert generation_config.get("thinkingConfig") == {"includeThoughts": True}
     parsed_text = json.loads(text)
     assert parsed_text["thought_summary"] == "summary only"
+
+
+def test_gemini_generate_sends_a_response_schema_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "")
+    monkeypatch.setenv("GEMINI_INCLUDE_THOUGHT_SUMMARY", "0")
+    client = GeminiRestClient(_settings(), api_key="dummy")
+    bodies: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"candidates": [{"content": {"parts": [{"text": '{"quote_presentation":{}}'}]}}]}
+            ).encode("utf-8")
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        bodies.append(json.loads(request.data.decode("utf-8")))
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    schema = {"type": "OBJECT", "properties": {"quote_presentation": {"type": "OBJECT"}}}
+
+    client.generate("system", [{"role": "user", "content": "hello"}], response_schema=schema)
+    client.generate("system", [{"role": "user", "content": "hello"}])
+
+    with_schema, without = bodies
+    assert with_schema["generationConfig"] == {
+        "responseMimeType": "application/json",
+        "responseSchema": schema,
+    }
+    assert without["generationConfig"] == {"responseMimeType": "application/json"}

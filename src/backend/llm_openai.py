@@ -64,8 +64,13 @@ class OpenAIRestClient:
         history: List[Dict[str, str]],
         *,
         role: LlmRole = LlmRole.DEFAULT,
+        response_schema: Dict[str, Any] | None = None,
     ) -> str:
-        """Generate a response from OpenAI using the Responses API."""
+        """Generate a response from OpenAI using the Responses API.
+
+        response_schema (Gemini's OpenAPI form) replaces the default reply schema
+        for this one reply.
+        """
         if isinstance(prompt_bundle, str):
             prompt_bundle = PromptBundle(
                 static_prompt_text=prompt_bundle,
@@ -87,8 +92,16 @@ class OpenAIRestClient:
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "sightsinger_llm_response",
-                    "schema": _OPENAI_LLM_RESPONSE_SCHEMA,
+                    "name": (
+                        "sightsinger_llm_response"
+                        if response_schema is None
+                        else "sightsinger_fixed_reply"
+                    ),
+                    "schema": (
+                        _OPENAI_LLM_RESPONSE_SCHEMA
+                        if response_schema is None
+                        else _json_schema_from_openapi(response_schema)
+                    ),
                     "strict": False,
                 }
             },
@@ -227,3 +240,22 @@ class OpenAIRestClient:
             return self._extract_text(parsed)
         except RuntimeError:
             return ""
+
+
+def _json_schema_from_openapi(schema: Any) -> Any:
+    """Convert a Gemini (OpenAPI subset) schema to JSON Schema: lower-case types, no ordering."""
+    if isinstance(schema, list):
+        return [_json_schema_from_openapi(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    converted: Dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "propertyOrdering":
+            continue
+        if key == "type" and isinstance(value, str):
+            converted[key] = value.lower()
+        elif key == "properties" and isinstance(value, dict):
+            converted[key] = {name: _json_schema_from_openapi(item) for name, item in value.items()}
+        else:
+            converted[key] = _json_schema_from_openapi(value)
+    return converted

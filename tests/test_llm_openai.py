@@ -138,3 +138,42 @@ def test_openai_generate_uses_role_specific_models_and_reasoning(
     payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
     assert payload["model"] == "gpt-5.5-pro"
     assert payload["reasoning"] == {"effort": "medium"}
+
+
+def test_openai_generate_uses_a_given_response_schema_as_json_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = OpenAIRestClient(_settings(), api_key="dummy")
+    captured: dict[str, object] = {}
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        captured["body"] = request.data
+        return _Response({"output_text": '{"quote_presentation":{}}'})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    schema = {
+        "type": "OBJECT",
+        "required": ["quote_presentation"],
+        "properties": {
+            "quote_presentation": {
+                "type": "OBJECT",
+                "propertyOrdering": ["quote_id"],
+                "properties": {"quote_id": {"type": "STRING"}},
+            }
+        },
+    }
+
+    client.generate("STATIC", [{"role": "user", "content": "hello"}], response_schema=schema)
+
+    payload = json.loads((captured["body"] or b"{}").decode("utf-8"))
+    assert payload["text"]["format"]["name"] == "sightsinger_fixed_reply"
+    assert payload["text"]["format"]["schema"] == {
+        "type": "object",
+        "required": ["quote_presentation"],
+        "properties": {
+            "quote_presentation": {
+                "type": "object",
+                "properties": {"quote_id": {"type": "string"}},
+            }
+        },
+    }
