@@ -58,6 +58,15 @@ def is_prod_env() -> bool:
     return _app_env().lower() not in {"dev", "development", "local", "test"}
 
 
+def _voicebanks_from_storage() -> bool:
+    """Whether voicebanks come from Cloud Storage rather than assets/voicebanks.
+
+    Production always uses storage. VOICEBANK_SOURCE=storage opts a local
+    backend in (e.g. to test text packs against the emulator).
+    """
+    return is_prod_env() or os.getenv("VOICEBANK_SOURCE", "").strip().lower() == "storage"
+
+
 def _project_root() -> Path:
     """Return project root based on this file location."""
     return Path(__file__).resolve().parents[2]
@@ -732,7 +741,7 @@ def _check_voicebank_id(voicebank_id: str) -> None:
 def resolve_voicebank_path(voicebank_id: str) -> Path:
     """Resolve a voicebank ID to a local path, caching in prod if needed."""
     _check_voicebank_id(voicebank_id)
-    if is_prod_env():
+    if _voicebanks_from_storage():
         return _ensure_cached_voicebank(voicebank_id)
     return _resolve_local_voicebank(voicebank_id)
 
@@ -746,7 +755,7 @@ def resolve_voicebank_text_path(voicebank_id: str) -> Path:
     memory on Cloud Run). A voicebank already cached in full is used as is.
     """
     _check_voicebank_id(voicebank_id)
-    if not is_prod_env():
+    if not _voicebanks_from_storage():
         return _resolve_local_voicebank(voicebank_id)
     full_dir = _cache_root() / voicebank_id
     resolved_full = discover_voicebank_root(full_dir) if full_dir.exists() else None

@@ -77,6 +77,11 @@ def main() -> int:
     parser.add_argument("--voicebank", action="append", help="only this voicebank ID (repeatable)")
     parser.add_argument("--dry-run", action="store_true", help="build and check, do not upload")
     parser.add_argument(
+        "--from-local",
+        action="store_true",
+        help="read each archive from its local copy under --out-root, not from the bucket",
+    )
+    parser.add_argument(
         "--out-root",
         type=Path,
         default=ROOT,
@@ -104,7 +109,11 @@ def main() -> int:
         pack_path.parent.mkdir(parents=True, exist_ok=True)
         # Built beside its final name, so a failed build leaves the last good pack.
         partial = pack_path.with_name(pack_path.name + ".partial")
-        with bucket.blob(archive_object).open("rb") as archive_stream:
+        if args.from_local:
+            archive_source = (args.out_root / archive_object).open("rb")
+        else:
+            archive_source = bucket.blob(archive_object).open("rb")
+        with archive_source as archive_stream:
             files, size = build_text_pack(archive_stream, partial)
         check_text_pack(partial)
         partial.replace(pack_path)
