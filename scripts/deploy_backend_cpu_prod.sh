@@ -15,7 +15,8 @@ set -euo pipefail
 # Going from a GPU revision to CPU is done once with
 # convert_backend_to_cpu_prod.sh: a GPU revision's settings stay on the
 # service, and update cannot remove all of them. This script stops if they
-# are still there.
+# are still there, so it passes no GPU flag: --gpu=0 could only be a no-op,
+# and it made gcloud warn "No GPU type is provided, defaulting to nvidia-l4".
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="sightsinger-app"
 REGION="us-east4"
@@ -131,7 +132,6 @@ deploy_args=(
   --project="${PROJECT}"
   --region="${REGION}"
   --image="${IMAGE}"
-  --gpu=0
   --cpu-throttling
   --cpu=2
   --memory=4Gi
