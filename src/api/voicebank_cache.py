@@ -751,7 +751,7 @@ def resolve_voicebank_text_path(voicebank_id: str) -> Path:
     try:
         return _ensure_cached_text_pack(voicebank_id)
     except VoicebankTextPackMissingError as exc:
-        logger.error("voicebank_text_pack_missing voicebank=%s error=%s", voicebank_id, exc)
+        logger.error("voicebank_text_pack_missing voicebank=%s location=%s", voicebank_id, exc.location)
         raise
 
 
@@ -870,13 +870,11 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
 
 
 class VoicebankTextPackMissingError(FileNotFoundError):
-    """A voicebank has no text pack: build and upload it, as for every voicebank."""
+    """A voicebank has no text pack: build and upload it with build_voicebank_text_packs.py."""
 
     def __init__(self, voicebank_id: str, location: str) -> None:
-        super().__init__(
-            f"Voicebank {voicebank_id!r} has no text pack at {location}. Build and upload it "
-            f"with scripts/build_voicebank_text_packs.py --voicebank {voicebank_id!r}."
-        )
+        super().__init__(f"Missing {voicebank_id} text pack.")
+        self.location = location
 
 
 # A voicebank's text pack holds the archive's text and config files at the

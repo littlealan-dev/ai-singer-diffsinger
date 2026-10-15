@@ -183,9 +183,12 @@ def test_a_missing_pack_is_an_error_never_a_full_download(request, voicebanks, c
 
     # A deployment miss: nothing falls back to the full voicebank.
     assert voicebanks == []
-    assert "build_voicebank_text_packs.py" in str(missing.value)
+    assert str(missing.value) == f"Missing {VOICEBANK_ID} text pack."
+    # Where it was expected goes to the error log, not to the user.
     assert any(
-        record.levelname == "ERROR" and "voicebank_text_pack_missing" in record.message
+        record.levelname == "ERROR"
+        and "voicebank_text_pack_missing" in record.message
+        and "Test_Voice.text.tar.gz" in record.message
         for record in caplog.records
     )
 
