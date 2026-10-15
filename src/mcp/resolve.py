@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from src.api.voicebank_cache import resolve_voicebank_path
+from src.api.voicebank_cache import resolve_voicebank_path, resolve_voicebank_text_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +33,11 @@ def resolve_project_path(path_value: str) -> Path:
 def resolve_voicebank_id(voicebank_id: str) -> Path:
     """Resolve a voicebank ID to a local path."""
     return resolve_voicebank_path(voicebank_id)
+
+
+def resolve_voicebank_text_id(voicebank_id: str) -> Path:
+    """Resolve a voicebank ID to a local path with its text files, not its models."""
+    return resolve_voicebank_text_path(voicebank_id)
 
 
 def resolve_optional_path(path_value: Optional[str]) -> Optional[Path]:

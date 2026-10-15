@@ -26,7 +26,12 @@ from src.api.voicebank_cache import (
     resolve_manifest_synthesis_control_defaults,
 )
 from src.api.score import score_duration_seconds
-from src.mcp.resolve import resolve_optional_path, resolve_project_path, resolve_voicebank_id
+from src.mcp.resolve import (
+    resolve_optional_path,
+    resolve_project_path,
+    resolve_voicebank_id,
+    resolve_voicebank_text_id,
+)
 
 
 class InvalidMusicXmlError(ValueError):
@@ -121,7 +126,8 @@ def handle_replace_birthday_name(params: Dict[str, Any], device: str) -> Dict[st
         resolve_project_path(params["output_musicxml_path"]),
         name=params.get("name"),
         sung_text=params.get("sung_text"),
-        voicebank_path=resolve_voicebank_id(params["voicebank"]),
+        # The name check reads the voicebank's dictionary, not its models.
+        voicebank_path=resolve_voicebank_text_id(params["voicebank"]),
         selected_verse_number=params.get("selected_verse_number"),
         selected_lyric_selection=params.get("selected_lyric_selection"),
     )
