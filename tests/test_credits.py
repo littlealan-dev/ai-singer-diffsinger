@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -32,8 +31,18 @@ from src.backend.feedback import (
 )
 from src.backend.firebase_app import get_firestore_client
 
-os.environ["FIRESTORE_EMULATOR_HOST"] = "localhost:8080"
-os.environ["GCLOUD_PROJECT"] = "demo-project"
+
+@pytest.fixture(scope="module", autouse=True)
+def firestore_emulator_env():
+    """Point Firestore at the emulator only while this module's tests run.
+
+    Set at import, these leaked into every test collected in the same run and
+    switched other suites' Firestore-backed code onto the live emulator.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:8080")
+        patch.setenv("GCLOUD_PROJECT", "demo-project")
+        yield
 
 
 @pytest.fixture(autouse=True)

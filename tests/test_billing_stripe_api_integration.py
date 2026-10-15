@@ -18,27 +18,36 @@ from src.backend.firebase_app import get_firestore_client
 from src.backend.main import create_app
 
 
-def _load_local_env_file(path: str) -> None:
+def _read_local_env_file(path: str) -> dict[str, str]:
+    """KEY=VALUE pairs of an env file, read without touching os.environ."""
+    values: dict[str, str] = {}
     if not path:
-        return
+        return values
     env_path = Path(path)
     if not env_path.is_file():
-        return
+        return values
     for raw_line in env_path.read_text().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if key and key not in os.environ:
-            os.environ[key] = value
+        if key.strip():
+            values[key.strip()] = value.strip()
+    return values
 
 
-_load_local_env_file(".env")
-_load_local_env_file("env/local.env")
-_load_local_env_file("env/dev.env")
-_load_local_env_file(os.getenv("BILLING_STRIPE_ENV_FILE", ""))
+# Read at import for the skip check below, but applied only per test (in
+# cleanup_firestore): loaded into os.environ at import, dev.env's settings such
+# as SESSION_STORE=firestore leaked into every test collected in the same run.
+# The first file to set a key wins, and the real environment wins over all.
+_LOCAL_ENV: dict[str, str] = {}
+for _env_file in (".env", "env/local.env", "env/dev.env", os.getenv("BILLING_STRIPE_ENV_FILE", "")):
+    for _key, _value in _read_local_env_file(_env_file).items():
+        _LOCAL_ENV.setdefault(_key, _value)
+
+
+def _env(name: str) -> str | None:
+    return os.getenv(name) or _LOCAL_ENV.get(name)
 
 
 def _missing_realtime_env() -> list[str]:
@@ -58,7 +67,7 @@ def _missing_realtime_env() -> list[str]:
         "STRIPE_CHECKOUT_CANCEL_URL",
         "STRIPE_PORTAL_RETURN_URL",
     ]
-    return [name for name in required if not os.getenv(name)]
+    return [name for name in required if not _env(name)]
 
 
 pytestmark = pytest.mark.skipif(
@@ -69,6 +78,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def cleanup_firestore(monkeypatch, firestore_emulator):
+    for key, value in _LOCAL_ENV.items():
+        if key not in os.environ:
+            monkeypatch.setenv(key, value)
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("BACKEND_AUTH_DISABLED", "false")
     monkeypatch.setenv("BACKEND_REQUIRE_APP_CHECK", "false")
