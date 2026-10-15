@@ -87,35 +87,56 @@ class _FakeBucket:
         return _FakeBlob(self.store, name, self.downloads)
 
 
+def _text_pack_bytes():
+    return _tar_gz({k: v for k, v in FILES.items() if voicebank_cache.is_voicebank_text_file(k)})
+
+
 @pytest.fixture
-def prod_voicebanks(monkeypatch, tmp_path):
-    """A prod-mode voicebank cache backed by a fake bucket holding only the text pack."""
-    pack_object = voicebank_cache.voicebank_text_pack_object(ARCHIVE_OBJECT)
-    text_files = {k: v for k, v in FILES.items() if voicebank_cache.is_voicebank_text_file(k)}
-    bucket = _FakeBucket({pack_object: _tar_gz(text_files)})
-    full_downloads = []
-    monkeypatch.setattr(voicebank_cache, "is_prod_env", lambda: True)
+def voicebanks(monkeypatch, tmp_path):
+    """A voicebank cache whose full-voicebank loaders record calls instead of loading."""
+    full_loads = []
     monkeypatch.setattr(voicebank_cache, "_check_voicebank_id", lambda voicebank_id: None)
-    monkeypatch.setattr(voicebank_cache, "_voicebank_bucket", lambda: "bucket")
     monkeypatch.setattr(
         voicebank_cache,
         "get_manifest_voicebank_metadata",
         lambda voicebank_id: {"storage_object": ARCHIVE_OBJECT},
     )
-    monkeypatch.setattr(voicebank_cache, "get_bucket", lambda name: bucket)
     monkeypatch.setattr(
         voicebank_cache,
         "_ensure_cached_voicebank",
-        lambda voicebank_id: full_downloads.append(voicebank_id) or tmp_path / "full",
+        lambda voicebank_id: full_loads.append(("storage", voicebank_id)) or tmp_path / "full",
     )
-    monkeypatch.setenv("VOICEBANK_CACHE_DIR", str(tmp_path / "voicebanks"))
+    monkeypatch.setattr(
+        voicebank_cache,
+        "_resolve_local_voicebank",
+        lambda voicebank_id: full_loads.append(("local", voicebank_id)) or tmp_path / "full",
+    )
     monkeypatch.setenv("VOICEBANK_TEXT_CACHE_DIR", str(tmp_path / "voicebank-text"))
-    return bucket, full_downloads, pack_object
+    return full_loads
 
 
-def test_the_text_path_downloads_the_small_pack_once_and_never_the_archive(prod_voicebanks):
-    bucket, full_downloads, pack_object = prod_voicebanks
+@pytest.fixture
+def in_prod(monkeypatch, voicebanks):
+    bucket = _FakeBucket({voicebank_cache.voicebank_text_pack_object(ARCHIVE_OBJECT): _text_pack_bytes()})
+    monkeypatch.setattr(voicebank_cache, "is_prod_env", lambda: True)
+    monkeypatch.setattr(voicebank_cache, "_voicebank_bucket", lambda: "bucket")
+    monkeypatch.setattr(voicebank_cache, "get_bucket", lambda name: bucket)
+    return bucket
 
+
+@pytest.fixture
+def in_local(monkeypatch, voicebanks, tmp_path):
+    """A local project whose only copy of the voicebank's text is the pack beside its archive."""
+    project = tmp_path / "project"
+    local_pack = project / voicebank_cache.voicebank_text_pack_object(ARCHIVE_OBJECT)
+    local_pack.parent.mkdir(parents=True)
+    local_pack.write_bytes(_text_pack_bytes())
+    monkeypatch.setattr(voicebank_cache, "is_prod_env", lambda: False)
+    monkeypatch.setattr(voicebank_cache, "_project_root", lambda: project)
+    return local_pack
+
+
+def test_in_prod_text_tools_download_the_small_pack_once_and_never_the_archive(in_prod, voicebanks):
     first = voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
     second = voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
 
@@ -123,33 +144,50 @@ def test_the_text_path_downloads_the_small_pack_once_and_never_the_archive(prod_
     assert (first / "dsconfig.yaml").is_file()
     assert (first / "dsdur" / "dsdict-en.yaml").is_file()
     assert not list(first.rglob("*.onnx"))
-    # The pack itself is deleted once extracted.
-    assert not list(first.parent.parent.rglob("*.tar.gz"))
-    assert bucket.downloads == [pack_object]
-    assert full_downloads == []
-    # It resolves to its manifest voicebank like the full cache does.
-    assert first.name == VOICEBANK_ID
+    assert not list(first.parents[1].rglob("*.tar.gz"))
+    assert in_prod.downloads == [voicebank_cache.voicebank_text_pack_object(ARCHIVE_OBJECT)]
+    assert voicebanks == []
+    # It still resolves to its manifest voicebank, as the full voicebank does.
+    assert VOICEBANK_ID in [parent.name for parent in (first, *first.parents)]
 
 
-def test_a_missing_text_pack_falls_back_to_the_full_archive(prod_voicebanks):
-    bucket, full_downloads, pack_object = prod_voicebanks
-    bucket.store.clear()
+def test_locally_text_tools_read_the_pack_beside_the_archive(in_local, voicebanks):
+    resolved = voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
 
-    voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
+    assert (resolved / "dsdur" / "dsdict-en.yaml").is_file()
+    assert not list(resolved.rglob("*.onnx"))
+    assert voicebanks == []
 
-    assert full_downloads == [VOICEBANK_ID]
+
+def test_a_rebuilt_local_pack_is_extracted_again(in_local, voicebanks):
+    import os
+
+    first = voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
+    os.utime(in_local, ns=(in_local.stat().st_atime_ns, in_local.stat().st_mtime_ns + 1_000_000))
+    second = voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
+
+    assert first != second
+    assert (second / "dsconfig.yaml").is_file()
 
 
-def test_a_voicebank_already_cached_in_full_is_used_without_a_download(prod_voicebanks, tmp_path):
-    bucket, full_downloads, _ = prod_voicebanks
-    full_root = tmp_path / "voicebanks" / VOICEBANK_ID
-    full_root.mkdir(parents=True)
-    (full_root / "dsconfig.yaml").write_text("x")
-    (full_root / "character.yaml").write_text("name: Test")
+@pytest.mark.parametrize("environment", ["in_prod", "in_local"])
+def test_a_missing_pack_is_an_error_never_a_full_download(request, voicebanks, caplog, environment):
+    setup = request.getfixturevalue(environment)
+    if environment == "in_prod":
+        setup.store.clear()
+    else:
+        setup.unlink()
 
-    assert voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID) == full_root
-    assert bucket.downloads == []
-    assert full_downloads == []
+    with pytest.raises(voicebank_cache.VoicebankTextPackMissingError) as missing:
+        voicebank_cache.resolve_voicebank_text_path(VOICEBANK_ID)
+
+    # A deployment miss: nothing falls back to the full voicebank.
+    assert voicebanks == []
+    assert "build_voicebank_text_packs.py" in str(missing.value)
+    assert any(
+        record.levelname == "ERROR" and "voicebank_text_pack_missing" in record.message
+        for record in caplog.records
+    )
 
 
 def test_the_birthday_name_tool_reads_the_text_pack(monkeypatch):
@@ -175,6 +213,57 @@ def test_the_birthday_name_tool_reads_the_text_pack(monkeypatch):
 
     assert resolved == [VOICEBANK_ID]
     assert result == {"voicebank_path": Path("/t")}
+
+
+LIEE = "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
+LIEE_PACK = ROOT / "assets" / "voicebanks" / "Diffsinger_LIEE_Immortal_Idol_JubiLIEE_2025.text.tar.gz"
+HAPPY_BIRTHDAY = ROOT / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
+
+
+@pytest.mark.skipif(not LIEE_PACK.is_file(), reason="needs the local LIEE text pack (build_voicebank_text_packs.py)")
+def test_happy_birthday_names_are_checked_against_the_liee_text_pack_alone(monkeypatch, tmp_path):
+    """With the full voicebank out of reach, the real tool still checks and writes the name."""
+    import src.mcp.handlers as handlers
+
+    def no_full_voicebank(voicebank_id):
+        raise AssertionError(f"loaded the full voicebank {voicebank_id}")
+
+    monkeypatch.setattr(voicebank_cache, "is_prod_env", lambda: False)
+    monkeypatch.setattr(voicebank_cache, "_resolve_local_voicebank", no_full_voicebank)
+    monkeypatch.setattr(voicebank_cache, "_ensure_cached_voicebank", no_full_voicebank)
+    monkeypatch.setenv("VOICEBANK_TEXT_CACHE_DIR", str(tmp_path / "voicebank-text"))
+    monkeypatch.setattr(handlers, "resolve_project_path", lambda value: Path(value))
+    resolved = []
+    real_resolve = handlers.resolve_voicebank_text_id
+    monkeypatch.setattr(
+        handlers,
+        "resolve_voicebank_text_id",
+        lambda voicebank: resolved.append(real_resolve(voicebank)) or resolved[-1],
+    )
+
+    def sing_to(name, sung_text):
+        return handlers.handle_replace_birthday_name(
+            {
+                "source_musicxml_path": str(HAPPY_BIRTHDAY),
+                "output_musicxml_path": str(tmp_path / f"{name}.xml"),
+                "name": name,
+                "sung_text": sung_text,
+                "voicebank": LIEE,
+            },
+            "cpu",
+        )
+
+    sarah = sing_to("Sarah", "Sa-rah")
+    mismatch = sing_to("Christopher", "Chris-topher")
+
+    assert sarah["status"] == "name_ready" and sarah["sung_text"] == "Sa-rah"
+    assert "<text>Sa</text>" in (tmp_path / "Sarah.xml").read_text()
+    # The check really ran on the pack's dictionary: a wrong split is caught.
+    assert mismatch["status"] == "action_required"
+    assert mismatch["code"] == "name_syllables_mismatch"
+    text_cache = (tmp_path / "voicebank-text").resolve()
+    assert all(text_cache in path.resolve().parents for path in resolved)
+    assert all(not list(path.rglob("*.onnx")) for path in resolved)
 
 
 def test_the_packer_keeps_each_pack_locally_at_its_storage_path(monkeypatch, tmp_path):

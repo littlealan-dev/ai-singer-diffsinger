@@ -58,15 +58,6 @@ def is_prod_env() -> bool:
     return _app_env().lower() not in {"dev", "development", "local", "test"}
 
 
-def _voicebanks_from_storage() -> bool:
-    """Whether voicebanks come from Cloud Storage rather than assets/voicebanks.
-
-    Production always uses storage. VOICEBANK_SOURCE=storage opts a local
-    backend in (e.g. to test text packs against the emulator).
-    """
-    return is_prod_env() or os.getenv("VOICEBANK_SOURCE", "").strip().lower() == "storage"
-
-
 def _project_root() -> Path:
     """Return project root based on this file location."""
     return Path(__file__).resolve().parents[2]
@@ -741,35 +732,27 @@ def _check_voicebank_id(voicebank_id: str) -> None:
 def resolve_voicebank_path(voicebank_id: str) -> Path:
     """Resolve a voicebank ID to a local path, caching in prod if needed."""
     _check_voicebank_id(voicebank_id)
-    if _voicebanks_from_storage():
+    if is_prod_env():
         return _ensure_cached_voicebank(voicebank_id)
     return _resolve_local_voicebank(voicebank_id)
 
 
 def resolve_voicebank_text_path(voicebank_id: str) -> Path:
-    """Resolve a voicebank ID to a local root holding at least its text files.
+    """Resolve a voicebank ID to its text pack: its text and config files, no models.
 
     For tools that read a voicebank's dictionaries, phoneme lists and config
-    but not its models. In prod this fetches the voicebank's small text pack
-    rather than the whole archive (hundreds of MB, held in /tmp, which is
-    memory on Cloud Run). A voicebank already cached in full is used as is.
+    but not its models (hundreds of MB, held in /tmp, which is memory on Cloud
+    Run). The pack, <archive>.text.tar.gz, comes from Cloud Storage in prod and
+    from its local copy beside the archive otherwise. A missing pack is an error,
+    never a full download: every voicebank needs one
+    (scripts/build_voicebank_text_packs.py).
     """
     _check_voicebank_id(voicebank_id)
-    if not _voicebanks_from_storage():
-        return _resolve_local_voicebank(voicebank_id)
-    full_dir = _cache_root() / voicebank_id
-    resolved_full = discover_voicebank_root(full_dir) if full_dir.exists() else None
-    if resolved_full is not None:
-        return resolved_full
     try:
         return _ensure_cached_text_pack(voicebank_id)
-    except FileNotFoundError as exc:
-        logger.warning(
-            "voicebank_text_pack_missing voicebank=%s error=%s; using the full archive",
-            voicebank_id,
-            exc,
-        )
-        return _ensure_cached_voicebank(voicebank_id)
+    except VoicebankTextPackMissingError as exc:
+        logger.error("voicebank_text_pack_missing voicebank=%s error=%s", voicebank_id, exc)
+        raise
 
 
 def list_voicebank_ids() -> List[str]:
@@ -886,6 +869,16 @@ def _ensure_cached_voicebank(voicebank_id: str) -> Path:
     return resolved_target
 
 
+class VoicebankTextPackMissingError(FileNotFoundError):
+    """A voicebank has no text pack: build and upload it, as for every voicebank."""
+
+    def __init__(self, voicebank_id: str, location: str) -> None:
+        super().__init__(
+            f"Voicebank {voicebank_id!r} has no text pack at {location}. Build and upload it "
+            f"with scripts/build_voicebank_text_packs.py --voicebank {voicebank_id!r}."
+        )
+
+
 # A voicebank's text pack holds the archive's text and config files at the
 # same paths, without its models: what reading dictionaries needs.
 VOICEBANK_TEXT_SUFFIXES = frozenset({".yaml", ".yml", ".json", ".txt"})
@@ -907,37 +900,56 @@ def _text_cache_root() -> Path:
 
 
 def _ensure_cached_text_pack(voicebank_id: str) -> Path:
-    """Download and extract a voicebank's text pack into the local cache.
+    """Extract a voicebank's text pack into the local cache, fetching it if needed.
 
     Several MCP processes may ask for the same pack at once: each extracts into
     its own directory and the first to finish publishes it.
     """
-    target_dir = _text_cache_root() / voicebank_id
-    resolved_cached = discover_voicebank_root(target_dir) if target_dir.exists() else None
-    if resolved_cached is not None:
-        return resolved_cached
-    bucket = _voicebank_bucket()
-    if not bucket:
-        raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
     manifest_entry = get_manifest_voicebank_metadata(voicebank_id)
     archive_object = manifest_entry.get("storage_object") if isinstance(manifest_entry, dict) else None
     if not isinstance(archive_object, str) or not archive_object.strip():
         raise ValueError(f"Manifest entry missing storage_object for voicebank: {voicebank_id}")
     pack_object = voicebank_text_pack_object(archive_object)
+    if is_prod_env():
+        bucket = _voicebank_bucket()
+        if not bucket:
+            raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
+        source = f"gs://{bucket}/{pack_object}"
+        target_dir = _text_cache_root() / voicebank_id / "storage"
+
+        def fetch(destination: Path) -> None:
+            try:
+                get_bucket(bucket).blob(pack_object).download_to_filename(str(destination))
+            except NotFound as exc:
+                raise VoicebankTextPackMissingError(voicebank_id, source) from exc
+    else:
+        local_pack = _project_root() / pack_object
+        if not local_pack.is_file():
+            raise VoicebankTextPackMissingError(voicebank_id, str(local_pack))
+        stat = local_pack.stat()
+        source = str(local_pack)
+        # A rebuilt local pack gets a fresh directory.
+        target_dir = _text_cache_root() / voicebank_id / f"local-{stat.st_size}-{stat.st_mtime_ns}"
+
+        def fetch(destination: Path) -> None:
+            shutil.copyfile(local_pack, destination)
+
+    resolved_cached = discover_voicebank_root(target_dir) if target_dir.exists() else None
+    if resolved_cached is not None:
+        logger.info("voicebank_text_pack_hit voicebank=%s path=%s", voicebank_id, resolved_cached)
+        return resolved_cached
     start = time.monotonic()
-    tmp_dir = _text_cache_root() / f".{voicebank_id}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = target_dir.parent / f".{target_dir.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp_dir.mkdir()
     try:
         pack_path = tmp_dir / Path(pack_object).name
-        try:
-            get_bucket(bucket).blob(pack_object).download_to_filename(str(pack_path))
-        except NotFound as exc:
-            raise FileNotFoundError(f"Voicebank text pack not in storage: {pack_object}") from exc
+        fetch(pack_path)
         size = pack_path.stat().st_size
         _extract_tarball(pack_path, tmp_dir)
         pack_path.unlink()
         if discover_voicebank_root(tmp_dir) is None:
-            raise FileNotFoundError(f"Voicebank text pack missing dsconfig.yaml: {pack_object}")
+            raise FileNotFoundError(f"Voicebank text pack missing dsconfig.yaml: {source}")
         try:
             tmp_dir.replace(target_dir)
         except OSError:
@@ -946,15 +958,17 @@ def _ensure_cached_text_pack(voicebank_id: str) -> Path:
                 raise
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-    logger.info(
-        "voicebank_text_pack_cached voicebank=%s bytes=%s elapsed_ms=%.2f",
-        voicebank_id,
-        size,
-        (time.monotonic() - start) * 1000.0,
-    )
     resolved = discover_voicebank_root(target_dir)
     if resolved is None:
-        raise FileNotFoundError(f"Voicebank text pack missing dsconfig.yaml: {voicebank_id}")
+        raise FileNotFoundError(f"Voicebank text pack missing dsconfig.yaml: {source}")
+    logger.info(
+        "voicebank_text_pack_cached voicebank=%s source=%s bytes=%s path=%s elapsed_ms=%.2f",
+        voicebank_id,
+        source,
+        size,
+        resolved,
+        (time.monotonic() - start) * 1000.0,
+    )
     return resolved
 
 
