@@ -3,13 +3,15 @@
 Tools that read a voicebank's dictionaries but not its models (the birthday-name
 check on the CPU-only API) fetch this pack instead of the full archive. The pack
 keeps the archive's paths, so it resolves like the full voicebank; it is stored
-next to the archive as <archive>.text.tar.gz. Each archive is read from Cloud
-Storage as a stream, so nothing the size of a voicebank is written to disk.
+next to the archive as <archive>.text.tar.gz, in Cloud Storage and locally at
+the same path under the project (assets/voicebanks/, git-ignored). Each archive
+is read from Cloud Storage as a stream, so nothing the size of a voicebank is
+written to disk.
 
 Run once, and again after a voicebank archive changes:
 
-    python scripts/build_voicebank_text_packs.py --dry-run   # build and check only
-    python scripts/build_voicebank_text_packs.py             # build and upload
+    python scripts/build_voicebank_text_packs.py --dry-run   # build, check, keep locally
+    python scripts/build_voicebank_text_packs.py             # ... and upload
 
 Needs credentials that can read and write the voicebank bucket
 (gcloud auth application-default login).
@@ -74,6 +76,12 @@ def main() -> int:
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--voicebank", action="append", help="only this voicebank ID (repeatable)")
     parser.add_argument("--dry-run", action="store_true", help="build and check, do not upload")
+    parser.add_argument(
+        "--out-root",
+        type=Path,
+        default=ROOT,
+        help="where the local copies go, at the storage path below it (default: the project)",
+    )
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -89,26 +97,28 @@ def main() -> int:
         print("No voicebanks selected.")
         return 1
     bucket = get_bucket(args.bucket)
-    with tempfile.TemporaryDirectory() as work:
-        for entry in selected:
-            archive_object = entry["storage_object"]
-            pack_object = voicebank_text_pack_object(archive_object)
-            pack_path = Path(work) / Path(pack_object).name
-            with bucket.blob(archive_object).open("rb") as archive_stream:
-                files, size = build_text_pack(archive_stream, pack_path)
-            check_text_pack(pack_path)
-            packed = pack_path.stat().st_size
-            line = (
-                f"{entry['id']}: {files} files, {size / 1e6:.2f} MB unpacked, "
-                f"{packed / 1e6:.2f} MB packed -> gs://{args.bucket}/{pack_object}"
-            )
-            if args.dry_run:
-                print(line + " (dry run, not uploaded)")
-                continue
-            bucket.blob(pack_object).upload_from_filename(
-                str(pack_path), content_type="application/gzip"
-            )
-            print(line + " (uploaded)")
+    for entry in selected:
+        archive_object = entry["storage_object"]
+        pack_object = voicebank_text_pack_object(archive_object)
+        pack_path = args.out_root / pack_object
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        # Built beside its final name, so a failed build leaves the last good pack.
+        partial = pack_path.with_name(pack_path.name + ".partial")
+        with bucket.blob(archive_object).open("rb") as archive_stream:
+            files, size = build_text_pack(archive_stream, partial)
+        check_text_pack(partial)
+        partial.replace(pack_path)
+        line = (
+            f"{entry['id']}: {files} files, {size / 1e6:.2f} MB unpacked, "
+            f"{pack_path.stat().st_size / 1e6:.2f} MB packed -> {pack_path}"
+        )
+        if args.dry_run:
+            print(line + " (dry run, not uploaded)")
+            continue
+        bucket.blob(pack_object).upload_from_filename(
+            str(pack_path), content_type="application/gzip"
+        )
+        print(line + f" and gs://{args.bucket}/{pack_object} (uploaded)")
     return 0
 
 

@@ -175,3 +175,45 @@ def test_the_birthday_name_tool_reads_the_text_pack(monkeypatch):
 
     assert resolved == [VOICEBANK_ID]
     assert result == {"voicebank_path": Path("/t")}
+
+
+def test_the_packer_keeps_each_pack_locally_at_its_storage_path(monkeypatch, tmp_path):
+    import json
+    import sys
+
+    archive = _tar_gz(FILES)
+    uploads = []
+
+    class _PackerBlob:
+        def __init__(self, name):
+            self.name = name
+
+        def open(self, mode):
+            assert self.name == ARCHIVE_OBJECT and mode == "rb"
+            return io.BytesIO(archive)
+
+        def upload_from_filename(self, path, content_type=None):
+            uploads.append((self.name, Path(path).read_bytes(), content_type))
+
+    class _PackerBucket:
+        def blob(self, name):
+            return _PackerBlob(name)
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"voicebanks": [{"id": VOICEBANK_ID, "storage_object": ARCHIVE_OBJECT}]}))
+    monkeypatch.setattr(packer, "get_bucket", lambda name: _PackerBucket())
+    local_pack = tmp_path / voicebank_cache.voicebank_text_pack_object(ARCHIVE_OBJECT)
+    common = ["build", "--manifest", str(manifest), "--out-root", str(tmp_path)]
+
+    monkeypatch.setattr(sys, "argv", common + ["--dry-run"])
+    assert packer.main() == 0
+    assert local_pack.is_file()
+    assert not local_pack.with_name(local_pack.name + ".partial").exists()
+    assert uploads == []
+
+    monkeypatch.setattr(sys, "argv", common)
+    assert packer.main() == 0
+    ((name, data, content_type),) = uploads
+    assert name == "assets/voicebanks/Test_Voice.text.tar.gz"
+    assert data == local_pack.read_bytes()
+    assert content_type == "application/gzip"
