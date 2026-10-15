@@ -77,6 +77,8 @@ QUOTE_PRESENTATION_SCHEMA: Dict[str, Any] = {
                     "voicebank_id": {"type": "STRING", "description": "Copy of render_choices.voicebank."},
                     "display": {"type": "STRING", "description": "The voice's display name."},
                 }, ["voicebank_id", "display"]),
+                # Copy fields for style controls are added per quote, for the
+                # controls that quote sets (quote_presentation_schema).
                 "voice_style": _row("Voice style", {
                     "display": {
                         "type": "STRING",
@@ -84,15 +86,6 @@ QUOTE_PRESENTATION_SCHEMA: Dict[str, Any] = {
                             "The style/color and the voice controls in words, "
                             "e.g. 'More masculine (gender +20)'."
                         ),
-                    },
-                    "voice_color": {"type": "STRING", "description": "Copy of render_choices.voice_color."},
-                    "gender": {"type": "NUMBER", "description": "Copy of render_choices.gender."},
-                    "airiness": {"type": "NUMBER", "description": "Copy of render_choices.airiness."},
-                    "intensity": {"type": "NUMBER", "description": "Copy of render_choices.intensity."},
-                    "clarity": {"type": "NUMBER", "description": "Copy of render_choices.clarity."},
-                    "articulation": {
-                        "type": "NUMBER",
-                        "description": "Copy of render_choices.articulation.",
                     },
                 }, ["display"]),
                 "repeats": _row("Repeats", {
@@ -169,6 +162,13 @@ QUOTE_PRESENTATION_SCHEMA: Dict[str, Any] = {
 # The quote's optional style inputs. None changes the price, but each one the
 # quote sets is shown, so the user sees what they are confirming.
 STYLE_FIELDS = ("voice_color", "gender", "airiness", "intensity", "clarity", "articulation")
+_STYLE_FIELD_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    field: {
+        "type": "STRING" if field == "voice_color" else "NUMBER",
+        "description": f"Copy of render_choices.{field}.",
+    }
+    for field in STYLE_FIELDS
+}
 
 
 def _quote_style(quote: Dict[str, Any]) -> Dict[str, Any]:
@@ -179,8 +179,10 @@ def _quote_style(quote: Dict[str, Any]) -> Dict[str, Any]:
 def quote_presentation_schema(quote: Dict[str, Any]) -> Dict[str, Any]:
     """The schema for presenting this quote.
 
-    Its player notice is required when it replaces takes, and its style row,
-    with a copy of each style input it sets, when it has any.
+    Its player notice is required when it replaces takes. Its style row offers
+    a copy field only for each style input the quote sets, and requires them:
+    a reply cannot put a control the quote does not set, such as a voicebank
+    default, into a field that would claim the quote sets it.
     """
     style = _quote_style(quote)
     if not quote.get("takes_removed_from_player") and not style:
@@ -190,8 +192,10 @@ def quote_presentation_schema(quote: Dict[str, Any]) -> Dict[str, Any]:
     if quote.get("takes_removed_from_player"):
         presentation["required"].append("takes_removed_note")
     if style:
+        voice_style = presentation["properties"]["voice_style"]
+        voice_style["properties"].update({key: _STYLE_FIELD_SCHEMAS[key] for key in style})
+        voice_style["required"].extend(style)
         presentation["required"].append("voice_style")
-        presentation["properties"]["voice_style"]["required"].extend(style)
     return schema
 
 

@@ -174,9 +174,12 @@ STYLED = {
 def test_a_styled_quote_requires_the_style_row_with_exact_copies():
     schema = quote_presentation_schema(STYLED)["properties"]["quote_presentation"]
     assert "voice_style" in schema["required"]
-    assert set(schema["properties"]["voice_style"]["required"]) == {
-        "label", "display", "gender", "voice_color",
-    }
+    style_row = schema["properties"]["voice_style"]
+    # Exactly the controls this quote sets are offered, and all are required.
+    assert set(style_row["properties"]) == {"label", "display", "gender", "voice_color"}
+    assert set(style_row["required"]) == {"label", "display", "gender", "voice_color"}
+    assert style_row["properties"]["gender"]["type"] == "NUMBER"
+    assert style_row["properties"]["voice_color"]["type"] == "STRING"
     reply = presentation_for_quote(STYLED)
     assert quote_presentation_problems(reply, STYLED) == []
 
@@ -196,6 +199,32 @@ def test_a_styled_quote_requires_the_style_row_with_exact_copies():
 def test_an_unstyled_quote_needs_no_style_row():
     assert "voice_style" not in quote_presentation_schema(QUOTE)["properties"]["quote_presentation"]["required"]
     assert quote_presentation_problems(_reply(), QUOTE) == []
+
+
+def test_an_unstyled_quote_offers_no_control_fields_for_voicebank_defaults():
+    """Production 2026-10-15: a Qixuan quote with no style inputs got its reply
+    rejected 8 times, because the schema offered gender and clarity and the
+    model filled them with Qixuan's defaults. Now no such field exists."""
+    style_row = quote_presentation_schema(QUOTE)["properties"]["quote_presentation"]["properties"]["voice_style"]
+    assert set(style_row["properties"]) == {"label", "display"}
+    # A text-only "default" row is still allowed.
+    assert quote_presentation_problems(
+        _reply(voice_style={"label": "Voice style", "display": "Default (clarity 170, gender 20.83)"}),
+        QUOTE,
+    ) == []
+    # The check still refuses a copy the quote does not set, should a client
+    # ever return one.
+    assert quote_presentation_problems(
+        _reply(voice_style={"label": "Voice style", "display": "Default", "gender": 20.83, "clarity": 170}),
+        QUOTE,
+    ) == ["voice_style.gender is not in the quote", "voice_style.clarity is not in the quote"]
+
+
+def test_a_quote_with_two_style_inputs_offers_both():
+    quote = {**QUOTE, "render_choices": {**QUOTE["render_choices"], "gender": -30.0, "airiness": 5.0}}
+    style_row = quote_presentation_schema(quote)["properties"]["quote_presentation"]["properties"]["voice_style"]
+    assert set(style_row["properties"]) == {"label", "display", "gender", "airiness"}
+    assert set(style_row["required"]) == {"label", "display", "gender", "airiness"}
 
 
 def test_the_style_row_is_shown_after_the_voice():
