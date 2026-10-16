@@ -10,7 +10,9 @@ PROJECT="sightsinger-app"
 REGION="us-east4"
 SERVICE="sightsinger-synthesis-worker"
 IMAGE="${SYNTHESIS_WORKER_IMAGE:-gcr.io/sightsinger-app/ai-singer-api:latest}"
-MAX_INSTANCES="${SYNTHESIS_WORKER_MAX_INSTANCES:-2}"
+# 3 = all of the project's L4 quota in us-east4, now that the API runs on CPU
+# (SIG-105 phase 7). Rolling the API back to a GPU revision needs 2 here first.
+MAX_INSTANCES="${SYNTHESIS_WORKER_MAX_INSTANCES:-3}"
 RUNTIME_SA="sightsinger-cloud-run-sa@${PROJECT}.iam.gserviceaccount.com"
 INVOKER_SA="sightsinger-preprocess-invoker@${PROJECT}.iam.gserviceaccount.com"
 DRY_RUN="${DRY_RUN:-0}"

@@ -12,7 +12,8 @@ PROJECT="${GCP_PROJECT:-sightsinger-app}"
 REGION="${GCP_REGION:-us-east4}"
 QUEUE="synthesis-jobs"
 INVOKER_SA="sightsinger-preprocess-invoker@${PROJECT}.iam.gserviceaccount.com"
-MAX_CONCURRENT="${SYNTHESIS_QUEUE_MAX_CONCURRENT_DISPATCHES:-4}"
+# 6 = 3 worker instances x concurrency 2 (SIG-105 phase 7).
+MAX_CONCURRENT="${SYNTHESIS_QUEUE_MAX_CONCURRENT_DISPATCHES:-6}"
 DRY_RUN="${DRY_RUN:-0}"
 
 if [[ ! "${MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]]; then

@@ -79,8 +79,8 @@ Rollback: `scripts/rollback_backend_to_revision.sh <revision from step 1>`.
 ## 4. Create the queue and deploy the synthesis worker
 
 ```bash
-scripts/setup_synthesis_tasks_prod.sh       # queue synthesis-jobs, 4 concurrent dispatches
-scripts/deploy_synthesis_worker_prod.sh     # GPU worker, max 2 instances; grants the invoker
+SYNTHESIS_QUEUE_MAX_CONCURRENT_DISPATCHES=4 scripts/setup_synthesis_tasks_prod.sh   # queue synthesis-jobs
+SYNTHESIS_WORKER_MAX_INSTANCES=2 scripts/deploy_synthesis_worker_prod.sh          # GPU worker; grants the invoker
 ```
 
 The worker script prints the worker URL and **five lines for
@@ -192,6 +192,10 @@ It pins traffic; return to "follow latest" with `update-traffic --to-latest`
 after the next good deploy.
 
 ## 7. Final limits
+
+Done on 2026-10-16: worker revision `sightsinger-synthesis-worker-00002-jh9`
+(max 3), queue 6 dispatches. Both scripts now default to these final limits
+(worker 3, queue 6), so phases 4–6 pass the transition values explicitly.
 
 Once the CPU API has run well for a day or two, give the worker the third GPU
 and the queue its final dispatch limit:
