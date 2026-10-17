@@ -114,6 +114,10 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   });
   await signInAsE2EUser(page, "score-history");
   await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  // The cookie banner covers the composer, including the send button.
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
   const upload = () => page.getByTestId("score-upload-input").setInputFiles({ name: "score.xml", mimeType: "application/xml", buffer: xml });
   await upload();
   await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
