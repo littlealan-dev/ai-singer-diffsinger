@@ -18,6 +18,10 @@ from src.mcp.logging_utils import get_logger
 logger = get_logger(__name__)
 
 _TERMINAL_SUBSCRIPTION_STATUSES = {"canceled", "incomplete_expired"}
+# An annual plan's monthly refresh needs a subscription in good standing: a
+# failed renewal (past_due, unpaid) or an unfinished first payment (incomplete)
+# has paid for no current year, so it waits like a monthly plan's unpaid cycle.
+_ANNUAL_REFRESH_STATUSES = {"active", "trialing"}
 
 
 def compute_next_monthly_refresh(anchor: datetime, after: datetime) -> datetime:
@@ -273,6 +277,8 @@ def _refresh_decision(
         return _RefreshDecision(status="cancel_scheduled", status_only=True)
 
     if interval == "year":
+        if subscription_status not in _ANNUAL_REFRESH_STATUSES:
+            return _RefreshDecision(status="waiting_for_invoice", status_only=True)
         return _RefreshDecision(
             status="applied",
             plan_key=active_plan_key,  # type: ignore[arg-type]
