@@ -11,6 +11,7 @@ export type E2EState = {
   current_score?: Record<string, unknown>;
   score_summary?: {
     parts?: Array<{ note_count?: number; part_name?: string }>;
+    repeat_expansion_available?: boolean;
     performance_midi?: {
       has_instrumental_parts?: boolean;
       original_midi_available?: boolean;

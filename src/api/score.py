@@ -25,7 +25,11 @@ except ImportError:
     HAS_RESTRICTED_PYTHON = False
     logger.warning("RestrictedPython not installed. modify_score will use unsafe exec.")
 
-from src.musicxml.parser import build_performance_measure_map, parse_musicxml_with_summary
+from src.musicxml.parser import (
+    RepeatExpansionError,
+    build_performance_measure_map,
+    parse_musicxml_with_summary,
+)
 from src.api.voice_parts import analyze_score_voice_parts
 from src.musicxml.instrument_programs import build_instrument_program_summary
 from src.musicxml.demo_songs import read_demo_song_id
@@ -85,14 +89,28 @@ def parse_score(
         lyric_selection=lyric_selection,
         expand_repeats=False,
     )
-    expanded_score = _parse_score_variant(
-        file_path,
-        part_id=part_id,
-        part_index=part_index,
-        verse_number=verse_number,
-        lyric_selection=lyric_selection,
-        expand_repeats=True,
-    )
+    try:
+        expanded_score: Optional[Dict[str, Any]] = _parse_score_variant(
+            file_path,
+            part_id=part_id,
+            part_index=part_index,
+            verse_number=verse_number,
+            lyric_selection=lyric_selection,
+            expand_repeats=True,
+        )
+    except RepeatExpansionError as exc:
+        if expand_repeats:
+            raise
+        # The written score parsed, so the score stays usable in written
+        # order. Only singing it with repeats is unavailable.
+        logger.warning(
+            "repeat_expansion_unavailable path=%s error_type=%s error=%s",
+            file_path,
+            type(exc.__cause__ or exc).__name__,
+            exc.__cause__ or exc,
+        )
+        expanded_score = None
+        _mark_repeat_expansion_unavailable(original_score)
 
     # Keep the canonical (notation) score and its linear performance score
     # together. This happens while the upload/reupload is parsed, allowing
@@ -101,7 +119,9 @@ def parse_score(
     _attach_variant_durations(original_score, expanded_score)
     _attach_performance_measure_map(original_score, Path(file_path))
     _attach_score_signatures(original_score)
-    if expand_repeats:
+    if expanded_score is None:
+        result = original_score
+    elif expand_repeats:
         expanded_score["original_score"] = original_score
         result = expanded_score
     else:
@@ -150,11 +170,29 @@ def _signature_of(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _mark_repeat_expansion_unavailable(score: Dict[str, Any]) -> None:
+    """Record that this score has no played order, for synthesis and the UI.
+
+    The score itself carries the flag because uploads store the summary apart
+    from the score that synthesis receives.
+    """
+    score["repeat_expansion_available"] = False
+    summary = score.get("score_summary")
+    if isinstance(summary, dict):
+        summary["repeat_expansion_available"] = False
+
+
 def _attach_variant_durations(
-    original_score: Dict[str, Any], expanded_score: Dict[str, Any]
+    original_score: Dict[str, Any], expanded_score: Optional[Dict[str, Any]]
 ) -> None:
     """Expose both cached playback durations from each parsed score variant."""
     original_summary = original_score.get("score_summary")
+    if expanded_score is None:
+        if isinstance(original_summary, dict):
+            original_duration = score_duration_seconds(original_score)
+            if original_duration > 0:
+                original_summary["duration_seconds"] = original_duration
+        return
     expanded_summary = expanded_score.get("score_summary")
     if not isinstance(original_summary, dict) or not isinstance(expanded_summary, dict):
         return
@@ -298,7 +336,14 @@ def expanded_score_for_synthesis(score: Dict[str, Any]) -> Dict[str, Any]:
     Upload/reupload parsing stores the expanded score alongside the canonical
     notation score. Scores created by older callers may not have that variant,
     so they remain usable as-is rather than unexpectedly reparsing their source.
+    A score whose repeats could not be expanded is never sung in written order
+    in place of the requested repeats.
     """
+    if score.get("repeat_expansion_available") is False:
+        raise RepeatExpansionError(
+            "This score's repeat marks can't be followed, so it can only be "
+            "sung in written order. Turn off With Repeats and try again."
+        )
     expanded_score = score.get("expanded_score")
     return expanded_score if isinstance(expanded_score, dict) else score
 

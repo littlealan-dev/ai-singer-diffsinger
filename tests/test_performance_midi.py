@@ -30,6 +30,24 @@ PIANO_REPEAT_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </score-partwise>"""
 
 
+# Both endings are numbered 1, so music21 finds no played order for the repeat.
+PIANO_DUPLICATE_ENDING_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano</part-name>
+      <score-instrument id="P1-I1"><instrument-name>Acoustic Grand Piano</instrument-name></score-instrument>
+      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure>
+    <measure number="2"><barline location="left"><ending number="1" type="start"/></barline><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note><barline location="right"><ending number="1" type="stop"/><repeat direction="backward"/></barline></measure>
+    <measure number="3"><barline location="left"><ending number="1" type="start"/></barline><note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note><barline location="right"><ending number="1" type="discontinue"/></barline></measure>
+  </part>
+</score-partwise>"""
+
+
 VOCAL_TEMPO_MAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list>
@@ -145,6 +163,27 @@ def test_builds_written_and_expanded_instrumental_midis() -> None:
         assert piano["midi_program"] == 0
         assert voice["eligible"] is False
         assert "lyrics" in voice["diagnostic"]
+
+
+def test_keeps_written_midi_when_repeats_cannot_be_expanded() -> None:
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = root / "score.musicxml"
+        source.write_text(PIANO_DUPLICATE_ENDING_XML)
+        written = root / "written.mid"
+        expanded = root / "expanded.mid"
+
+        result = build_instrumental_performance_midis(
+            source,
+            original_output_path=written,
+            expanded_output_path=expanded,
+        )
+
+        assert result["original_midi_available"] is True
+        assert result["expanded_midi_available"] is False
+        assert result["diagnostic"] is None
+        assert written.read_bytes().startswith(b"MThd")
+        assert not expanded.exists()
 
 
 def test_preserves_per_note_musicxml_percussion_routes() -> None:

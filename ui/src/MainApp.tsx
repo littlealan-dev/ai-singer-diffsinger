@@ -89,6 +89,8 @@ const SCORE_PREVIEW_RENDER_ERROR =
   "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
 const BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60;
 const BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav";
+const REPEATS_UNAVAILABLE_MESSAGE =
+  "Repeats: unavailable. This score's repeat marks can't be followed, so it sings in written order";
 
 const traceBrowserMixBounce = (stage: string, details: Record<string, unknown> = {}) => {
   if (import.meta.env.DEV) {
@@ -3044,6 +3046,12 @@ export default function MainApp() {
       loading: announcementsLoading,
   } = useAnnouncements();
 
+  // A score whose repeat marks give no played order can only sing as written.
+  const repeatsUnavailable = scoreSummary?.repeat_expansion_available === false;
+  useEffect(() => {
+    if (repeatsUnavailable) setExpandRepeats(false);
+  }, [repeatsUnavailable]);
+
   const estimatedDuration = expandRepeats
     ? (scoreSummary?.expanded_duration_seconds ?? scoreSummary?.duration_seconds)
     : scoreSummary?.duration_seconds;
@@ -5196,6 +5204,14 @@ export default function MainApp() {
       setScoreSummary(summary);
       setPerformanceMidi(uploadResponse.performance_midi ?? summary?.performance_midi ?? null);
       setExpandRepeats(false);
+      // Say so once, where messages appear; the toggle's tooltip is easy to miss.
+      setNotice((current) =>
+        summary?.repeat_expansion_available === false
+          ? REPEATS_UNAVAILABLE_MESSAGE
+          : current === REPEATS_UNAVAILABLE_MESSAGE
+            ? null
+            : current,
+      );
       setPendingSelection(shouldPromptSelection(summary));
       setSelectorShown(false);
       const nextPartOptions = buildPartOptions(summary);
@@ -6230,11 +6246,13 @@ export default function MainApp() {
                 data-tour="repeats"
                 className={clsx("composer-tool composer-repeat-toggle", { active: expandRepeats })}
                 data-tooltip={
-                  expandRepeats
-                    ? "Repeats: on. The next take sings the repeats"
-                    : "Repeats: off. The next take sings in written order"
+                  repeatsUnavailable
+                    ? REPEATS_UNAVAILABLE_MESSAGE
+                    : expandRepeats
+                      ? "Repeats: on. The next take sings the repeats"
+                      : "Repeats: off. The next take sings in written order"
                 }
-                disabled={!score || browserMixBounceActive}
+                disabled={!score || browserMixBounceActive || repeatsUnavailable}
                 onClick={() => setExpandRepeats((current) => !current)}
               >
                 <Repeat size={16} aria-hidden="true" />

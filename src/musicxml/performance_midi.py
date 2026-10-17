@@ -10,7 +10,7 @@ from xml.etree import ElementTree
 from music21 import bar, instrument, midi, note, percussion, repeat, stream, tempo
 
 from src.musicxml.io import read_musicxml_content
-from src.musicxml.parser import _expand_repeat_navigation
+from src.musicxml.parser import RepeatExpansionError, _expand_repeat_navigation
 from src.musicxml.part_reference import load_musicxml_score, map_parser_part_indices_to_raw_part_ids
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 
@@ -57,13 +57,18 @@ def build_instrumental_performance_midis(
             programs_by_part=programs_by_part,
         )
         result["original_midi_available"] = original_output_path.is_file()
-        _write_instrumental_midi(
-            source_path,
-            output_path=expanded_output_path,
-            eligible_indices=eligible_indices,
-            expand_repeats=True,
-            programs_by_part=programs_by_part,
-        )
+        try:
+            _write_instrumental_midi(
+                source_path,
+                output_path=expanded_output_path,
+                eligible_indices=eligible_indices,
+                expand_repeats=True,
+                programs_by_part=programs_by_part,
+            )
+        except RepeatExpansionError:
+            # The score has no played order, so it is only sung as written;
+            # its written-order accompaniment is still valid.
+            expanded_output_path.unlink(missing_ok=True)
         result["expanded_midi_available"] = expanded_output_path.is_file()
     except Exception as exc:  # Keep a MIDI conversion issue isolated from score upload.
         result["diagnostic"] = f"Instrumental MIDI could not be prepared: {exc}"
