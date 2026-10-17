@@ -468,6 +468,14 @@ test.describe("core singing regression", () => {
     await expect(withRepeats).toBeDisabled();
     await expect(withRepeats).toHaveAttribute("aria-checked", "false");
     await expect(withRepeats).toHaveAttribute("data-tooltip", /Repeats: unavailable/);
+    // The tooltip is easy to miss, so the upload also says so where messages appear.
+    const notice = page.locator(".message-box.info");
+    await expect(notice).toContainText("Repeats: unavailable. This score's repeat marks can't be followed");
+
+    // A score that can sing its repeats takes the message away again.
+    await uploadFixture(page, "active-measure-repeat.xml");
+    await expect(notice).toHaveCount(0);
+    await expect(withRepeats).toBeEnabled();
   });
 
   test("re-upload replaces score-specific state in the same authenticated session", async ({ page, request }) => {
