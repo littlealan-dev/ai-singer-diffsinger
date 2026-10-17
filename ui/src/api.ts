@@ -60,6 +60,9 @@ export type ScoreSummary = {
   lyricist?: string | null;
   duration_seconds?: number;
   expanded_duration_seconds?: number;
+  // False when the score's repeat marks give no played order; it then sings
+  // only in written order.
+  repeat_expansion_available?: boolean;
   performance_measure_map?: PerformanceMeasureMap;
   performance_midi?: PerformanceMidi;
   parts?: ScoreSummaryPart[];

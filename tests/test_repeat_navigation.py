@@ -10,11 +10,17 @@ from unittest import mock
 from xml.etree import ElementTree
 
 from src.api.score import expanded_score_for_synthesis, parse_score
+from src.api.synthesize import synthesize
 from src.mcp import handlers
 from src.mcp.tools import list_tools
-from src.musicxml.parser import build_performance_measure_map
+from src.musicxml.parser import RepeatExpansionError, build_performance_measure_map
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "repeat_navigation"
+# Scores whose repeat marks music21 refuses to expand ("badly formed repeats").
+# Kept apart so the fixture loops above only see expandable forms.
+UNEXPANDABLE_FIXTURE_DIRECTORY = (
+    Path(__file__).parent / "fixtures" / "repeat_navigation_unexpandable"
+)
 
 
 def _part_pitch_steps(score: dict) -> str:
@@ -218,6 +224,55 @@ class RepeatNavigationParsingTests(unittest.TestCase):
                 {**base_params, "expand_repeats": True}, device="cpu"
             )
             self.assertIs(synthesize_mock.call_args.kwargs["expand_repeats"], True)
+
+
+class UnexpandableRepeatParsingTests(unittest.TestCase):
+    """A score music21 cannot expand stays usable in written order."""
+
+    # Two endings both numbered 1, as several exported scores in the wild are.
+    SOURCE = UNEXPANDABLE_FIXTURE_DIRECTORY / "duplicate_ending_numbers.xml"
+
+    def test_parse_keeps_the_written_score_and_flags_repeats_unavailable(self) -> None:
+        score = parse_score(self.SOURCE)
+
+        self.assertEqual(_part_pitch_steps(score), "CDEFG")
+        self.assertIs(score["repeat_expansion_available"], False)
+        self.assertNotIn("expanded_score", score)
+        summary = score["score_summary"]
+        self.assertIs(summary["repeat_expansion_available"], False)
+        self.assertEqual(summary["duration_seconds"], 2.5)
+        self.assertNotIn("expanded_duration_seconds", summary)
+
+    def test_expandable_scores_carry_no_unavailable_flag(self) -> None:
+        score = parse_score(FIXTURE_DIRECTORY / "volta_endings.xml")
+
+        self.assertNotIn("repeat_expansion_available", score)
+        self.assertNotIn("repeat_expansion_available", score["score_summary"])
+
+    def test_mcp_parse_returns_the_score_instead_of_invalid_musicxml(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        score = handlers.handle_parse_score(
+            {"file_path": str(self.SOURCE.resolve().relative_to(project_root))}, device="cpu"
+        )
+
+        self.assertIs(score["repeat_expansion_available"], False)
+
+    def test_explicitly_expanded_parse_still_fails(self) -> None:
+        with self.assertRaises(RepeatExpansionError):
+            parse_score(self.SOURCE, expand_repeats=True)
+
+    def test_synthesis_with_repeats_is_refused_not_sung_as_written(self) -> None:
+        score = parse_score(self.SOURCE)
+
+        with self.assertRaisesRegex(RepeatExpansionError, "Turn off With Repeats"):
+            expanded_score_for_synthesis(score)
+        with self.assertRaisesRegex(RepeatExpansionError, "Turn off With Repeats"):
+            synthesize(score, "TestBank", expand_repeats=True)
+
+    def test_duration_estimate_with_repeats_falls_back_to_written_order(self) -> None:
+        score = parse_score(self.SOURCE)
+
+        self.assertEqual(handlers._calculate_score_duration(score, expand_repeats=True), 2.5)
 
 
 if __name__ == "__main__":

@@ -452,6 +452,24 @@ test.describe("core singing regression", () => {
     expect(state.synthesis?.score_sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  test("uploads a score whose repeats cannot be expanded, with With Repeats unavailable", async ({ page, request }) => {
+    // Repeats on for a score that can sing them.
+    await uploadFixture(page, "active-measure-repeat.xml");
+    const withRepeats = page.getByRole("switch", { name: "With Repeats" });
+    await withRepeats.click();
+    await expect(withRepeats).toHaveAttribute("aria-checked", "true");
+
+    // Both endings are numbered 1, so the repeats have no played order. The
+    // score still uploads and sings as written.
+    await uploadFixture(page, "repeat-duplicate-ending-numbers.xml");
+    const state = await getE2EState(page, request, sessionId);
+
+    expect(state.score_summary?.repeat_expansion_available).toBe(false);
+    await expect(withRepeats).toBeDisabled();
+    await expect(withRepeats).toHaveAttribute("aria-checked", "false");
+    await expect(withRepeats).toHaveAttribute("data-tooltip", /Repeats: unavailable/);
+  });
+
   test("re-upload replaces score-specific state in the same authenticated session", async ({ page, request }) => {
     await uploadFixture(page, "basic-one-part.xml");
     await sendMessage(page, "Remember that I will upload a different song next.");

@@ -20,6 +20,15 @@ from src.musicxml.part_reference import (
 from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
 
 
+class RepeatExpansionError(ValueError):
+    """Raised when a score's repeat/navigation marks give no played order.
+
+    music21 refuses to expand repeats it judges badly formed, e.g. two endings
+    both numbered 1, an ending with no number, or a forward repeat with no
+    backward repeat after it. The written score is still valid.
+    """
+
+
 @dataclass(frozen=True)
 class TempoEvent:
     """Tempo change event in beat space."""
@@ -180,12 +189,12 @@ def _expand_repeat_navigation(score: stream.Score, source_path: Path) -> stream.
     try:
         expanded = score.expandRepeats()
     except Exception as exc:
-        raise ValueError(
+        raise RepeatExpansionError(
             "Could not expand repeat/navigation notation for synthesis: "
             f"{source_path.name}."
         ) from exc
     if not isinstance(expanded, stream.Score):
-        raise ValueError(
+        raise RepeatExpansionError(
             "Could not expand repeat/navigation notation for synthesis: "
             f"{source_path.name}."
         )

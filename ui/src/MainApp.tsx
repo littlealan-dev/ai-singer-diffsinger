@@ -3044,6 +3044,12 @@ export default function MainApp() {
       loading: announcementsLoading,
   } = useAnnouncements();
 
+  // A score whose repeat marks give no played order can only sing as written.
+  const repeatsUnavailable = scoreSummary?.repeat_expansion_available === false;
+  useEffect(() => {
+    if (repeatsUnavailable) setExpandRepeats(false);
+  }, [repeatsUnavailable]);
+
   const estimatedDuration = expandRepeats
     ? (scoreSummary?.expanded_duration_seconds ?? scoreSummary?.duration_seconds)
     : scoreSummary?.duration_seconds;
@@ -6230,11 +6236,13 @@ export default function MainApp() {
                 data-tour="repeats"
                 className={clsx("composer-tool composer-repeat-toggle", { active: expandRepeats })}
                 data-tooltip={
-                  expandRepeats
-                    ? "Repeats: on. The next take sings the repeats"
-                    : "Repeats: off. The next take sings in written order"
+                  repeatsUnavailable
+                    ? "Repeats: unavailable. This score's repeat marks can't be followed, so it sings in written order"
+                    : expandRepeats
+                      ? "Repeats: on. The next take sings the repeats"
+                      : "Repeats: off. The next take sings in written order"
                 }
-                disabled={!score || browserMixBounceActive}
+                disabled={!score || browserMixBounceActive || repeatsUnavailable}
                 onClick={() => setExpandRepeats((current) => !current)}
               >
                 <Repeat size={16} aria-hidden="true" />
