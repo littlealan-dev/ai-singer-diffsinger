@@ -7,5 +7,8 @@ FROM ${BASE_IMAGE}
 
 COPY scripts/bench/bench_gpu_pool.py /app/scripts/bench/bench_gpu_pool.py
 COPY ui/public/demo-scores/amazing-grace.xml /app/bench/amazing-grace.xml
+# The same song with a backward repeat at the end: with BENCH_EXPAND_REPEATS=true
+# each take sings it twice (58.8 s per part).
+COPY scripts/bench/amazing-grace-twice.xml /app/bench/amazing-grace-twice.xml
 
 CMD ["python3", "/app/scripts/bench/bench_gpu_pool.py"]

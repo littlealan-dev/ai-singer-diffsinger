@@ -12,6 +12,8 @@ Settings (environment):
   BENCH_PARTS       comma-separated part ids, cycled over the takes (default S, A, T, B)
   BENCH_SCORE       MusicXML to sing, relative to the project root (default: the Amazing
                     Grace demo, 29.4 s per part)
+  BENCH_EXPAND_REPEATS  "true" to sing the score's repeats, as With Repeat does
+                    (bench/amazing-grace-twice.xml repeats the whole song: 58.8 s per part)
   BENCH_ROUNDS      rounds (default 2: the first loads voicebanks and models, the next is warm)
   BENCH_SAMPLE_SECONDS  GPU memory sampling interval (default 0.5)
 
@@ -143,7 +145,7 @@ def _takes(score_path: Path, router: McpRouter) -> List[Dict[str, Any]]:
                 "language": "en",
                 "lyric_selection": selection,
                 "quote_id": "benchmark",
-                "expand_repeats": False,
+                "expand_repeats": os.getenv("BENCH_EXPAND_REPEATS", "").strip().lower() == "true",
             }
         )
     return takes

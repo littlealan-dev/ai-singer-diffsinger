@@ -1,14 +1,14 @@
 steps:
   # .dockerignore leaves scripts/ and ui/ out of the production images'
   # build context, so the benchmark builds from its own context holding just
-  # the two files Dockerfile.bench copies, at the same paths.
+  # the files Dockerfile.bench copies, at the same paths.
   - name: bash
     args:
       - -c
       - |
         set -euo pipefail
         mkdir -p bench-context/scripts/bench bench-context/ui/public/demo-scores
-        cp scripts/bench/bench_gpu_pool.py bench-context/scripts/bench/
+        cp scripts/bench/bench_gpu_pool.py scripts/bench/amazing-grace-twice.xml bench-context/scripts/bench/
         cp ui/public/demo-scores/amazing-grace.xml bench-context/ui/public/demo-scores/
   - name: gcr.io/cloud-builders/docker
     args:

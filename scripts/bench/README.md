@@ -47,6 +47,10 @@ Each run does `BENCH_ROUNDS` rounds (default 2):
 
 The takes sing the Amazing Grace demo: Soprano, Alto, Tenor and Bass, cycled, at 29.4 s each.
 
+For longer takes, `bench/amazing-grace-twice.xml` is the same score with a backward repeat on the
+final barline. With `BENCH_SCORE=bench/amazing-grace-twice.xml,BENCH_EXPAND_REPEATS=true` each take
+sings verse 1 twice: 58.8 s per part.
+
 ## Results
 
 The job prints one line, `bench_result {json}`. It holds, per round:
