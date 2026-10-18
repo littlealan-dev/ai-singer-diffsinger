@@ -6013,7 +6013,7 @@ export default function MainApp() {
                       </span>
                       <span className="voice-picker-option-copy">
                         <span className="voice-picker-option-name">Upload MusicXML…</span>
-                        <span className="voice-picker-option-meta">.xml or .mxl</span>
+                        <span className="voice-picker-option-meta">.musicxml, .xml or .mxl</span>
                       </span>
                     </button>
                     <div className="score-picker-heading">Demo songs</div>
@@ -6057,7 +6057,7 @@ export default function MainApp() {
                   type="file"
                   hidden
                   data-testid="score-upload-input"
-                  accept=".xml,.mxl"
+                  accept=".musicxml,.xml,.mxl"
                   disabled={uploading || creditsLocked || browserMixBounceActive}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
