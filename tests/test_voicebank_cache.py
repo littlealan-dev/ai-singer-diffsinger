@@ -1,7 +1,10 @@
 import os
 import tarfile
+import threading
+import time
 import unittest
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -107,6 +110,77 @@ class TestVoicebankCache(unittest.TestCase):
 
             self.assertTrue((resolved / "dsconfig.yaml").exists())
             self.assertIn("TestBank", str(resolved))
+
+    def test_prod_env_downloads_once_when_processes_ask_together(self) -> None:
+        # A GPU worker pool on a cold instance: every process asks for the same
+        # voicebank at once. One downloads it; the others wait and reuse it.
+        # Each thread opens the lock file itself, as a separate process would.
+        with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
+            gcs_root_path = Path(gcs_root)
+            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "voicebanks": [
+                            {
+                                "id": "TestBank",
+                                "enabled": True,
+                                "storage_object": "assets/voicebanks/TestBank.tar.gz",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source_dir = gcs_root_path / "tmp" / "TestBank"
+            (source_dir / "dsvocoder").mkdir(parents=True)
+            (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
+            (source_dir / "character.yaml").write_text("name: TestBank\n", encoding="utf-8")
+            (source_dir / "dsvocoder" / "vocoder.yaml").write_text("name: vocoder\n", encoding="utf-8")
+            archive_path = gcs_root_path / "assets" / "voicebanks" / "TestBank.tar.gz"
+            archive_path.parent.mkdir(parents=True)
+            with tarfile.open(archive_path, "w:gz") as tar:
+                tar.add(source_dir, arcname="TestBank")
+
+            downloads = []
+
+            class SlowBlob(FakeBlob):
+                def download_to_filename(self, filename: str) -> None:
+                    downloads.append(filename)
+                    time.sleep(0.2)
+                    super().download_to_filename(filename)
+
+            def fake_list_blobs(bucket_name: str, prefix: str):
+                return [SlowBlob("assets/voicebanks/TestBank.tar.gz", archive_path)]
+
+            start = threading.Barrier(4)
+
+            def resolve(_: int) -> Path:
+                start.wait()
+                return resolve_voicebank_path("TestBank")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "prod",
+                    "VOICEBANK_BUCKET": "dummy-bucket",
+                    "VOICEBANK_CACHE_DIR": cache_root,
+                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
+                },
+                clear=False,
+            ), mock.patch(
+                "src.api.voicebank_cache.list_blobs",
+                side_effect=fake_list_blobs,
+            ), ThreadPoolExecutor(max_workers=4) as pool:
+                resolved = list(pool.map(resolve, range(4)))
+
+            self.assertEqual(len(downloads), 1)
+            self.assertEqual(len(set(resolved)), 1)
+            self.assertTrue((resolved[0] / "dsconfig.yaml").is_file())
+            self.assertTrue((resolved[0] / "dsvocoder" / "vocoder.yaml").is_file())
+            leftovers = [path.name for path in Path(cache_root).iterdir() if path.name.endswith(".tmp")]
+            self.assertEqual(leftovers, [])
 
     def test_prod_env_downloads_nested_voicebank_to_cache(self) -> None:
         with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:

@@ -3,6 +3,7 @@ from __future__ import annotations
 """Helpers for resolving and caching voicebanks locally or from storage."""
 
 from functools import lru_cache
+import fcntl
 import json
 import math
 from pathlib import Path
@@ -807,14 +808,43 @@ def _list_voicebank_ids_gcs() -> List[str]:
 
 
 def _ensure_cached_voicebank(voicebank_id: str) -> Path:
-    """Download and extract a voicebank archive into the local cache."""
+    """Download and extract a voicebank archive into the local cache.
+
+    Several MCP processes on one instance may need the same voicebank at once
+    (a GPU worker pool on a cold instance). One downloads it under a file lock;
+    the others wait for the lock and then find it cached, so no process removes
+    files another is writing or reading.
+    """
     cache_root = _cache_root()
     target_dir = cache_root / voicebank_id
+    resolved_cached = _cached_voicebank_root(voicebank_id, target_dir)
+    if resolved_cached is not None:
+        return resolved_cached
+
+    cache_root.mkdir(parents=True, exist_ok=True)
+    wait_start = time.monotonic()
+    # flock locks belong to the open file, so threads and processes that open
+    # the lock file separately all wait for each other.
+    with open(cache_root / f".{voicebank_id}.lock", "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        wait_ms = (time.monotonic() - wait_start) * 1000.0
+        resolved_cached = _cached_voicebank_root(voicebank_id, target_dir)
+        if resolved_cached is not None:
+            logger.info("voicebank_cache_waited voicebank=%s elapsed_ms=%.2f", voicebank_id, wait_ms)
+            return resolved_cached
+        return _download_voicebank(voicebank_id, cache_root, target_dir)
+
+
+def _cached_voicebank_root(voicebank_id: str, target_dir: Path) -> Optional[Path]:
+    """Return the cached voicebank's root, or None when it is not cached."""
     resolved_cached = discover_voicebank_root(target_dir) if target_dir.exists() else None
     if resolved_cached is not None:
         logger.info("voicebank_cache_hit voicebank=%s path=%s", voicebank_id, resolved_cached)
-        return resolved_cached
+    return resolved_cached
 
+
+def _download_voicebank(voicebank_id: str, cache_root: Path, target_dir: Path) -> Path:
+    """Download and extract a voicebank into target_dir; the caller holds its lock."""
     start_total = time.monotonic()
     bucket = _voicebank_bucket()
     if not bucket:
