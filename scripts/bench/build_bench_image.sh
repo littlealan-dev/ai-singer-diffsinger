@@ -27,10 +27,14 @@ else
 fi
 printf 'Benchmark base image: %s\n' "${base_image}"
 
+# The upload holds only what the benchmark uses (bench.gcloudignore); the
+# ignore file's path is relative to the uploaded folder.
+cd "${ROOT_DIR}"
 command=(
   gcloud builds submit "${ROOT_DIR}"
   --project="${GCP_PROJECT}"
   --config="${ROOT_DIR}/cloudbuild.bench.yaml"
+  --ignore-file=scripts/bench/bench.gcloudignore
   --substitutions="_BASE_IMAGE=${base_image},_BENCH_IMAGE=${BENCH_IMAGE}"
 )
 if [[ "${DRY_RUN}" == "1" ]]; then
