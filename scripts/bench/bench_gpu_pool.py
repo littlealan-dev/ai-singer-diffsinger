@@ -10,7 +10,8 @@ Settings (environment):
   BENCH_TAKES       takes started together in each round (default: MCP_GPU_WORKERS)
   BENCH_VOICES      comma-separated voicebank ids, cycled over the takes
   BENCH_PARTS       comma-separated part ids, cycled over the takes (default S, A, T, B)
-  BENCH_SCORE       MusicXML to sing (default: the Amazing Grace demo, 29.4 s per part)
+  BENCH_SCORE       MusicXML to sing, relative to the project root (default: the Amazing
+                    Grace demo, 29.4 s per part)
   BENCH_ROUNDS      rounds (default 2: the first loads voicebanks and models, the next is warm)
   BENCH_SAMPLE_SECONDS  GPU memory sampling interval (default 0.5)
 
@@ -36,7 +37,9 @@ sys.path.insert(0, str(ROOT))
 from src.backend.config import Settings  # noqa: E402
 from src.backend.mcp_client import McpRouter  # noqa: E402
 
-DEFAULT_SCORE = ROOT / "bench" / "amazing-grace.xml"
+# Relative to the project root (/app in the image): the MCP tools refuse
+# absolute paths.
+DEFAULT_SCORE = Path("bench") / "amazing-grace.xml"
 DEFAULT_PARTS = "Sopran,Alt,Tenor,Bass"
 DEFAULT_VOICE = "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
 _MIB = 1024 * 1024
