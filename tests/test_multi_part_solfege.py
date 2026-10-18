@@ -38,6 +38,47 @@ def test_every_listed_part_gets_its_line_in_one_pass(tmp_path: Path) -> None:
     assert result["derived_score"]["selected_lyric_selection"] == selections[0]
 
 
+def test_same_named_sopranos_each_get_a_solfege_line(tmp_path: Path) -> None:
+    source = tmp_path / "three-sopranos.xml"
+    part_list = "\n".join(
+        f'    <score-part id="P{index}"><part-name>Soprano</part-name></score-part>'
+        for index in range(1, 4)
+    )
+    parts = "\n".join(
+        f'''  <part id="P{index}"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>{pitch}</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+  </measure></part>'''
+        for index, pitch in enumerate(("C", "D", "E"), start=1)
+    )
+    source.write_text(
+        f'''<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+{part_list}
+  </part-list>
+{parts}
+</score-partwise>''',
+        encoding="utf-8",
+    )
+    output = tmp_path / "solfege.xml"
+
+    result = add_solfege_lyric_verse(
+        source,
+        output,
+        part_ids=["Soprano", "Soprano (2)", "Soprano (3)"],
+    )
+
+    assert result["status"] == "ready"
+    assert [target["part_id"] for target in result["completed_targets"]] == [
+        "Soprano", "Soprano (2)", "Soprano (3)"
+    ]
+    assert [target["raw_part_id"] for target in result["completed_targets"]] == [
+        "P1", "P2", "P3"
+    ]
+    assert _parts_with_a_line(output) == {"P1", "P2", "P3"}
+
+
 def test_parts_that_already_have_a_line_or_cannot_take_one_are_reported(tmp_path: Path) -> None:
     first = tmp_path / "first.xml"
     add_solfege_lyric_verse(AMAZING_GRACE, first, part_ids=["Sopran"])
