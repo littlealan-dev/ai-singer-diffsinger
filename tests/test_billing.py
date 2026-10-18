@@ -1900,6 +1900,65 @@ def test_scheduler_annual_cancel_scheduled_before_period_end_refreshes():
     assert user["billing"]["refreshScheduler"]["lastStatus"] == "applied"
 
 
+@pytest.mark.parametrize(
+    ("status", "refreshes"),
+    [
+        ("active", True),
+        ("trialing", True),
+        ("past_due", False),
+        ("unpaid", False),
+        ("incomplete", False),
+    ],
+)
+def test_scheduler_annual_refresh_needs_a_subscription_in_good_standing(status, refreshes):
+    uid = f"user-annual-{status}"
+    get_or_create_credits(uid, f"annual-{status}@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    due_at = now - timedelta(minutes=1)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "solo_annual",
+                "family": "solo",
+                "billingInterval": "year",
+                "stripeSubscriptionStatus": status,
+                "currentPeriodEnd": now - timedelta(days=3),
+                "creditRefreshAnchor": now - timedelta(days=31),
+                "nextCreditRefreshAt": due_at,
+            },
+            "credits": {
+                "balance": 3,
+                "reserved": 0,
+                "monthlyAllowance": 30,
+            },
+        },
+        merge=True,
+    )
+
+    result = run_credit_refresh(now=now, max_users=10, run_id=f"refresh_test_annual_{status}")
+
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    if refreshes:
+        assert result["processed"] == 1
+        assert user["credits"]["balance"] == 30
+        assert user["credits"]["lastGrantType"] == "grant_paid_annual_monthly_refresh"
+        assert user["billing"]["refreshScheduler"]["lastStatus"] == "applied"
+    else:
+        # A renewal that was not paid grants nothing and stays due, so the
+        # refresh applies once Stripe reports the subscription paid again.
+        assert result["processed"] == 0
+        assert user["credits"]["balance"] == 3
+        assert user["billing"]["nextCreditRefreshAt"] == due_at
+        assert user["billing"]["refreshScheduler"]["lastStatus"] == "waiting_for_invoice"
+        assert not list(
+            db.collection("credit_ledger")
+            .where(filter=firestore.FieldFilter("userId", "==", uid))
+            .where(filter=firestore.FieldFilter("type", "==", "grant_paid_annual_monthly_refresh"))
+            .stream()
+        )
+
+
 def test_annual_invoice_paid_sets_paid_anchor_and_next_refresh():
     uid = "user-5"
     get_or_create_credits(uid, "user5@example.com")
