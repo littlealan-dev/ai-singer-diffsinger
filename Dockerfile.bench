@@ -1,0 +1,14 @@
+# GPU benchmark image: the production Blackwell worker image plus the benchmark
+# script and the score it sings. Nothing here enters the production image.
+# BASE_IMAGE should be the production image's digest, so the benchmark measures
+# exactly what the premium worker runs.
+ARG BASE_IMAGE=gcr.io/sightsinger-app/ai-singer-api-blackwell:latest
+FROM ${BASE_IMAGE}
+
+COPY scripts/bench/bench_gpu_pool.py /app/scripts/bench/bench_gpu_pool.py
+COPY ui/public/demo-scores/amazing-grace.xml /app/bench/amazing-grace.xml
+# The same song with a backward repeat at the end: with BENCH_EXPAND_REPEATS=true
+# each take sings it twice (58.8 s per part).
+COPY scripts/bench/amazing-grace-twice.xml /app/bench/amazing-grace-twice.xml
+
+CMD ["python3", "/app/scripts/bench/bench_gpu_pool.py"]

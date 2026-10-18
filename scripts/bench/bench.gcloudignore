@@ -1,0 +1,16 @@
+# Upload list for the benchmark image build (build_bench_image.sh): only the
+# files cloudbuild.bench.yaml and Dockerfile.bench use. The repository's
+# .gcloudignore leaves ui/ out, and the score lives there.
+/*
+!/Dockerfile.bench
+!/cloudbuild.bench.yaml
+!/scripts/
+/scripts/*
+!/scripts/bench/
+!/ui/
+/ui/*
+!/ui/public/
+/ui/public/*
+!/ui/public/demo-scores/
+/ui/public/demo-scores/*
+!/ui/public/demo-scores/amazing-grace.xml

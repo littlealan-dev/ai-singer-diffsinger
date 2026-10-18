@@ -53,7 +53,9 @@ from src.backend.job_dispatch import (
     JobDispatchError,
     JobDispatcher,
     job_route,
+    premium_synthesis_route,
 )
+from src.backend.premium_routing import PremiumSynthesisRouting
 from src.backend.language_selection import (
     collect_score_lyrics,
     normalize_language_code,
@@ -303,9 +305,17 @@ class Orchestrator:
             job_route(settings, SYNTHESIS_JOB_KIND),
             on_give_up=self._fail_undelivered_synthesis_job,
         )
-        # Renders on this instance's GPU run one at a time: the GPU MCP worker
-        # serves one call at a time.
-        self._gpu_render_lock = asyncio.Lock()
+        # Jobs of users the routing picks go to the premium (RTX) worker instead.
+        premium_route = premium_synthesis_route(settings)
+        self._premium_synthesis_dispatcher = (
+            JobDispatcher(premium_route, on_give_up=self._fail_undelivered_synthesis_job)
+            if premium_route is not None
+            else None
+        )
+        self._premium_routing = PremiumSynthesisRouting(settings.synthesis_premium_routing)
+        # One render slot per GPU MCP process: each serves one call at a time,
+        # so MCP_GPU_WORKERS renders run at once and later ones wait for a slot.
+        self._gpu_render_slots = asyncio.Semaphore(max(1, settings.mcp_gpu_workers))
         # Outside "inline" mode a preprocess job runs on the worker service,
         # inside the worker's request, rather than as a task in this process.
         self._preprocess_dispatcher = PreprocessDispatcher(
@@ -753,7 +763,7 @@ class Orchestrator:
             synth_args["voice_id"] = self._settings.default_voice_id
         if job_id is not None:
             synth_args["progress_job_id"] = job_id
-        async with self._gpu_render_lock:
+        async with self._gpu_render_slots:
             return await self._render_and_save_audio(
                 session_id,
                 score,
@@ -974,6 +984,7 @@ class Orchestrator:
         arguments: Dict[str, Any],
         *,
         user_id: str,
+        user_email: Optional[str] = None,
         job_id: Optional[str] = None,
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
@@ -1031,6 +1042,7 @@ class Orchestrator:
                 session_id,
                 job_id,
                 user_id=user_id,
+                user_email=user_email,
                 score=score,
                 arguments=arguments,
                 input_path=input_path,
@@ -1395,6 +1407,7 @@ class Orchestrator:
         job_id: str,
         *,
         user_id: str,
+        user_email: Optional[str] = None,
         score: Dict[str, Any],
         arguments: Dict[str, Any],
         input_path: Optional[str],
@@ -1429,15 +1442,21 @@ class Orchestrator:
             # Only without storage (tests): the score travels in the job itself.
             spec["score"] = score
             spec["inputPath"] = input_path
+        dispatcher = self._synthesis_dispatcher
+        if self._premium_synthesis_dispatcher is not None and await asyncio.to_thread(
+            self._premium_routing.is_premium, user_id, user_email
+        ):
+            dispatcher = self._premium_synthesis_dispatcher
         # Stored as JSON text: Firestore cannot hold arrays nested in arrays.
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
             jobKind="synthesis",
             synthesisSpecJson=json.dumps(spec, sort_keys=True, default=str),
+            dispatchRoute=dispatcher.route.variant,
         )
         try:
-            await self._synthesis_dispatcher.dispatch(job_id)
+            await dispatcher.dispatch(job_id)
         except JobDispatchError as exc:
             self._logger.error(
                 "synthesis_dispatch_failed session=%s job=%s error=%s",
@@ -1454,10 +1473,11 @@ class Orchestrator:
             )
             raise
         self._logger.info(
-            "synthesis_job_dispatched session=%s job=%s mode=%s",
+            "synthesis_job_dispatched session=%s job=%s mode=%s route=%s",
             session_id,
             job_id,
-            self._synthesis_dispatcher.mode,
+            dispatcher.mode,
+            dispatcher.route.variant,
         )
 
     async def _fail_undelivered_synthesis_job(self, job_id: str) -> None:
@@ -8759,6 +8779,7 @@ class Orchestrator:
                         current_score,
                         synth_args,
                         user_id=user_id,
+                        user_email=user_email,
                         job_id=job_id,
                         billing_components=billing_components,
                         originating_turn_id=originating_turn_id,

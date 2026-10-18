@@ -12595,7 +12595,7 @@ class _FakeSynthesisDispatcher:
 
         self.mode = mode
         self.route = SimpleNamespace(
-            max_dispatch_attempts=max_attempts, lease_seconds=lease_seconds
+            max_dispatch_attempts=max_attempts, lease_seconds=lease_seconds, variant="standard"
         )
         self.dispatched: list[str] = []
         self._error = error
@@ -12666,6 +12666,118 @@ def test_a_synthesis_job_is_dispatched_with_the_exact_score(client, monkeypatch)
     assert spec["billingComponents"] == ["vocal"]
     assert spec["originatingTurnId"] == "turn-1"
     assert "score" not in spec
+
+
+@pytest.mark.parametrize(
+    ("allowlisted", "expected_route"),
+    [(True, "premium"), (False, "standard")],
+)
+def test_a_synthesis_job_goes_to_the_premium_worker_only_for_allowlisted_users(
+    client, monkeypatch, allowlisted, expected_route
+):
+    from types import SimpleNamespace
+
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    _patch_synthesis_start(monkeypatch, orchestrator, session_id)
+    standard = _FakeSynthesisDispatcher()
+    premium = _FakeSynthesisDispatcher()
+    premium.route.variant = "premium"
+    monkeypatch.setattr(orchestrator, "_synthesis_dispatcher", standard)
+    monkeypatch.setattr(orchestrator, "_premium_synthesis_dispatcher", premium)
+    asked = []
+
+    def is_premium(user_id, user_email):
+        asked.append((user_id, user_email))
+        return allowlisted
+
+    monkeypatch.setattr(orchestrator, "_premium_routing", SimpleNamespace(is_premium=is_premium))
+
+    asyncio.run(
+        orchestrator._start_synthesis_job(
+            session_id,
+            {"title": "Quoted", "parts": [{"part_id": "Alto", "notes": []}]},
+            {"part_id": "Alto", "language": "en"},
+            user_id="test-user",
+            user_email="tester@example.com",
+            job_id="job-routed",
+            billing_components=["vocal"],
+        )
+    )
+
+    assert asked == [("test-user", "tester@example.com")]
+    chosen, other = (premium, standard) if allowlisted else (standard, premium)
+    assert chosen.dispatched == ["job-routed"]
+    assert other.dispatched == []
+    assert app.state.job_store.get_job("job-routed")["dispatchRoute"] == expected_route
+
+
+def test_without_premium_routing_jobs_skip_the_allowlist(client, monkeypatch):
+    from types import SimpleNamespace
+
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    _patch_synthesis_start(monkeypatch, orchestrator, session_id)
+    standard = _FakeSynthesisDispatcher()
+    monkeypatch.setattr(orchestrator, "_synthesis_dispatcher", standard)
+    monkeypatch.setattr(orchestrator, "_premium_synthesis_dispatcher", None)
+
+    def must_not_be_asked(*_):
+        raise AssertionError("the allowlist must not be read when routing is off")
+
+    monkeypatch.setattr(
+        orchestrator, "_premium_routing", SimpleNamespace(is_premium=must_not_be_asked)
+    )
+
+    asyncio.run(
+        orchestrator._start_synthesis_job(
+            session_id,
+            {"title": "Quoted", "parts": [{"part_id": "Alto", "notes": []}]},
+            {"part_id": "Alto", "language": "en"},
+            user_id="test-user",
+            user_email="tester@example.com",
+            job_id="job-standard",
+        )
+    )
+
+    assert standard.dispatched == ["job-standard"]
+    assert app.state.job_store.get_job("job-standard")["dispatchRoute"] == "standard"
+
+
+def test_gpu_render_slots_let_one_render_per_gpu_process_run_at_once(client, monkeypatch):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(orchestrator, "_gpu_render_slots", asyncio.Semaphore(2))
+    running = 0
+    peak = 0
+
+    async def fake_render(*args, **kwargs):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        return {"ok": True}
+
+    monkeypatch.setattr(orchestrator, "_render_and_save_audio", fake_render)
+    monkeypatch.setattr(orchestrator, "_resolve_voicebank", lambda: asyncio.sleep(0, "voice"))
+
+    async def render_three():
+        return await asyncio.gather(
+            *(
+                orchestrator._synthesize(
+                    f"session-{index}", {"parts": []}, {"voicebank": "voice"}, job_id=f"job-{index}"
+                )
+                for index in range(3)
+            )
+        )
+
+    results = asyncio.run(render_three())
+
+    assert results == [{"ok": True}] * 3
+    assert peak == 2
 
 
 def test_a_synthesis_job_that_cannot_be_dispatched_fails_and_raises(client, monkeypatch):

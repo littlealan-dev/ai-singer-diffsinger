@@ -15,6 +15,7 @@ import numpy as np
 
 from src.api.phonemize import _resolve_dictionary_path, phonemize
 from src.api.score import expanded_score_for_synthesis
+from src.api.gpu_memory import gpu_memory_log_fields
 import src.api.syllable_alignment as syllable_alignment
 from src.api.inference import (
     predict_durations,
@@ -2363,9 +2364,10 @@ def synthesize(
     }
     total_ms = (time.monotonic() - start_total) * 1000.0
     logger.info(
-        "synthesize_total elapsed_ms=%.2f duration_seconds=%.2f",
+        "synthesize_total elapsed_ms=%.2f duration_seconds=%.2f%s",
         total_ms,
         duration,
+        gpu_memory_log_fields(),
     )
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("synthesize output=%s", summarize_payload(result))
