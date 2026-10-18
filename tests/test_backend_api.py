@@ -1589,7 +1589,7 @@ def test_upload_rejects_invalid_extension_without_resetting_session(client):
         files={"file": ("notes.txt", b"not musicxml", "text/plain")},
     )
     assert response.status_code == 400
-    assert response.json()["detail"] == "Only .xml or .mxl files are supported."
+    assert response.json()["detail"].startswith("SightSinger can't read .txt files.")
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"] == original_history
@@ -2781,11 +2781,45 @@ def test_preprocess_mapping_uses_parser_visible_derived_part_id(client):
     assert target["derived_part_raw_id"] == "P_DERIVED_87F991C3E8"
 
 
-def test_upload_rejects_invalid_extension(client):
+def test_upload_rejects_invalid_extension(client, caplog):
     test_client, _ = client
     session_id = _create_session(test_client)
-    response = _upload_score(test_client, session_id, filename="score.txt")
+    with caplog.at_level("WARNING", logger="src.backend.main"):
+        response = _upload_score(test_client, session_id, filename="score.txt")
     assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "SightSinger can't read .txt files. Upload a MusicXML score (.musicxml, .xml "
+        "or .mxl). Most notation apps can export one, e.g. MuseScore: File > Export > MusicXML."
+    )
+    # The extension is logged, so production triage can count what users try.
+    assert any(
+        "upload_unsupported_file_type" in record.getMessage()
+        and "suffix='.txt'" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_upload_rejects_file_without_extension(client):
+    test_client, _ = client
+    session_id = _create_session(test_client)
+    response = _upload_score(test_client, session_id, filename="score")
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith(
+        "SightSinger can't read files without a file extension."
+    )
+
+
+def test_upload_accepts_musicxml_extension_and_stores_it_as_xml(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    response = _upload_score(test_client, session_id, filename="Song.MusicXML")
+    assert response.status_code == 200
+
+    files = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))["files"]
+    assert files["musicxml_name"] == "Song.MusicXML"
+    assert files["musicxml_path"].endswith("/upload/score.xml")
+    assert files["uploaded_musicxml_path"] == files["musicxml_path"]
+    assert (app.state.settings.project_root / files["musicxml_path"]).is_file()
 
 
 def test_upload_accepts_mxl_extension(client):
@@ -8232,7 +8266,7 @@ def test_storage_backed_session_scores_rehydrate_from_object_storage(
     [{"BACKEND_USE_STORAGE": "true"}],
     indirect=True,
 )
-@pytest.mark.parametrize("filename", ["score.xml", "score.mxl"])
+@pytest.mark.parametrize("filename", ["score.xml", "score.musicxml", "score.mxl"])
 def test_active_uploaded_musicxml_rehydrates_for_score_requests(
     client_with_env, monkeypatch, filename
 ):

@@ -107,6 +107,10 @@ _TERMINAL_PROGRESS_STATUSES = {"done", "error", "action_required"}
 _SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE = (
     "We couldn’t confirm the final job status. Checking for updates…"
 )
+# MusicXML's file extensions: .musicxml and .xml are plain XML, .mxl is zipped.
+# A .musicxml upload is stored as .xml, so everything after the upload sees
+# only the two suffixes it already handles.
+_SCORE_UPLOAD_STORED_SUFFIXES = {".musicxml": ".xml", ".xml": ".xml", ".mxl": ".mxl"}
 
 
 _JSON_RESPONSE_ADAPTER: TypeAdapter[Any] = TypeAdapter(Any)
@@ -789,11 +793,21 @@ def create_app() -> FastAPI:
 
         original_name = Path(file.filename or "").name
         suffix = Path(original_name).suffix.lower()
-        if suffix not in {".xml", ".mxl"}:
-            raise HTTPException(status_code=400, detail="Only .xml or .mxl files are supported.")
+        stored_suffix = _SCORE_UPLOAD_STORED_SUFFIXES.get(suffix)
+        if stored_suffix is None:
+            logger.warning(
+                "upload_unsupported_file_type session_id=%s user_id=%s suffix=%r",
+                session_id,
+                user_id,
+                suffix[:16],
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=_unsupported_score_file_message(suffix),
+            )
 
         temp_dir = Path(tempfile.mkdtemp(prefix="upload-", dir=settings.data_dir))
-        temp_upload_path = temp_dir / f"score{suffix}"
+        temp_upload_path = temp_dir / f"score{stored_suffix}"
         temp_canonical_path = temp_upload_path
         try:
             upload_write_start = time.monotonic()
@@ -882,7 +896,7 @@ def create_app() -> FastAPI:
             score_id = uuid.uuid4().hex
             session_dir = sessions.session_dir(session_id) / "scores" / score_id / "upload"
             session_dir.mkdir(parents=True, exist_ok=True)
-            target_path = session_dir / f"score{suffix}"
+            target_path = session_dir / f"score{stored_suffix}"
             temp_upload_path.replace(target_path)
             canonical_musicxml_path = target_path
             if suffix == ".mxl":
@@ -2603,6 +2617,19 @@ def _backend_starting_http_exception(
             "message": exc.user_message,
         },
         headers={"Retry-After": "10"},
+    )
+
+
+def _unsupported_score_file_message(suffix: str) -> str:
+    """Tell the user which file they gave and what to upload instead."""
+    given = (
+        f"SightSinger can't read {suffix[:16]} files."
+        if suffix
+        else "SightSinger can't read files without a file extension."
+    )
+    return (
+        f"{given} Upload a MusicXML score (.musicxml, .xml or .mxl). Most notation "
+        "apps can export one, e.g. MuseScore: File > Export > MusicXML."
     )
 
 
