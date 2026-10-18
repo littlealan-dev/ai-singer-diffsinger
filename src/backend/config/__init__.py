@@ -25,6 +25,14 @@ def _mcp_cpu_workers() -> int:
     return value
 
 
+def _mcp_gpu_workers() -> int:
+    """Read MCP_GPU_WORKERS: at least 1."""
+    value = _env_int("MCP_GPU_WORKERS", 1)
+    if value < 1:
+        raise ValueError("MCP_GPU_WORKERS must be at least 1.")
+    return value
+
+
 def _env_float(name: str, default: float) -> float:
     """Read a float env var with a default."""
     value = os.getenv(name)
@@ -50,6 +58,30 @@ def _dispatch_route_env(prefix: str) -> tuple[str, str, str, str]:
         )
     audience = os.getenv(f"{prefix}_WORKER_AUDIENCE", "").strip() or worker_url
     return mode, worker_url, tasks_queue, audience
+
+
+def _premium_synthesis_route_env(synthesis_mode: str) -> tuple[str, str, str, str]:
+    """Read and check the premium synthesis route: routing, worker URL, queue, audience."""
+    routing = os.getenv("SYNTHESIS_PREMIUM_ROUTING", "off").strip().lower() or "off"
+    if routing not in {"off", "allowlist"}:
+        raise ValueError("SYNTHESIS_PREMIUM_ROUTING must be one of off, allowlist.")
+    worker_url = os.getenv("SYNTHESIS_PREMIUM_WORKER_URL", "").strip().rstrip("/")
+    tasks_queue = os.getenv("SYNTHESIS_PREMIUM_TASKS_QUEUE", "").strip()
+    audience = os.getenv("SYNTHESIS_PREMIUM_WORKER_AUDIENCE", "").strip() or worker_url
+    if routing != "off":
+        if synthesis_mode == "inline":
+            raise ValueError(
+                "SYNTHESIS_PREMIUM_ROUTING needs SYNTHESIS_DISPATCH_MODE http or cloud_tasks."
+            )
+        if not worker_url:
+            raise ValueError(
+                "SYNTHESIS_PREMIUM_WORKER_URL is required when SYNTHESIS_PREMIUM_ROUTING is on."
+            )
+        if synthesis_mode == "cloud_tasks" and not tasks_queue:
+            raise ValueError(
+                "SYNTHESIS_PREMIUM_TASKS_QUEUE is required with SYNTHESIS_DISPATCH_MODE=cloud_tasks."
+            )
+    return routing, worker_url, tasks_queue, audience
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -223,6 +255,15 @@ class Settings:
     synthesis_tasks_queue: str = ""
     synthesis_job_max_dispatch_attempts: int = 3
     synthesis_job_lease_seconds: float = 90.0
+    # A second synthesis worker (the RTX PRO 6000 one) for some users' jobs,
+    # dispatched the same way as SYNTHESIS_DISPATCH_MODE with its own URL,
+    # audience and queue. "off" sends every job to the standard worker;
+    # "allowlist" sends jobs of users on app_config/maintenance's allowedUids
+    # or allowedEmails to it, whether or not maintenance is on.
+    synthesis_premium_routing: str = "off"
+    synthesis_premium_worker_url: str = ""
+    synthesis_premium_worker_audience: str = ""
+    synthesis_premium_tasks_queue: str = ""
     # The worker service has no GPU, so it starts only the CPU MCP worker.
     mcp_gpu_enabled: bool = True
     # Start MCP on the first tool call rather than at boot: for request-billed
@@ -231,6 +272,10 @@ class Settings:
     # CPU MCP processes per instance. Each serves one call at a time, so more
     # than one lets a busy API run several users' score tools at once.
     mcp_cpu_workers: int = 1
+    # GPU MCP processes per instance, and so renders at once on its GPU. Each
+    # process loads its own models; more than one suits a GPU with memory to
+    # spare (the RTX PRO 6000 worker), not the L4.
+    mcp_gpu_workers: int = 1
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -366,6 +411,12 @@ class Settings:
             synthesis_tasks_queue,
             synthesis_worker_audience,
         ) = _dispatch_route_env("SYNTHESIS")
+        (
+            synthesis_premium_routing,
+            synthesis_premium_worker_url,
+            synthesis_premium_tasks_queue,
+            synthesis_premium_worker_audience,
+        ) = _premium_synthesis_route_env(synthesis_dispatch_mode)
         preprocess_worker_enabled = _env_bool("PREPROCESS_WORKER_ENABLED", False)
         synthesis_worker_enabled = _env_bool("SYNTHESIS_WORKER_ENABLED", False)
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
@@ -583,6 +634,10 @@ class Settings:
             synthesis_job_lease_seconds=max(
                 15.0, _env_float("SYNTHESIS_JOB_LEASE_SECONDS", 90.0)
             ),
+            synthesis_premium_routing=synthesis_premium_routing,
+            synthesis_premium_worker_url=synthesis_premium_worker_url,
+            synthesis_premium_worker_audience=synthesis_premium_worker_audience,
+            synthesis_premium_tasks_queue=synthesis_premium_tasks_queue,
             mcp_gpu_enabled=mcp_gpu_enabled,
             # Unset keeps the earlier behaviour: only the preprocess worker
             # starts MCP on its first call.
@@ -590,6 +645,7 @@ class Settings:
                 "MCP_START_ON_FIRST_CALL", preprocess_worker_enabled
             ),
             mcp_cpu_workers=_mcp_cpu_workers(),
+            mcp_gpu_workers=_mcp_gpu_workers(),
             llm_provider=llm_provider,
             gemini_api_key=gemini_api_key,
             gemini_api_key_secret=gemini_api_key_secret,

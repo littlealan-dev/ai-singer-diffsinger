@@ -19,7 +19,7 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable, Optional, Set
 
 import httpx
@@ -60,6 +60,9 @@ class JobRoute:
     endpoint_path: str
     token_header: str
     invoker_setting_name: str
+    # Which worker of the kind this route reaches: "standard", or "premium"
+    # for the second synthesis worker. Task names and log events use the kind.
+    variant: str = "standard"
 
     def endpoint(self, job_id: str) -> str:
         return f"{self.worker_url}{self.endpoint_path}/{job_id}"
@@ -100,6 +103,23 @@ def job_route(settings: Settings, kind: str) -> JobRoute:
             invoker_setting_name="SYNTHESIS_WORKER_INVOKER_SERVICE_ACCOUNT",
         )
     raise ValueError(f"Unknown job kind: {kind}")
+
+
+def premium_synthesis_route(settings: Settings) -> Optional[JobRoute]:
+    """Return the route to the premium synthesis worker, or None when routing is off.
+
+    It is the synthesis route with the premium worker's URL, audience and
+    queue; the caller identity, attempts and lease are shared.
+    """
+    if settings.synthesis_premium_routing == "off":
+        return None
+    return replace(
+        job_route(settings, SYNTHESIS_JOB_KIND),
+        worker_url=settings.synthesis_premium_worker_url,
+        audience=settings.synthesis_premium_worker_audience,
+        tasks_queue=settings.synthesis_premium_tasks_queue,
+        variant="premium",
+    )
 
 
 class JobDispatcher:

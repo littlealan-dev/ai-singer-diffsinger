@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.blackwell
+      - -t
+      - ${_BLACKWELL_IMAGE}
+      - .
+
+images:
+  - ${_BLACKWELL_IMAGE}

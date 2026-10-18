@@ -919,27 +919,36 @@ class McpRouter:
             )
         self._cpu_in_flight = [0] * len(self._cpu_pool)
         self._cpu_pick_lock = threading.Lock()
-        self._gpu = McpProcess(
-            name="mcp_gpu",
-            args=[
-                python_exe,
-                "-m",
-                "src.mcp_server",
-                "--device",
-                settings.mcp_gpu_device,
-                "--mode",
-                "gpu",
-                "--service-name",
-                "mcp_gpu",
-            ]
-            + (["--debug"] if settings.mcp_debug else []),
-            cwd=settings.project_root,
-            timeout_seconds=settings.mcp_gpu_timeout_seconds,
-            startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
-            pipe_stderr=pipe_stderr,
-            start_gate=self._start_gate,
-            stopping=self._stopping,
-        )
+        # GPU tool calls likewise go to the least busy of MCP_GPU_WORKERS
+        # processes, each holding its own models on the instance's one GPU.
+        self._gpu_pool: list[Any] = []
+        for index in range(max(1, settings.mcp_gpu_workers)):
+            service_name = "mcp_gpu" if index == 0 else f"mcp_gpu_{index + 1}"
+            self._gpu_pool.append(
+                McpProcess(
+                    name=service_name,
+                    args=[
+                        python_exe,
+                        "-m",
+                        "src.mcp_server",
+                        "--device",
+                        settings.mcp_gpu_device,
+                        "--mode",
+                        "gpu",
+                        "--service-name",
+                        service_name,
+                    ]
+                    + (["--debug"] if settings.mcp_debug else []),
+                    cwd=settings.project_root,
+                    timeout_seconds=settings.mcp_gpu_timeout_seconds,
+                    startup_timeout_seconds=settings.mcp_startup_timeout_seconds,
+                    pipe_stderr=pipe_stderr,
+                    start_gate=self._start_gate,
+                    stopping=self._stopping,
+                )
+            )
+        self._gpu_in_flight = [0] * len(self._gpu_pool)
+        self._gpu_pick_lock = threading.Lock()
         self._tool_to_worker = {
             "parse_score": "cpu",
             "reparse": "cpu",
@@ -974,13 +983,26 @@ class McpRouter:
     def _cpu(self, process: Any) -> None:
         self._cpu_pool[0] = process
 
+    @property
+    def _gpu(self) -> Any:
+        """The first GPU MCP process (the only one unless MCP_GPU_WORKERS > 1)."""
+        return self._gpu_pool[0]
+
+    @_gpu.setter
+    def _gpu(self, process: Any) -> None:
+        self._gpu_pool[0] = process
+
     def _processes(self) -> list[tuple[str, Any]]:
-        """Every MCP process with its worker label: the CPU pool, then the GPU."""
+        """Every MCP process with its worker label: the CPU pool, then the GPU pool."""
         cpu = [
             ("cpu" if index == 0 else f"cpu_{index + 1}", process)
             for index, process in enumerate(self._cpu_pool)
         ]
-        return cpu + [("gpu", self._gpu)]
+        gpu = [
+            ("gpu" if index == 0 else f"gpu_{index + 1}", process)
+            for index, process in enumerate(self._gpu_pool)
+        ]
+        return cpu + gpu
 
     def start(self) -> None:
         """Start both CPU and GPU MCP processes."""
@@ -1127,7 +1149,9 @@ class McpRouter:
         draining = self._stopping.is_set()
         cpu_ready = all(process.is_ready() for process in self._cpu_pool)
         gpu_enabled = self._settings.mcp_gpu_enabled
-        gpu_ready = self._gpu.is_ready() if gpu_enabled else None
+        gpu_ready = (
+            all(process.is_ready() for process in self._gpu_pool) if gpu_enabled else None
+        )
         ready = bool(
             self._startup_ready.is_set()
             and self._startup_error is None
@@ -1163,6 +1187,10 @@ class McpRouter:
             "starting": starting,
             "draining": draining,
             "workers": {"cpu": cpu_ready, "gpu": gpu_ready},
+            "processes": {
+                "cpu": len(self._cpu_pool),
+                "gpu": len(self._gpu_pool) if gpu_enabled else 0,
+            },
         }
         if self._startup_error:
             payload["error"] = self._startup_error
@@ -1172,10 +1200,10 @@ class McpRouter:
         """Run startup from a daemon thread and keep any failure observable."""
         error: BaseException | None = None
         try:
-            self._start_cpu_pool()
+            self._start_pool(self._cpu_pool)
             self._raise_if_stopping()
             if self._settings.mcp_gpu_enabled:
-                self._gpu.start()
+                self._start_pool(self._gpu_pool)
                 self._raise_if_stopping()
         except McpShuttingDownError as exc:
             error = exc
@@ -1206,14 +1234,14 @@ class McpRouter:
                 else:
                     future.set_exception(error)
 
-    def _start_cpu_pool(self) -> None:
-        """Start every CPU process at once, so the pool starts as fast as one.
+    def _start_pool(self, pool: list[Any]) -> None:
+        """Start every process of a pool at once, so it starts as fast as one.
 
         Each process spends its start importing in its own child, outside the
         shared start gate, so the starts overlap.
         """
-        if len(self._cpu_pool) == 1:
-            self._cpu_pool[0].start()
+        if len(pool) == 1:
+            pool[0].start()
             return
         errors: list[BaseException] = []
 
@@ -1223,12 +1251,13 @@ class McpRouter:
             except BaseException as exc:
                 errors.append(exc)
 
+        members = {id(process) for process in pool}
         threads = [
             threading.Thread(
                 target=start, args=(process,), name=f"mcp-start-{label}", daemon=True
             )
             for label, process in self._processes()
-            if process is not self._gpu
+            if id(process) in members
         ]
         for thread in threads:
             thread.start()
@@ -1279,21 +1308,22 @@ class McpRouter:
     def _call_with_retry(self, worker: str, name: str, arguments: Dict[str, Any]) -> Any:
         """Retry a tool call once after restarting a failed process."""
         if worker == "gpu":
-            return self._call_process_with_retry(worker, self._gpu, name, arguments)
-        index = self._checkout_cpu()
+            pool, in_flight, lock = self._gpu_pool, self._gpu_in_flight, self._gpu_pick_lock
+        else:
+            pool, in_flight, lock = self._cpu_pool, self._cpu_in_flight, self._cpu_pick_lock
+        index = self._checkout(in_flight, lock)
         try:
-            return self._call_process_with_retry(
-                worker, self._cpu_pool[index], name, arguments
-            )
+            return self._call_process_with_retry(worker, pool[index], name, arguments)
         finally:
-            with self._cpu_pick_lock:
-                self._cpu_in_flight[index] -= 1
+            with lock:
+                in_flight[index] -= 1
 
-    def _checkout_cpu(self) -> int:
-        """Pick the CPU process with the fewest calls in flight; count this one."""
-        with self._cpu_pick_lock:
-            index = min(range(len(self._cpu_pool)), key=self._cpu_in_flight.__getitem__)
-            self._cpu_in_flight[index] += 1
+    @staticmethod
+    def _checkout(in_flight: list[int], lock: threading.Lock) -> int:
+        """Pick the process with the fewest calls in flight; count this one."""
+        with lock:
+            index = min(range(len(in_flight)), key=in_flight.__getitem__)
+            in_flight[index] += 1
             return index
 
     def _call_process_with_retry(
@@ -1304,10 +1334,11 @@ class McpRouter:
             result = process.call_tool(name, arguments)
             elapsed_ms = (time.monotonic() - start) * 1000.0
             logging.getLogger(__name__).info(
-                "mcp_tool_call tool=%s worker=%s elapsed_ms=%.2f",
+                "mcp_tool_call tool=%s worker=%s elapsed_ms=%.2f process=%s",
                 name,
                 worker,
                 elapsed_ms,
+                getattr(process, "_name", worker),
             )
             return result
         except McpToolError as exc:

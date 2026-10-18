@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.bench
+      - --build-arg
+      - BASE_IMAGE=${_BASE_IMAGE}
+      - -t
+      - ${_BENCH_IMAGE}
+      - .
+
+images:
+  - ${_BENCH_IMAGE}

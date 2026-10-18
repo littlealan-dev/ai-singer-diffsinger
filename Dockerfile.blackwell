@@ -1,0 +1,49 @@
+# Synthesis worker image for the NVIDIA RTX PRO 6000 Blackwell (sm_120) on
+# Cloud Run. Same application as the L4 image (Dockerfile), on Python 3.11.
+#
+# CUDA comes from pip, not a CUDA base image: onnxruntime-gpu[cuda,cudnn]
+# installs NVIDIA's CUDA 13 runtime and cuDNN 9 wheels, which match the
+# Cloud Run GPU driver (580.x, CUDA 13.0). Cloud Run mounts the driver itself.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        libgomp1 \
+        gcc \
+        g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# 1.30.0 is a CUDA 13 build (released 2026-09-10). Whether its kernels cover
+# sm_120 is checked on the GPU at the first deploy: the CUDA provider must load
+# and render, with no "no kernel image" error.
+# The CUDA and cuDNN wheels put their libraries under site-packages/nvidia;
+# they are listed for the dynamic loader instead of overriding LD_LIBRARY_PATH,
+# which Cloud Run sets for the driver libraries.
+ARG ONNXRUNTIME_GPU_VERSION=1.30.0
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    python3 -m pip install --no-cache-dir -r /app/requirements.txt && \
+    python3 -m pip uninstall -y onnxruntime && \
+    python3 -m pip install --no-cache-dir \
+        "onnxruntime-gpu[cuda,cudnn]==${ONNXRUNTIME_GPU_VERSION}" \
+        nvidia-ml-py && \
+    python3 -c "import glob, site; dirs = sorted(d for s in site.getsitepackages() for d in glob.glob(s + '/nvidia/*/lib')); open('/etc/ld.so.conf.d/nvidia-pip.conf', 'w').write(chr(10).join(dirs) + chr(10))" && \
+    ldconfig
+
+RUN python3 -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')"
+ENV NLTK_DATA=/root/nltk_data
+
+COPY env/voicebank_manifest.dev.json /app/env/voicebank_manifest.dev.json
+COPY env/voicebank_manifest.prod.json /app/env/voicebank_manifest.prod.json
+COPY bundled_assets/vocoders/pc_nsf_hifigan_44.1k /app/assets/vocoders/pc_nsf_hifigan_44.1k
+COPY src /app/src
+
+CMD ["python3", "-m", "src.backend.server", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug", "--access-log"]
