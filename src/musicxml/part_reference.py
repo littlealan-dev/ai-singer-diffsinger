@@ -34,8 +34,29 @@ def load_musicxml_score(path: str | Path) -> stream.Score:
     """Load MusicXML via the bounded reader when the source is an MXL archive."""
     source_path = Path(path)
     if source_path.suffix.lower() != ".mxl":
-        return converter.parse(str(source_path))
-    return converter.parseData(read_musicxml_content(source_path), format="musicxml")
+        score = converter.parse(str(source_path))
+    else:
+        score = converter.parseData(read_musicxml_content(source_path), format="musicxml")
+    _make_part_ids_unique(score)
+    return score
+
+
+def _make_part_ids_unique(score: stream.Score) -> None:
+    """Give later parts with the same parser-visible ID an unused suffix."""
+    ids = [str(part.id or "").strip() for part in score.parts]
+    taken = set(ids)
+    seen: set[str] = set()
+    for part, part_id in zip(score.parts, ids):
+        if not part_id or part_id not in seen:
+            seen.add(part_id)
+            continue
+        suffix = 2
+        while f"{part_id} ({suffix})" in taken:
+            suffix += 1
+        new_id = f"{part_id} ({suffix})"
+        part.id = new_id
+        taken.add(new_id)
+        seen.add(new_id)
 
 
 def map_parser_part_indices_to_raw_part_ids(
@@ -66,20 +87,26 @@ def resolve_part_reference(
     if isinstance(score, Mapping):
         score_parts = score.get("parts")
         if isinstance(score_parts, list):
-            for parser_part_index, part in enumerate(score_parts):
-                if not isinstance(part, Mapping):
-                    continue
-                parser_part_id = str(part.get("part_id") or "").strip()
-                if parser_part_id != requested_part_id:
-                    continue
-                raw_part_id = str(part.get("raw_part_id") or parser_part_id).strip()
+            matches = [
+                (index, part)
+                for index, part in enumerate(score_parts)
+                if isinstance(part, Mapping)
+                and str(part.get("part_id") or "").strip() == requested_part_id
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Ambiguous part_id: {part_id} matches {len(matches)} parts"
+                )
+            if matches:
+                parser_part_index, part = matches[0]
+                raw_part_id = str(part.get("raw_part_id") or requested_part_id).strip()
                 if not raw_part_id:
                     raise ValueError(f"part_id has no raw MusicXML reference: {part_id}")
                 return PartReference(
                     raw_part_id=raw_part_id,
                     raw_part_index=-1,
                     parser_part_index=parser_part_index,
-                    parser_part_id=parser_part_id,
+                    parser_part_id=requested_part_id,
                     parser_part_name=str(part.get("part_name") or "").strip(),
                 )
         raise ValueError(f"Unknown part_id: {part_id}")

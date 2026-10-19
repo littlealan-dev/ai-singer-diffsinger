@@ -29,7 +29,78 @@ TEST_SOLFEGE_MXL = (
 )
 
 
+def _three_soprano_score(part_names: tuple[str, str, str] = ("Soprano",) * 3) -> str:
+    pitches = ("C", "D", "E")
+    part_list = "\n".join(
+        f'    <score-part id="P{index}"><part-name>{name}</part-name></score-part>'
+        for index, name in enumerate(part_names, start=1)
+    )
+    parts = "\n".join(
+        f'''  <part id="P{index}"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>{pitch}</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+  </measure></part>'''
+        for index, pitch in enumerate(pitches, start=1)
+    )
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+{part_list}
+  </part-list>
+{parts}
+</score-partwise>'''
+
+
 class MusicXmlParserTests(unittest.TestCase):
+    def test_same_named_sopranos_have_unique_ids_in_parser_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "three-sopranos.xml"
+            path.write_text(_three_soprano_score(), encoding="utf-8")
+            parsed = parse_musicxml(path, lyrics_only=False)
+            summarized, summary = parse_musicxml_with_summary(path, lyrics_only=False)
+
+        expected_ids = ["Soprano", "Soprano (2)", "Soprano (3)"]
+        expected_raw_ids = ["P1", "P2", "P3"]
+        for score in (parsed, summarized):
+            self.assertEqual([part.part_id for part in score.parts], expected_ids)
+            self.assertEqual([part.raw_part_id for part in score.parts], expected_raw_ids)
+            self.assertEqual([part.part_name for part in score.parts], ["Soprano"] * 3)
+        self.assertEqual([part["part_id"] for part in summary["parts"]], expected_ids)
+        self.assertEqual([part["raw_part_id"] for part in summary["parts"]], expected_raw_ids)
+
+    def test_selects_second_same_named_soprano_by_unique_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "three-sopranos.xml"
+            path.write_text(_three_soprano_score(), encoding="utf-8")
+            selected = parse_musicxml(path, part_id="Soprano (2)", lyrics_only=False)
+
+        self.assertEqual(len(selected.parts), 1)
+        self.assertEqual(selected.parts[0].part_id, "Soprano (2)")
+        self.assertEqual(selected.parts[0].raw_part_id, "P2")
+        self.assertEqual([note.pitch_midi for note in selected.parts[0].notes], [62.0])
+
+    def test_duplicate_name_skips_an_existing_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "reserved-suffix.xml"
+            path.write_text(
+                _three_soprano_score(("Soprano", "Soprano", "Soprano (2)")),
+                encoding="utf-8",
+            )
+            parsed = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(
+            [part.part_id for part in parsed.parts],
+            ["Soprano", "Soprano (3)", "Soprano (2)"],
+        )
+
+    def test_ambiguous_stored_summary_part_id_is_rejected(self) -> None:
+        score = {"parts": [
+            {"part_id": "Soprano", "raw_part_id": "P1"},
+            {"part_id": "Soprano", "raw_part_id": "P2"},
+        ]}
+        with self.assertRaisesRegex(ValueError, "Ambiguous"):
+            resolve_part_reference(part_id="Soprano", score=score)
+
     def test_summary_includes_duration_weighted_part_pitch_range(self) -> None:
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
@@ -438,6 +509,10 @@ class MusicXmlParserTests(unittest.TestCase):
         self.assertEqual(
             [part.raw_part_id for part in parsed.parts],
             ["P10", "P11"],
+        )
+        self.assertEqual(
+            [part.part_id for part in parsed.parts],
+            ["Drumset", "Drumset (2)"],
         )
 
 
