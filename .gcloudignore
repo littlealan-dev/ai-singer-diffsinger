@@ -73,5 +73,15 @@ firebase-debug.log
 firestore-debug.log
 .agent/
 
+# Local analysis and reporting scripts (keep tracked build scripts available)
+scripts/audit_free_credit_abuse_risk.py
+scripts/daily_analytics_report.py
+scripts/download_ai_studio_logs.py
+scripts/extract_messages.py
+scripts/generate_cloud_cost_per_credit_report.py
+scripts/generate_user_revenue_voicebank_one_pager.py
+scripts/report_failed_preprocess_jobs.py
+scripts/reporting/
+
 # Git
 .git/
