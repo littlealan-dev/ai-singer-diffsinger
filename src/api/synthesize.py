@@ -1116,17 +1116,17 @@ def _group_notes(notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return syllable_alignment._group_notes(notes)
 
 
-_JAPANESE_DASH_MARKS = frozenset({"ー", "ｰ", "−", "–", "—", "-"})
+_DASH_EXTENSION_MARKS = frozenset({"ー", "ｰ", "−", "–", "—", "-", "‐", "_"})
 
 
-def _is_japanese_dash_marker(lyric: object) -> bool:
+def _is_dash_extension_marker(lyric: object) -> bool:
     """Return whether a lyric consists solely of a dash-like extension mark."""
     normalized = unicodedata.normalize("NFKC", str(lyric or "")).strip()
-    return bool(normalized) and all(character in _JAPANESE_DASH_MARKS for character in normalized)
+    return bool(normalized) and all(character in _DASH_EXTENSION_MARKS for character in normalized)
 
 
-def _normalize_japanese_dash_extensions(notes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Map contextual Japanese dash notes to the existing lyric-extension contract.
+def _normalize_dash_extensions(notes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Map contextual dash or underscore notes to the existing lyric-extension contract.
 
     A literal dash is treated as a sustain only when it follows a contiguous,
     lexical note in the same voice/staff/verse context. The input score remains
@@ -1165,7 +1165,7 @@ def _normalize_japanese_dash_extensions(notes: Sequence[Dict[str, Any]]) -> List
                 previous_continuation_note.pop(context, None)
             continue
 
-        if _is_japanese_dash_marker(lyric) and previous is not None and is_contiguous:
+        if _is_dash_extension_marker(lyric) and previous is not None and is_contiguous:
             note["lyric"] = "+"
             note["lyric_is_extended"] = True
             previous_continuation_note[context] = note
@@ -1670,8 +1670,7 @@ def align_phonemes_to_notes(
     notes = _select_voice_notes(notes, voice_id)
     if not notes:
         raise ValueError("No notes left after applying voice selection")
-    if str(language).strip().lower().split("-", 1)[0] == "ja":
-        notes = _normalize_japanese_dash_extensions(notes)
+    notes = _normalize_dash_extensions(notes)
 
     start_frames, end_frames, note_frame_durations, note_pitches, _ = _compute_note_timing(
         notes,
