@@ -4,6 +4,7 @@ Tests for the SVS Backend API module.
 Tests cover the core public APIs defined in api_design.md.
 """
 
+import copy
 import unittest
 import tempfile
 import zipfile
@@ -29,7 +30,7 @@ from src.api.voicebank_cache import get_enabled_manifest_voicebanks
 from src.api.synthesize import (
     _apply_coda_tail_durations,
     _build_slur_velocity_envelope,
-    _normalize_japanese_dash_extensions,
+    _normalize_dash_extensions,
 )
 from src.api.voice_parts import preprocess_voice_parts
 from src.phonemizer import UnsupportedLyricTokenError
@@ -60,13 +61,27 @@ def test_japanese_dash_extension_requires_contiguous_lexical_note():
         {"voice": "1", "lyric_line_index": "1", "lyric": "−", "offset_beats": 4, "duration_beats": 1},
     ]
 
-    normalized = _normalize_japanese_dash_extensions(notes)
+    normalized = _normalize_dash_extensions(notes)
 
     assert normalized[1]["lyric"] == "+"
     assert normalized[1]["lyric_is_extended"] is True
     assert normalized[2]["lyric"] == "+"
     assert normalized[3]["lyric"] == "−"
     assert notes[1]["lyric"] == "−"
+
+
+def test_dash_extension_markers_include_underscore_hyphen_and_fullwidth_underscore():
+    for marker in ("_", "‐", "＿"):
+        notes = [
+            {"voice": "1", "lyric_line_index": "1", "lyric": "long",
+             "offset_beats": 0, "duration_beats": 1},
+            {"voice": "1", "lyric_line_index": "1", "lyric": marker,
+             "offset_beats": 1, "duration_beats": 1},
+        ]
+        normalized = _normalize_dash_extensions(notes)
+        assert normalized[1]["lyric"] == "+"
+        assert normalized[1]["lyric_is_extended"] is True
+        assert notes[1]["lyric"] == marker
 
 
 class TestParseScore(unittest.TestCase):
@@ -123,7 +138,7 @@ class TestParseScore(unittest.TestCase):
 
         score = parse_score(TEST_JAPANESE_MXL, verse_number="1")
         notes = score["parts"][0]["notes"]
-        normalized = _normalize_japanese_dash_extensions(notes)
+        normalized = _normalize_dash_extensions(notes)
         dash_pairs = [
             (raw, prepared)
             for raw, prepared in zip(notes, normalized)
@@ -638,6 +653,63 @@ class TestAlignPhonemesToNotes(unittest.TestCase):
         self.assertEqual(len(result["note_durations"]), len(result["note_pitches"]))
         self.assertEqual(len(result["note_durations"]), len(result["note_rests"]))
         self.assertEqual(sum(result["word_boundaries"]), len(result["phoneme_ids"]))
+
+
+    def test_english_dash_and_underscore_lyrics_align_as_extensions(self):
+        score = parse_score(TEST_XML)
+        reference_note = score["parts"][0]["notes"][6]
+        self.assertEqual(reference_note["lyric"], "+")
+        self.assertTrue(reference_note["lyric_is_extended"])
+        expected = align_phonemes_to_notes(
+            score, VOICEBANK_PATH, voice_id="soprano", language="en"
+        )
+        for marker in ("-", "_", "—"):
+            with self.subTest(marker=marker):
+                changed = copy.deepcopy(score)
+                changed_note = changed["parts"][0]["notes"][6]
+                changed_note["lyric"] = marker
+                changed_note["lyric_is_extended"] = False
+                actual = align_phonemes_to_notes(
+                    changed, VOICEBANK_PATH, voice_id="soprano", language="en"
+                )
+                for key in (
+                    "phoneme_ids", "word_boundaries", "word_durations",
+                    "note_durations", "note_rests",
+                ):
+                    self.assertEqual(actual[key], expected[key], key)
+
+    def test_english_dash_without_previous_note_still_rejected(self):
+        fixture = ROOT_DIR / "tests/fixtures/lyric_dash_melisma.musicxml"
+        score = copy.deepcopy(parse_score(fixture, verse_number="1"))
+        first_note = score["parts"][0]["notes"][0]
+        self.assertEqual(first_note["lyric"], "long")
+        first_note["lyric"] = "-"
+        first_note["lyric_is_extended"] = False
+        with self.assertRaises(UnsupportedLyricTokenError) as caught:
+            align_phonemes_to_notes(
+                score, VOICEBANK_PATH, language="en"
+            )
+        self.assertEqual(caught.exception.reason, "no_pronounceable_lyric_after_cleanup")
+
+    def test_dash_melisma_fixture_aligns_in_english_and_portuguese(self):
+        fixture = ROOT_DIR / "tests/fixtures/lyric_dash_melisma.musicxml"
+        score = parse_score(fixture, verse_number="1")
+        lyrics = [note["lyric"] for note in score["parts"][0]["notes"]]
+        self.assertEqual(
+            lyrics, ["long", "-", "er,", "Na-", "-", "sceu", "_", "glo"]
+        )
+        portuguese_voicebank = VOICEBANKS_DIR / "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
+        for language, voicebank in (
+            ("en", VOICEBANK_PATH),
+            ("pt", portuguese_voicebank),
+        ):
+            with self.subTest(language=language):
+                if not voicebank.exists():
+                    self.skipTest(f"Voicebank not found at {voicebank}")
+                result = align_phonemes_to_notes(
+                    score, voicebank, language=language
+                )
+                self.assertTrue(result["phoneme_ids"])
 
 
 class TestSynthesizeActions(unittest.TestCase):
