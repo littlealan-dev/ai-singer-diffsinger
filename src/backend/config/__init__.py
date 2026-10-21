@@ -217,6 +217,7 @@ class Settings:
     backend_build_id: str
     gemini_prompt_cache_enabled: bool
     gemini_prompt_cache_ttl_days: int
+    gemini_prompt_cache_ttl_minutes: int | None
     gemini_prompt_cache_delete_stale: bool
     feedback_prompt_cooldown_days: int
     feedback_prompt_min_successful_generations: int
@@ -563,6 +564,10 @@ class Settings:
             app_env_lower not in {"dev", "development", "local", "test"},
         )
         gemini_prompt_cache_ttl_days = max(1, _env_int("GEMINI_PROMPT_CACHE_TTL_DAYS", 3650))
+        ttl_minutes_text = os.getenv("GEMINI_PROMPT_CACHE_TTL_MINUTES", "").strip()
+        gemini_prompt_cache_ttl_minutes = int(ttl_minutes_text) if ttl_minutes_text else None
+        if gemini_prompt_cache_ttl_minutes is not None and gemini_prompt_cache_ttl_minutes < 1:
+            raise ValueError("GEMINI_PROMPT_CACHE_TTL_MINUTES must be at least 1.")
         gemini_prompt_cache_delete_stale = _env_bool(
             "GEMINI_PROMPT_CACHE_DELETE_STALE",
             True,
@@ -721,6 +726,7 @@ class Settings:
             backend_build_id=backend_build_id,
             gemini_prompt_cache_enabled=gemini_prompt_cache_enabled,
             gemini_prompt_cache_ttl_days=gemini_prompt_cache_ttl_days,
+            gemini_prompt_cache_ttl_minutes=gemini_prompt_cache_ttl_minutes,
             gemini_prompt_cache_delete_stale=gemini_prompt_cache_delete_stale,
             feedback_prompt_cooldown_days=feedback_prompt_cooldown_days,
             feedback_prompt_min_successful_generations=feedback_prompt_min_successful_generations,
