@@ -565,7 +565,9 @@ class Settings:
         )
         gemini_prompt_cache_ttl_days = max(1, _env_int("GEMINI_PROMPT_CACHE_TTL_DAYS", 3650))
         ttl_minutes_text = os.getenv("GEMINI_PROMPT_CACHE_TTL_MINUTES", "").strip()
-        gemini_prompt_cache_ttl_minutes = int(ttl_minutes_text) if ttl_minutes_text else None
+        gemini_prompt_cache_ttl_minutes = (
+            _env_int("GEMINI_PROMPT_CACHE_TTL_MINUTES", 0) if ttl_minutes_text else None
+        )
         if gemini_prompt_cache_ttl_minutes is not None and gemini_prompt_cache_ttl_minutes < 1:
             raise ValueError("GEMINI_PROMPT_CACHE_TTL_MINUTES must be at least 1.")
         gemini_prompt_cache_delete_stale = _env_bool(

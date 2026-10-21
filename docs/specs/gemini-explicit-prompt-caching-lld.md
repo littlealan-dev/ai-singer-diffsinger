@@ -443,6 +443,7 @@ Add settings:
 - `BACKEND_BUILD_ID`
 - `GEMINI_PROMPT_CACHE_ENABLED` default `true` in prod, `false` in dev
 - `GEMINI_PROMPT_CACHE_TTL_DAYS` default `3650`
+- optional `GEMINI_PROMPT_CACHE_TTL_MINUTES` overrides the day setting when set; dev sets it to `30`
 - optional `GEMINI_PROMPT_CACHE_DELETE_STALE` default `true`
 
 ## 12. Detailed Flow

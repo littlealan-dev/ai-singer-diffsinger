@@ -122,6 +122,21 @@ def test_preprocess_role_keeps_all_voice_part_signals() -> None:
     assert _prompt_voice_part_signals(signals, role="preprocess") == signals
 
 
+def test_build_system_prompt_injects_nonempty_parsed_score_json() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        score_summary={"title": "My Tribute"},
+        parsed_score_json={"parts": [{"notes": [{"measure_number": 7}]}]},
+    )
+
+    parsed_score_section = prompt.rsplit(
+        "Full parsed score JSON (if available):\n", 1
+    )[1].split("\nVoice-part planning signals (if available):", 1)[0]
+    assert '"measure_number": 7' in parsed_score_section
+    assert '"score_summary": {' not in prompt
+
+
 def test_build_system_prompt_includes_preprocess_mapping_context() -> None:
     prompt = build_system_prompt(
         tools=[],
