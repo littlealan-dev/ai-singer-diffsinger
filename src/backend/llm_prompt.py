@@ -69,6 +69,60 @@ class PromptBundle:
         return isinstance(value, str) and value in self.full_prompt_text
 
 
+def _default_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep score, part, and voice summaries without measure-level planning data."""
+    score_fields = (
+        "analysis_version",
+        "requested_verse_number",
+        "has_multi_voice_parts",
+        "has_missing_lyric_voice_parts",
+    )
+    part_fields = (
+        "part_index",
+        "part_id",
+        "part_name",
+        "multi_voice_part",
+        "has_missing_lyric_voice_parts",
+        "has_same_voice_simultaneous_notes",
+        "is_potentially_complex_for_preprocess",
+        "verse_number",
+    )
+    voice_fields = (
+        "source_voice_id",
+        "voice_part_id",
+        "note_count",
+        "lyric_note_count",
+        "missing_lyrics",
+        "avg_pitch_midi",
+    )
+    compact = {key: signals[key] for key in score_fields if key in signals}
+    full_analysis = signals.get("full_score_analysis") or {}
+    full_parts = full_analysis.get("parts") if isinstance(full_analysis, dict) else None
+    full_parts_by_index = {
+        part.get("part_index"): part
+        for part in (full_parts or [])
+        if isinstance(part, dict)
+    }
+    compact_parts = []
+    for part in signals.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        compact_part = {key: part[key] for key in part_fields if key in part}
+        full_part = full_parts_by_index.get(part.get("part_index"))
+        if full_part is not None and full_part.get("part_id") == part.get("part_id"):
+            voice_parts = full_part.get("voice_parts")
+        else:
+            voice_parts = part.get("voice_parts")
+        compact_part["voice_parts"] = [
+            {key: voice[key] for key in voice_fields if key in voice}
+            for voice in (voice_parts or [])
+            if isinstance(voice, dict)
+        ]
+        compact_parts.append(compact_part)
+    compact["parts"] = compact_parts
+    return compact
+
+
 def build_prompt_bundle(
     tools: List[Dict[str, Any]],
     score_available: bool,
@@ -118,8 +172,13 @@ def build_prompt_bundle(
         )
     voice_part_signals_text = "none"
     if voice_part_signals:
+        prompt_signals = (
+            voice_part_signals
+            if _is_preprocess_role(role)
+            else _default_voice_part_signals(voice_part_signals)
+        )
         voice_part_signals_text = json.dumps(
-            voice_part_signals, indent=2, sort_keys=True, ensure_ascii=False
+            prompt_signals, indent=2, sort_keys=True, ensure_ascii=False
         )
     preprocess_mapping_context_text = "none"
     if preprocess_mapping_context:

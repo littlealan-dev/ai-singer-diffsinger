@@ -1,41 +1,125 @@
 from __future__ import annotations
 
+import json
+
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
 
-def test_build_system_prompt_includes_voice_part_signals() -> None:
-    voice_part_signals = {
+def _sample_voice_part_signals() -> dict:
+    return {
         "analysis_version": "v2",
+        "requested_verse_number": "1",
+        "has_multi_voice_parts": True,
+        "has_missing_lyric_voice_parts": True,
         "parts": [
             {
                 "part_index": 0,
                 "part_id": "Women",
+                "part_name": "Soprano Alto",
+                "multi_voice_part": True,
+                "has_missing_lyric_voice_parts": True,
+                "has_same_voice_simultaneous_notes": False,
+                "is_potentially_complex_for_preprocess": True,
+                "verse_number": "1",
                 "voice_part_measure_spans": {
                     "voice part 1": [{"start": 7, "end": 11}, {"start": 13, "end": 18}],
                     "voice part 2": [{"start": 7, "end": 18}],
                 },
-                "voice_part_id_to_source_voice_id": {
-                    "voice part 1": "1",
-                    "voice part 2": "2",
-                },
+            }
+        ],
+        "full_score_analysis": {
+            "parts": [
+                {
+                    "part_index": 0,
+                    "part_id": "Women",
+                    "voice_parts": [
+                        {
+                            "source_voice_id": "1",
+                            "voice_part_id": "soprano",
+                            "note_count": 37,
+                            "lyric_note_count": 37,
+                            "missing_lyrics": False,
+                            "avg_pitch_midi": 67.838,
+                            "note_level_debug": [{"measure_number": 7}],
+                        },
+                        {
+                            "source_voice_id": "2",
+                            "voice_part_id": "alto",
+                            "note_count": 31,
+                            "lyric_note_count": 0,
+                            "missing_lyrics": True,
+                            "avg_pitch_midi": 61.258,
+                        },
+                    ],
+                    "measure_lyric_coverage": [{"measure_number": 7}],
+                }
+            ],
+            "status_taxonomy": ["ready", "action_required"],
+        },
+        "measure_staff_voice_map": [{"measure_number": 7}],
+        "measure_chord_density": [{"measure_number": 7}],
+    }
+
+
+def _prompt_voice_part_signals(signals: dict, *, role: str) -> dict:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        voice_part_signals=signals,
+        role=role,
+    )
+    signals_text = bundle.dynamic_prompt_text.split(
+        "Voice-part planning signals (if available):\n", 1
+    )[1].split("\nPreprocess-derived mapping context", 1)[0]
+    return json.loads(signals_text)
+
+
+def test_default_role_keeps_song_part_and_voice_summaries() -> None:
+    signals = _sample_voice_part_signals()
+
+    assert _prompt_voice_part_signals(signals, role="default") == {
+        "analysis_version": "v2",
+        "requested_verse_number": "1",
+        "has_multi_voice_parts": True,
+        "has_missing_lyric_voice_parts": True,
+        "parts": [
+            {
+                "part_index": 0,
+                "part_id": "Women",
+                "part_name": "Soprano Alto",
+                "multi_voice_part": True,
+                "has_missing_lyric_voice_parts": True,
+                "has_same_voice_simultaneous_notes": False,
+                "is_potentially_complex_for_preprocess": True,
+                "verse_number": "1",
+                "voice_parts": [
+                    {
+                        "source_voice_id": "1",
+                        "voice_part_id": "soprano",
+                        "note_count": 37,
+                        "lyric_note_count": 37,
+                        "missing_lyrics": False,
+                        "avg_pitch_midi": 67.838,
+                    },
+                    {
+                        "source_voice_id": "2",
+                        "voice_part_id": "alto",
+                        "note_count": 31,
+                        "lyric_note_count": 0,
+                        "missing_lyrics": True,
+                        "avg_pitch_midi": 61.258,
+                    },
+                ],
             }
         ],
     }
-    prompt = build_system_prompt(
-        tools=[],
-        score_available=True,
-        voicebank_ids=["Raine_Rena_2.01"],
-        score_summary={"title": "My Tribute"},
-        parsed_score_json={"parts": [{"part_index": 0, "notes": [{"measure_number": 7}]}]},
-        voice_part_signals=voice_part_signals,
-        voicebank_details=None,
-    )
-    assert "Voice-part planning signals (if available):" in prompt
-    assert "Full parsed score JSON (if available):" in prompt
-    assert '"measure_number": 7' in prompt
-    assert '"score_summary": {' not in prompt
-    assert '"voice part 1"' in prompt
-    assert '"voice part 2"' in prompt
+    assert "full_score_analysis" in signals
+
+
+def test_preprocess_role_keeps_all_voice_part_signals() -> None:
+    signals = _sample_voice_part_signals()
+
+    assert _prompt_voice_part_signals(signals, role="preprocess") == signals
 
 
 def test_build_system_prompt_includes_preprocess_mapping_context() -> None:
