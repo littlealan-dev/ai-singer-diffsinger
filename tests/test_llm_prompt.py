@@ -529,6 +529,21 @@ def test_explicit_repeat_request_can_override_the_quote_setting_only() -> None:
     assert "Never set it on synthesize" in instruction
 
 
+def test_unexpandable_score_tells_every_reply_that_repeats_are_not_possible() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary={"duration_seconds": 60, "repeat_expansion_available": False},
+        expand_repeats=False,
+    )
+    instruction = bundle.dynamic_prompt_text.split(
+        "Repeat-expansion setting (authoritative):\n", 1
+    )[1]
+    assert "can only be sung in written order" in instruction
+    assert "don't offer to sing it with repeats" in instruction
+    assert "pass expand_repeats with the requested value" not in instruction
+
+
 def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration() -> None:
     summary = {
         "duration_seconds": 60,
