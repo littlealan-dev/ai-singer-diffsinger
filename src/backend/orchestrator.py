@@ -8655,6 +8655,8 @@ class Orchestrator:
                                     key: value
                                     for key, value in call.arguments.items()
                                     # The override only vouches for the old quote's voice.
+                                    # On confirmation the UI repeat order is authoritative,
+                                    # not a stale synthesize argument.
                                     if key not in {"quote_id", "confirmed_voicebank_override", "expand_repeats"}
                                 },
                             ),
