@@ -259,9 +259,13 @@ def build_prompt_bundle(
         {
             "expand_repeats": bool(expand_repeats),
             "instruction": (
-                "This UI-selected setting is authoritative. The backend applies it to "
-                "every synthesis call; do not choose or override it. Use the matching "
-                "score-summary duration for the billable quote and duration limit."
+                "This is the current With Repeats setting, which the backend applies to every "
+                "synthesis call. If the user's latest message explicitly asks to sing with the "
+                "score's repeats, or in written order, and that differs from this setting, pass "
+                "expand_repeats with the requested value to prepare_synthesis_quote. The quote "
+                "then uses it and the With Repeats switch is updated to match. Otherwise omit "
+                "expand_repeats. Never set it on synthesize. Use the score-summary duration that "
+                "matches the repeat order you quote for the billable quote and the duration limit."
             ),
         },
         indent=2,

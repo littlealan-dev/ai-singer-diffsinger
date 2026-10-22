@@ -92,6 +92,16 @@ def test_prepare_synthesis_quote_schema_requires_complete_render_identity() -> N
     assert tool["outputSchema"]["properties"]["quote_id"]["type"] == "string"
 
 
+def test_quote_repeat_override_has_no_model_filling_default() -> None:
+    schemas = _tool_schema_map()
+    quote_repeats = schemas["prepare_synthesis_quote"]["inputSchema"]["properties"]["expand_repeats"]
+    synth_repeats = schemas["synthesize"]["inputSchema"]["properties"]["expand_repeats"]
+    assert quote_repeats["type"] == "boolean"
+    assert "default" not in quote_repeats
+    assert synth_repeats["type"] == "boolean"
+    assert synth_repeats["default"] is False
+
+
 def test_parse_score_schema_describes_per_part_lyric_verse_samples() -> None:
     output_schema = _tool_schema_map()["parse_score"]["outputSchema"]
     summary_schema = output_schema["properties"]["score_summary"]
