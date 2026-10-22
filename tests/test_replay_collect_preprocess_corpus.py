@@ -86,10 +86,11 @@ def test_selection_dedupes_newest_using_canonical_context_and_caps_kept_jobs():
 def test_write_entry_preserves_bytes_and_matches_private_safe_interface(tmp_path):
     job = _job(
         userId="user-secret", sessionId="session-secret",
-        details={"quality_class": "good", "userId": "user-secret", "note": "singer@example.com"},
+        details={"quality_class": "good", "userId": "user-secret", "note": "singer@example.com; session-secret"},
     )
     spec = json.loads(job["preprocessSpecJson"])
     spec["toolCalls"][0]["arguments"] = {"email": "singer@example.com", "text": "hello singer@example.com"}
+    spec["initialMessage"] = "start for user-secret"
     job["preprocessSpecJson"] = json.dumps(spec)
     xml = b"\x00<score>\xff</score>"
     metadata = collector.write_corpus_entry(tmp_path, "job-a", job, xml)

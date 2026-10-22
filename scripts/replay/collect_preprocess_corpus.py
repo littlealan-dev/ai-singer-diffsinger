@@ -104,17 +104,20 @@ def select_jobs(
     return Selection(selected, len(fetched), deduped)
 
 
-def _without_private_data(value: Any) -> Any:
+def _without_private_data(value: Any, private_values: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
         return {
-            key: _without_private_data(item)
+            key: _without_private_data(item, private_values)
             for key, item in value.items()
             if isinstance(key, str) and key.lower() not in PRIVATE_KEYS and "email" not in key.lower()
         }
     if isinstance(value, list):
-        return [_without_private_data(item) for item in value]
+        return [_without_private_data(item, private_values) for item in value]
     if isinstance(value, str):
-        return EMAIL_PATTERN.sub("[redacted email]", value)
+        cleaned = EMAIL_PATTERN.sub("[redacted email]", value)
+        for private_value in private_values:
+            cleaned = cleaned.replace(private_value, "[redacted id]")
+        return cleaned
     return value
 
 
@@ -159,7 +162,19 @@ def _job_metadata(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
             "duration_s": _duration(job),
         },
     }
-    return _without_private_data(metadata)
+    private_values = tuple(
+        sorted(
+            {
+                value for value in (
+                    job.get("userId"), job.get("sessionId"),
+                    spec.get("originatingTurnId"),
+                ) if isinstance(value, str) and value
+            },
+            key=len,
+            reverse=True,
+        )
+    )
+    return _without_private_data(metadata, private_values)
 
 
 def write_corpus_entry(out_dir: Path, job_id: str, job: dict[str, Any], xml_bytes: bytes) -> dict[str, Any]:
