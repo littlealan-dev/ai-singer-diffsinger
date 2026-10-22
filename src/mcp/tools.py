@@ -1969,6 +1969,10 @@ TOOLS: List[Tool] = [
                     "description": 'Exact voicebank ID from Available voicebanks (IDs) in Dynamic Context, such as Qixuan_v2.7.0_DiffSinger_OpenUtau. Never the display name shown to the user (for example "Qixuan / 绮萱 v2.7.0"); an unknown value is rejected.',
                 },
                 "confirmed_voicebank_override": {"type": "boolean", "default": False},
+                "expand_repeats": {
+                    "type": "boolean",
+                    "description": "Set only when the user's latest message explicitly asks to sing with the score's repeats (true) or in written order (false). Otherwise omit it; the With Repeats setting in Dynamic Context then applies. The With Repeats switch is updated to the value you set.",
+                },
                 "language": {"type": "string", "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$"},
                 "part_id": {
                     "type": "string",

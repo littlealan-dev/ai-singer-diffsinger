@@ -127,6 +127,8 @@ export type ChatResponse =
       suppress_selector?: boolean;
       /** The turn produced a quote, which fixes the part and lyric line. */
       selection_resolved?: boolean;
+      /** The repeat order this turn's quote used, when chat changed it; the With Repeats switch adopts it. */
+      expand_repeats?: boolean;
       details?: unknown;
       warning?: string;
       solfege_settings?: SolfegeSettings;
@@ -138,6 +140,7 @@ export type ChatResponse =
       /** Required to cache or refresh the take; the backend no longer sends this type. */
       job_id?: string;
       audio_track?: AudioTrackMetadata;
+      expand_repeats?: boolean;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
       details?: unknown;
@@ -149,6 +152,7 @@ export type ChatResponse =
       message: string;
       progress_url: string;
       job_id?: string;
+      expand_repeats?: boolean;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
       details?: unknown;

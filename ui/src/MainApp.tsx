@@ -5371,6 +5371,9 @@ export default function MainApp() {
           setSelectedVerse(String(response.score_summary.selected_verse_number));
         }
       }
+      if (typeof response.expand_repeats === "boolean" && !repeatsUnavailable) {
+        setExpandRepeats(response.expand_repeats);
+      }
       if ("solfege_settings" in response && response.solfege_settings) {
         setSolfegeSystem(response.solfege_settings.system);
         setSolfegeMode(response.solfege_settings.mode);
