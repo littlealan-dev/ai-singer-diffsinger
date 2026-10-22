@@ -35,6 +35,13 @@ def test_synthesis_max_duration_seconds_env_override_is_preserved(monkeypatch):
     assert settings.synthesis_max_duration_seconds == 240.0
 
 
+def test_gemini_prompt_cache_ttl_minutes_requires_positive_value(monkeypatch):
+    monkeypatch.setenv("GEMINI_PROMPT_CACHE_TTL_MINUTES", "0")
+
+    with pytest.raises(ValueError, match="GEMINI_PROMPT_CACHE_TTL_MINUTES"):
+        Settings.from_env()
+
+
 @pytest.mark.parametrize(
     ("app_env", "expected"),
     [("dev", "memory"), ("test", "memory"), ("prod", "firestore")],

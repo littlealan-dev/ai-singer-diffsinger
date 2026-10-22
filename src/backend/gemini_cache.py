@@ -213,7 +213,12 @@ class GeminiPromptCacheManager:
         display_name: str,
         static_prompt_text: str,
     ) -> GeminiPromptCache | None:
-        ttl_seconds = max(1, self._settings.gemini_prompt_cache_ttl_days * 24 * 60 * 60)
+        ttl_minutes = self._settings.gemini_prompt_cache_ttl_minutes
+        ttl_seconds = (
+            ttl_minutes * 60
+            if ttl_minutes is not None
+            else self._settings.gemini_prompt_cache_ttl_days * 24 * 60 * 60
+        )
         expire_time = (
             datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         ).isoformat().replace("+00:00", "Z")

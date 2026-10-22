@@ -53,6 +53,38 @@ def test_prompt_cache_display_name_includes_environment() -> None:
     )
 
 
+def test_cache_creation_uses_minute_ttl_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GEMINI_PROMPT_CACHE_TTL_DAYS", "30")
+    monkeypatch.setenv("GEMINI_PROMPT_CACHE_TTL_MINUTES", "30")
+    manager = _manager("dev")
+    payloads = []
+
+    def fake_request_json(method, url, payload):  # type: ignore[no-untyped-def]
+        payloads.append(payload)
+        return {"name": "cachedContents/new", "model": f"models/{MODEL}"}
+
+    monkeypatch.setattr(manager, "_request_json", fake_request_json)
+    manager._create_cache(model=MODEL, display_name="dev-test", static_prompt_text=PROMPT)
+
+    assert payloads[0]["ttl"] == "1800s"
+
+
+def test_cache_creation_keeps_day_ttl_without_minute_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GEMINI_PROMPT_CACHE_TTL_DAYS", "30")
+    monkeypatch.delenv("GEMINI_PROMPT_CACHE_TTL_MINUTES", raising=False)
+    manager = _manager("prod")
+    payloads = []
+
+    def fake_request_json(method, url, payload):  # type: ignore[no-untyped-def]
+        payloads.append(payload)
+        return {"name": "cachedContents/new", "model": f"models/{MODEL}"}
+
+    monkeypatch.setattr(manager, "_request_json", fake_request_json)
+    manager._create_cache(model=MODEL, display_name="prod-test", static_prompt_text=PROMPT)
+
+    assert payloads[0]["ttl"] == "2592000s"
+
+
 def test_delete_stale_caches_only_deletes_same_environment(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     manager = _manager("dev")
     caches = [
