@@ -280,7 +280,7 @@ def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
         Lane("a", "P1", 0, "1", "voice part 2", 1, "append_new_derived_lane"),
         Lane("b", "P1", 0, "1", "voice part 2", 2, "append_new_derived_lane"),
     ]
-    assert list(_rank_assignment_options([nonzero])[0].fields["rank_index_by_lane"].values()) == [1, 2]
+    assert list(_rank_assignment_options([nonzero])[0].fields["rank_index_by_lane"].values()) == [0, 1]
     assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
     assert sheet.fixed
     assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)
@@ -336,6 +336,27 @@ def test_derived_and_generated_solfege_donors_are_excluded():
                 assert option.fields[field]["part_index"] != 2
                 if field == "lyric_source":
                     assert option.fields[field] != {"part_index": 0, "voice_part_id": "voice part 1"}
+
+
+def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
+    score = parse_score(SATB, verse_number=1)
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    for segment in sheet.segments:
+        for lane_id, _, _ in segment.signature.lanes:
+            relevant = [slot for slot in sheet.slots
+                        if lane_id in slot.lane_ids and
+                        (slot.start_measure, slot.end_measure) ==
+                        (segment.start_measure, segment.end_measure)]
+            if any(slot.kind == "freeform" for slot in relevant):
+                continue
+            mode_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|mode"
+            mode_options = next((slot.options for slot in relevant if slot.kind == "mode"),
+                                (sheet.fixed[mode_id],) if mode_id in sheet.fixed else ())
+            if any(option.fields["mode"] == "derive" for option in mode_options):
+                lyric_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|lyric_source"
+                assert any(slot.kind == "lyric_source" and slot.options for slot in relevant) or (
+                    lyric_id in sheet.fixed
+                )
 
 
 def test_unmodelled_singing_segment_has_one_freeform_slot(monkeypatch, tmp_path):

@@ -537,7 +537,7 @@ def _rank_assignment_options(groups: list[list[Lane]]) -> tuple[Option, ...]:
     """Enumerate joint assignments with each lane's existing rank first."""
     assignments: list[dict[str, int]] = [{}]
     for group in groups:
-        ranks = tuple(lane.default_rank for lane in group)
+        ranks = tuple(range(len(group)))
         assignments = [
             {**assignment, **{lane.lane_id: rank for lane, rank in zip(group, chosen)}}
             for assignment in assignments for chosen in permutations(ranks)
