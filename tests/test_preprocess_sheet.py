@@ -11,7 +11,8 @@ import pytest
 
 from src.api import parse_score
 from src.api.preprocess_sheet import (
-    SLOT_KINDS, _shared_notes_in_scope, build_sheet, build_sheet_skeleton,
+    SLOT_KINDS, Lane, _rank_assignment_options, _shared_notes_in_scope,
+    build_sheet, build_sheet_skeleton,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 from src.api.voice_parts import _staff_scope_measure_max_simultaneous_notes
@@ -275,6 +276,11 @@ def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
     assert list(mappings[0].values()) == [0, 1]
     assert all(len(set(mapping.values())) == 2 for mapping in mappings)
     assert len({tuple(mapping.values()) for mapping in mappings}) == len(mappings) == 2
+    nonzero = [
+        Lane("a", "P1", 0, "1", "voice part 2", 1, "append_new_derived_lane"),
+        Lane("b", "P1", 0, "1", "voice part 2", 2, "append_new_derived_lane"),
+    ]
+    assert list(_rank_assignment_options([nonzero])[0].fields["rank_index_by_lane"].values()) == [1, 2]
     assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
     assert sheet.fixed
     assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)

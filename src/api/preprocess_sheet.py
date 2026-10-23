@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from itertools import permutations
+from math import factorial
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -532,6 +533,22 @@ def _freeform_slot(segment: Segment, lanes: list[Lane], reason: str) -> Slot:
     )
 
 
+def _rank_assignment_options(groups: list[list[Lane]]) -> tuple[Option, ...]:
+    """Enumerate joint assignments with each lane's existing rank first."""
+    assignments: list[dict[str, int]] = [{}]
+    for group in groups:
+        ranks = tuple(lane.default_rank for lane in group)
+        assignments = [
+            {**assignment, **{lane.lane_id: rank for lane, rank in zip(group, chosen)}}
+            for assignment in assignments for chosen in permutations(ranks)
+        ]
+    return tuple(Option(
+        option_id="perm:" + "-".join(str(rank) for rank in assignment.values()),
+        label="Ranks " + ", ".join(str(rank) for rank in assignment.values()),
+        fields={"rank_index_by_lane": assignment}, evidence={}, flags=(),
+    ) for assignment in assignments)
+
+
 def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment."""
     skeleton = build_sheet_skeleton(score, planning_context)
@@ -627,25 +644,21 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             by_source: dict[str, list[Lane]] = {}
             for lane in lanes:
                 by_source.setdefault(lane.source_voice_part_id, []).append(lane)
-            for siblings in by_source.values():
-                if len(siblings) < 2:
-                    continue
-                if len(siblings) > 4:  # 5! options exceed the 24-option menu limit.
+            groups = [sorted(siblings, key=lambda lane: lane.default_rank)
+                      for siblings in by_source.values() if len(siblings) > 1]
+            if groups:
+                option_count = 1
+                for group in groups:
+                    option_count *= factorial(len(group))
+                if option_count > 24:
                     freeform_reason = "rank_assignment_over_24_permutations"
-                    break
-                ordered = sorted(siblings, key=lambda lane: lane.default_rank)
-                rank_options = tuple(Option(
-                    option_id="perm:" + "-".join(map(str, ranks)),
-                    label="Ranks " + ", ".join(map(str, ranks)),
-                    fields={"rank_index_by_lane": {
-                        lane.lane_id: rank for lane, rank in zip(ordered, ranks)
-                    }},
-                    evidence={}, flags=(),
-                ) for ranks in permutations(range(len(ordered))))
-                segment_slots.append(_choice_slot(
-                    tuple(lane.lane_id for lane in ordered), segment, "rank_assignment",
-                    rank_options, joint_id=f"{ordered[0].part_id}|{segment.scope_key}",
-                ))
+                else:
+                    ordered_lanes = [lane for group in groups for lane in group]
+                    rank_options = _rank_assignment_options(groups)
+                    segment_slots.append(_choice_slot(
+                        tuple(lane.lane_id for lane in ordered_lanes), segment, "rank_assignment",
+                        rank_options, joint_id=f"{ordered_lanes[0].part_id}|{segment.scope_key}",
+                    ))
         if freeform_reason is not None:
             sheet.slots.append(_freeform_slot(segment, lanes, freeform_reason))
         else:
