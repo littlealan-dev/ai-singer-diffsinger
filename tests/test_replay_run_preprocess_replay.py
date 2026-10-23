@@ -130,5 +130,38 @@ class CorpusTests(unittest.TestCase):
             self.assertEqual(replay._corpus_job_ids(corpus, [], 1), ["a"])
 
 
+class SaveSplitScoreTests(unittest.TestCase):
+    def test_copies_the_file_the_app_wrote_for_the_split(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "session" / "score.xml"
+            input_path.parent.mkdir()
+            input_path.write_text("<input/>", encoding="utf-8")
+            split_path = root / "session" / "score.derived_abc.xml"
+            split_path.write_text("<split/>", encoding="utf-8")
+            scores_dir = root / "out" / "scores"
+
+            saved = replay._save_split_score(
+                {"source_musicxml_path": str(split_path)}, input_path, scores_dir, "job1"
+            )
+
+            self.assertEqual(saved, "scores/job1.xml")
+            self.assertEqual((scores_dir / "job1.xml").read_text(encoding="utf-8"), "<split/>")
+
+    def test_no_file_when_the_job_wrote_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "score.xml"
+            input_path.write_text("<input/>", encoding="utf-8")
+            scores_dir = root / "scores"
+            for final_score in (
+                {},
+                {"source_musicxml_path": str(input_path)},
+                {"source_musicxml_path": str(root / "missing.xml")},
+            ):
+                self.assertIsNone(replay._save_split_score(final_score, input_path, scores_dir, "job1"))
+            self.assertFalse(scores_dir.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

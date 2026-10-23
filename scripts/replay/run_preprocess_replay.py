@@ -9,6 +9,7 @@ compare_preprocess_runs.py reads:
 
     <out>/run.json
     <out>/jobs/<job_id>.json
+    <out>/scores/<job_id>.xml   (the app's split MusicXML, when the job wrote one)
 
 It never touches production: sessions live in memory under data/replay/, the
 job store is an in-memory stand-in, and Firestore is pointed at a closed local
@@ -388,6 +389,27 @@ def _lanes(original: Dict[str, Any], final: Dict[str, Any]) -> List[Dict[str, An
     return lanes
 
 
+def _save_split_score(
+    final_score: Dict[str, Any], input_path: Path, scores_dir: Path, job_id: str
+) -> Optional[str]:
+    """Copy the MusicXML the app wrote for the split parts out of the session folder.
+
+    After a split, the app points the score's source_musicxml_path at the file it
+    wrote with the derived parts appended. The session folder is deleted after each
+    job, so this keeps that file as <out>/scores/<job_id>.xml for manual checks.
+    Returns the path relative to <out>, or None when the job wrote no new file.
+    """
+    path_value = final_score.get("source_musicxml_path")
+    if not path_value:
+        return None
+    split_path = Path(str(path_value))
+    if not split_path.is_file() or split_path.resolve() == input_path.resolve():
+        return None
+    scores_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(split_path, scores_dir / f"{job_id}.xml")
+    return f"{scores_dir.name}/{job_id}.xml"
+
+
 async def _replay_job(
     *,
     job_id: str,
@@ -397,6 +419,7 @@ async def _replay_job(
     llm_client: Any,
     usage: UsageRecorder,
     keep_sessions: bool,
+    scores_dir: Path,
 ) -> Dict[str, Any]:
     from src.backend import orchestrator as orchestrator_module
     from src.backend.orchestrator import Orchestrator, ToolCall
@@ -416,6 +439,7 @@ async def _replay_job(
         "findings": [],
         "llm_calls": recorder.llm_calls,
         "lanes": [],
+        "score_file": None,
     }
 
     sessions = SessionStore(
@@ -533,6 +557,7 @@ async def _replay_job(
         snapshot = await sessions.get_snapshot(session_id, REPLAY_USER_ID)
         final_score = (snapshot.get("current_score") or {}).get("score") or {}
         result["lanes"] = _lanes(original_score, final_score)
+        result["score_file"] = _save_split_score(final_score, musicxml_path, scores_dir, job_id)
         if job_store.unexpected_calls:
             result["unexpected_job_store_calls"] = sorted(set(job_store.unexpected_calls))
     except Exception as exc:  # noqa: BLE001 - one bad job must not stop the run.
@@ -599,6 +624,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                 llm_client=llm_client,
                 usage=usage,
                 keep_sessions=args.keep_sessions,
+                scores_dir=out / "scores",
             )
             target.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(
