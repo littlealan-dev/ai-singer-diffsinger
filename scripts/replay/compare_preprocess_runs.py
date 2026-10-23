@@ -45,8 +45,15 @@ def _read_job(path: Path) -> tuple[dict[str, Any] | None, str | None]:
                 raise ValueError("lane must contain a notes list")
             if any(not isinstance(note, dict) for note in lane.get("notes") or []):
                 raise ValueError("notes must be objects")
+            for note in lane.get("notes") or []:
+                hash(_note_signature(note))
+        for finding in job.get("findings") or []:
+            hash(_finding_key(finding))
+        if job.get("quality_class") is not None:
+            float(job["quality_class"])
+        _metrics(job)
         return job, None
-    except (OSError, UnicodeError, ValueError, TypeError):
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
         return None, "unreadable"
 
 
