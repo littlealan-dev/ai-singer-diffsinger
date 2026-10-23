@@ -6,6 +6,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -157,9 +158,12 @@ def test_write_entry_preserves_bytes_and_matches_private_safe_interface(tmp_path
     assert set(metadata["spec"]) == {"toolCalls", "planningContext", "initialMessage", "initialThoughtSummary"}
     assert set(metadata["prod_outcome"]) == {
         "status", "step", "review_required", "message", "error_message",
-        "warning_message", "details", "duration_s",
+        "warning_message", "details", "duration_s", "processing_s",
+        "processing_source", "dispatch_attempts",
     }
     assert metadata["prod_outcome"]["duration_s"] == 12.0
+    assert metadata["prod_outcome"]["processing_s"] == 12.0
+    assert metadata["prod_outcome"]["processing_source"] == "created_at_fallback"
     assert metadata["created_at"].endswith("+00:00")
     assert metadata["prod_outcome"]["details"]["quality_class"] == "good"
     for private_value in ("userId", "sessionId", "userEmail", "originatingTurnId", "llmCallsUsed", "user-secret", "session-secret", "singer@example.com"):
@@ -170,10 +174,14 @@ def test_dry_run_writes_nothing_and_never_downloads(tmp_path, capsys):
     def unexpected_download(bucket, path):
         raise AssertionError("dry-run attempted download")
 
+    def unexpected_log_read(job_id, created_at, end, project):
+        raise AssertionError("dry-run attempted log read")
+
     out = tmp_path / "missing"
     counts = collector.collect(
         [_job()], days=30, max_jobs=200, out_dir=out, bucket="bucket",
         dry_run=True, now=NOW, download=unexpected_download,
+        read_first_log=unexpected_log_read,
     )
     assert not out.exists()
     assert counts == {"scanned": 1, "kept": 1, "deduped": 0, "failed": 0}
@@ -192,6 +200,7 @@ def test_index_has_fixed_header_and_only_successful_downloads(tmp_path):
     counts = collector.collect(
         jobs, days=30, max_jobs=200, out_dir=tmp_path, bucket="bucket",
         dry_run=False, now=NOW, download=download,
+        read_first_log=lambda job_id, created_at, end, project: None,
     )
     with (tmp_path / "index.csv").open(newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
@@ -199,8 +208,81 @@ def test_index_has_fixed_header_and_only_successful_downloads(tmp_path):
         rows = list(reader)
     assert [row["job_id"] for row in rows] == ["good"]
     assert rows[0]["duration_s"] == "12.0"
+    assert rows[0]["processing_s"] == "12.0"
+    assert rows[0]["processing_source"] == "created_at_fallback"
     assert counts == {"scanned": 2, "kept": 1, "deduped": 0, "failed": 1}
     assert not (tmp_path / "missing").exists()
+
+
+def test_worker_log_time_is_recorded_in_json_and_index(tmp_path):
+    job = _job(dispatchAttempt=2)
+    created_at = job["createdAt"]
+    end = job["completedAt"]
+    calls = []
+
+    def read_first_log(job_id, start, finish, project):
+        calls.append((job_id, start, finish, project))
+        return start + timedelta(seconds=5)
+
+    collector.collect(
+        [job], days=30, max_jobs=200, out_dir=tmp_path, bucket="bucket",
+        dry_run=False, now=NOW, download=lambda bucket, path: b"<score/>",
+        project="sightsinger-app", read_first_log=read_first_log,
+    )
+    assert calls == [("job-a", created_at, end, "sightsinger-app")]
+    outcome = json.loads((tmp_path / "job-a" / "job.json").read_text())["prod_outcome"]
+    assert outcome["processing_s"] == 7.0
+    assert outcome["processing_source"] == "worker_logs"
+    assert outcome["dispatch_attempts"] == 2
+    with (tmp_path / "index.csv").open(newline="", encoding="utf-8") as file:
+        row = next(csv.DictReader(file))
+    assert (row["processing_s"], row["processing_source"], row["dispatch_attempts"]) == (
+        "7.0", "worker_logs", "2"
+    )
+
+
+@pytest.mark.parametrize("reader_fails", [False, True])
+def test_missing_or_failed_log_read_falls_back_without_stopping(tmp_path, reader_fails):
+    def read_first_log(job_id, created_at, end, project):
+        if reader_fails:
+            raise TimeoutError("fake gcloud timeout")
+        return None
+
+    collector.collect(
+        [_job()], days=30, max_jobs=200, out_dir=tmp_path, bucket="bucket",
+        dry_run=False, now=NOW, download=lambda bucket, path: b"<score/>",
+        read_first_log=read_first_log,
+    )
+    outcome = json.loads((tmp_path / "job-a" / "job.json").read_text())["prod_outcome"]
+    assert outcome["processing_s"] == 12.0
+    assert outcome["processing_source"] == "created_at_fallback"
+
+
+def test_gcloud_reader_uses_exact_filter_and_read_only_arguments(monkeypatch):
+    captured = []
+
+    def fake_run(command, **kwargs):
+        captured.append((command, kwargs))
+        return SimpleNamespace(stdout="2026-10-21T12:00:05Z\n")
+
+    monkeypatch.setattr(collector.subprocess, "run", fake_run)
+    created_at = NOW - timedelta(days=1)
+    end = created_at + timedelta(seconds=12)
+    first = collector._read_first_worker_log("job-a", created_at, end, "sightsinger-app")
+    assert first == created_at + timedelta(seconds=5)
+    assert captured == [(
+        [
+            "gcloud", "logging", "read",
+            'resource.type="cloud_run_revision" '
+            'AND resource.labels.service_name="sightsinger-preprocess-worker" '
+            'AND jsonPayload.job_id="job-a" '
+            'AND timestamp>="2026-10-21T11:58:00Z" '
+            'AND timestamp<="2026-10-21T12:02:12Z"',
+            "--project", "sightsinger-app", "--order=asc", "--limit=1",
+            "--format=value(timestamp)",
+        ],
+        {"capture_output": True, "text": True, "check": True, "timeout": 30},
+    )]
 
 
 def test_out_is_required():

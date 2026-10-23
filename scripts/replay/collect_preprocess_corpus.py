@@ -11,6 +11,7 @@ import csv
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 DEFAULT_BUCKET = "sightsinger-app.firebasestorage.app"
 INDEX_COLUMNS = (
     "job_id", "created_at", "status", "score_title", "demo_song_id",
-    "input_sha256", "duration_s",
+    "input_sha256", "duration_s", "processing_s", "processing_source", "dispatch_attempts",
 )
 PRIVATE_KEYS = {"userid", "sessionid", "useremail", "originatingturnid", "llmcallsused"}
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
@@ -127,7 +128,9 @@ def _duration(job: dict[str, Any]) -> float | None:
     return (end - start).total_seconds() if start and end else None
 
 
-def _job_metadata(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+def _job_metadata(
+    job_id: str, job: dict[str, Any], processing_started_at: datetime | None = None
+) -> dict[str, Any]:
     spec = _spec(job)
     if spec is None:
         raise ValueError("preprocessSpecJson must be a JSON object")
@@ -135,6 +138,13 @@ def _job_metadata(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     if created_at is None:
         raise ValueError("createdAt is required")
     completed_at = _utc(job.get("completedAt"))
+    end = completed_at or _utc(job.get("updatedAt"))
+    worker_start = _utc(processing_started_at)
+    worker_timed = worker_start is not None and end is not None
+    processing_s = (end - worker_start).total_seconds() if worker_timed else _duration(job)
+    dispatch_attempts = job.get("dispatchAttempt")
+    if not isinstance(dispatch_attempts, int) or isinstance(dispatch_attempts, bool):
+        dispatch_attempts = None
     replay_spec = {
         "toolCalls": spec.get("toolCalls", []),
         "planningContext": spec.get("planningContext"),
@@ -160,6 +170,9 @@ def _job_metadata(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
             "warning_message": job.get("warningMessage"),
             "details": job.get("details"),
             "duration_s": _duration(job),
+            "processing_s": processing_s,
+            "processing_source": "worker_logs" if worker_timed else "created_at_fallback",
+            "dispatch_attempts": dispatch_attempts,
         },
     }
     private_values = tuple(
@@ -177,11 +190,14 @@ def _job_metadata(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     return _without_private_data(metadata, private_values)
 
 
-def write_corpus_entry(out_dir: Path, job_id: str, job: dict[str, Any], xml_bytes: bytes) -> dict[str, Any]:
+def write_corpus_entry(
+    out_dir: Path, job_id: str, job: dict[str, Any], xml_bytes: bytes,
+    *, processing_started_at: datetime | None = None,
+) -> dict[str, Any]:
     """Write an exact score copy and the fixed replay metadata interface."""
     if not job_id or job_id in {".", ".."} or "/" in job_id or "\\" in job_id:
         raise ValueError("unsafe job id")
-    metadata = _job_metadata(job_id, job)
+    metadata = _job_metadata(job_id, job, processing_started_at)
     entry = Path(out_dir) / job_id
     entry.mkdir(parents=True, exist_ok=True)
     (entry / "input.xml").write_bytes(xml_bytes)
@@ -191,10 +207,35 @@ def write_corpus_entry(out_dir: Path, job_id: str, job: dict[str, Any], xml_byte
     return metadata
 
 
+def _read_first_worker_log(
+    job_id: str, created_at: datetime, end: datetime, project: str
+) -> datetime | None:
+    def utc_z(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    start_bound = utc_z(created_at - timedelta(minutes=2))
+    end_bound = utc_z(end + timedelta(minutes=2))
+    filter_text = (
+        'resource.type="cloud_run_revision" '
+        'AND resource.labels.service_name="sightsinger-preprocess-worker" '
+        f"AND jsonPayload.job_id={json.dumps(job_id)} "
+        f'AND timestamp>="{start_bound}" AND timestamp<="{end_bound}"'
+    )
+    result = subprocess.run(
+        ["gcloud", "logging", "read", filter_text, "--project", project,
+         "--order=asc", "--limit=1", "--format=value(timestamp)"],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    first_line = result.stdout.strip().splitlines()
+    return _utc(first_line[0]) if first_line else None
+
+
 def collect(
     job_dicts: Iterable[dict[str, Any]], *, days: int, max_jobs: int,
     out_dir: Path, bucket: str, dry_run: bool, now: datetime,
     download: Callable[[str, str], bytes],
+    project: str = "sightsinger-app",
+    read_first_log: Callable[[str, datetime, datetime, str], datetime | None] | None = None,
 ) -> dict[str, int]:
     selection = select_jobs(job_dicts, days, max_jobs, now)
     counts = {"scanned": selection.scanned, "kept": 0, "deduped": selection.deduped, "failed": 0}
@@ -216,7 +257,19 @@ def collect(
                     counts["failed"] += 1
                     print(f"download failed for {job_id}: {type(exc).__name__}", file=sys.stderr)
                     continue
-                metadata = write_corpus_entry(out_dir, job_id, job, xml_bytes)
+                created_at = _utc(job.get("createdAt"))
+                end = _utc(job.get("completedAt")) or _utc(job.get("updatedAt"))
+                first_log = None
+                if created_at and end:
+                    try:
+                        reader = read_first_log or _read_first_worker_log
+                        first_log = reader(job_id, created_at, end, project)
+                    except Exception:
+                        # A failed or timed-out log read must not stop collection.
+                        pass
+                metadata = write_corpus_entry(
+                    out_dir, job_id, job, xml_bytes, processing_started_at=first_log
+                )
                 outcome = metadata["prod_outcome"]
                 writer.writerow({
                     "job_id": metadata["job_id"],
@@ -226,6 +279,9 @@ def collect(
                     "demo_song_id": metadata["demo_song_id"],
                     "input_sha256": metadata["input_sha256"],
                     "duration_s": outcome["duration_s"],
+                    "processing_s": outcome["processing_s"],
+                    "processing_source": outcome["processing_source"],
+                    "dispatch_attempts": outcome["dispatch_attempts"],
                 })
                 counts["kept"] += 1
     print(" ".join(f"{key}={value}" for key, value in counts.items()))
@@ -293,7 +349,7 @@ def _query_jobs(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--target", choices=("production", "local"), required=True)
-    parser.add_argument("--project", default=os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID"))
+    parser.add_argument("--project", default=os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID") or "sightsinger-app")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--max-jobs", type=int, default=200)
     parser.add_argument("--out", type=Path, required=True)
@@ -318,7 +374,7 @@ def main(argv: list[str] | None = None) -> None:
     collect(
         _query_jobs(now, args.days), days=args.days, max_jobs=args.max_jobs,
         out_dir=args.out, bucket=args.bucket, dry_run=args.dry_run, now=now,
-        download=download_bytes,
+        download=download_bytes, project=args.project,
     )
 
 
