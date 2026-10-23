@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 
@@ -13,6 +14,19 @@ from src.backend.gemini_cache import GeminiPromptCacheManager
 from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.mcp.logging_utils import summarize_payload
+
+
+_CONNECTION_ATTEMPTS = 2
+_CONNECTION_RETRY_DELAY_SECONDS = 0.5
+
+
+def _is_connection_drop(exc: BaseException) -> bool:
+    """Return whether a request lost its connection before a complete response."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, ConnectionError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, ConnectionError)
 
 
 class GeminiRestClient:
@@ -151,16 +165,26 @@ class GeminiRestClient:
                 "x-goog-api-key": self._api_key,
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = response.read()
-        except TimeoutError as exc:
-            raise RuntimeError("Gemini request timed out.") from exc
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Gemini HTTP error {exc.code}: {details}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Gemini connection error: {exc.reason}") from exc
+        for attempt in range(1, _CONNECTION_ATTEMPTS + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    body = response.read()
+                break
+            except TimeoutError as exc:
+                raise RuntimeError("Gemini request timed out.") from exc
+            except urllib.error.HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"Gemini HTTP error {exc.code}: {details}") from exc
+            except (urllib.error.URLError, ConnectionError) as exc:
+                if _is_connection_drop(exc) and attempt < _CONNECTION_ATTEMPTS:
+                    self._logger.warning(
+                        "gemini_connection_retry role=%s model=%s attempt=%s error_type=%s error=%s",
+                        role.value, model, attempt, type(exc).__name__, exc,
+                    )
+                    time.sleep(_CONNECTION_RETRY_DELAY_SECONDS)
+                    continue
+                reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                raise RuntimeError(f"Gemini connection error: {reason}") from exc
 
         parsed = json.loads(body)
         self._log_usage(
