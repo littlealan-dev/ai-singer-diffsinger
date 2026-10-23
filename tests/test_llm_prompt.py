@@ -1051,3 +1051,42 @@ def test_preprocess_role_uses_planner_prompt_without_chat_only_rules() -> None:
     ):
         assert chat_only in default
         assert chat_only not in preprocess
+
+
+_SYNTHESIS_ONLY_SECTIONS = (
+    "Available voicebanks (IDs):",
+    "Voicebank metadata (if available):",
+    "User-selected voicebank override:",
+    "User-selected language override:",
+    "Canonical current solfege settings (authoritative):",
+    "Current credit availability (authoritative, refreshed for this request):",
+    "Synthesis quote instruction:",
+    "Active synthesis quote awaiting confirmation",
+    "Repeat-expansion setting (authoritative):",
+)
+
+
+def test_preprocess_role_leaves_out_synthesis_only_context() -> None:
+    kwargs = dict(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["voice-a"],
+        score_summary={"title": "T"},
+        voice_part_signals=_sample_voice_part_signals(),
+        voicebank_details=[{"id": "voice-a"}],
+        selected_voicebank_id="voice-a",
+        selected_language="en",
+        solfege_settings={"system": "movable_do"},
+        current_credit_availability={"credits": 3},
+        active_synthesis_quote={"quote_id": "q-1"},
+        expand_repeats=True,
+    )
+    preprocess = build_prompt_bundle(**kwargs, role="preprocess").dynamic_prompt_text
+    default = build_prompt_bundle(**kwargs, role="default").dynamic_prompt_text
+
+    for section in _SYNTHESIS_ONLY_SECTIONS:
+        assert section in default
+        assert section not in preprocess
+    for section in ("Score summary (if available):", "Voice-part planning signals (if available):"):
+        assert section in preprocess
+    assert preprocess.endswith("End Dynamic Context.")

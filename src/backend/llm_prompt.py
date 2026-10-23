@@ -363,6 +363,31 @@ def build_prompt_bundle(
             "Tools available for this score (call them like the tools listed in the "
             f"system prompt):\n{score_tools_json}\n"
         )
+    # Voices, overrides, solfege, credits, quotes and repeats feed synthesis
+    # replies only; the line-preparation model never reads them.
+    synthesis_context = (
+        ""
+        if _is_preprocess_role(role)
+        else (
+            f"Available voicebanks (IDs): {voicebanks_text}\n"
+            "Voicebank metadata (if available):\n"
+            f"{voicebank_details_text}\n"
+            f"User-selected voicebank override: {selected_voicebank_text}\n"
+            f"User-selected language override: {selected_language_text}\n"
+            "Canonical current solfege settings (authoritative):\n"
+            f"{solfege_settings_text}\n"
+            "Current credit availability (authoritative, refreshed for this request):\n"
+            f"{current_credit_availability_text}\n"
+            "Synthesis quote instruction:\n"
+            f"{current_synthesis_estimate_text}\n"
+            "Active synthesis quote awaiting confirmation (authoritative; pass this "
+            "exact quote_id to synthesize once the user confirms it):\n"
+            f"{active_synthesis_quote_text}\n"
+            "Repeat-expansion setting (authoritative):\n"
+            f"{repeat_expansion_text}\n"
+            f"{score_tools_text}"
+        )
+    )
     dynamic_prompt = (
         "Dynamic Context:\n"
         "AUTHORITATIVE CURRENT APPLICATION STATE: The values below are current and supersede "
@@ -380,23 +405,7 @@ def build_prompt_bundle(
         f"{preprocess_mapping_context_text}\n"
         "Latest attempted preprocess plan (if available):\n"
         f"{last_preprocess_plan_text}\n"
-        f"Available voicebanks (IDs): {voicebanks_text}\n"
-        "Voicebank metadata (if available):\n"
-        f"{voicebank_details_text}\n"
-        f"User-selected voicebank override: {selected_voicebank_text}\n"
-        f"User-selected language override: {selected_language_text}\n"
-        "Canonical current solfege settings (authoritative):\n"
-        f"{solfege_settings_text}\n"
-        "Current credit availability (authoritative, refreshed for this request):\n"
-        f"{current_credit_availability_text}\n"
-        "Synthesis quote instruction:\n"
-        f"{current_synthesis_estimate_text}\n"
-        "Active synthesis quote awaiting confirmation (authoritative; pass this "
-        "exact quote_id to synthesize once the user confirms it):\n"
-        f"{active_synthesis_quote_text}\n"
-        "Repeat-expansion setting (authoritative):\n"
-        f"{repeat_expansion_text}\n"
-        f"{score_tools_text}"
+        f"{synthesis_context}"
         "End Dynamic Context."
     )
     return PromptBundle(
