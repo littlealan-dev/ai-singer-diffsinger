@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import logging
+import socket
 import urllib.error
 import urllib.request
 
@@ -591,3 +593,150 @@ def test_gemini_generate_sends_a_response_schema_only_when_given(
         "responseSchema": schema,
     }
     assert without["generationConfig"] == {"responseMimeType": "application/json"}
+
+
+class _RetryCacheManager:
+    def ensure_prompt_cache(self, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+
+class _RetryResponse:
+    def __enter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(
+            {"candidates": [{"content": {"parts": [
+                {"text": '{"tool_calls":[],"final_message":"ok","include_score":false}'}
+            ]}}]}
+        ).encode("utf-8")
+
+
+def _retry_client(monkeypatch: pytest.MonkeyPatch) -> GeminiRestClient:
+    monkeypatch.setattr(
+        "src.backend.llm_gemini._CONNECTION_RETRY_DELAY_SECONDS", 0, raising=False
+    )
+    return GeminiRestClient(
+        _settings(), api_key="dummy", cache_manager=_RetryCacheManager()
+    )
+
+
+def test_gemini_retries_remote_disconnect_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return _RetryResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    caplog.set_level(logging.WARNING, logger="src.backend.llm_gemini")
+
+    text = client.generate("system", [{"role": "user", "content": "hello"}])
+
+    assert text == '{"tool_calls":[],"final_message":"ok","include_score":false}'
+    assert calls == 2
+    warnings = [
+        record for record in caplog.records
+        if record.name == "src.backend.llm_gemini" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage().startswith("gemini_connection_retry")
+
+
+def test_gemini_retries_wrapped_connection_reset_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.URLError(ConnectionResetError("connection reset"))
+        return _RetryResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    text = client.generate("system", [{"role": "user", "content": "hello"}])
+
+    assert text == '{"tool_calls":[],"final_message":"ok","include_score":false}'
+    assert calls == 2
+
+
+def test_gemini_stops_after_two_remote_disconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="Gemini connection error: Remote end closed"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+    assert calls == 2
+
+
+def test_gemini_does_not_retry_http_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            request.full_url, 429, "Too Many Requests", hdrs=None,
+            fp=io.BytesIO(b'{"error":{"code":429}}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="Gemini HTTP error 429"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+    assert calls == 1
+
+
+def test_gemini_does_not_retry_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="Gemini request timed out"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+    assert calls == 1
+
+
+def test_gemini_does_not_retry_dns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _retry_client(monkeypatch)
+    calls = 0
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        raise urllib.error.URLError(socket.gaierror(8, "nodename nor servname provided"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="Gemini connection error"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+    assert calls == 1
