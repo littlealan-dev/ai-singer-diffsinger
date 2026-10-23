@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare two offline preprocess replay runs and report the ship gate."""
+"""Compare offline preprocess replay runs and report the ship gate.
+
+One --baseline and one --candidate: the per-job comparison (jobs.csv, new_p2.csv,
+lane_diffs.csv, summary.md). Two of each: the two-run gate (gate_jobs.csv,
+review.csv, gate_summary.md), with an optional --tiebreak run.
+"""
 
 from __future__ import annotations
 
@@ -329,17 +334,285 @@ def compare_runs(baseline_dir: Path, candidate_dir: Path, out_dir: Path) -> Path
     return summary_path
 
 
+# Two-run ship gate (Alan, 2026-10-23). A run of a job is "good" when it
+# completed with no P0 or P1 finding. v1 and the candidate each run every job
+# twice; a block means "stop and investigate", not a verdict on the candidate.
+GATE_JOB_COLUMNS = (
+    "job_id", "v1_good", "candidate_good", "result", "reasons",
+    "v1_statuses", "candidate_statuses", "tiebreak_status",
+    "v1_quality_classes", "candidate_quality_classes",
+)
+REVIEW_COLUMNS = ("job_id", "reason", "rule", "severity", "target", "runs")
+RUNNER_PYTHON = "/Users/alanchan/antigravity/ai-singer-diffsinger/.venv310/bin/python"
+REPLAY_ENV = "/Users/alanchan/antigravity/sightsinger-agents/replay.env"
+
+
+def _is_good(job: dict[str, Any]) -> bool:
+    return job.get("status") == "completed" and not any(
+        finding.get("severity") in {"P0", "P1"} for finding in job.get("findings") or []
+    )
+
+
+def _keys(job: dict[str, Any], severity: str) -> set[tuple[Any, Any, Any]]:
+    return {
+        _finding_key(finding)
+        for finding in job.get("findings") or []
+        if finding.get("severity") == severity
+    }
+
+
+def gate_job(
+    job_id: str,
+    v1_runs: list[dict[str, Any]],
+    candidate_runs: list[dict[str, Any]],
+    tiebreak: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Apply the per-job gate to two v1 runs and two candidate runs of one job.
+
+    result is "block", "needs_tiebreak", "review" or "pass"; review rows list
+    what a person should look at even when nothing blocks.
+    """
+    v1_good = sum(_is_good(run) for run in v1_runs)
+    candidate_good = sum(_is_good(run) for run in candidate_runs)
+    reasons: list[str] = []
+    review: list[dict[str, Any]] = []
+
+    def review_row(reason: str, finding_key=(None, None, None), runs: str = "") -> dict[str, Any]:
+        rule, severity, target = finding_key
+        return {"job_id": job_id, "reason": reason, "rule": rule, "severity": severity,
+                "target": target, "runs": runs}
+
+    if v1_good == 2 and candidate_good == 0:
+        reasons.append("good in 2/2 v1 runs but 0/2 candidate runs")
+    v1_p0 = set().union(*(_keys(run, "P0") for run in v1_runs))
+    for key in sorted(set().union(*(_keys(run, "P0") for run in candidate_runs)) - v1_p0, key=str):
+        reasons.append(f"new P0 {key[0]} on {key[2]}")
+    v1_p1 = set().union(*(_keys(run, "P1") for run in v1_runs))
+    candidate_p1 = [_keys(run, "P1") - v1_p1 for run in candidate_runs]
+    for key in sorted(candidate_p1[0] & candidate_p1[1], key=str):
+        reasons.append(f"same new P1 {key[0]} on {key[2]} in both candidate runs")
+    for key in sorted(candidate_p1[0] ^ candidate_p1[1], key=str):
+        review.append(review_row("new P1 in one candidate run only", key,
+                                 "1" if key in candidate_p1[0] else "2"))
+    v1_classes = [
+        run.get("quality_class") for run in v1_runs
+        if run.get("status") == "completed" and run.get("quality_class") is not None
+    ]
+    if v1_classes:
+        floor = min(v1_classes)
+        for index, run in enumerate(candidate_runs, start=1):
+            quality = run.get("quality_class")
+            if run.get("status") == "completed" and quality is not None and quality < floor:
+                reasons.append(f"candidate run {index} quality_class {quality} < v1 minimum {floor}")
+    v1_p2 = set().union(*(_keys(run, "P2") for run in v1_runs))
+    for index, run in enumerate(candidate_runs, start=1):
+        for key in sorted(_keys(run, "P2") - v1_p2, key=str):
+            review.append(review_row("new P2", key, str(index)))
+
+    tiebreak_status = ""
+    if reasons:
+        result = "block"
+    elif v1_good == 2 and candidate_good == 1:
+        if tiebreak is None:
+            result = "needs_tiebreak"
+            tiebreak_status = "missing"
+        elif _is_good(tiebreak):
+            result = "review"
+            tiebreak_status = "good"
+            review.append(review_row("passed only on the tie-break run (2/3 good)"))
+        else:
+            result = "block"
+            tiebreak_status = "not good"
+            reasons.append("good in 2/2 v1 runs but 1/3 candidate runs (tie-break run not good)")
+    else:
+        if candidate_good < v1_good:
+            review.append(review_row(f"good in {v1_good}/2 v1 runs but {candidate_good}/2 candidate runs"))
+        result = "review" if review else "pass"
+    row = {
+        "job_id": job_id,
+        "v1_good": v1_good,
+        "candidate_good": candidate_good,
+        "result": result,
+        "reasons": "; ".join(reasons),
+        "v1_statuses": "/".join(str(run.get("status")) for run in v1_runs),
+        "candidate_statuses": "/".join(str(run.get("status")) for run in candidate_runs),
+        "tiebreak_status": tiebreak_status,
+        "v1_quality_classes": "/".join(str(run.get("quality_class")) for run in v1_runs),
+        "candidate_quality_classes": "/".join(str(run.get("quality_class")) for run in candidate_runs),
+    }
+    return row, review
+
+
+def _run_meta(run_dir: Path) -> dict[str, Any]:
+    try:
+        meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        return meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def tiebreak_command(candidate_dir: Path, tiebreak_dir: Path, job_ids: list[str]) -> str:
+    """The runner command that replays only the tie-break jobs into tiebreak_dir."""
+    meta = _run_meta(candidate_dir)
+    label = f"{meta.get('label') or candidate_dir.name}-tiebreak"
+    jobs = " ".join(f"--job {job_id}" for job_id in job_ids)
+    return (
+        "bash -c 'set -a; . " + REPLAY_ENV + "; set +a; "
+        f"{RUNNER_PYTHON} scripts/replay/run_preprocess_replay.py "
+        f"--corpus {meta.get('corpus_dir') or '<corpus>'} --out {tiebreak_dir} "
+        f"--label {label} --planner {meta.get('planner') or 'v1'} {jobs}'"
+    )
+
+
+def evaluate_gate(
+    baseline_dirs: list[Path],
+    candidate_dirs: list[Path],
+    out_dir: Path,
+    tiebreak_dir: Path | None = None,
+) -> Path:
+    """Report the two-run gate for two v1 runs against two candidate runs."""
+    baseline_dirs = [Path(path) for path in baseline_dirs]
+    candidate_dirs = [Path(path) for path in candidate_dirs]
+    out_dir = Path(out_dir)
+    tiebreak_dir = Path(tiebreak_dir) if tiebreak_dir else candidate_dirs[0].parent / (
+        candidate_dirs[0].name + "-tiebreak"
+    )
+    all_dirs = baseline_dirs + candidate_dirs
+    job_ids = sorted(set().union(*(
+        {path.stem for path in (run_dir / "jobs").glob("*.json")} for run_dir in all_dirs
+    )))
+    rows: list[dict[str, Any]] = []
+    review: list[dict[str, Any]] = []
+    incomplete: list[str] = []
+    v1_good_total = candidate_good_total = 0
+    candidate_drops = noise_drops = 0
+    for job_id in job_ids:
+        runs = [_read_job(run_dir / "jobs" / f"{job_id}.json") for run_dir in all_dirs]
+        if any(error for _, error in runs):
+            incomplete.append(
+                f"{job_id}: " + ", ".join(
+                    f"{run_dir.name} {error}" for run_dir, (_, error) in zip(all_dirs, runs) if error
+                )
+            )
+            continue
+        v1_runs = [job for job, _ in runs[:2]]
+        candidate_runs = [job for job, _ in runs[2:]]
+        tiebreak, tiebreak_error = _read_job(tiebreak_dir / "jobs" / f"{job_id}.json")
+        row, job_review = gate_job(
+            job_id, v1_runs, candidate_runs, tiebreak if tiebreak_error is None else None
+        )
+        rows.append(row)
+        review.extend(job_review)
+        v1_good_total += row["v1_good"]
+        candidate_good_total += row["candidate_good"]
+        candidate_drops += row["v1_good"] == 2 and row["candidate_good"] == 1
+        noise_drops += _is_good(v1_runs[0]) and not _is_good(v1_runs[1])
+
+    set_reasons = []
+    if candidate_good_total < v1_good_total:
+        set_reasons.append(
+            f"candidate good runs {candidate_good_total}/{2 * len(rows)} < v1 good runs "
+            f"{v1_good_total}/{2 * len(rows)}"
+        )
+    if candidate_drops > noise_drops:
+        set_reasons.append(
+            f"jobs going 2/2 -> 1/2: {candidate_drops} > v1 noise ({baseline_dirs[0].name} good, "
+            f"{baseline_dirs[1].name} not): {noise_drops}"
+        )
+    blocked = [row for row in rows if row["result"] == "block"]
+    pending = [row["job_id"] for row in rows if row["result"] == "needs_tiebreak"]
+    if blocked or set_reasons:
+        verdict = "blocked: investigate"
+    elif pending:
+        verdict = "needs tie-breaker"
+    elif incomplete:
+        verdict = "incomplete: missing results"
+    else:
+        verdict = "pass"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_csv(out_dir / "gate_jobs.csv", GATE_JOB_COLUMNS, rows)
+    _write_csv(out_dir / "review.csv", REVIEW_COLUMNS, review)
+    lines = [
+        "# Preprocess two-run gate",
+        "",
+        f"Result: {verdict}",
+        "A block is a stop to investigate the listed jobs, not a verdict on the candidate.",
+        "",
+        "v1 runs: " + ", ".join(path.name for path in baseline_dirs),
+        "Candidate runs: " + ", ".join(path.name for path in candidate_dirs),
+        f"Tie-break run: {tiebreak_dir.name}",
+        f"Jobs compared: {len(rows)}",
+        "",
+        "## Jobs to investigate",
+    ]
+    lines.extend(f"- {row['job_id']}: {row['reasons']}" for row in blocked)
+    lines.extend(f"- set level: {reason}" for reason in set_reasons)
+    if not blocked and not set_reasons:
+        lines.append("- None")
+    lines.extend(["", "## Needs a tie-breaker run"])
+    if pending:
+        lines.extend(f"- {job_id}" for job_id in pending)
+        lines.extend(["", "Run from the planner-v2 worktree:", "",
+                      "    " + tiebreak_command(candidate_dirs[0], tiebreak_dir, pending)])
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Review (not blocking)"])
+    lines.extend(
+        f"- {item['job_id']}: {item['reason']}"
+        + (f" {item['rule']} on {item['target']} (run {item['runs']})" if item["rule"] else "")
+        for item in review
+    )
+    if not review:
+        lines.append("- None")
+    lines.extend(["", "## Missing results"])
+    lines.extend(f"- {item}" for item in incomplete)
+    if not incomplete:
+        lines.append("- None")
+    lines.extend([
+        "", "## Set level", "",
+        f"- Good runs: v1 {v1_good_total}/{2 * len(rows)}, candidate {candidate_good_total}/{2 * len(rows)}",
+        f"- Jobs 2/2 -> 1/2: candidate {candidate_drops}, v1 noise {noise_drops}",
+        "", "## Run metrics", "",
+    ])
+    for run_dir in all_dirs:
+        jobs = [job for job, error in (
+            _read_job(path) for path in sorted((run_dir / "jobs").glob("*.json"))
+        ) if error is None]
+        metrics = _metric_summary(jobs)
+        lines.append(
+            f"- {run_dir.name}: median wall_time_s {_display(metrics['median_time'])}, "
+            f"p90 {_display(metrics['p90_time'])}, median total tokens "
+            f"{_display(metrics['median_tokens'])}, p90 {_display(metrics['p90_tokens'])}"
+        )
+    summary_path = out_dir / "gate_summary.md"
+    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return summary_path
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", type=Path, required=True)
-    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path, action="append", required=True,
+                        help="A v1 run directory; give two for the two-run gate.")
+    parser.add_argument("--candidate", type=Path, action="append", required=True,
+                        help="A candidate run directory; give two for the two-run gate.")
+    parser.add_argument("--tiebreak", type=Path,
+                        help="Third candidate run for tie-break jobs (default: <first candidate>-tiebreak).")
     parser.add_argument("--out", type=Path, required=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if (len(args.baseline), len(args.candidate)) not in {(1, 1), (2, 2)}:
+        parser.error("give one --baseline and one --candidate, or two of each")
+    if args.tiebreak and len(args.candidate) != 2:
+        parser.error("--tiebreak needs two --candidate runs")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    print(compare_runs(args.baseline, args.candidate, args.out))
+    if len(args.baseline) == 2:
+        print(evaluate_gate(args.baseline, args.candidate, args.out, args.tiebreak))
+    else:
+        print(compare_runs(args.baseline[0], args.candidate[0], args.out))
     return 0
 
 

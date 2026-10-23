@@ -169,3 +169,173 @@ def test_fixture_report_has_gate_failures_p2_and_metric_medians(tmp_path, capsys
         reader = csv.DictReader(file)
         assert reader.fieldnames == list(compare.LANE_COLUMNS)
         assert [row["job_id"] for row in reader] == ["job-a"]
+
+
+# Two-run gate (Alan, 2026-10-23).
+
+GOOD = _job()
+FAILED = _job(status="failed", quality_class=None)
+
+
+def _gate(v1, candidate, tiebreak=None):
+    return compare.gate_job("job-x", list(v1), list(candidate), tiebreak)
+
+
+@pytest.mark.parametrize(
+    ("v1", "candidate", "result"),
+    [
+        ((GOOD, GOOD), (GOOD, GOOD), "pass"),
+        ((GOOD, GOOD), (FAILED, FAILED), "block"),
+        ((GOOD, GOOD), (GOOD, FAILED), "needs_tiebreak"),
+        ((GOOD, FAILED), (FAILED, FAILED), "review"),   # 1/2 -> 0/2: review, not block
+        ((FAILED, FAILED), (FAILED, FAILED), "pass"),
+        ((GOOD, FAILED), (GOOD, GOOD), "pass"),
+    ],
+)
+def test_gate_by_good_run_counts(v1, candidate, result):
+    row, _ = _gate(v1, candidate)
+    assert row["result"] == result
+
+
+def test_gate_tiebreak_good_passes_for_review_and_bad_blocks():
+    row, review = _gate((GOOD, GOOD), (GOOD, FAILED), tiebreak=GOOD)
+    assert row["result"] == "review"
+    assert row["tiebreak_status"] == "good"
+    assert any("tie-break" in item["reason"] for item in review)
+    row, _ = _gate((GOOD, GOOD), (GOOD, FAILED), tiebreak=FAILED)
+    assert row["result"] == "block"
+    assert "1/3" in row["reasons"]
+
+
+def test_gate_new_p0_in_either_candidate_run_blocks_but_known_p0_does_not():
+    p0 = _finding("same_clef_claim_coverage", "P0")
+    new_p0, _ = _gate((GOOD, GOOD), (GOOD, _job(findings=[p0])))
+    assert new_p0["result"] == "block"
+    assert "new P0 same_clef_claim_coverage" in new_p0["reasons"]
+    known, _ = _gate((_job(findings=[p0]), GOOD), (_job(findings=[p0]), _job(findings=[p0])))
+    assert "new P0" not in known["reasons"]
+
+
+def test_gate_same_new_p1_in_both_runs_blocks_one_run_only_is_review():
+    p1 = _finding("weak_lyric_source_with_better_alternative", "P1")
+    both, _ = _gate((FAILED, FAILED), (_job(findings=[p1]), _job(findings=[p1])))
+    assert both["result"] == "block"
+    assert "same new P1" in both["reasons"]
+    one, review = _gate((FAILED, FAILED), (_job(findings=[p1]), FAILED))
+    assert one["result"] == "review"
+    assert [item["reason"] for item in review] == ["new P1 in one candidate run only"]
+    known, _ = _gate((_job(findings=[p1]), FAILED), (_job(findings=[p1]), _job(findings=[p1])))
+    assert known["result"] != "block"
+
+
+def test_gate_quality_class_below_v1_minimum_blocks():
+    lower, _ = _gate((GOOD, _job(quality_class=2)), (GOOD, _job(quality_class=1)))
+    assert lower["result"] == "block"
+    assert "quality_class 1 < v1 minimum 2" in lower["reasons"]
+    equal, _ = _gate((GOOD, _job(quality_class=2)), (GOOD, _job(quality_class=2)))
+    assert "quality_class" not in equal["reasons"]
+
+
+def test_gate_new_p2_is_review_only():
+    row, review = _gate((GOOD, GOOD), (GOOD, _job(findings=[_finding("partial_lyric_coverage", "P2")])))
+    assert row["result"] == "review"
+    assert review[0]["reason"] == "new P2"
+
+
+def _write_run(root, name, jobs, label=None):
+    run = root / name
+    (run / "jobs").mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({
+        "label": label or name, "planner": "v1", "corpus_dir": "/corpus",
+    }))
+    for job_id, job in jobs.items():
+        (run / "jobs" / f"{job_id}.json").write_text(json.dumps({**job, "job_id": job_id}))
+    return run
+
+
+def _gate_runs(tmp_path, v1a, v1b, ca, cb, tiebreak=None):
+    runs = [
+        _write_run(tmp_path, name, jobs)
+        for name, jobs in (("v1a", v1a), ("v1b", v1b), ("c1", ca), ("c2", cb))
+    ]
+    if tiebreak is not None:
+        _write_run(tmp_path, "c1-tiebreak", tiebreak)
+    summary = compare.evaluate_gate(runs[:2], runs[2:], tmp_path / "report")
+    return summary.read_text(encoding="utf-8")
+
+
+def test_evaluate_gate_lists_tiebreak_jobs_with_runner_command(tmp_path):
+    # Job c improves (1/2 -> 2/2), so the set-level good-run totals tie.
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": GOOD, "c": FAILED},
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": FAILED, "c": GOOD},
+    )
+    assert "Result: needs tie-breaker" in summary
+    assert "- b" in summary
+    assert "run_preprocess_replay.py --corpus /corpus" in summary
+    assert "--label c1-tiebreak --planner v1 --job b'" in summary
+
+
+def test_evaluate_gate_tiebreak_present_passes_with_review(tmp_path):
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": GOOD, "c": FAILED},
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": FAILED, "c": GOOD},
+        tiebreak={"b": GOOD},
+    )
+    assert "Result: pass" in summary
+    assert "passed only on the tie-break run" in summary
+
+
+def test_evaluate_gate_tiebreak_job_alone_still_blocks_at_set_level(tmp_path):
+    # As specified: the set-level count uses the two candidate runs only, so a
+    # 2/2 -> 1/2 job lowers the total even when its tie-break run is good.
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD}, {"a": GOOD, "b": GOOD},
+        {"a": GOOD, "b": GOOD}, {"a": GOOD, "b": FAILED},
+        tiebreak={"b": GOOD},
+    )
+    assert "Result: blocked: investigate" in summary
+    assert "set level: candidate good runs 3/4 < v1 good runs 4/4" in summary
+
+
+def test_evaluate_gate_set_level_blocks_on_fewer_good_runs(tmp_path):
+    # Each job alone is only "review" (1/2 -> 0/2), but the set has fewer good runs.
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD}, {"a": FAILED, "b": FAILED},
+        {"a": FAILED, "b": FAILED}, {"a": FAILED, "b": FAILED},
+    )
+    assert "Result: blocked: investigate" in summary
+    assert "set level: candidate good runs 0/4 < v1 good runs 2/4" in summary
+
+
+def test_evaluate_gate_set_level_blocks_on_more_drops_than_v1_noise(tmp_path):
+    # v1 noise: no job good in v1a and not in v1b. Candidate: two jobs 2/2 -> 1/2,
+    # balanced by two jobs 0/2 -> 1/2 so the good-run totals tie.
+    v1 = {"a": GOOD, "b": GOOD, "c": FAILED, "d": FAILED}
+    summary = _gate_runs(
+        tmp_path, v1, dict(v1),
+        {"a": GOOD, "b": GOOD, "c": GOOD, "d": GOOD},
+        {"a": FAILED, "b": FAILED, "c": FAILED, "d": FAILED},
+        tiebreak={"a": GOOD, "b": GOOD},
+    )
+    assert "Result: blocked: investigate" in summary
+    assert "jobs going 2/2 -> 1/2: 2 > v1 noise" in summary
+
+
+def test_evaluate_gate_reports_missing_results_not_pass(tmp_path):
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD}, {"a": GOOD, "b": GOOD},
+        {"a": GOOD, "b": GOOD}, {"a": GOOD},
+    )
+    assert "Result: incomplete: missing results" in summary
+    assert "- b: c2 missing" in summary
+
+
+def test_main_requires_one_or_two_of_each_run(tmp_path):
+    with pytest.raises(SystemExit):
+        compare._parse_args(["--baseline", "a", "--candidate", "b", "--candidate", "c", "--out", "o"])
