@@ -123,6 +123,62 @@ def _default_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
     return compact
 
 
+# Per-part fields that full_score_analysis.parts[] repeats from parts[] (key in
+# full_score_analysis -> key in parts[]): both are built from the same analysis.
+_DUPLICATED_ANALYSIS_PART_FIELDS = {
+    "measure_lyric_coverage": "measure_lyric_coverage",
+    "voice_part_measure_spans": "voice_part_measure_spans",
+    "voice_part_id_to_source_voice_id": "voice_part_id_to_source_voice_id",
+    "part_region_indices": "part_region_indices",
+    "section_source_candidate_hints": "source_candidate_hints",
+}
+
+
+def _preprocess_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop full_score_analysis copies of per-part values that parts[] already has.
+
+    A field is dropped only when the matching parts[] entry holds the identical
+    value, so the line-preparation model still sees every value once.
+    """
+    full_analysis = signals.get("full_score_analysis")
+    if not isinstance(full_analysis, dict) or not isinstance(full_analysis.get("parts"), list):
+        return signals
+    parts_by_key = {
+        (part.get("part_index"), part.get("part_id")): part
+        for part in signals.get("parts") or []
+        if isinstance(part, dict)
+    }
+    analysis_parts = []
+    for part in full_analysis["parts"]:
+        twin = (
+            parts_by_key.get((part.get("part_index"), part.get("part_id")))
+            if isinstance(part, dict)
+            else None
+        )
+        if twin is None:
+            analysis_parts.append(part)
+            continue
+        analysis_parts.append(
+            {
+                key: value
+                for key, value in part.items()
+                if not (
+                    key in _DUPLICATED_ANALYSIS_PART_FIELDS
+                    and _DUPLICATED_ANALYSIS_PART_FIELDS[key] in twin
+                    and twin[_DUPLICATED_ANALYSIS_PART_FIELDS[key]] == value
+                )
+            }
+        )
+    return {**signals, "full_score_analysis": {**full_analysis, "parts": analysis_parts}}
+
+
+def _context_json(value: Any, *, compact: bool) -> str:
+    """Serialize a Dynamic Context value; the line-preparation model gets it unindented."""
+    if compact:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
+
+
 def build_prompt_bundle(
     tools: List[Dict[str, Any]],
     score_available: bool,
@@ -156,40 +212,34 @@ def build_prompt_bundle(
         )
 
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True, ensure_ascii=False)
+    # The line-preparation model reads the largest score facts, so its JSON is compact.
+    compact_context = _is_preprocess_role(role)
     score_hint = "available" if score_available else "missing"
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
     score_summary_text = "none"
     if score_summary:
-        score_summary_text = json.dumps(
-            score_summary, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        score_summary_text = _context_json(score_summary, compact=compact_context)
     parsed_score_json_text = "none"
     if parsed_score_json:
-        parsed_score_json_text = json.dumps(
-            parsed_score_json, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        parsed_score_json_text = _context_json(parsed_score_json, compact=compact_context)
     voice_part_signals_text = "none"
     if voice_part_signals:
         prompt_signals = (
-            voice_part_signals
+            _preprocess_voice_part_signals(voice_part_signals)
             if _is_preprocess_role(role)
             else _default_voice_part_signals(voice_part_signals)
         )
-        voice_part_signals_text = json.dumps(
-            prompt_signals, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        voice_part_signals_text = _context_json(prompt_signals, compact=compact_context)
     preprocess_mapping_context_text = "none"
     if preprocess_mapping_context:
-        preprocess_mapping_context_text = json.dumps(
-            preprocess_mapping_context, indent=2, sort_keys=True, ensure_ascii=False
+        preprocess_mapping_context_text = _context_json(
+            preprocess_mapping_context, compact=compact_context
         )
     last_preprocess_plan_text = "none"
     if last_preprocess_plan:
-        last_preprocess_plan_text = json.dumps(
-            last_preprocess_plan, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        last_preprocess_plan_text = _context_json(last_preprocess_plan, compact=compact_context)
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(

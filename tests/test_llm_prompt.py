@@ -122,6 +122,63 @@ def test_preprocess_role_keeps_all_voice_part_signals() -> None:
     assert _prompt_voice_part_signals(signals, role="preprocess") == signals
 
 
+def test_preprocess_role_drops_only_identical_duplicate_analysis_fields() -> None:
+    signals = _sample_voice_part_signals()
+    part = signals["parts"][0]
+    analysis_part = signals["full_score_analysis"]["parts"][0]
+    part["measure_lyric_coverage"] = [{"measure_number": 7}]
+    part["source_candidate_hints"] = [{"target_voice_part_id": "alto"}]
+    analysis_part["section_source_candidate_hints"] = [{"target_voice_part_id": "alto"}]
+    analysis_part["voice_part_measure_spans"] = {"soprano": [{"start": 1, "end": 2}]}
+
+    prompt_signals = _prompt_voice_part_signals(signals, role="preprocess")
+
+    prompt_analysis_part = prompt_signals["full_score_analysis"]["parts"][0]
+    assert "measure_lyric_coverage" not in prompt_analysis_part
+    assert "section_source_candidate_hints" not in prompt_analysis_part
+    # Differs from parts[], so it is not a copy and stays.
+    assert prompt_analysis_part["voice_part_measure_spans"] == {"soprano": [{"start": 1, "end": 2}]}
+    assert prompt_analysis_part["voice_parts"] == analysis_part["voice_parts"]
+    assert prompt_signals["parts"] == signals["parts"]
+
+
+def test_preprocess_role_signals_lose_no_value_on_a_parsed_score() -> None:
+    from src.api import parse_score
+    from src.backend.llm_prompt import (
+        _DUPLICATED_ANALYSIS_PART_FIELDS,
+        _preprocess_voice_part_signals,
+    )
+
+    signals = parse_score("tests/fixtures/split/satb_two_bars.xml")["voice_part_signals"]
+    compact = _preprocess_voice_part_signals(signals)
+
+    parts_by_key = {(p["part_index"], p["part_id"]): p for p in compact["parts"]}
+    restored = json.loads(json.dumps(compact))
+    for part in restored["full_score_analysis"]["parts"]:
+        twin = parts_by_key[(part["part_index"], part["part_id"])]
+        for analysis_key, part_key in _DUPLICATED_ANALYSIS_PART_FIELDS.items():
+            if analysis_key not in part and part_key in twin:
+                part[analysis_key] = twin[part_key]
+    assert restored == json.loads(json.dumps(signals))
+    assert len(json.dumps(compact)) < len(json.dumps(signals))
+
+
+def test_preprocess_role_writes_dynamic_json_compactly() -> None:
+    signals = _sample_voice_part_signals()
+    preprocess_text = build_prompt_bundle(
+        tools=[], score_available=True, score_summary={"title": "T", "parts": [1]},
+        voice_part_signals=signals, role="preprocess",
+    ).dynamic_prompt_text
+    default_text = build_prompt_bundle(
+        tools=[], score_available=True, score_summary={"title": "T", "parts": [1]},
+        voice_part_signals=signals, role="default",
+    ).dynamic_prompt_text
+
+    assert '{"parts":[1],"title":"T"}' in preprocess_text
+    assert '"analysis_version":"v2"' in preprocess_text
+    assert '{\n  "parts": [\n    1\n  ],\n  "title": "T"\n}' in default_text
+
+
 def test_build_system_prompt_injects_nonempty_parsed_score_json() -> None:
     prompt = build_system_prompt(
         tools=[],

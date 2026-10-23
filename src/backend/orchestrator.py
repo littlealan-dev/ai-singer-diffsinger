@@ -3084,7 +3084,7 @@ class Orchestrator:
                 try:
                     repair_response, repair_error = await self._decide_followup_with_llm(
                         latest_snapshot,
-                        json.dumps(repair_envelope, sort_keys=True),
+                        json.dumps(repair_envelope, sort_keys=True, separators=(",", ":")),
                         working_score,
                         session_id=session_id,
                         user_id=user_id,
@@ -6142,7 +6142,7 @@ class Orchestrator:
             )
             response, error = await self._decide_followup_with_llm(
                 snapshot,
-                json.dumps(attempt_context, sort_keys=True),
+                json.dumps(attempt_context, sort_keys=True, separators=(",", ":")),
                 score,
                 role=LlmRole.PREPROCESS,
                 current_credit_availability=current_credit_availability,
