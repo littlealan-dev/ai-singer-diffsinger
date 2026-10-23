@@ -11,6 +11,7 @@ from typing import Any
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
     _avg_pitch,
+    _best_same_part_word_lyric_source_for_range,
     _build_measure_lyric_coverage,
     _build_part_region_indices,
     _derived_part_indices,
@@ -25,6 +26,7 @@ from src.api.voice_parts import (
     _normalize_verse_number,
     _staff_scope_key,
     _staff_scope_measure_max_simultaneous_notes,
+    _target_sung_note_count_for_section,
     _voice_key,
 )
 
@@ -394,15 +396,18 @@ def _melody_options(lane: Lane, candidates: list[dict]) -> tuple[Option, ...]:
 
 
 def _lyric_options(
-    score: dict, lane: Lane, segment: Segment, candidates: list[dict], target_notes: list[dict],
+    score: dict, lane: Lane, segment: Segment, candidates: list[dict],
+    target_notes: list[dict], target_sung_note_count: int, derived_indices: set[int],
 ) -> tuple[Option, ...]:
     target_onsets = {
         (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
         for note in target_notes
     }
-    target_count = len(target_onsets)
+    target_onset_count = len(target_onsets)
     valid: list[tuple[dict, dict]] = []
     for source in candidates:
+        if source["part_index"] in derived_indices:
+            continue
         if not any(_lyric_kind(note) == "word" for note in source["notes"]):
             continue
         generated = _generated_solfege_lyric_stats_for_voice_part_range(
@@ -416,7 +421,7 @@ def _lyric_options(
             score=score, part_index=source["part_index"],
             voice_part_id=source["voice_part_id"],
             start_measure=segment.start_measure, end_measure=segment.end_measure,
-            target_sung_note_count=target_count,
+            target_sung_note_count=target_sung_note_count,
         )
         if int(stats["word_lyric_note_count"]) > 0:
             donor_onsets = {
@@ -426,48 +431,55 @@ def _lyric_options(
             stats = dict(stats)
             stats["aligned_word_note_count"] = len(target_onsets & donor_onsets)
             stats["aligned_word_coverage_ratio"] = round(
-                len(target_onsets & donor_onsets) / max(1, target_count), 4
+                len(target_onsets & donor_onsets) / max(1, target_onset_count), 4
             )
             valid.append((source, stats))
     valid.sort(key=lambda item: (
         0 if (
             item[0]["part_index"] == lane.part_index
             and item[0]["voice_part_id"] == lane.source_voice_part_id
-            and target_count > 0
-            and int(item[1]["word_lyric_note_count"]) >= target_count
+            and target_sung_note_count > 0
+            and int(item[1]["word_lyric_note_count"]) >= target_sung_note_count
         ) else 1,
-        -float(item[1]["aligned_word_coverage_ratio"]),
         -float(item[1]["word_lyric_coverage_ratio"]),
+        -float(item[1]["aligned_word_coverage_ratio"]),
         0 if item[0]["part_index"] == lane.part_index else 1,
         item[0]["voice_part_id"], item[0]["part_index"],
     ))
     options: list[Option] = []
     for source, stats in valid:
         flags: list[str] = []
-        same_staff = source["part_index"] == lane.part_index and lane.scope_key in source["scopes"]
-        same_part_alternatives = [
-            alternative_stats for alternative, alternative_stats in valid
-            if alternative["part_index"] == source["part_index"]
-            and alternative["voice_part_id"] != source["voice_part_id"]
-        ]
-        if same_staff:
-            if any(_is_weak_word_lyric_source_with_better_alternative(
-                selected_stats=stats, alternative_stats=alternative_stats,
-            ) for alternative_stats in same_part_alternatives):
+        if source["part_index"] == lane.part_index:
+            alternative = _best_same_part_word_lyric_source_for_range(
+                score=score, part_index=lane.part_index,
+                start_measure=segment.start_measure, end_measure=segment.end_measure,
+                exclude_voice_part_id=source["voice_part_id"],
+                target_sung_note_count=target_sung_note_count,
+            )
+            if alternative is not None and _is_weak_word_lyric_source_with_better_alternative(
+                selected_stats=stats, alternative_stats=alternative["stats"],
+            ):
                 flags.append("P1 weak_lyric_source_with_better_alternative")
         else:
-            local_alternatives = [
-                alternative_stats for alternative, alternative_stats in valid
-                if alternative["part_index"] == lane.part_index
-                and lane.scope_key in alternative["scopes"]
-            ]
-            if any(_is_cross_staff_lyric_source_with_stronger_local_alternative(
-                selected_stats=stats, local_alternative_stats=alternative_stats,
-            ) for alternative_stats in local_alternatives):
+            local_alternative = _best_same_part_word_lyric_source_for_range(
+                score=score, part_index=lane.part_index,
+                start_measure=segment.start_measure, end_measure=segment.end_measure,
+                exclude_voice_part_id="",
+                target_sung_note_count=target_sung_note_count,
+            )
+            if local_alternative is not None and _is_cross_staff_lyric_source_with_stronger_local_alternative(
+                selected_stats=stats, local_alternative_stats=local_alternative["stats"],
+            ):
                 flags.append("P1 cross_staff_lyric_source_with_stronger_local_alternative")
-            if any(_is_cross_staff_weak_lyric_source_with_better_alternative(
-                selected_stats=stats, donor_alternative_stats=alternative_stats,
-            ) for alternative_stats in same_part_alternatives):
+            donor_alternative = _best_same_part_word_lyric_source_for_range(
+                score=score, part_index=source["part_index"],
+                start_measure=segment.start_measure, end_measure=segment.end_measure,
+                exclude_voice_part_id=source["voice_part_id"],
+                target_sung_note_count=target_sung_note_count,
+            )
+            if donor_alternative is not None and _is_cross_staff_weak_lyric_source_with_better_alternative(
+                selected_stats=stats, donor_alternative_stats=donor_alternative["stats"],
+            ):
                 flags.append("P1 cross_staff_weak_lyric_source_with_better_alternative")
         options.append(_source_option(source, "lyric_source", flags=tuple(flags), evidence=dict(stats)))
     return tuple(options)
@@ -550,7 +562,11 @@ def _rank_assignment_options(groups: list[list[Lane]]) -> tuple[Option, ...]:
 
 
 def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
-    """Enumerate deterministic defaults and legal choices for each segment."""
+    """Enumerate deterministic defaults and legal choices for each segment.
+
+    A non-native lane's lyric choices use its default melody source for coverage
+    and onset evidence; later phases may condition them on a different melody choice.
+    """
     skeleton = build_sheet_skeleton(score, planning_context)
     sheet = Sheet(
         target_part_index=skeleton.target_part_index,
@@ -591,7 +607,20 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                 target_notes = next(source["notes"] for source in candidates if
                                     source["part_index"] == default_melody["part_index"] and
                                     source["voice_part_id"] == default_melody["voice_part_id"])
-            lyric = _lyric_options(score, lane, segment, candidates, target_notes)
+            else:
+                default_melody = {"part_index": lane.part_index,
+                                  "voice_part_id": lane.source_voice_part_id}
+            target_sung_note_count = _target_sung_note_count_for_section(
+                score=score, target_part_index=lane.part_index,
+                target_voice_part_id=lane.source_voice_part_id,
+                start_measure=segment.start_measure, end_measure=segment.end_measure,
+                melody_source_part_index=default_melody["part_index"],
+                melody_source_voice_part_id=default_melody["voice_part_id"],
+            )
+            lyric = _lyric_options(
+                score, lane, segment, candidates, target_notes,
+                target_sung_note_count, derived_indices,
+            )
             if not lyric:
                 freeform_reason = "derive_without_lyric_source"
                 break

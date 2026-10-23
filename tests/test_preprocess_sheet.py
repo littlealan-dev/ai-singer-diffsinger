@@ -284,6 +284,15 @@ def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
     assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
     assert sheet.fixed
     assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)
+    first_measure_lyric = [
+        option for slot_id, option in sheet.fixed.items()
+        if slot_id.endswith("|1-1|lyric_source")
+    ]
+    assert first_measure_lyric
+    # Lint counts both notes of the chord, even though they share one onset.
+    assert all(option.evidence["target_sung_note_count"] == 2
+               and option.evidence["word_lyric_coverage_ratio"] == 1.0
+               for option in first_measure_lyric)
 
 
 def test_lyric_donor_order_flags_and_extension_policy():
@@ -314,6 +323,29 @@ def test_lyric_donor_order_flags_and_extension_policy():
     ]
 
 
+def test_same_part_other_staff_uses_weak_source_flag():
+    score = parse_score(SATB, verse_number=1)
+    combined = deepcopy(score["parts"][0])
+    combined["part_id"] = "P1-Combined"
+    combined["notes"] = [
+        {**note, "staff": str(staff)}
+        for staff, part in enumerate(score["parts"], start=1)
+        for note in part["notes"]
+    ]
+    next(note for note in combined["notes"] if note.get("voice") == "5")["lyric"] = "one"
+    score["parts"] = [combined]
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
+    alto_id = next(lane.lane_id for lane in sheet.lanes
+                   if lane.source_voice_part_id == "voice part 2")
+    donors = [option for slot in sheet.slots
+              if slot.kind == "lyric_source" and alto_id in slot.lane_ids
+              for option in slot.options]
+    weak_other_scope = next(option for option in donors
+                            if option.fields["lyric_source"]["voice_part_id"] == "voice part 3")
+    assert "P1 weak_lyric_source_with_better_alternative" in weak_other_scope.flags
+    assert not any("cross_staff" in flag for flag in weak_other_scope.flags)
+
+
 def test_derived_and_generated_solfege_donors_are_excluded():
     score = parse_score(SATB, verse_number=1)
     derived = deepcopy(score["parts"][0])
@@ -336,6 +368,12 @@ def test_derived_and_generated_solfege_donors_are_excluded():
                 assert option.fields[field]["part_index"] != 2
                 if field == "lyric_source":
                     assert option.fields[field] != {"part_index": 0, "voice_part_id": "voice part 1"}
+    derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
+    derived_lyric_options = [option for option in _all_options(derived_target)
+                             if "lyric_source" in option.fields]
+    assert derived_lyric_options
+    assert all(option.fields["lyric_source"]["part_index"] != 2
+               for option in derived_lyric_options)
 
 
 def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
