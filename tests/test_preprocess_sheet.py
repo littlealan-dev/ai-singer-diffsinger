@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict
+import json
 from pathlib import Path
 
 import pytest
 
 from src.api import parse_score
-from src.api.preprocess_sheet import build_sheet_skeleton
+from src.api.preprocess_sheet import (
+    SLOT_KINDS, Lane, _rank_assignment_options, _shared_notes_in_scope,
+    build_sheet, build_sheet_skeleton,
+)
+from src.musicxml.solfege import GENERATED_LYRIC_NAME
 from src.api.voice_parts import _staff_scope_measure_max_simultaneous_notes
 
 
@@ -231,3 +237,182 @@ def test_existing_visible_lane_uses_update_mode(tmp_path):
         "append_new_derived_lane", "update_existing_derived_lane"
     ]
     assert score == original
+
+
+def _all_options(sheet):
+    return [option for slot in sheet.slots for option in slot.options] + list(sheet.fixed.values())
+
+
+def test_sheet_excludes_rest_on_native_notes_and_is_pure_json():
+    score = parse_score(SATB, verse_number=1)
+    original = deepcopy(score)
+    context = {"target": {"part_id": "P1-Staff1"}}
+    sheet = build_sheet(score, context)
+    assert set(slot.kind for slot in sheet.slots).issubset(SLOT_KINDS)
+    native_by_lane_segment = {
+        (lane_id, segment.start_measure, segment.end_measure)
+        for segment in sheet.segments for lane_id, native, _ in segment.signature.lanes if native
+    }
+    for slot in sheet.slots:
+        if slot.kind == "mode" and (
+            slot.lane_ids[0], slot.start_measure, slot.end_measure
+        ) in native_by_lane_segment:
+            assert all(option.fields["mode"] != "rest" for option in slot.options)
+    for slot_id, option in sheet.fixed.items():
+        if slot_id.endswith("|mode"):
+            assert option.fields["mode"] != "rest"
+    assert json.dumps(asdict(sheet), sort_keys=True)
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    assert score == original
+
+
+def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
+    score = _chord_score(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    rank_slots = [slot for slot in sheet.slots if slot.kind == "rank_assignment"]
+    assert len(rank_slots) == 1
+    assert len(rank_slots[0].lane_ids) == 2
+    mappings = [option.fields["rank_index_by_lane"] for option in rank_slots[0].options]
+    assert list(mappings[0].values()) == [0, 1]
+    assert all(len(set(mapping.values())) == 2 for mapping in mappings)
+    assert len({tuple(mapping.values()) for mapping in mappings}) == len(mappings) == 2
+    nonzero = [
+        Lane("a", "P1", 0, "1", "voice part 2", 1, "append_new_derived_lane"),
+        Lane("b", "P1", 0, "1", "voice part 2", 2, "append_new_derived_lane"),
+    ]
+    assert list(_rank_assignment_options([nonzero])[0].fields["rank_index_by_lane"].values()) == [0, 1]
+    assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
+    assert sheet.fixed
+    assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)
+    first_measure_lyric = [
+        option for slot_id, option in sheet.fixed.items()
+        if slot_id.endswith("|1-1|lyric_source")
+    ]
+    assert first_measure_lyric
+    # Lint counts both notes of the chord, even though they share one onset.
+    assert all(option.evidence["target_sung_note_count"] == 2
+               and option.evidence["word_lyric_coverage_ratio"] == 1.0
+               for option in first_measure_lyric)
+
+
+def test_lyric_donor_order_flags_and_extension_policy():
+    score = parse_score(SATB, verse_number=1)
+    # The local soprano has eight words; the distant tenor has just one.
+    tenor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
+    tenor["lyric"] = "one"
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    alto_id = next(lane.lane_id for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
+    donors = [slot for slot in sheet.slots if slot.kind == "lyric_source" and alto_id in slot.lane_ids]
+    assert donors
+    assert donors[0].options[0].fields["lyric_source"]["part_index"] == 0
+    cross = next(option for option in donors[0].options
+                 if option.fields["lyric_source"]["part_index"] == 1)
+    assert "P1 cross_staff_lyric_source_with_stronger_local_alternative" in cross.flags
+    assert not any(slot.kind == "lyric_policy" for slot in sheet.slots)
+
+    for note in score["parts"][0]["notes"]:
+        if note.get("voice") == "1" and note.get("measure_number") == 2:
+            note["lyric"] = "+"
+    next(note for note in score["parts"][1]["notes"]
+         if note.get("voice") == "5" and note.get("measure_number") == 2)["lyric"] = "next"
+    extension = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    policies = [slot for slot in extension.slots if slot.kind == "lyric_policy"]
+    assert policies
+    assert [option.fields["lyric_policy"] for option in policies[0].options] == [
+        "fill_missing_only", "replace_all"
+    ]
+
+
+def test_same_part_other_staff_uses_weak_source_flag():
+    score = parse_score(SATB, verse_number=1)
+    combined = deepcopy(score["parts"][0])
+    combined["part_id"] = "P1-Combined"
+    combined["notes"] = [
+        {**note, "staff": str(staff)}
+        for staff, part in enumerate(score["parts"], start=1)
+        for note in part["notes"]
+    ]
+    next(note for note in combined["notes"] if note.get("voice") == "5")["lyric"] = "one"
+    score["parts"] = [combined]
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
+    alto_id = next(lane.lane_id for lane in sheet.lanes
+                   if lane.source_voice_part_id == "voice part 2")
+    donors = [option for slot in sheet.slots
+              if slot.kind == "lyric_source" and alto_id in slot.lane_ids
+              for option in slot.options]
+    weak_other_scope = next(option for option in donors
+                            if option.fields["lyric_source"]["voice_part_id"] == "voice part 3")
+    assert "P1 weak_lyric_source_with_better_alternative" in weak_other_scope.flags
+    assert not any("cross_staff" in flag for flag in weak_other_scope.flags)
+
+
+def test_derived_and_generated_solfege_donors_are_excluded():
+    score = parse_score(SATB, verse_number=1)
+    derived = deepcopy(score["parts"][0])
+    derived["part_id"] = "P_DERIVED_TEST"
+    score["parts"].append(derived)
+    score["voice_part_transforms"] = {
+        "synthetic": {"appended_part_ref": {"part_index": 2},
+                      "derived_lane": {"source": {"part_index": 0, "voice_part_id": "voice part 1"},
+                                       "slot": 1}}
+    }
+    for note in score["parts"][0]["notes"]:
+        if note.get("voice") == "1":
+            note["lyric_name"] = GENERATED_LYRIC_NAME
+    donor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
+    donor["lyric"] = "word"
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    for option in _all_options(sheet):
+        for field in ("melody_source", "lyric_source"):
+            if field in option.fields:
+                assert option.fields[field]["part_index"] != 2
+                if field == "lyric_source":
+                    assert option.fields[field] != {"part_index": 0, "voice_part_id": "voice part 1"}
+    derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
+    derived_lyric_options = [option for option in _all_options(derived_target)
+                             if "lyric_source" in option.fields]
+    assert derived_lyric_options
+    assert all(option.fields["lyric_source"]["part_index"] != 2
+               for option in derived_lyric_options)
+
+
+def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
+    score = parse_score(SATB, verse_number=1)
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    for segment in sheet.segments:
+        for lane_id, _, _ in segment.signature.lanes:
+            relevant = [slot for slot in sheet.slots
+                        if lane_id in slot.lane_ids and
+                        (slot.start_measure, slot.end_measure) ==
+                        (segment.start_measure, segment.end_measure)]
+            if any(slot.kind == "freeform" for slot in relevant):
+                continue
+            mode_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|mode"
+            mode_options = next((slot.options for slot in relevant if slot.kind == "mode"),
+                                (sheet.fixed[mode_id],) if mode_id in sheet.fixed else ())
+            if any(option.fields["mode"] == "derive" for option in mode_options):
+                lyric_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|lyric_source"
+                assert any(slot.kind == "lyric_source" and slot.options for slot in relevant) or (
+                    lyric_id in sheet.fixed
+                )
+
+
+def test_unmodelled_singing_segment_has_one_freeform_slot(monkeypatch, tmp_path):
+    score = _chord_score(tmp_path)
+    monkeypatch.setattr("src.api.preprocess_sheet._source_candidates", lambda *_: [])
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert len(sheet.slots) == len(sheet.segments)
+    assert all(slot.kind == "freeform" and not slot.options for slot in sheet.slots)
+    assert not sheet.fixed
+    assert all(slot.evidence["per_measure_facts"] for slot in sheet.slots)
+
+
+def test_shared_note_policy_requires_same_measure_and_note():
+    score = parse_score(SATB, verse_number=1)
+    lane = build_sheet_skeleton(score, {"target": {"part_id": "P1-Staff1"}}).lanes[0]
+    first = next(note for note in score["parts"][0]["notes"] if note.get("voice") == "1")
+    another_measure = {**first, "voice": "2", "measure_number": 2}
+    score["parts"][0]["notes"] = [first, another_measure]
+    assert not _shared_notes_in_scope(score, lane)
+    another_measure["measure_number"] = 1
+    assert _shared_notes_in_scope(score, lane)
