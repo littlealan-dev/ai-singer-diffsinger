@@ -97,8 +97,10 @@ def test_target_resolution_and_intent_flag():
     assert [(lane.source_voice_part_id, lane.default_rank) for lane in by_id.lanes] == [
         ("voice part 1", 0), ("voice part 2", 1)
     ]
-    assert len(by_id.segments) == 1
-    assert (by_id.segments[0].start_measure, by_id.segments[0].end_measure) == (1, 2)
+    assert [(segment.start_measure, segment.end_measure) for segment in by_id.segments] == [
+        (1, 1), (2, 2)
+    ]
+    assert [segment.signature.annotation for segment in by_id.segments] == ["Moderato", None]
     _assert_contiguous_segments(by_id, score)
 
     single = deepcopy(score)
@@ -177,19 +179,32 @@ def test_lyric_kind_change_starts_new_segment():
     assert score == original
 
 
-def test_annotation_change_starts_new_segment():
+def test_real_parsed_annotations_do_not_leak_between_staffs():
     score = parse_score(SATB, verse_number=1)
-    score["voice_part_signals"]["measure_annotations"] = [{
-        "part_id": "P1-Staff1",
-        "measures": [{
-            "measure_number": "2",
-            "direction_entries": [{"staff": "1", "text": "unis."}],
-        }],
-    }]
+    original = deepcopy(score)
+    staff1 = build_sheet_skeleton(score, {"target": {"part_id": "P1-Staff1"}})
+    staff2 = build_sheet_skeleton(score, {"target": {"part_id": "P1-Staff2"}})
+    assert [segment.signature.annotation for segment in staff1.segments] == ["Moderato", None]
+    assert [(segment.start_measure, segment.end_measure) for segment in staff1.segments] == [
+        (1, 1), (2, 2)
+    ]
+    assert len(staff2.segments) == 1
+    assert (staff2.segments[0].start_measure, staff2.segments[0].end_measure) == (1, 2)
+    assert staff2.segments[0].signature.annotation is None
+    _assert_contiguous_segments(staff1, score)
+    _assert_contiguous_segments(staff2, score)
+    assert score == original
+
+
+def test_non_numeric_raw_annotation_measure_is_skipped():
+    score = parse_score(SATB, verse_number=1)
+    score["voice_part_signals"]["measure_annotations"][0]["measures"].append({
+        "measure_number": "12a",
+        "direction_entries": [{"staff": "1", "text": "div."}],
+    })
     original = deepcopy(score)
     sheet = build_sheet_skeleton(score, {"target": {"part_id": "P1-Staff1"}})
-    assert [segment.signature.annotation for segment in sheet.segments] == [None, "unis."]
-    _assert_contiguous_segments(sheet, score)
+    assert [segment.signature.annotation for segment in sheet.segments] == ["Moderato", None]
     assert score == original
 
 

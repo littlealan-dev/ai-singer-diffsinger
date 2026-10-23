@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,22 +111,29 @@ def _annotations(score: dict, part: dict, scope: str) -> dict[int, str]:
     signals = score.get("voice_part_signals") or {}
     rows = signals.get("measure_annotations") or []
     text_by_measure: dict[int, str] = {}
+    raw_part_id = part.get("raw_part_id") or part.get("part_id")
+    split_staff = re.search(r"-Staff(\d+)$", str(part.get("part_id") or ""))
+    raw_staff = split_staff.group(1) if split_staff else scope
     for part_row in rows:
-        if part_row.get("part_id") != part.get("part_id"):
+        if part_row.get("part_id") != raw_part_id:
             continue
         for measure in part_row.get("measures") or []:
+            try:
+                measure_number = int(measure["measure_number"])
+            except (KeyError, TypeError, ValueError):
+                continue
             entries = measure.get("direction_entries") or []
             if entries:
                 texts = [
                     str(entry.get("text") or "").strip()
                     for entry in entries
-                    if str(entry.get("staff") or scope) == scope
+                    if str(entry.get("staff") or raw_staff) == raw_staff
                     and str(entry.get("text") or "").strip()
                 ]
             else:
                 texts = [str(text).strip() for text in measure.get("directions") or [] if str(text).strip()]
             if texts:
-                text_by_measure[int(measure["measure_number"])] = "; ".join(texts)
+                text_by_measure[measure_number] = "; ".join(texts)
     return text_by_measure
 
 
