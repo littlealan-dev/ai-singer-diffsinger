@@ -1003,3 +1003,51 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     assert "VOICEBANK OVERRIDE ACTIVE" in bundle.dynamic_prompt_text
     assert "while it supports the resolved singing language" in bundle.dynamic_prompt_text
     assert "list the compatible available voices" in bundle.dynamic_prompt_text
+
+
+_PLANNER_ONLY_LINES = {
+    "",
+    "Capability contract:",
+    "The current score facts (score summary, voice-part planning signals, line-preparation "
+    "mapping context and the latest attempted plan) are given in Dynamic Context.",
+    "Tool list (name, description, input schema):",
+    "{tool_json}",
+    '- Do not use "preprocess" or "preprocessing" in user-facing text.',
+    "- Verse lock:",
+}
+
+
+def test_planner_base_prompt_copies_chat_prompt_lines_verbatim() -> None:
+    from src.backend.llm_prompt import _SYSTEM_PROMPT_PATH, _SYSTEM_PROMPT_PLANNER_BASE_PATH
+
+    chat_lines = set(_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").split("\n"))
+    planner_lines = _SYSTEM_PROMPT_PLANNER_BASE_PATH.read_text(encoding="utf-8").split("\n")
+    drifted = [
+        line for line in planner_lines if line not in _PLANNER_ONLY_LINES and line not in chat_lines
+    ]
+    assert drifted == []
+
+
+def test_preprocess_role_uses_planner_prompt_without_chat_only_rules() -> None:
+    preprocess = _role_prompt("preprocess")
+    default = _role_prompt("default")
+
+    for text in (
+        '"tool_calls": [',
+        "Every reply must be a single valid JSON object in this format",
+        '"phase": "preprocess_postflight_repair"',
+        "Treat `score_summary.selected_verse_number`",
+        "SVS Voice-Part Lint Rules (Canonical Runtime Validation)",
+        "SVS Postflight Validation Rules (Canonical Runtime Validation)",
+        "You are the line-preparation model.",
+    ):
+        assert text in preprocess
+    for chat_only in (
+        "Billable synthesis confirmation",
+        "Voicebank selection:",
+        "Language selection for synthesis:",
+        "Instrument playback presets",
+        "Solfege lyric selection:",
+    ):
+        assert chat_only in default
+        assert chat_only not in preprocess

@@ -15,6 +15,12 @@ from src.api.voice_part_lint_rules import (
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
+# The line-preparation model's base prompt: the chat prompt's identity, reply
+# format, verse and tool-output rules, copied verbatim, without the chat-only
+# rules (quotes, credits, voices, solfege, synthesis).
+_SYSTEM_PROMPT_PLANNER_BASE_PATH = (
+    Path(__file__).resolve().parent / "config" / "system_prompt_planner_base.txt"
+)
 _SYSTEM_PROMPT_LESSONS_PATH = (
     Path(__file__).resolve().parent / "config" / "system_prompt_lessons.txt"
 )
@@ -449,9 +455,12 @@ def _is_preprocess_role(role: Any) -> bool:
 
 def _load_system_prompt(*, include_preprocess_guidance: bool = False) -> str:
     """Load and combine system prompt templates from disk."""
-    if not _SYSTEM_PROMPT_PATH.exists():
-        raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
-    base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    base_path = (
+        _SYSTEM_PROMPT_PLANNER_BASE_PATH if include_preprocess_guidance else _SYSTEM_PROMPT_PATH
+    )
+    if not base_path.exists():
+        raise FileNotFoundError(f"Missing system prompt template: {base_path}")
+    base_prompt = base_path.read_text(encoding="utf-8")
     # The role line goes right after the opening identity line.
     identity, _, rest = base_prompt.partition("\n")
     role_line = _PREPROCESS_ROLE_LINE if include_preprocess_guidance else _DEFAULT_ROLE_LINE
