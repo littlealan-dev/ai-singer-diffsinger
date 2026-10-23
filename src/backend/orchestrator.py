@@ -4801,6 +4801,7 @@ class Orchestrator:
                 "in singer-friendly language, explain why the workflow is stopping "
                 "here, and ask the user to review the score or request revisions."
             ),
+            compact_context=True,
         )
         if followup_error:
             return candidate_response
@@ -6054,6 +6055,7 @@ class Orchestrator:
             selected_voicebank_id=selected_voicebank_id,
             instructions=REPAIR_NOTICE_INSTRUCTIONS,
             rejection_detail=REPAIR_NOTICE_REJECTION_DETAIL,
+            compact_context=True,
         )
         if error or response is None:
             if error:
@@ -6460,8 +6462,13 @@ class Orchestrator:
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
         rejection_detail: str = MESSAGE_ONLY_REJECTION_DETAIL,
         presentation_quote: Optional[Dict[str, Any]] = None,
+        compact_context: bool = False,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM for prose only; a reply that calls a tool is rejected, never shown.
+
+        compact_context gives a line-preparation progress or review message the
+        score's part list and the derived-part mapping only, instead of the full
+        session context.
 
         With presentation_quote, the reply must present that quote in its
         quote_presentation_schema and match it exactly; it is then shown as the
@@ -6499,6 +6506,11 @@ class Orchestrator:
                         selected_voicebank_id=selected_voicebank_id,
                         selected_language=selected_language,
                         expand_repeats=expand_repeats,
+                    )
+                    if not compact_context
+                    else (
+                        self._build_line_preparation_message_prompt(snapshot, current_score),
+                        current_credit_availability,
                     )
                 )
                 history = [*snapshot.get("history", []), payload_entry]
@@ -6693,6 +6705,39 @@ class Orchestrator:
             and session_id
         ):
             await self._sessions.acknowledge_score_context_updated(session_id)
+
+    def _build_line_preparation_message_prompt(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Build a small prompt for a line-preparation progress or review message.
+
+        Such a message only reports what happened to the parts, so it gets the
+        score's title, verses and part list and the derived-part mapping, not the
+        voice, credit, solfege or planning-signal context.
+        """
+        score_summary = snapshot.get("score_summary")
+        return build_prompt_bundle(
+            [],
+            score_available=True,
+            score_summary=(
+                _line_preparation_message_score_summary(score_summary)
+                if isinstance(score_summary, dict)
+                else None
+            ),
+            preprocess_mapping_context=(
+                self._build_preprocess_mapping_context(
+                    current_score,
+                    score_summary=score_summary,
+                )
+                if isinstance(current_score, dict)
+                else None
+            ),
+            score_context_updated=bool(snapshot.get("score_context_updated")),
+            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
+            role=LlmRole.DEFAULT,
+        )
 
     async def _build_message_only_rich_prompt(
         self,
@@ -9801,6 +9846,24 @@ def _snapshot_score_version(snapshot: Any) -> Any:
     """The version of a session snapshot's current score; every score save bumps it."""
     current = snapshot.get("current_score") if isinstance(snapshot, dict) else None
     return current.get("version") if isinstance(current, dict) else None
+
+
+_LINE_PREPARATION_MESSAGE_PART_FIELDS = ("part_id", "part_name", "is_derived_part", "has_lyrics")
+
+
+def _line_preparation_message_score_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the score summary fields a line-preparation message can mention."""
+    compact: Dict[str, Any] = {
+        key: summary[key]
+        for key in ("title", "selected_verse_number", "available_verses")
+        if key in summary
+    }
+    compact["parts"] = [
+        {key: part[key] for key in _LINE_PREPARATION_MESSAGE_PART_FIELDS if key in part}
+        for part in summary.get("parts") or []
+        if isinstance(part, dict)
+    ]
+    return compact
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:
