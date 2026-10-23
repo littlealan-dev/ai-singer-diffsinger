@@ -288,28 +288,41 @@ def test_evaluate_gate_tiebreak_present_passes_with_review(tmp_path):
     assert "passed only on the tie-break run" in summary
 
 
-def test_evaluate_gate_tiebreak_job_alone_still_blocks_at_set_level(tmp_path):
-    # As specified: the set-level count uses the two candidate runs only, so a
-    # 2/2 -> 1/2 job lowers the total even when its tie-break run is good.
+def test_evaluate_gate_tiebreak_job_alone_passes_at_set_level(tmp_path):
+    # A 2/2 -> 1/2 job with a good tie-break run leaves the candidate 1 good run
+    # below v1, which is within v1's own run-to-run variation. v1 has noise 1
+    # (job c good in its first run only), so one 2/2 -> 1/2 job is not more.
     summary = _gate_runs(
         tmp_path,
-        {"a": GOOD, "b": GOOD}, {"a": GOOD, "b": GOOD},
-        {"a": GOOD, "b": GOOD}, {"a": GOOD, "b": FAILED},
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": GOOD, "c": FAILED},
+        {"a": GOOD, "b": GOOD, "c": GOOD}, {"a": GOOD, "b": FAILED, "c": FAILED},
         tiebreak={"b": GOOD},
     )
-    assert "Result: blocked: investigate" in summary
-    assert "set level: candidate good runs 3/4 < v1 good runs 4/4" in summary
+    assert "Result: pass" in summary
+    assert "Good runs: v1 5/6, candidate 4/6" in summary
+    assert "Jobs 2/2 -> 1/2: candidate 1, v1 noise 1" in summary
 
 
-def test_evaluate_gate_set_level_blocks_on_fewer_good_runs(tmp_path):
-    # Each job alone is only "review" (1/2 -> 0/2), but the set has fewer good runs.
+def test_evaluate_gate_set_level_exactly_one_good_run_below_v1_passes(tmp_path):
+    # Job a goes 1/2 -> 0/2: only a review item, and one run below v1 is within the margin.
+    summary = _gate_runs(
+        tmp_path,
+        {"a": GOOD, "b": GOOD}, {"a": FAILED, "b": GOOD},
+        {"a": FAILED, "b": GOOD}, {"a": FAILED, "b": GOOD},
+    )
+    assert "Result: pass" in summary
+    assert "set level:" not in summary
+
+
+def test_evaluate_gate_set_level_two_good_runs_below_v1_blocks(tmp_path):
+    # Each job alone is only "review" (1/2 -> 0/2), but together they are 2 runs below v1.
     summary = _gate_runs(
         tmp_path,
         {"a": GOOD, "b": GOOD}, {"a": FAILED, "b": FAILED},
         {"a": FAILED, "b": FAILED}, {"a": FAILED, "b": FAILED},
     )
     assert "Result: blocked: investigate" in summary
-    assert "set level: candidate good runs 0/4 < v1 good runs 2/4" in summary
+    assert "set level: candidate good runs 0/4 more than 1 below v1 good runs 2/4" in summary
 
 
 def test_evaluate_gate_set_level_blocks_on_more_drops_than_v1_noise(tmp_path):

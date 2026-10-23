@@ -343,6 +343,7 @@ GATE_JOB_COLUMNS = (
     "v1_quality_classes", "candidate_quality_classes",
 )
 REVIEW_COLUMNS = ("job_id", "reason", "rule", "severity", "target", "runs")
+SET_GOOD_RUN_MARGIN = 1
 RUNNER_PYTHON = "/Users/alanchan/antigravity/ai-singer-diffsinger/.venv310/bin/python"
 REPLAY_ENV = "/Users/alanchan/antigravity/sightsinger-agents/replay.env"
 
@@ -509,10 +510,12 @@ def evaluate_gate(
         noise_drops += _is_good(v1_runs[0]) and not _is_good(v1_runs[1])
 
     set_reasons = []
-    if candidate_good_total < v1_good_total:
+    # v1 itself varies by about one good run between its two runs, so only a
+    # larger shortfall blocks (Alan, 2026-10-23).
+    if candidate_good_total < v1_good_total - SET_GOOD_RUN_MARGIN:
         set_reasons.append(
-            f"candidate good runs {candidate_good_total}/{2 * len(rows)} < v1 good runs "
-            f"{v1_good_total}/{2 * len(rows)}"
+            f"candidate good runs {candidate_good_total}/{2 * len(rows)} more than "
+            f"{SET_GOOD_RUN_MARGIN} below v1 good runs {v1_good_total}/{2 * len(rows)}"
         )
     if candidate_drops > noise_drops:
         set_reasons.append(
