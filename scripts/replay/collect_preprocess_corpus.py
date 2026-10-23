@@ -267,18 +267,27 @@ def _validate_target(target: str) -> None:
     raise ValueError(f"Unsupported target: {target}")
 
 
-def _query_jobs(now: datetime, days: int) -> Iterable[dict[str, Any]]:
-    from firebase_admin import firestore
-    from src.backend.firebase_app import get_firestore_client
+def _query_jobs(
+    now: datetime, days: int, *, client: Any = None, firestore_module: Any = None
+) -> Iterable[dict[str, Any]]:
+    if firestore_module is None:
+        from firebase_admin import firestore as firestore_module
+    if client is None:
+        from src.backend.firebase_app import get_firestore_client
 
-    query = (
-        get_firestore_client().collection("jobs")
-        .where(filter=firestore.FieldFilter("jobKind", "==", "preprocess"))
-        .where(filter=firestore.FieldFilter("createdAt", ">=", now - timedelta(days=days)))
-        .order_by("createdAt", direction=firestore.Query.DESCENDING)
-    )
-    for snapshot in query.stream():
-        yield {"job_id": snapshot.id, **(snapshot.to_dict() or {})}
+        client = get_firestore_client()
+
+    jobs = client.collection("jobs")
+    cutoff = now - timedelta(days=days)
+    for status in ("completed", "failed"):
+        query = (
+            jobs.where(filter=firestore_module.FieldFilter("jobKind", "==", "preprocess"))
+            .where(filter=firestore_module.FieldFilter("status", "==", status))
+            .where(filter=firestore_module.FieldFilter("updatedAt", ">=", cutoff))
+            .order_by("updatedAt", direction=firestore_module.Query.DESCENDING)
+        )
+        for snapshot in query.stream():
+            yield {"job_id": snapshot.id, **(snapshot.to_dict() or {})}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

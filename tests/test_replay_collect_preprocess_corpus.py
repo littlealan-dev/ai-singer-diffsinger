@@ -83,6 +83,59 @@ def test_selection_dedupes_newest_using_canonical_context_and_caps_kept_jobs():
     assert len(capped.jobs) == 1
 
 
+def test_query_uses_existing_status_updated_at_index_and_unions_documents():
+    calls = []
+
+    class FakeSnapshot:
+        def __init__(self, job_id, status):
+            self.id = job_id
+            self.status = status
+
+        def to_dict(self):
+            return {"status": self.status, "jobKind": "preprocess"}
+
+    class FakeQuery:
+        def __init__(self, filters=(), ordering=None):
+            self.filters = filters
+            self.ordering = ordering
+
+        def where(self, *, filter):
+            return FakeQuery(self.filters + (filter,), self.ordering)
+
+        def order_by(self, field, *, direction):
+            return FakeQuery(self.filters, (field, direction))
+
+        def stream(self):
+            calls.append((self.filters, self.ordering))
+            status = self.filters[1][2]
+            return [FakeSnapshot(f"{status}-job", status)]
+
+    class FakeClient:
+        def collection(self, name):
+            assert name == "jobs"
+            return FakeQuery()
+
+    class FakeFirestore:
+        FieldFilter = staticmethod(lambda field, operation, value: (field, operation, value))
+
+        class Query:
+            DESCENDING = "descending"
+
+    jobs = list(collector._query_jobs(NOW, 30, client=FakeClient(), firestore_module=FakeFirestore))
+    cutoff = NOW - timedelta(days=30)
+    assert calls == [
+        (
+            (("jobKind", "==", "preprocess"), ("status", "==", status), ("updatedAt", ">=", cutoff)),
+            ("updatedAt", "descending"),
+        )
+        for status in ("completed", "failed")
+    ]
+    assert jobs == [
+        {"job_id": "completed-job", "status": "completed", "jobKind": "preprocess"},
+        {"job_id": "failed-job", "status": "failed", "jobKind": "preprocess"},
+    ]
+
+
 def test_write_entry_preserves_bytes_and_matches_private_safe_interface(tmp_path):
     job = _job(
         userId="user-secret", sessionId="session-secret",
