@@ -185,8 +185,14 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
                 row["status"] = "assembled"
     except FreeformUnresolved as exc:
         row["status"] = "freeform_unresolved"
-        row["error"] = str(exc)
         row["freeform_slot_ids"] = exc.slot_ids
+        reasons = {
+            slot.slot_id: slot.evidence.get("reason", "unspecified")
+            for slot in sheet.slots if slot.slot_id in exc.slot_ids
+        } if sheet is not None else {}
+        row["error"] = str(exc) + "; reasons: " + ", ".join(
+            f"{slot_id}={reasons.get(slot_id, 'unspecified')}" for slot_id in exc.slot_ids
+        )
     except AssemblyError as exc:
         row["status"] = "assembly_error"
         row["error"] = _exception_text(exc)

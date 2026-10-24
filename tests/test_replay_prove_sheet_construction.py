@@ -58,10 +58,10 @@ def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     assert rows[0]["lint_clean"] and rows[0]["p0"] == 0
     assert rows[0]["lanes"] == 2 and rows[0]["segments"] > 0
     assert "target_unresolved" in rows[1]["issues"]
-    assert rows[2]["freeform_slot_ids"] == [
-        _json(out / "jobs/c-freeform.json")["freeform_slot_ids"][0]
-    ]
-    assert "freeform" in rows[2]["freeform_slot_ids"][0]
+    freeform_sheet = _json(out / "sheets/c-freeform.json")
+    assert rows[2]["freeform_slot_ids"] == [slot["slot_id"] for slot in freeform_sheet["slots"]]
+    assert freeform_sheet["slots"][0]["evidence"]["reason"] == "derive_without_lyric_source"
+    assert "derive_without_lyric_source" in rows[2]["error"]
     assert rows[2]["slots_by_kind"] == {"freeform": 1}
     assert rows[3]["error"].startswith("ParseError:")
     assert "<score" not in rows[3]["error"]
@@ -151,3 +151,22 @@ def test_p0_p1_normalization_and_summary_job_counts(tmp_path, monkeypatch):
     assert "| P1 | validation_failed_needs_review | 2 |" in summary
     assert "| first | section_timeline_contiguous_no_gaps |" in summary
     assert "| second | section_timeline_contiguous_no_gaps |" in summary
+
+
+def test_assembly_error_and_intent_count(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    _job(corpus, "intent", SATB.read_bytes(), "P1-Staff1")
+    path = corpus / "intent/job.json"
+    job = _json(path)
+    job["spec"]["planningContext"]["other_instruction"] = "keep the soprano"
+    path.write_text(json.dumps(job), encoding="utf-8")
+
+    def fail_assembly(_sheet, _choices):
+        raise proof.AssemblyError("uncovered measure 2")
+
+    monkeypatch.setattr(proof, "assemble_plan", fail_assembly)
+    rows = proof.prove(corpus, tmp_path / "report")
+    assert rows[0]["status"] == "assembly_error"
+    assert rows[0]["error"] == "AssemblyError: uncovered measure 2"
+    assert "intent_requires_llm" in rows[0]["issues"]
+    assert "Intent requires LLM: 1" in (tmp_path / "report/summary.md").read_text(encoding="utf-8")
