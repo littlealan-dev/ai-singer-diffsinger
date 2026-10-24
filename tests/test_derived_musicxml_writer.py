@@ -7,7 +7,11 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from src.api import parse_score
-from src.api.voice_parts import _materialize_transformed_part, preprocess_voice_parts
+from src.api.voice_parts import (
+    _append_transformed_measures,
+    _materialize_transformed_part,
+    preprocess_voice_parts,
+)
 
 
 def _note(pitch: str, duration: int, *, lyric: str | None = None, tie: str | None = None) -> str:
@@ -145,6 +149,48 @@ def test_three_four_meter_and_implicit_pickup():
     _assert_round_trip(lane, reparsed)
     assert [note["offset_beats"] for note in lane] == [0.0, 3.0, 4.0]
     assert [_rest_beats(m) for m in written.findall("measure")] == [[], [2.0], [2.0]]
+
+
+def test_unmarked_pickup_uses_source_measure_timeline():
+    xml = _score_xml([
+        _measure(0, _note("C", 4), implicit=False),
+        _measure(1, _note("C", 4) + _note("D", 4) + _note("E", 4) + _note("F", 4)),
+        _measure(2, _note("G", 4) + _rest(12)),
+    ])
+    lane, reparsed, _ = _materialize(xml)
+    _assert_round_trip(lane, reparsed)
+    assert [note["offset_beats"] for note in lane] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_underfull_middle_bar_does_not_shift_following_notes():
+    xml = _score_xml([
+        _measure(1, _note("C", 4) + _note("D", 4) + _note("E", 4) + _note("F", 4)),
+        _measure(2, _note("G", 4) + _note("A", 4) + _note("B", 4)),
+        _measure(3, _note("C", 4) + _rest(12)),
+    ])
+    lane, reparsed, _ = _materialize(xml)
+    _assert_round_trip(lane, reparsed)
+    assert lane[-1]["offset_beats"] == 7.0
+
+
+def test_no_reference_does_not_write_missing_bars_as_leading_rests():
+    part = ET.Element("part", {"id": "P_DERIVED_TEST"})
+    _append_transformed_measures(
+        part,
+        transformed_notes=[{
+            "measure_number": 3,
+            "offset_beats": 8.0,
+            "duration_beats": 1.0,
+            "pitch_midi": 60.0,
+        }],
+        divisions=4,
+        reference_part=None,
+        q=lambda tag: tag,
+    )
+    measure = part.find("measure")
+    assert measure is not None
+    assert measure.get("number") == "3"
+    assert measure.find("note/rest") is None
 
 
 def test_ties_and_lyrics_survive_bar_line():

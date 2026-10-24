@@ -6070,7 +6070,7 @@ def _derived_lane_tie_types(
 def _reference_measure_length_beats(
     measure: ET.Element, q: Any, divisions: int, nominal_beats: float
 ) -> float:
-    """Use the source bar's written timeline for pickup and overfull measures."""
+    """Use the source bar's written length, including an unmarked pickup."""
     cursor = 0
     end = 0
     for child in measure:
@@ -6084,9 +6084,28 @@ def _reference_measure_length_beats(
             cursor -= int(child.findtext(q("duration")) or 0)
         end = max(end, cursor)
     written_beats = end / float(divisions)
-    if measure.get("implicit") == "yes" and written_beats > 0:
-        return written_beats
-    return max(nominal_beats, written_beats)
+    return written_beats if written_beats > 0 else nominal_beats
+
+
+def _parsed_reference_measure_starts(reference_part: ET.Element, q: Any) -> List[float]:
+    """Read measure offsets with the same music21 timeline as parse_score."""
+    from music21 import converter, stream
+
+    part_id = reference_part.get("id") or "P1"
+    score = ET.Element(q("score-partwise"), {"version": "3.1"})
+    part_list = ET.SubElement(score, q("part-list"))
+    score_part = ET.SubElement(part_list, q("score-part"), {"id": part_id})
+    ET.SubElement(score_part, q("part-name")).text = "Source"
+    score.append(deepcopy(reference_part))
+    try:
+        parsed = converter.parseData(ET.tostring(score, encoding="unicode"))
+        parsed_part = next(iter(parsed.parts))
+        measures = list(parsed_part.getElementsByClass(stream.Measure))
+        if len(measures) != len(reference_part.findall(q("measure"))):
+            return []
+        return [float(measure.getOffsetInHierarchy(parsed)) for measure in measures]
+    except Exception:
+        return []
 
 
 def _append_gap_rests(
@@ -6144,6 +6163,10 @@ def _append_transformed_measures(
     reference_measures = (
         [m for m in reference_part.findall(q("measure"))] if reference_part is not None else []
     )
+    source_starts = (
+        _parsed_reference_measure_starts(reference_part, q)
+        if reference_part is not None else []
+    )
     if reference_measures:
         ordered_measures = reference_measures
     else:
@@ -6176,15 +6199,34 @@ def _append_transformed_measures(
             if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
                 current_divisions = int(source_divisions)
         nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
-        bar_length = (
+        written_length = (
             _reference_measure_length_beats(ref_measure, q, current_divisions, nominal_beats)
             if reference_measures else nominal_beats
         )
+        if source_starts:
+            bar_start = source_starts[idx]
+            if idx + 1 < len(source_starts):
+                bar_length = source_starts[idx + 1] - bar_start
+            elif ref_measure.get("implicit") == "yes":
+                bar_length = written_length
+            else:
+                bar_length = nominal_beats
+        else:
+            bar_length = written_length
         bar_end = bar_start + bar_length
         notes = sorted(
             by_measure.get(measure_int, []),
             key=lambda row: (float(row.get("offset_beats") or 0.0), float(row.get("pitch_midi") or 0.0)),
         )
+        if not reference_measures and notes:
+            # The lane alone cannot tell where absent earlier bars started.
+            bar_start = float(notes[0].get("offset_beats") or 0.0)
+            bar_end = max(
+                float(note.get("offset_beats") or 0.0)
+                + float(note.get("duration_beats") or 1.0)
+                for note in notes
+            )
+            bar_length = bar_end - bar_start
         if not notes:
             duration_beats = bar_length
             duration_div = max(1, int(round(duration_beats * float(divisions))))
