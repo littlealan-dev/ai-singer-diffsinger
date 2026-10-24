@@ -18,6 +18,14 @@ _RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503}
 _RETRY_DELAY = re.compile(r"^(?:\d+(?:\.\d+)?|\.\d+)s$")
 
 
+class LlmConnectionError(RuntimeError):
+    """The LLM provider couldn't be reached; carries the provider name for the user message."""
+
+    def __init__(self, provider: str, reason: object) -> None:
+        super().__init__(f"{provider} connection error: {reason}")
+        self.provider = provider
+
+
 def _is_transient_transport_error(exc: BaseException) -> bool:
     """Distinguish connection failures from permanent URL/TLS errors."""
     reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
@@ -94,7 +102,7 @@ def post_with_retry(request, *, timeout, provider, role, model, settings, logger
             cause = exc
         except (urllib.error.URLError, ConnectionError, http.client.IncompleteRead, ssl.SSLError) as exc:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            failure = RuntimeError(f"{provider} connection error: {reason}")
+            failure = LlmConnectionError(provider, reason)
             delay = _backoff_delay(attempt, settings) if _is_transient_transport_error(exc) else None
             status = None
             cause = exc

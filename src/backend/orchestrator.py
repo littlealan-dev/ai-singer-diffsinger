@@ -22,6 +22,7 @@ from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient, LlmRole
+from src.backend.llm_http import LlmConnectionError
 from src.backend.quote_presentation import (
     QUOTE_PRESENTATION_INSTRUCTION,
     presented_quote,
@@ -6216,6 +6217,8 @@ class Orchestrator:
         """Return a user-facing LLM error message."""
         if isinstance(exc, LlmTurnLimitReached):
             return str(exc)
+        if isinstance(exc, LlmConnectionError):
+            return f"{exc.provider} connection failed. Please try again later."
         message = str(exc).strip()
         if not message:
             return LLM_ERROR_FALLBACK

@@ -17,6 +17,7 @@ from src.backend.config import Settings
 from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.backend.llm_gemini import GeminiRestClient
+from src.backend.llm_http import LlmConnectionError
 
 
 _RETRY_REPLY = '{"tool_calls":[],"final_message":"ok","include_score":false}'
@@ -97,6 +98,26 @@ def test_retry_remote_disconnect_exhausts(monkeypatch):  # type: ignore[no-untyp
         _gemini_text(client)
     assert len(calls) == 3
     assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("error", [
+    http.client.RemoteDisconnected("Remote end closed connection without response"),
+    urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+])
+def test_gemini_transport_failure_raises_connection_error(monkeypatch, error):  # type: ignore[no-untyped-def]
+    client, _, _ = _script_gemini(monkeypatch, [error, error, error])
+    with pytest.raises(LlmConnectionError) as raised:
+        _gemini_text(client)
+    assert raised.value.provider == "Gemini"
+    assert str(raised.value).startswith("Gemini connection error: ")
+
+
+@pytest.mark.parametrize("error", [TimeoutError("read timed out"), _http_error(503, {"error": "busy"})])
+def test_gemini_timeout_and_http_errors_are_not_connection_errors(monkeypatch, error):  # type: ignore[no-untyped-def]
+    client, _, _ = _script_gemini(monkeypatch, [error, error, error])
+    with pytest.raises(RuntimeError) as raised:
+        _gemini_text(client)
+    assert not isinstance(raised.value, LlmConnectionError)
 
 
 def test_retry_gemini_503(monkeypatch):  # type: ignore[no-untyped-def]

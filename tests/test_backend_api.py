@@ -29,6 +29,7 @@ from src.backend.main import (
     create_app,
 )
 from src.backend.llm_client import LlmRole, StaticLlmClient
+from src.backend.llm_http import LlmConnectionError
 from src.backend.lifecycle import ShutdownCoordinator
 from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import (
@@ -6109,6 +6110,18 @@ def test_format_llm_error_returns_plain_non_json_message(client):
     assert (
         orchestrator._format_llm_error(RuntimeError("Gemini service unavailable."))
         == "Gemini service unavailable."
+    )
+
+
+@pytest.mark.parametrize("provider", ["Gemini", "OpenAI"])
+def test_format_llm_error_returns_provider_connection_message(client, provider):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    error = LlmConnectionError(provider, "Remote end closed connection without response")
+    assert (
+        orchestrator._format_llm_error(error)
+        == f"{provider} connection failed. Please try again later."
     )
 
 
