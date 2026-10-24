@@ -40,6 +40,7 @@ class Lane:
     source_voice_part_id: str
     default_rank: int
     output_mode: str
+    existing_derived_lane_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,10 +126,10 @@ def _verse_number(planning_context: dict) -> str | None:
     return _normalize_verse_number(raw)
 
 
-def _existing_lane_slots(score: dict) -> set[tuple[int, str, int]]:
+def _existing_lane_slots(score: dict) -> dict[tuple[int, str, int], str | None]:
     """Existing visible derived lanes, addressed by the executor's per-source slot."""
     visible_parts = _derived_part_indices(score)
-    slots: set[tuple[int, str, int]] = set()
+    slots: dict[tuple[int, str, int], str | None] = {}
     transforms = score.get("voice_part_transforms")
     if not isinstance(transforms, dict):
         return slots
@@ -146,7 +147,7 @@ def _existing_lane_slots(score: dict) -> set[tuple[int, str, int]]:
         voice_part_id = source.get("voice_part_id")
         slot = lane.get("slot")
         if isinstance(part_index, int) and isinstance(voice_part_id, str) and isinstance(slot, int):
-            slots.add((part_index, voice_part_id, slot))
+            slots[(part_index, voice_part_id, slot)] = str(lane.get("derived_lane_id") or "").strip() or None
     return slots
 
 
@@ -322,6 +323,7 @@ def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSke
                 source_voice_part_id=source,
                 default_rank=rank,
                 output_mode=output_mode,
+                existing_derived_lane_id=existing_slots.get((part_index, source, ordinal + 1)),
             ))
         skeleton.lanes.extend(scope_lanes)
         skeleton.segments.extend(_segments(
