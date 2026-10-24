@@ -6067,6 +6067,59 @@ def _derived_lane_tie_types(
     return tie_types
 
 
+def _reference_measure_length_beats(
+    measure: ET.Element, q: Any, divisions: int, nominal_beats: float
+) -> float:
+    """Use the source bar's written timeline for pickup and overfull measures."""
+    cursor = 0
+    end = 0
+    for child in measure:
+        if child.tag == q("note"):
+            if child.find(q("chord")) is not None or child.find(q("grace")) is not None:
+                continue
+            cursor += int(child.findtext(q("duration")) or 0)
+        elif child.tag == q("forward"):
+            cursor += int(child.findtext(q("duration")) or 0)
+        elif child.tag == q("backup"):
+            cursor -= int(child.findtext(q("duration")) or 0)
+        end = max(end, cursor)
+    written_beats = end / float(divisions)
+    if measure.get("implicit") == "yes" and written_beats > 0:
+        return written_beats
+    return max(nominal_beats, written_beats)
+
+
+def _append_gap_rests(
+    measure_node: ET.Element, *, gap_beats: float, divisions: int, q: Any
+) -> None:
+    """Fill a silent interval with rests whose types match exact durations."""
+    remaining = int(round(gap_beats * divisions))
+    if remaining <= 0:
+        return
+    choices: List[Tuple[int, str, int]] = []
+    for name, base in (
+        ("whole", 4.0), ("half", 2.0), ("quarter", 1.0),
+        ("eighth", 0.5), ("16th", 0.25), ("32nd", 0.125),
+        ("64th", 0.0625), ("128th", 0.03125),
+    ):
+        for dots in range(4):
+            beats = base * sum(0.5**n for n in range(dots + 1))
+            duration = int(round(beats * divisions))
+            if duration > 0 and abs(duration / divisions - beats) <= 1e-9:
+                choices.append((duration, name, dots))
+    choices.sort(key=lambda choice: (-choice[0], choice[2]))
+    while remaining > 0:
+        duration, name, dots = next(choice for choice in choices if choice[0] <= remaining)
+        rest_node = ET.SubElement(measure_node, q("note"))
+        ET.SubElement(rest_node, q("rest"))
+        ET.SubElement(rest_node, q("duration")).text = str(duration)
+        ET.SubElement(rest_node, q("voice")).text = "1"
+        ET.SubElement(rest_node, q("type")).text = name
+        for _ in range(dots):
+            ET.SubElement(rest_node, q("dot"))
+        remaining -= duration
+
+
 def _append_transformed_measures(
     part_node: ET.Element,
     *,
@@ -6093,10 +6146,15 @@ def _append_transformed_measures(
         ]
 
     current_time = {"beats": 4, "beat_type": 4}
+    current_divisions = divisions
+    bar_start = 0.0
     for idx, ref_measure in enumerate(ordered_measures):
         measure_number = ref_measure.attrib.get("number") or str(idx + 1)
         measure_int = int(measure_number) if measure_number.isdigit() else idx + 1
-        measure_node = ET.SubElement(part_node, q("measure"), {"number": str(measure_number)})
+        measure_attributes = {"number": str(measure_number)}
+        if ref_measure.get("implicit") == "yes":
+            measure_attributes["implicit"] = "yes"
+        measure_node = ET.SubElement(part_node, q("measure"), measure_attributes)
 
         ref_attributes = ref_measure.find(q("attributes"))
         if ref_attributes is not None:
@@ -6106,14 +6164,22 @@ def _append_transformed_measures(
             ET.SubElement(attributes, q("divisions")).text = str(divisions)
 
         _update_time_signature(ref_attributes, q, current_time)
+        if ref_attributes is not None:
+            source_divisions = ref_attributes.findtext(q("divisions"))
+            if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
+                current_divisions = int(source_divisions)
+        nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
+        bar_length = (
+            _reference_measure_length_beats(ref_measure, q, current_divisions, nominal_beats)
+            if reference_measures else nominal_beats
+        )
+        bar_end = bar_start + bar_length
         notes = sorted(
             by_measure.get(measure_int, []),
             key=lambda row: (float(row.get("offset_beats") or 0.0), float(row.get("pitch_midi") or 0.0)),
         )
         if not notes:
-            duration_beats = (
-                float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
-            )
+            duration_beats = bar_length
             duration_div = max(1, int(round(duration_beats * float(divisions))))
             rest_node = ET.SubElement(measure_node, q("note"))
             ET.SubElement(rest_node, q("rest"))
@@ -6123,9 +6189,16 @@ def _append_transformed_measures(
             ET.SubElement(rest_node, q("type")).text = rest_type
             for _ in range(_coerce_dot_count(None)):
                 ET.SubElement(rest_node, q("dot"))
+            bar_start = bar_end
             continue
 
+        cursor = bar_start
         for note in notes:
+            note_start = float(note.get("offset_beats") or 0.0)
+            if note_start - cursor > 1e-6:
+                _append_gap_rests(
+                    measure_node, gap_beats=note_start - cursor, divisions=divisions, q=q
+                )
             note_node = ET.SubElement(measure_node, q("note"))
             duration_beats = float(note.get("duration_beats") or 1.0)
             if note.get("is_rest"):
@@ -6178,6 +6251,12 @@ def _append_transformed_measures(
                 ET.SubElement(lyric_node, q("text")).text = lyric
                 if bool(note.get("lyric_is_extended")):
                     ET.SubElement(lyric_node, q("extend"))
+            cursor = max(cursor, note_start + duration_beats)
+        if bar_end - cursor > 1e-6:
+            _append_gap_rests(
+                measure_node, gap_beats=bar_end - cursor, divisions=divisions, q=q
+            )
+        bar_start = bar_end
 
 
 def _source_staff_number(
