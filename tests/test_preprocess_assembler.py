@@ -80,7 +80,12 @@ def test_run_length_merge_exact_randomized_and_boundaries():
 
 @pytest.mark.parametrize("fixture", ["satb", "chord"])
 def test_first_option_plan_is_public_valid_deterministic_and_executable(tmp_path, fixture):
-    score = parse_score(SATB, verse_number=1) if fixture == "satb" else _chord_score(tmp_path)
+    if fixture == "satb":
+        satb_copy = tmp_path / SATB.name
+        satb_copy.write_bytes(SATB.read_bytes())
+        score = parse_score(satb_copy, verse_number=1)
+    else:
+        score = _chord_score(tmp_path)
     part_id = score["parts"][0]["part_id"]
     original = deepcopy(score)
     sheet = _sheet(score, part_id)
