@@ -117,6 +117,32 @@ def test_chord_split_always_ranked_even_when_density_falls(tmp_path):
     assert [target["sections"][0]["rank_index"] for target in plan["targets"]] == [0, 1]
 
 
+def test_rule_19_lyric_policy_for_words_none_and_extension_only():
+    score = parse_score(SATB, verse_number=1)
+    sheet = _sheet(score, "P1-Staff1")
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    assert plan["targets"][0]["sections"][0]["lyric_policy"] == "fill_missing_only"
+    assert plan["targets"][1]["sections"][0]["lyric_policy"] == "replace_all"
+
+    for note in score["parts"][0]["notes"]:
+        if note.get("voice") == "1" and note.get("measure_number") == 2:
+            note["lyric"] = "+"
+    next(note for note in score["parts"][1]["notes"]
+         if note.get("voice") == "5" and note.get("measure_number") == 2)["lyric"] = "next"
+    extension = _sheet(score, "P1-Staff1")
+    policy_slot = next(slot for slot in extension.slots if slot.kind == "lyric_policy")
+    choices = assembler.first_option_choices(extension)
+    for desired in ("fill_missing_only", "replace_all"):
+        choices[policy_slot.slot_id] = next(option.option_id for option in policy_slot.options
+                                           if option.fields["lyric_policy"] == desired)
+        plan = assembler.assemble_plan(extension, choices)
+        target = next(target for lane, target in zip(extension.lanes, plan["targets"])
+                      if lane.lane_id in policy_slot.lane_ids)
+        section = next(section for section in target["sections"]
+                       if section["start_measure"] <= 2 <= section["end_measure"])
+        assert section["lyric_policy"] == desired
+
+
 def test_rest_and_copy_unison_decision_rows(tmp_path):
     score = _chord_score(tmp_path)
     sheet = _sheet(score, score["parts"][0]["part_id"])
@@ -162,6 +188,23 @@ def test_invalid_choices_freeform_and_forced_roundtrip_failure(monkeypatch, tmp_
     with pytest.raises(assembler.FreeformUnresolved) as error:
         assembler.assemble_plan(freeform_sheet, assembler.first_option_choices(freeform_sheet))
     assert error.value.slot_ids == sorted(slot.slot_id for slot in freeform_sheet.slots)
+    supplied = {
+        slot.slot_id: [{
+            "start_measure": slot.start_measure, "end_measure": slot.end_measure,
+            "mode": "derive", "decision_type": "SPLIT_CHORDS_SELECT_NOTES",
+            "method": "ranked", "rank_index": 0, "rank_fallback": "greedy",
+            "melody_source": {"part_id": "Solo", "voice_part_id": "voice part 1"},
+            "lyric_source": {"part_id": "Solo", "voice_part_id": "voice part 1"},
+            "lyric_strategy": "strict_onset", "lyric_policy": "fill_missing_only",
+        }]
+        for slot in freeform_sheet.slots
+    }
+    freeform_plan = assembler.assemble_plan(
+        freeform_sheet, assembler.first_option_choices(freeform_sheet),
+        freeform_sections=supplied,
+    )
+    _assert_schema(freeform_plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+    assert parse_voice_part_plan(freeform_plan, score=score)["ok"]
 
     monkeypatch.setattr(assembler, "expand", lambda sections: {})
     with pytest.raises(assembler.AssemblyError, match="Round-trip mismatch"):
