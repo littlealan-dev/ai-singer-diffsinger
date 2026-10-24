@@ -6109,9 +6109,16 @@ def _append_gap_rests(
                 choices.append((duration, name, dots))
     choices.sort(key=lambda choice: (-choice[0], choice[2]))
     while remaining > 0:
-        duration, name, dots = next(choice for choice in choices if choice[0] <= remaining)
+        choice = next((item for item in choices if item[0] <= remaining), None)
         rest_node = ET.SubElement(measure_node, q("note"))
         ET.SubElement(rest_node, q("rest"))
+        if choice is None:
+            # Tuplet subdivisions can be exact in divisions without a plain
+            # note type. MusicXML still parses the exact duration.
+            ET.SubElement(rest_node, q("duration")).text = str(remaining)
+            ET.SubElement(rest_node, q("voice")).text = "1"
+            return
+        duration, name, dots = choice
         ET.SubElement(rest_node, q("duration")).text = str(duration)
         ET.SubElement(rest_node, q("voice")).text = "1"
         ET.SubElement(rest_node, q("type")).text = name
