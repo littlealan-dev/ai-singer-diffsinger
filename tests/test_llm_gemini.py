@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import io
+import http.client
 import json
 import logging
+import random
+import socket
+import ssl
+import time
 import urllib.error
 import urllib.request
 
@@ -12,6 +17,185 @@ from src.backend.config import Settings
 from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.backend.llm_gemini import GeminiRestClient
+
+
+_RETRY_REPLY = '{"tool_calls":[],"final_message":"ok","include_score":false}'
+
+
+class _RetryCacheManager:
+    def ensure_prompt_cache(self, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+
+class _RetryResponse:
+    def __init__(self, body: bytes | BaseException | None = None) -> None:
+        self.body = body if body is not None else json.dumps(
+            {"candidates": [{"content": {"parts": [{"text": _RETRY_REPLY}]}}]}
+        ).encode()
+
+    def __enter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+        return False
+
+    def read(self) -> bytes:
+        if isinstance(self.body, BaseException):
+            raise self.body
+        return self.body
+
+
+def _http_error(code: int, body: dict, headers: dict | None = None) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid", code, "failure", headers or {}, io.BytesIO(json.dumps(body).encode())
+    )
+
+
+def _script_gemini(monkeypatch: pytest.MonkeyPatch, steps: list[object]):
+    monkeypatch.setenv("LLM_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("LLM_RETRY_BASE_DELAY_SECONDS", "1")
+    monkeypatch.setenv("LLM_RETRY_MAX_DELAY_SECONDS", "10")
+    calls: list[object] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0)
+
+    def fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        step = steps.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = GeminiRestClient(Settings.from_env(), api_key="dummy-secret-key", cache_manager=_RetryCacheManager())
+    return client, calls, sleeps
+
+
+def _gemini_text(client: GeminiRestClient, message: str = "hello") -> str:
+    return client.generate("system", [{"role": "user", "content": message}])
+
+
+def test_retry_remote_disconnect_twice_then_succeeds(monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_gemini(monkeypatch, [
+        http.client.RemoteDisconnected("Remote end closed"),
+        http.client.RemoteDisconnected("Remote end closed"),
+        _RetryResponse(),
+    ])
+    caplog.set_level(logging.WARNING, logger="src.backend.llm_gemini")
+    assert _gemini_text(client) == _RETRY_REPLY
+    assert len(calls) == 3
+    assert sleeps == [1.0, 2.0]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING and r.getMessage().startswith("llm_http_retry")]) == 2
+
+
+def test_retry_remote_disconnect_exhausts(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_gemini(monkeypatch, [
+        http.client.RemoteDisconnected("Remote end closed") for _ in range(3)
+    ])
+    with pytest.raises(RuntimeError, match="Gemini connection error: Remote end closed"):
+        _gemini_text(client)
+    assert len(calls) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_retry_gemini_503(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, _ = _script_gemini(monkeypatch, [_http_error(503, {"error": "busy"}), _RetryResponse()])
+    assert _gemini_text(client) == _RETRY_REPLY
+    assert len(calls) == 2
+
+
+def test_gemini_spending_cap_429_fails_immediately(monkeypatch):  # type: ignore[no-untyped-def]
+    body = {"error": {"code": 429, "message": "Your project has exceeded its monthly spending cap.", "status": "RESOURCE_EXHAUSTED"}}
+    client, calls, sleeps = _script_gemini(monkeypatch, [_http_error(429, body)])
+    with pytest.raises(RuntimeError, match="Gemini HTTP error 429"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_retry_gemini_429_retry_info(monkeypatch):  # type: ignore[no-untyped-def]
+    body = {"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "3s"}]}}
+    client, calls, sleeps = _script_gemini(monkeypatch, [_http_error(429, body), _RetryResponse()])
+    assert _gemini_text(client) == _RETRY_REPLY
+    assert len(calls) == 2
+    assert sleeps == [3.0]
+
+
+def test_gemini_429_excessive_retry_delay_fails_immediately(monkeypatch):  # type: ignore[no-untyped-def]
+    body = {"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "60s"}]}}
+    client, calls, sleeps = _script_gemini(monkeypatch, [_http_error(429, body)])
+    with pytest.raises(RuntimeError, match="Gemini HTTP error 429"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_raw_timeout_is_not_retried(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_gemini(monkeypatch, [TimeoutError("read timed out")])
+    with pytest.raises(RuntimeError, match="Gemini request timed out"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("error", [
+    urllib.error.URLError(socket.gaierror(8, "nodename nor servname provided")),
+    urllib.error.URLError(TimeoutError("timed out")),
+])
+def test_retry_gemini_connect_failure(monkeypatch, error):  # type: ignore[no-untyped-def]
+    client, calls, _ = _script_gemini(monkeypatch, [error, _RetryResponse()])
+    assert _gemini_text(client) == _RETRY_REPLY
+    assert len(calls) == 2
+
+
+def test_retry_gemini_incomplete_read(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, _ = _script_gemini(monkeypatch, [_RetryResponse(http.client.IncompleteRead(b"")), _RetryResponse()])
+    assert _gemini_text(client) == _RETRY_REPLY
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("status", [504, 400])
+def test_gemini_permanent_http_error_fails_immediately(monkeypatch, status):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_gemini(monkeypatch, [_http_error(status, {"error": "permanent"})])
+    with pytest.raises(RuntimeError, match=f"Gemini HTTP error {status}"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_certificate_failure_is_not_retried(monkeypatch):  # type: ignore[no-untyped-def]
+    error = urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+    client, calls, sleeps = _script_gemini(monkeypatch, [error])
+    with pytest.raises(RuntimeError, match="Gemini connection error"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_one_attempt_maps_disconnect(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_gemini(monkeypatch, [http.client.RemoteDisconnected("Remote end closed")])
+    monkeypatch.setenv("LLM_RETRY_MAX_ATTEMPTS", "1")
+    client._settings = Settings.from_env()
+    with pytest.raises(RuntimeError, match="Gemini connection error: Remote end closed"):
+        _gemini_text(client)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_gemini_logs_do_not_include_prompt_or_key(monkeypatch, caplog):  # type: ignore[no-untyped-def]
+    sentinel = "private-sentinel-message"
+    client, calls, _ = _script_gemini(monkeypatch, [
+        http.client.RemoteDisconnected("Remote end closed"),
+        http.client.RemoteDisconnected("Remote end closed"),
+        _RetryResponse(),
+    ])
+    caplog.set_level(logging.WARNING)
+    assert _gemini_text(client, sentinel) == _RETRY_REPLY
+    assert len(calls) == 3
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING and r.getMessage().startswith("llm_http_retry")]) == 2
+    assert sentinel not in caplog.text
+    assert "dummy-secret-key" not in caplog.text
 
 
 def _settings() -> Settings:
