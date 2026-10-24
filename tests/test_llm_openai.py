@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import http.client
+import io
+import random
+import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -9,6 +14,60 @@ from src.backend.config import Settings
 from src.backend.llm_client import LlmRole
 from src.backend.llm_openai import OpenAIRestClient
 from src.backend.llm_prompt import PromptBundle
+
+
+def _script_openai(monkeypatch: pytest.MonkeyPatch, steps: list[object]):
+    monkeypatch.setenv("LLM_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("LLM_RETRY_BASE_DELAY_SECONDS", "1")
+    monkeypatch.setenv("LLM_RETRY_MAX_DELAY_SECONDS", "10")
+    calls: list[object] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0)
+
+    def fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        step = steps.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return OpenAIRestClient(Settings.from_env(), api_key="dummy"), calls, sleeps
+
+
+def _openai_429(code: str, retry_after: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid", 429, "rate limited", {"Retry-After": retry_after},
+        io.BytesIO(json.dumps({"error": {"code": code}}).encode()),
+    )
+
+
+def test_retry_openai_remote_disconnect(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, _ = _script_openai(monkeypatch, [
+        http.client.RemoteDisconnected("Remote end closed"),
+        _Response({"output_text": '{"tool_calls":[],"final_message":"ok","include_score":false}'}),
+    ])
+    assert '"final_message":"ok"' in client.generate("system", [{"role": "user", "content": "hello"}])
+    assert len(calls) == 2
+
+
+def test_retry_openai_429_with_retry_after(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_openai(monkeypatch, [
+        _openai_429("rate_limit_exceeded", "2"),
+        _Response({"output_text": '{"tool_calls":[],"final_message":"ok","include_score":false}'}),
+    ])
+    assert '"final_message":"ok"' in client.generate("system", [{"role": "user", "content": "hello"}])
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_openai_insufficient_quota_is_not_retried(monkeypatch):  # type: ignore[no-untyped-def]
+    client, calls, sleeps = _script_openai(monkeypatch, [_openai_429("insufficient_quota", "1")])
+    with pytest.raises(RuntimeError, match="OpenAI HTTP error 429"):
+        client.generate("system", [{"role": "user", "content": "hello"}])
+    assert len(calls) == 1
+    assert sleeps == []
 
 
 def _settings() -> Settings:
