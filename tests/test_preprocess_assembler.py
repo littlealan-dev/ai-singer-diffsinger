@@ -117,6 +117,15 @@ def test_chord_split_always_ranked_even_when_density_falls(tmp_path):
     assert [target["sections"][0]["rank_index"] for target in plan["targets"]] == [0, 1]
 
 
+def test_own_density_one_source_extracts_trivially():
+    score = parse_score(SATB, verse_number=1)
+    sheet = _sheet(score, "P1-Staff1")
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    assert all(section["decision_type"] == "EXTRACT_FROM_VOICE"
+               and section["method"] == "trivial"
+               for target in plan["targets"] for section in target["sections"])
+
+
 def test_rule_19_lyric_policy_for_words_none_and_extension_only():
     score = parse_score(SATB, verse_number=1)
     sheet = _sheet(score, "P1-Staff1")
@@ -151,8 +160,10 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
     choices[rest_slot.slot_id] = next(option.option_id for option in rest_slot.options
                                       if option.fields["mode"] == "rest")
     plan = assembler.assemble_plan(sheet, choices)
-    assert plan["targets"][1]["sections"][-1]["decision_type"] == "INSERT_RESTS"
-    assert plan["targets"][1]["sections"][-1]["mode"] == "rest"
+    rest_section = plan["targets"][1]["sections"][-1]
+    assert rest_section["decision_type"] == "INSERT_RESTS"
+    assert rest_section["mode"] == "rest"
+    assert {"method", "melody_source", "lyric_source"}.isdisjoint(rest_section)
     assert parse_voice_part_plan(plan, score=score)["ok"]
 
     satb = parse_score(SATB, verse_number=1)
@@ -165,8 +176,16 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
                        if option.fields["melody_source"]["voice_part_id"] != own_voice)
     choices[source_slot.slot_id] = copy_option.option_id
     plan = assembler.assemble_plan(sheet, choices)
-    assert any(section["decision_type"] == "COPY_UNISON_SECTION"
-               for target in plan["targets"] for section in target["sections"])
+    chosen = copy_option.fields["melody_source"]
+    expected_source = {
+        "part_id": satb["parts"][chosen["part_index"]]["part_id"],
+        "voice_part_id": chosen["voice_part_id"],
+    }
+    copy_sections = [section for target in plan["targets"] for section in target["sections"]
+                     if section["decision_type"] == "COPY_UNISON_SECTION"]
+    assert copy_sections
+    assert all(section["method"] == "trivial"
+               and section["melody_source"] == expected_source for section in copy_sections)
     _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
     assert parse_voice_part_plan(plan, score=satb)["ok"]
 
