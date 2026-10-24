@@ -185,9 +185,15 @@ def test_gemini_one_attempt_maps_disconnect(monkeypatch):  # type: ignore[no-unt
 
 def test_gemini_logs_do_not_include_prompt_or_key(monkeypatch, caplog):  # type: ignore[no-untyped-def]
     sentinel = "private-sentinel-message"
-    client, _, _ = _script_gemini(monkeypatch, [_RetryResponse()])
+    client, calls, _ = _script_gemini(monkeypatch, [
+        http.client.RemoteDisconnected("Remote end closed"),
+        http.client.RemoteDisconnected("Remote end closed"),
+        _RetryResponse(),
+    ])
     caplog.set_level(logging.WARNING)
     assert _gemini_text(client, sentinel) == _RETRY_REPLY
+    assert len(calls) == 3
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING and r.getMessage().startswith("llm_http_retry")]) == 2
     assert sentinel not in caplog.text
     assert "dummy-secret-key" not in caplog.text
 
