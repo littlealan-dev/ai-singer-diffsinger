@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import json
 import logging
-import urllib.error
 import urllib.request
 
 from src.backend.config import Settings
 from src.backend.gemini_cache import GeminiPromptCacheManager
 from src.backend.llm_client import LlmRole
+from src.backend.llm_http import post_with_retry
 from src.backend.llm_prompt import PromptBundle
 from src.mcp.logging_utils import summarize_payload
 
@@ -151,16 +151,15 @@ class GeminiRestClient:
                 "x-goog-api-key": self._api_key,
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = response.read()
-        except TimeoutError as exc:
-            raise RuntimeError("Gemini request timed out.") from exc
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Gemini HTTP error {exc.code}: {details}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Gemini connection error: {exc.reason}") from exc
+        body = post_with_retry(
+            request,
+            timeout=timeout,
+            provider="Gemini",
+            role=role,
+            model=model,
+            settings=self._settings,
+            logger=self._logger,
+        )
 
         parsed = json.loads(body)
         self._log_usage(

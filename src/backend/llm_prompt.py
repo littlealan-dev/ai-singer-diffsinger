@@ -311,14 +311,29 @@ def build_prompt_bundle(
         active_synthesis_quote_text = json.dumps(
             active_synthesis_quote, indent=2, sort_keys=True, ensure_ascii=False
         )
+    # Every call that builds this prompt sees this block, including the quote
+    # reply, which never sees a repeat_expansion_unavailable result from earlier
+    # in the turn. So an unexpandable score must say here that repeats are out.
+    if (score_summary or {}).get("repeat_expansion_available") is False:
+        repeat_expansion_instruction = (
+            "This score's repeat marks can't be followed, so it can only be sung in written "
+            "order. Don't pass expand_repeats=true and don't offer to sing it with repeats. "
+            "If the user asks for repeats, say so and quote the written order."
+        )
+    else:
+        repeat_expansion_instruction = (
+            "This is the current With Repeats setting, which the backend applies to every "
+            "synthesis call. If the user's latest message explicitly asks to sing with the "
+            "score's repeats, or in written order, and that differs from this setting, pass "
+            "expand_repeats with the requested value to prepare_synthesis_quote. The quote "
+            "then uses it and the With Repeats switch is updated to match. Otherwise omit "
+            "expand_repeats. Never set it on synthesize. Use the score-summary duration that "
+            "matches the repeat order you quote for the billable quote and the duration limit."
+        )
     repeat_expansion_text = json.dumps(
         {
             "expand_repeats": bool(expand_repeats),
-            "instruction": (
-                "This UI-selected setting is authoritative. The backend applies it to "
-                "every synthesis call; do not choose or override it. Use the matching "
-                "score-summary duration for the billable quote and duration limit."
-            ),
+            "instruction": repeat_expansion_instruction,
         },
         indent=2,
         sort_keys=True,

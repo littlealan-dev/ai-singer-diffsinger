@@ -22,6 +22,7 @@ from src.backend.config import Settings
 from src.backend.credit_retry import retry_credit_op
 from src.backend.job_store import build_progress_payload
 from src.backend.llm_client import LlmClient, LlmRole
+from src.backend.llm_http import LlmConnectionError
 from src.backend.quote_presentation import (
     QUOTE_PRESENTATION_INSTRUCTION,
     presented_quote,
@@ -2753,6 +2754,7 @@ class Orchestrator:
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
         selection_resolved = False
+        repeat_setting_changed = False
         selector_suppressed = False
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
@@ -2846,6 +2848,9 @@ class Orchestrator:
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
             selection_resolved = selection_resolved or tool_result.selection_resolved
+            if tool_result.expand_repeats is not None and tool_result.expand_repeats != expand_repeats:
+                expand_repeats = tool_result.expand_repeats
+                repeat_setting_changed = True
             if tool_result.explicit_verse_number is not None:
                 snapshot = dict(snapshot)
                 files = snapshot.get("files")
@@ -3401,6 +3406,8 @@ class Orchestrator:
         # Set here: the reply dict is rebuilt when the LLM's final message arrives.
         if selection_resolved:
             response["selection_resolved"] = True
+        if repeat_setting_changed:
+            response["expand_repeats"] = expand_repeats
         if selector_suppressed:
             response["suppress_selector"] = True
         if include_score or response.get("review_required"):
@@ -6212,6 +6219,8 @@ class Orchestrator:
         """Return a user-facing LLM error message."""
         if isinstance(exc, LlmTurnLimitReached):
             return str(exc)
+        if isinstance(exc, LlmConnectionError):
+            return f"{exc.provider} connection failed. Please try again later."
         message = str(exc).strip()
         if not message:
             return LLM_ERROR_FALLBACK
@@ -7520,6 +7529,23 @@ class Orchestrator:
         The prepare_synthesis_quote tool and a refused synthesize call both use
         this, so both return the same success and failure payloads.
         """
+        requested = call.arguments.get("expand_repeats") if call.name == TOOL_PREPARE_SYNTHESIS_QUOTE else None
+        if isinstance(requested, bool):
+            expand_repeats = requested
+        if expand_repeats and (score_summary or {}).get("repeat_expansion_available") is False:
+            action_required = {
+                "status": "action_required",
+                "action": "repeat_expansion_unavailable",
+                "code": "repeat_expansion_unavailable",
+                "message": "This score's repeat marks can't be followed, so it can only be sung in written order.",
+            }
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(action_required, sort_keys=True),
+                action_required_payload=action_required,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
         quote_args = self._without_ignored_synthesis_target_fields(
             call.arguments, session_id=session_id, tool=call.name
         )
@@ -7808,6 +7834,7 @@ class Orchestrator:
             explicit_verse_number=selected_explicit_verse_number,
             session_state_changed=quote_reparsed,
             selection_resolved=True,
+            expand_repeats=expand_repeats,
             # The tool result reaches the model through a message-only
             # follow-up, so the id is remembered on the session: the
             # confirmation turn reads it from dynamic prompt context. Only once
@@ -8676,7 +8703,9 @@ class Orchestrator:
                                     key: value
                                     for key, value in call.arguments.items()
                                     # The override only vouches for the old quote's voice.
-                                    if key not in {"quote_id", "confirmed_voicebank_override"}
+                                    # On confirmation the UI repeat order is authoritative,
+                                    # not a stale synthesize argument.
+                                    if key not in {"quote_id", "confirmed_voicebank_override", "expand_repeats"}
                                 },
                             ),
                             session_id=session_id,
@@ -9758,6 +9787,8 @@ class ToolExecutionResult:
     # A billable quote fixes the part and lyric line, so the UI's part/verse
     # picker has nothing left to ask.
     selection_resolved: bool = False
+    # Repeat order bound to a successful quote, for the rest of this turn and the UI.
+    expand_repeats: Optional[bool] = None
     # Session metadata that holds only once the message-only reply presenting
     # this result reaches the user, such as the quote awaiting confirmation.
     # The workflow writes it after that reply succeeds; a failed reply leaves

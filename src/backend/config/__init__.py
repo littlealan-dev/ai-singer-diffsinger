@@ -214,6 +214,9 @@ class Settings:
     credit_retry_base_delay_seconds: float
     credit_retry_test_settle_fail_count: int
     credit_retry_test_release_fail_count: int
+    llm_retry_max_attempts: int
+    llm_retry_base_delay_seconds: float
+    llm_retry_max_delay_seconds: float
     backend_build_id: str
     gemini_prompt_cache_enabled: bool
     gemini_prompt_cache_ttl_days: int
@@ -554,6 +557,13 @@ class Settings:
             0,
             _env_int("CREDIT_RETRY_TEST_RELEASE_FAIL_COUNT", 0),
         )
+        llm_retry_max_attempts = max(1, _env_int("LLM_RETRY_MAX_ATTEMPTS", 3))
+        llm_retry_base_delay_seconds = max(
+            0.0, _env_float("LLM_RETRY_BASE_DELAY_SECONDS", 1.0)
+        )
+        llm_retry_max_delay_seconds = max(
+            0.0, _env_float("LLM_RETRY_MAX_DELAY_SECONDS", 10.0)
+        )
         backend_build_id = (
             os.getenv("BACKEND_BUILD_ID")
             or os.getenv("K_REVISION")
@@ -725,6 +735,9 @@ class Settings:
             credit_retry_base_delay_seconds=credit_retry_base_delay_seconds,
             credit_retry_test_settle_fail_count=credit_retry_test_settle_fail_count,
             credit_retry_test_release_fail_count=credit_retry_test_release_fail_count,
+            llm_retry_max_attempts=llm_retry_max_attempts,
+            llm_retry_base_delay_seconds=llm_retry_base_delay_seconds,
+            llm_retry_max_delay_seconds=llm_retry_max_delay_seconds,
             backend_build_id=backend_build_id,
             gemini_prompt_cache_enabled=gemini_prompt_cache_enabled,
             gemini_prompt_cache_ttl_days=gemini_prompt_cache_ttl_days,

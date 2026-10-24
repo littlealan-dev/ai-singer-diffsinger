@@ -29,6 +29,7 @@ from src.backend.main import (
     create_app,
 )
 from src.backend.llm_client import LlmRole, StaticLlmClient
+from src.backend.llm_http import LlmConnectionError
 from src.backend.lifecycle import ShutdownCoordinator
 from src.backend.message_catalog import backend_message
 from src.backend.mcp_client import (
@@ -499,11 +500,13 @@ class _RecordingQuoteClient(_QuoteThenSynthesizeClient):
     def __init__(self, arguments: dict):
         super().__init__(arguments)
         self.tool_results: list[str] = []
+        self.reply_prompts: list[str] = []
 
     def generate(self, prompt_bundle, history, *, role=None, **kwargs):
         last = history[-1].get("content", "") if history else ""
         if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
             self.tool_results.append(last)
+            self.reply_prompts.append(prompt_bundle.dynamic_prompt_text)
         return super().generate(prompt_bundle, history, role=role, **kwargs)
 
 
@@ -4508,6 +4511,152 @@ def test_a_quote_reply_that_calls_a_tool_is_rejected_and_retried(client, monkeyp
     assert snapshot["files"].get("active_synthesis_quote_turn_id")
 
 
+def _repeat_quote_session(test_client, app, monkeypatch, *, requested, available=None):
+    session_id, summary = _upload_demo_with_real_parsing(test_client, app)
+    if available is not None:
+        summary = {**summary, "repeat_expansion_available": available}
+        asyncio.run(app.state.sessions.set_score_summary(session_id, summary))
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    alto_verse_1 = next(
+        selection
+        for part in summary["parts"]
+        if part["part_id"] == "Alto"
+        for selection in part["lyric_selections"]
+        if selection["number"] == "1"
+    )
+    arguments = {
+        "part_id": "Alto",
+        "voicebank": "Dummy",
+        "language": "en",
+        "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+    }
+    if requested is not None:
+        arguments["expand_repeats"] = requested
+    llm_client = _RecordingQuoteClient(arguments)
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+    return session_id, llm_client
+
+
+def _quote_with_chat_repeat_request(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client = _repeat_quote_session(
+        test_client, app, monkeypatch, requested=True
+    )
+    quoted = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing with repeats", "expand_repeats": False},
+    )
+    assert quoted.status_code == 200
+    return test_client, app, session_id, llm_client, quoted
+
+
+def test_explicit_chat_repeat_request_changes_quote_and_response(client, monkeypatch):
+    _, _, _, llm_client, quoted = _quote_with_chat_repeat_request(client, monkeypatch)
+    quote = _message_only_payload(llm_client.tool_results[-1])
+    assert quote["render_choices"]["expand_repeats"] is True
+    assert quote["estimate"]["expand_repeats"] is True
+    assert quoted.json()["expand_repeats"] is True
+
+
+def test_chat_repeat_quote_confirms_without_refresh(client, monkeypatch):
+    test_client, app, session_id, llm_client, _ = _quote_with_chat_repeat_request(
+        client, monkeypatch
+    )
+    started = {}
+
+    async def fake_start_synthesis_job(session_id_arg, score_arg, arguments, **kwargs):
+        started["arguments"] = dict(arguments)
+        return {"type": "chat_text", "message": "Starting synthesis."}
+
+    app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    confirmed = test_client.post(
+        f"/sessions/{session_id}/chat", json={"message": "yes", "expand_repeats": True}
+    )
+    assert confirmed.status_code == 200
+    assert started["arguments"]["expand_repeats"] is True
+    assert "synthesis_quote_refresh_required" not in str(llm_client.tool_results[-1:])
+
+
+def test_chat_repeat_quote_reply_sees_quoted_repeat_setting(client, monkeypatch):
+    _, _, _, llm_client, _ = _quote_with_chat_repeat_request(client, monkeypatch)
+    repeat_setting = llm_client.reply_prompts[0].split(
+        "Repeat-expansion setting (authoritative):\n", 1
+    )[1]
+    assert json.loads(repeat_setting[: repeat_setting.index("\n}") + 2])[
+        "expand_repeats"
+    ] is True
+
+
+def test_explicit_written_order_request_changes_quote_and_response(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client = _repeat_quote_session(
+        test_client, app, monkeypatch, requested=False
+    )
+    quoted = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing in written order", "expand_repeats": True},
+    )
+    assert quoted.status_code == 200
+    quote = _message_only_payload(llm_client.tool_results[-1])
+    assert quote["render_choices"]["expand_repeats"] is False
+    assert quoted.json()["expand_repeats"] is False
+
+
+@pytest.mark.parametrize("ui_repeats", [True, False])
+def test_omitted_chat_repeat_request_preserves_ui_setting(client, monkeypatch, ui_repeats):
+    test_client, app = client
+    session_id, llm_client = _repeat_quote_session(
+        test_client, app, monkeypatch, requested=None
+    )
+    quoted = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing the alto", "expand_repeats": ui_repeats},
+    )
+    assert quoted.status_code == 200
+    quote = _message_only_payload(llm_client.tool_results[-1])
+    assert quote["render_choices"]["expand_repeats"] is ui_repeats
+    assert "expand_repeats" not in quoted.json()
+
+
+def test_unexpandable_score_refuses_chat_repeat_request_without_quote(client, monkeypatch):
+    test_client, app = client
+    session_id, llm_client = _repeat_quote_session(
+        test_client, app, monkeypatch, requested=True, available=False
+    )
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "sing with repeats", "expand_repeats": False},
+    )
+    assert response.status_code == 200
+    result = json.loads(llm_client.tool_results[-1].split(TOOL_RESULT_PREFIX, 1)[1])
+    assert result["action"] == "repeat_expansion_unavailable"
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    assert not snapshot["files"].get("active_synthesis_quote_id")
+    assert "expand_repeats" not in response.json()
+
+
+def test_refused_synthesize_requote_ignores_its_repeat_argument(client, monkeypatch):
+    """Guard: old code also lets the UI control a refused-synthesize requote."""
+    test_client, app = client
+    session_id, llm_client, started, _ = _alto_quote_session(test_client, app, monkeypatch)
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
+    asyncio.run(app.state.sessions.set_score(session_id, snapshot["current_score"]["score"]))
+    llm_client._arguments["expand_repeats"] = True
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "yes", "expand_repeats": False},
+    )
+    assert response.status_code == 200
+    assert "arguments" not in started
+    refusal = _message_only_payload(llm_client.tool_results[-1])
+    assert refusal["action"] == "synthesis_quote_refresh_required"
+    assert refusal["quote"]["render_choices"]["expand_repeats"] is False
+
+
 @pytest.mark.parametrize("expand_repeats", [True, False])
 def test_a_quote_reply_is_told_the_repeat_setting_of_its_turn(client, monkeypatch, expand_repeats):
     # The reply presenting a quote must see the same repeat setting the quote
@@ -5961,6 +6110,18 @@ def test_format_llm_error_returns_plain_non_json_message(client):
     assert (
         orchestrator._format_llm_error(RuntimeError("Gemini service unavailable."))
         == "Gemini service unavailable."
+    )
+
+
+@pytest.mark.parametrize("provider", ["Gemini", "OpenAI"])
+def test_format_llm_error_returns_provider_connection_message(client, provider):
+    _, app = client
+    orchestrator = app.state.orchestrator
+
+    error = LlmConnectionError(provider, "Remote end closed connection without response")
+    assert (
+        orchestrator._format_llm_error(error)
+        == f"{provider} connection failed. Please try again later."
     )
 
 

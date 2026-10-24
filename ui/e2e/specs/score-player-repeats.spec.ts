@@ -83,6 +83,8 @@ function singleNoteMidi(seconds: number): Buffer {
 
 type Backend = {
   nextTake: (take: Take) => void;
+  nextChatReply: (reply: { type: "chat_text"; message: string; expand_repeats?: boolean }) => void;
+  setRepeatExpansionAvailable: (available: boolean) => void;
   midiRequests: () => boolean[];
   chatBodies: () => ChatBody[];
 };
@@ -90,6 +92,8 @@ type Backend = {
 async function mockBackend(page: Page): Promise<Backend> {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   let take: Take | null = null;
+  let repeatExpansionAvailable = true;
+  const chatReplies: Array<{ type: "chat_text"; message: string; expand_repeats?: boolean }> = [];
   const midiRequests: boolean[] = [];
   const chatBodies: ChatBody[] = [];
   const completed = (current: Take) => ({
@@ -131,6 +135,7 @@ async function mockBackend(page: Page): Promise<Backend> {
         score_summary: {
           duration_seconds: 6,
           expanded_duration_seconds: 9,
+          repeat_expansion_available: repeatExpansionAvailable,
           parts: [
             { part_id: "Voice", part_index: 0, part_name: "Voice", has_lyrics: true },
             { part_id: "Voice 2", part_index: 1, part_name: "Voice 2", has_lyrics: true },
@@ -152,8 +157,10 @@ async function mockBackend(page: Page): Promise<Backend> {
       return route.fulfill({ contentType: "audio/wav", body: silentWav(seconds) });
     }
     if (route_.endsWith("/chat")) {
-      if (!take) throw new Error("No take queued for this chat turn.");
       chatBodies.push(request.postDataJSON() as ChatBody);
+      const reply = chatReplies.shift();
+      if (reply) return json(reply);
+      if (!take) throw new Error("No take queued for this chat turn.");
       const accepted = {
         type: "chat_progress",
         message: "Starting the take.",
@@ -173,6 +180,8 @@ async function mockBackend(page: Page): Promise<Backend> {
     nextTake: (next) => {
       take = next;
     },
+    nextChatReply: (reply) => { chatReplies.push(reply); },
+    setRepeatExpansionAvailable: (available) => { repeatExpansionAvailable = available; },
     midiRequests: () => [...midiRequests],
     chatBodies: () => [...chatBodies],
   };
@@ -254,4 +263,45 @@ test("the instrumental MIDI follows the takes' repeat order, not the toggle", as
   await expect(repeatsToggle(page)).not.toBeChecked();
   await page.waitForTimeout(1_000);
   expect(backend.midiRequests()).toEqual([true, false]);
+});
+
+
+test("a chat quote turns With Repeats on for the next chat request", async ({ page }) => {
+  const backend = await mockBackend(page);
+  await signInAsE2EUser(page, "chat-repeat-setting");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
+  await uploadScore(page, "chat-repeats.xml");
+  await expect(repeatsToggle(page)).toHaveAttribute("aria-checked", "false");
+
+  backend.nextChatReply({ type: "chat_text", message: "Here is the quote.", expand_repeats: true });
+  await page.getByTestId("chat-input").fill("sing with repeats");
+  await page.getByTestId("send-message").click();
+  await expect(repeatsToggle(page)).toHaveAttribute("aria-checked", "true");
+
+  backend.nextChatReply({ type: "chat_text", message: "Ready." });
+  await page.getByTestId("chat-input").fill("thanks");
+  await page.getByTestId("send-message").click();
+  await expect.poll(() => backend.chatBodies().length).toBe(2);
+  expect(backend.chatBodies()[1].expand_repeats).toBe(true);
+});
+
+test("an unavailable repeat expansion keeps the switch off after chat", async ({ page }) => {
+  const backend = await mockBackend(page);
+  backend.setRepeatExpansionAvailable(false);
+  await signInAsE2EUser(page, "chat-repeat-unavailable");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
+  await uploadScore(page, "chat-repeats-unavailable.xml");
+  await expect(repeatsToggle(page)).toHaveAttribute("aria-checked", "false");
+
+  backend.nextChatReply({ type: "chat_text", message: "Written order only.", expand_repeats: true });
+  await page.getByTestId("chat-input").fill("sing with repeats");
+  await page.getByTestId("send-message").click();
+  await expect.poll(() => backend.chatBodies().length).toBe(1);
+  await expect(repeatsToggle(page)).toHaveAttribute("aria-checked", "false");
 });

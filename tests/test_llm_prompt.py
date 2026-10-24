@@ -554,7 +554,7 @@ def test_build_system_prompt_caches_duration_limit_check_before_synthesis() -> N
     )
 
     assert "The configured maximum duration for one synthesis is `300` seconds" in bundle.static_prompt_text
-    assert "use the duration selected by the authoritative Repeat-expansion setting" in bundle.static_prompt_text
+    assert "use the duration of the repeat order being quoted (the Repeat-expansion setting, or the order the user explicitly asked for in chat)" in bundle.static_prompt_text
     assert "Synthesis duration limit" not in bundle.dynamic_prompt_text
 
 
@@ -570,8 +570,35 @@ def test_build_system_prompt_exposes_authoritative_repeat_expansion_setting() ->
     )
 
     assert '"expand_repeats": false' in bundle.dynamic_prompt_text
-    assert "Use the duration selected by the authoritative Repeat-expansion setting" in bundle.static_prompt_text
-    assert "do not choose or override it" in bundle.dynamic_prompt_text
+    assert "Use the duration of the repeat order being quoted (the Repeat-expansion setting, or the order the user explicitly asked for in chat)" in bundle.static_prompt_text
+    assert "current With Repeats setting" in bundle.dynamic_prompt_text
+    assert "repeat_expansion_unavailable" in bundle.static_prompt_text
+
+
+def test_explicit_repeat_request_can_override_the_quote_setting_only() -> None:
+    bundle = build_prompt_bundle(tools=[], score_available=True, expand_repeats=False)
+    instruction = bundle.dynamic_prompt_text.split(
+        "Repeat-expansion setting (authoritative):\n", 1
+    )[1]
+    assert "latest message explicitly asks" in instruction
+    assert "pass expand_repeats with the requested value to prepare_synthesis_quote" in instruction
+    assert "Otherwise omit expand_repeats" in instruction
+    assert "Never set it on synthesize" in instruction
+
+
+def test_unexpandable_score_tells_every_reply_that_repeats_are_not_possible() -> None:
+    bundle = build_prompt_bundle(
+        tools=[],
+        score_available=True,
+        score_summary={"duration_seconds": 60, "repeat_expansion_available": False},
+        expand_repeats=False,
+    )
+    instruction = bundle.dynamic_prompt_text.split(
+        "Repeat-expansion setting (authoritative):\n", 1
+    )[1]
+    assert "can only be sung in written order" in instruction
+    assert "don't offer to sing it with repeats" in instruction
+    assert "pass expand_repeats with the requested value" not in instruction
 
 
 def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration() -> None:
