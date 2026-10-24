@@ -236,6 +236,7 @@ def test_existing_visible_lane_uses_update_mode(tmp_path):
     assert [lane.output_mode for lane in sheet.lanes] == [
         "append_new_derived_lane", "update_existing_derived_lane"
     ]
+    assert [lane.existing_derived_lane_id for lane in sheet.lanes] == [None, "dl:test:2"]
     assert score == original
 
 
