@@ -13,7 +13,7 @@ from src.api import preprocess_assembler as assembler
 from src.api.preprocess_sheet import build_sheet
 from src.api.voice_parts import parse_voice_part_plan, preprocess_voice_parts
 from src.mcp.tools import _PREPROCESS_PLAN_REQUEST_SCHEMA
-from tests.test_preprocess_sheet import SATB, _chord_score
+from tests.test_preprocess_sheet import SATB, _chord_score, _two_staff_score
 
 
 def _assert_schema(value, schema):
@@ -234,3 +234,41 @@ def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
     missing_id = replace(sheet, lanes=[sheet.lanes[0], replace(sheet.lanes[1], existing_derived_lane_id=None)])
     with pytest.raises(assembler.AssemblyError, match="lacks derived_lane_id"):
         assembler.assemble_plan(missing_id, choices)
+
+
+def test_real_two_staff_freeform_requires_then_accepts_public_sections(tmp_path):
+    score = _two_staff_score(tmp_path)
+    original = deepcopy(score)
+    for part in score["parts"]:
+        sheet = _sheet(score, part["part_id"])
+        freeform_slots = [slot for slot in sheet.slots if slot.kind == "freeform"]
+        assert len(freeform_slots) == 1
+        assert all(slot.evidence["reason"] == "derive_without_lyric_source"
+                   for slot in freeform_slots)
+        choices = assembler.first_option_choices(sheet)
+        with pytest.raises(assembler.FreeformUnresolved) as error:
+            assembler.assemble_plan(sheet, choices)
+        assert error.value.slot_ids == sorted(slot.slot_id for slot in freeform_slots)
+
+        source = {"part_id": part["part_id"], "voice_part_id": "voice part 1"}
+        supplied = {
+            slot.slot_id: [{
+                "start_measure": slot.start_measure,
+                "end_measure": slot.end_measure,
+                "mode": "derive",
+                "decision_type": "EXTRACT_FROM_VOICE",
+                "method": "trivial",
+                "melody_source": source,
+                "lyric_source": source,
+                "lyric_strategy": "strict_onset",
+                "lyric_policy": "replace_all",
+            }]
+            for slot in freeform_slots
+        }
+        plan = assembler.assemble_plan(sheet, choices, freeform_sections=supplied)
+        _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+        assert parse_voice_part_plan(plan, score=score)["ok"]
+        result = preprocess_voice_parts(score, request={"plan": plan})
+        assert not [finding for finding in result.get("lint_findings", [])
+                    if finding.get("rule_severity") == "P0"]
+    assert score == original
