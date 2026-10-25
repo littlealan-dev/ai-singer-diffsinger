@@ -173,6 +173,24 @@ def _build_unsupported_lyric_action_required(
     }
 
 
+def _canonical_tempo_events(tempos: List[Dict[str, Any]]) -> List[Dict[str, float]]:
+    """Use the MIDI default tempo until the first valid score tempo mark."""
+    events = []
+    for tempo in tempos:
+        try:
+            offset = float(tempo["offset_beats"])
+            bpm = float(tempo["bpm"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(offset) or not math.isfinite(bpm) or bpm <= 0:
+            continue
+        events.append({"offset_beats": max(0.0, offset), "bpm": bpm})
+    events.sort(key=lambda event: event["offset_beats"])
+    if not events or events[0]["offset_beats"] > 1e-9:
+        events.insert(0, {"offset_beats": 0.0, "bpm": 120.0})
+    return events
+
+
 class TimeAxis:
     """Tempo-aware time axis for converting beats to milliseconds."""
     
@@ -182,11 +200,7 @@ class TimeAxis:
         Args:
             tempos: List of {"offset_beats": float, "bpm": float}
         """
-        # Keep tempo events ordered by beat offset.
-        self.tempos = sorted(tempos, key=lambda t: t["offset_beats"])
-        if not self.tempos:
-            # Default 120 BPM
-            self.tempos = [{"offset_beats": 0.0, "bpm": 120.0}]
+        self.tempos = _canonical_tempo_events(tempos)
         
         # Precompute ms offsets for each tempo change.
         self.ms_offsets = [0.0]

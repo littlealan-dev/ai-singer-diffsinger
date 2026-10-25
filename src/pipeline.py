@@ -89,7 +89,20 @@ class TimeAxis:
         Inputs: tempos list with offset_beats and bpm.
         Outputs: instance with cached ms offsets per tempo change.
         """
-        self.tempos = sorted(tempos, key=lambda t: t.offset_beats)
+        events = []
+        for tempo in tempos:
+            try:
+                offset = float(tempo.offset_beats)
+                bpm = float(tempo.bpm)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not np.isfinite(offset) or not np.isfinite(bpm) or bpm <= 0:
+                continue
+            events.append(TempoEvent(offset_beats=max(0.0, offset), bpm=bpm))
+        events.sort(key=lambda event: event.offset_beats)
+        if not events or events[0].offset_beats > 1e-9:
+            events.insert(0, TempoEvent(offset_beats=0.0, bpm=120.0))
+        self.tempos = events
         # Precompute ms offsets for each tempo change.
         self.ms_offsets = [0.0]
         current_ms = 0.0
