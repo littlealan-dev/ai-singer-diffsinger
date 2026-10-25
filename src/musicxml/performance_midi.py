@@ -13,6 +13,7 @@ from src.musicxml.io import read_musicxml_content
 from src.musicxml.parser import RepeatExpansionError, _expand_repeat_navigation
 from src.musicxml.part_reference import load_musicxml_score, map_parser_part_indices_to_raw_part_ids
 from src.musicxml.instrument_programs import instrumental_programs_by_part
+from src.musicxml.tempo_map import canonical_tempo_events
 
 
 PERFORMANCE_MIDI_VERSION = 9
@@ -341,8 +342,6 @@ def _canonical_tempo_events(score: stream.Score) -> List[Tuple[float, float]]:
         except Exception:
             offset = float(mark.offset)
         events.append((offset, float(bpm)))
-    if not events:
-        return [(0.0, 120.0)]
     events.sort(key=lambda event: event[0])
     deduped: List[Tuple[float, float]] = []
     for event in events:
@@ -353,7 +352,7 @@ def _canonical_tempo_events(score: stream.Score) -> List[Tuple[float, float]]:
         ):
             continue
         deduped.append(event)
-    return deduped
+    return canonical_tempo_events(deduped)
 
 
 def _replace_midi_tempo_map(
