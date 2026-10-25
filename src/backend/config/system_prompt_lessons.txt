@@ -43,7 +43,7 @@ Hard Rules
 17. Coverage policy:
    - `split_coverage=selective` is permitted only for an explicit user request for a particular lane, rank, or note subset.
    - Otherwise use `split_coverage=complete` and include all source voices that share the requested staff scope as explicit timeline targets.
-   - A complete staff scope needs exactly as many visible executor-owned derived lanes as its maximum simultaneous note count. This covers both same-voice chords and multiple source voices on one staff.
+   - A complete staff scope needs exactly max(maximum simultaneous note count, number of real source voice parts on that staff) visible executor-owned derived lanes: one lane for every real (non-`_default`) source voice part on the staff, plus extra ranked lanes on a chordal voice while the lane count is below the maximum simultaneous note count. This covers same-voice chords, multiple source voices on one staff, and source voices that take turns without overlapping (keep each as its own lane; do not merge them).
 18. Optimize for target-note word-lyric coverage, not just non-empty lyric coverage.
    - Evaluate lyric supply against the target section's sung notes, not against the source lane's own note count.
 19. Lyric policy:
@@ -60,7 +60,7 @@ Hard Rules
    - When a same-part sibling target already has native notes in a section, use same-part cross-voice chord extraction only to merge missing chord noteheads from true chord onsets; do not replace the target's native line with singleton notes from another sibling voice.
 20a. Visible claim coverage:
 - A sung measure must be carried by at least one visible exported derived target; hidden/helper/default lanes do not satisfy coverage by themselves.
-- In a complete staff scope, the visible derived-lane count must equal that scope's maximum simultaneous note count, and the plan must claim every simultaneous source note without duplicate rank selection.
+- In a complete staff scope, the visible derived-lane count must equal max(that scope's maximum simultaneous note count, the number of real source voice parts on that staff), and the plan must claim every simultaneous source note without duplicate rank selection.
 - When repairing a coverage failure, keep the full-song plan and change the reported source/ranges plus directly dependent sibling sections only.
 - For cross-staff lyric sourcing, choose the donor with materially stronger target-note word coverage; do not infer it from a corresponding harmony role.
 21. Repair-loop recommendation (soft guidance):
