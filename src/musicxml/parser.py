@@ -18,6 +18,7 @@ from src.musicxml.part_reference import (
     map_parser_part_indices_to_raw_part_ids,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
+from src.musicxml.tempo_map import canonical_tempo_events
 
 
 class RepeatExpansionError(ValueError):
@@ -245,7 +246,7 @@ def _build_measure_timing_entries(
         (measure.number, measure.numberSuffix): index
         for index, measure in enumerate(source_measures)
     }
-    seconds_by_measure_id = _measure_seconds_by_id(performance_score.parts[0])
+    seconds_by_measure_id = _measure_seconds_by_id(performance_score.parts[0], performance_score)
     passed_counts: Dict[int, int] = {}
     entries: List[Dict[str, Any]] = []
 
@@ -287,13 +288,24 @@ def _build_measure_timing_entries(
     return entries
 
 
-def _measure_seconds_by_id(part: stream.Part) -> Dict[int, tuple[float, float]]:
+def _measure_seconds_by_id(
+    part: stream.Part, score: stream.Score
+) -> Dict[int, tuple[float, float]]:
     """Return start/end seconds for measures already timed by music21.
 
     ``Part.secondsMap`` is music21's authoritative timing result and contains
     entries for measures as well as their child events.  We retain only measure
     rows, so constructing the player map does not add its own note-event walk.
     """
+    # The first part's secondsMap does not inherit marks owned by other parts,
+    # and music21 otherwise uses 120 BPM before a late first mark. Seed this
+    # in-memory timing part with the same score-wide map as quote and MIDI.
+    events = canonical_tempo_events(
+        (event.offset_beats, event.bpm) for event in _extract_tempos(score)
+    )
+    for offset, bpm in events:
+        part.insert(offset, tempo.MetronomeMark(number=bpm))
+
     result: Dict[int, tuple[float, float]] = {}
     for entry in part.secondsMap:
         measure = entry.get("element")

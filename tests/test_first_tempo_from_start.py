@@ -1,6 +1,7 @@
 """A late first tempo applies from beat zero in quote, voice, and MIDI."""
 
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from music21 import midi
@@ -76,6 +77,37 @@ def test_fixture_duration_parity() -> None:
         _estimated_score_duration_seconds(score),
     )
     assert values == pytest.approx((16.0,) * 4, abs=0.01)
+
+
+def test_fixture_measure_highlight_map_matches_playback() -> None:
+    score = _fixture_score()
+    expected = [(0.0, 4.0), (4.0, 8.0), (8.0, 12.0), (12.0, 16.0)]
+    measure_map = score["score_summary"]["performance_measure_map"]
+    for order in ("written", "expanded"):
+        entries = measure_map[order]
+        assert len(entries) == len(expected)
+        for entry, (start, end) in zip(entries, expected):
+            assert entry["start_seconds"] == pytest.approx(start)
+            assert entry["end_seconds"] == pytest.approx(end)
+
+
+def test_measure_highlight_map_uses_mark_owned_by_another_part(tmp_path: Path) -> None:
+    tree = ElementTree.parse(FIXTURE)
+    soprano, piano = tree.getroot().findall("part")
+    soprano_measure = soprano.find("./measure[@number='3']")
+    piano_measure = piano.find("./measure[@number='3']")
+    assert soprano_measure is not None and piano_measure is not None
+    direction = soprano_measure.find("direction")
+    assert direction is not None
+    soprano_measure.remove(direction)
+    piano_measure.insert(0, direction)
+    source = tmp_path / "piano-owned-tempo.musicxml"
+    tree.write(source, encoding="utf-8", xml_declaration=True)
+
+    score = parse_score(source)
+    assert score["tempos"] == [{"offset_beats": 8.0, "bpm": 60.0}]
+    entries = score["score_summary"]["performance_measure_map"]["written"]
+    assert [entry["end_seconds"] for entry in entries] == pytest.approx([4.0, 8.0, 12.0, 16.0])
 
 
 def test_instrumental_midi_starts_with_first_mark(tmp_path: Path) -> None:
