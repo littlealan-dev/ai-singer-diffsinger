@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 from xml.etree import ElementTree
 
-from music21 import chord, harmony, note, stream, tempo
+from music21 import chord, harmony, note, stream
 
 from src.musicxml.io import read_musicxml_content
 from src.musicxml.part_reference import (
@@ -18,7 +18,7 @@ from src.musicxml.part_reference import (
     map_parser_part_indices_to_raw_part_ids,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
-from src.musicxml.tempo_map import canonical_tempo_events
+from src.musicxml.tempo_map import score_tempo_events
 
 
 class RepeatExpansionError(ValueError):
@@ -246,7 +246,7 @@ def _build_measure_timing_entries(
         (measure.number, measure.numberSuffix): index
         for index, measure in enumerate(source_measures)
     }
-    seconds_by_measure_id = _measure_seconds_by_id(performance_score.parts[0], performance_score)
+    seconds_by_measure_id = _measure_seconds_by_id(performance_score.parts[0])
     passed_counts: Dict[int, int] = {}
     entries: List[Dict[str, Any]] = []
 
@@ -288,24 +288,13 @@ def _build_measure_timing_entries(
     return entries
 
 
-def _measure_seconds_by_id(
-    part: stream.Part, score: stream.Score
-) -> Dict[int, tuple[float, float]]:
+def _measure_seconds_by_id(part: stream.Part) -> Dict[int, tuple[float, float]]:
     """Return start/end seconds for measures already timed by music21.
 
     ``Part.secondsMap`` is music21's authoritative timing result and contains
     entries for measures as well as their child events.  We retain only measure
     rows, so constructing the player map does not add its own note-event walk.
     """
-    # The first part's secondsMap does not inherit marks owned by other parts,
-    # and music21 otherwise uses 120 BPM before a late first mark. Seed this
-    # in-memory timing part with the same score-wide map as quote and MIDI.
-    events = canonical_tempo_events(
-        (event.offset_beats, event.bpm) for event in _extract_tempos(score)
-    )
-    for offset, bpm in events:
-        part.insert(offset, tempo.MetronomeMark(number=bpm))
-
     result: Dict[int, tuple[float, float]] = {}
     for entry in part.secondsMap:
         measure = entry.get("element")
@@ -644,45 +633,8 @@ def _normalize_verse_number(verse_number: Optional[str | int]) -> Optional[str]:
 
 
 def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:
-    tempo_events = []
-    for mark in score.recurse().getElementsByClass(tempo.MetronomeMark):
-        bpm = _metronome_bpm(mark)
-        if bpm is None:
-            continue
-        try:
-            offset_beats = float(mark.getOffsetInHierarchy(score))
-        except Exception:
-            # Fallback for unusual music21 contexts.
-            offset_beats = float(mark.offset)
-        tempo_events.append(
-            TempoEvent(
-                offset_beats=offset_beats,
-                bpm=float(bpm),
-            )
-        )
-    if not tempo_events:
-        tempo_events = [TempoEvent(offset_beats=0.0, bpm=120.0)]
-    tempo_events.sort(key=lambda event: event.offset_beats)
-    deduped: List[TempoEvent] = []
-    for event in tempo_events:
-        if (
-            deduped
-            and abs(event.offset_beats - deduped[-1].offset_beats) < 1e-9
-            and abs(event.bpm - deduped[-1].bpm) < 1e-9
-        ):
-            continue
-        deduped.append(event)
-    return deduped
-
-
-def _metronome_bpm(mark: tempo.MetronomeMark) -> Optional[float]:
-    if hasattr(mark, "getQuarterBPM"):
-        bpm = mark.getQuarterBPM()
-        if bpm is not None:
-            return float(bpm)
-    if mark.number is not None:
-        return float(mark.number)
-    return None
+    events = score_tempo_events(score) or [(0.0, 120.0)]
+    return [TempoEvent(offset_beats=offset, bpm=bpm) for offset, bpm in events]
 
 
 def _collect_part_events(

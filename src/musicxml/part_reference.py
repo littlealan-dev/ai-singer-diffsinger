@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 from music21 import converter, stream
 
 from src.musicxml.io import read_musicxml_content
+from src.musicxml.tempo_map import normalize_score_tempo_map
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ def load_musicxml_score(path: str | Path) -> stream.Score:
     else:
         score = converter.parseData(read_musicxml_content(source_path), format="musicxml")
     _make_part_ids_unique(score)
+    normalize_score_tempo_map(score)
     return score
 
 
