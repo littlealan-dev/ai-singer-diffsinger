@@ -13,7 +13,7 @@ from src.musicxml.io import read_musicxml_content
 from src.musicxml.parser import RepeatExpansionError, _expand_repeat_navigation
 from src.musicxml.part_reference import load_musicxml_score, map_parser_part_indices_to_raw_part_ids
 from src.musicxml.instrument_programs import instrumental_programs_by_part
-from src.musicxml.tempo_map import canonical_tempo_events
+from src.musicxml.tempo_map import score_tempo_events
 
 
 PERFORMANCE_MIDI_VERSION = 9
@@ -332,27 +332,7 @@ def _canonical_tempo_events(score: stream.Score) -> List[Tuple[float, float]]:
     taking timings from just the exported parts.  Identical directions at the
     same offset (common in multi-part scores) are emitted only once.
     """
-    events: List[Tuple[float, float]] = []
-    for mark in score.recurse().getElementsByClass(tempo.MetronomeMark):
-        bpm = mark.getQuarterBPM() if hasattr(mark, "getQuarterBPM") else mark.number
-        if bpm is None or float(bpm) <= 0:
-            continue
-        try:
-            offset = float(mark.getOffsetInHierarchy(score))
-        except Exception:
-            offset = float(mark.offset)
-        events.append((offset, float(bpm)))
-    events.sort(key=lambda event: event[0])
-    deduped: List[Tuple[float, float]] = []
-    for event in events:
-        if (
-            deduped
-            and abs(event[0] - deduped[-1][0]) < 1e-9
-            and abs(event[1] - deduped[-1][1]) < 1e-9
-        ):
-            continue
-        deduped.append(event)
-    return canonical_tempo_events(deduped)
+    return score_tempo_events(score) or [(0.0, 120.0)]
 
 
 def _replace_midi_tempo_map(

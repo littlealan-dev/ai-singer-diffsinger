@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.mcp.logging_utils import get_logger, summarize_payload
 from src.musicxml.io import read_musicxml_content
-from src.musicxml.tempo_map import canonical_tempo_events
 
 logger = get_logger(__name__)
 
@@ -230,11 +229,15 @@ def score_duration_seconds(score: Dict[str, Any]) -> float:
     if max_beats <= 0:
         return 0.0
 
-    tempo_events = canonical_tempo_events(
-        (tempo.get("offset_beats"), tempo.get("bpm"))
-        for tempo in score.get("tempos", [])
-        if isinstance(tempo, dict)
-    )
+    tempo_events: List[tuple[float, float]] = []
+    for tempo in score.get("tempos", []):
+        if not isinstance(tempo, dict):
+            continue
+        offset = tempo.get("offset_beats")
+        bpm = tempo.get("bpm")
+        if isinstance(offset, (int, float)) and isinstance(bpm, (int, float)) and bpm > 0:
+            tempo_events.append((max(0.0, float(offset)), float(bpm)))
+    tempo_events.sort()
 
     total_seconds = 0.0
     current_beat = 0.0

@@ -89,21 +89,7 @@ class TimeAxis:
         Inputs: tempos list with offset_beats and bpm.
         Outputs: instance with cached ms offsets per tempo change.
         """
-        normalized: List[TempoEvent] = []
-        for tempo in tempos:
-            try:
-                offset, bpm = float(tempo.offset_beats), float(tempo.bpm)
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(offset) or not np.isfinite(bpm) or bpm <= 0:
-                continue
-            normalized.append(TempoEvent(offset_beats=max(0.0, offset), bpm=bpm))
-        normalized.sort(key=lambda tempo: tempo.offset_beats)
-        if normalized:
-            normalized[0] = TempoEvent(offset_beats=0.0, bpm=normalized[0].bpm)
-        else:
-            normalized = [TempoEvent(offset_beats=0.0, bpm=120.0)]
-        self.tempos = normalized
+        self.tempos = sorted(tempos, key=lambda t: t.offset_beats)
         # Precompute ms offsets for each tempo change.
         self.ms_offsets = [0.0]
         current_ms = 0.0

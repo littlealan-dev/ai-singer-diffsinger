@@ -40,7 +40,6 @@ from src.api.voicebank_cache import (
 from src.api.timing_errors import InfeasibleAnchorError
 from src.phonemizer.phonemizer import Phonemizer, UnsupportedLyricTokenError
 from src.mcp.logging_utils import get_logger, summarize_payload
-from src.musicxml.tempo_map import canonical_tempo_events
 
 logger = get_logger(__name__)
 
@@ -183,12 +182,11 @@ class TimeAxis:
         Args:
             tempos: List of {"offset_beats": float, "bpm": float}
         """
-        self.tempos = [
-            {"offset_beats": offset, "bpm": bpm}
-            for offset, bpm in canonical_tempo_events(
-                (tempo.get("offset_beats"), tempo.get("bpm")) for tempo in tempos
-            )
-        ]
+        # Keep tempo events ordered by beat offset.
+        self.tempos = sorted(tempos, key=lambda t: t["offset_beats"])
+        if not self.tempos:
+            # Default 120 BPM
+            self.tempos = [{"offset_beats": 0.0, "bpm": 120.0}]
         
         # Precompute ms offsets for each tempo change.
         self.ms_offsets = [0.0]
