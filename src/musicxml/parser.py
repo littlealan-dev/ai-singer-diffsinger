@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 from xml.etree import ElementTree
 
-from music21 import chord, harmony, note, stream, tempo
+from music21 import chord, harmony, note, stream
 
 from src.musicxml.io import read_musicxml_content
 from src.musicxml.part_reference import (
@@ -18,6 +18,7 @@ from src.musicxml.part_reference import (
     map_parser_part_indices_to_raw_part_ids,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME, GENERATED_LYRIC_NUMBER
+from src.musicxml.tempo_map import score_tempo_events
 
 
 class RepeatExpansionError(ValueError):
@@ -632,45 +633,8 @@ def _normalize_verse_number(verse_number: Optional[str | int]) -> Optional[str]:
 
 
 def _extract_tempos(score: stream.Score) -> Sequence[TempoEvent]:
-    tempo_events = []
-    for mark in score.recurse().getElementsByClass(tempo.MetronomeMark):
-        bpm = _metronome_bpm(mark)
-        if bpm is None:
-            continue
-        try:
-            offset_beats = float(mark.getOffsetInHierarchy(score))
-        except Exception:
-            # Fallback for unusual music21 contexts.
-            offset_beats = float(mark.offset)
-        tempo_events.append(
-            TempoEvent(
-                offset_beats=offset_beats,
-                bpm=float(bpm),
-            )
-        )
-    if not tempo_events:
-        tempo_events = [TempoEvent(offset_beats=0.0, bpm=120.0)]
-    tempo_events.sort(key=lambda event: event.offset_beats)
-    deduped: List[TempoEvent] = []
-    for event in tempo_events:
-        if (
-            deduped
-            and abs(event.offset_beats - deduped[-1].offset_beats) < 1e-9
-            and abs(event.bpm - deduped[-1].bpm) < 1e-9
-        ):
-            continue
-        deduped.append(event)
-    return deduped
-
-
-def _metronome_bpm(mark: tempo.MetronomeMark) -> Optional[float]:
-    if hasattr(mark, "getQuarterBPM"):
-        bpm = mark.getQuarterBPM()
-        if bpm is not None:
-            return float(bpm)
-    if mark.number is not None:
-        return float(mark.number)
-    return None
+    events = score_tempo_events(score) or [(0.0, 120.0)]
+    return [TempoEvent(offset_beats=offset, bpm=bpm) for offset, bpm in events]
 
 
 def _collect_part_events(
