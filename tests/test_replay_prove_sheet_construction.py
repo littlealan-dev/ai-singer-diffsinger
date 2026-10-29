@@ -49,6 +49,22 @@ def _json(path: Path):
 
 def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     corpus = _corpus(tmp_path)
+    # Five simultaneous notes in one voice require 5! rank assignments.
+    # Keep this job freeform while the two-staff score now assembles.
+    chord_notes = "".join(
+        f'<note>{"<chord/>" if index else ""}<pitch><step>{step}</step>'
+        '<octave>5</octave></pitch><duration>4</duration><voice>1</voice>'
+        '<type>whole</type></note>'
+        for index, step in enumerate("CDEFG")
+    )
+    (corpus / "c-freeform/input.xml").write_text(
+        '<score-partwise version="3.1"><part-list><score-part id="P1">'
+        '<part-name>P1-Staff1</part-name></score-part></part-list><part id="P1">'
+        '<measure number="1"><attributes><divisions>1</divisions>'
+        '<time><beats>4</beats><beat-type>4</beat-type></time>'
+        '<clef><sign>G</sign><line>2</line></clef></attributes>'
+        + chord_notes + '</measure></part></score-partwise>', encoding="utf-8",
+    )
     out = tmp_path / "proof"
     rows = proof.prove(corpus, out)
     assert [row["job_id"] for row in rows] == ["a-satb", "b-unknown", "c-freeform", "d-error"]
@@ -60,8 +76,8 @@ def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     assert "target_unresolved" in rows[1]["issues"]
     freeform_sheet = _json(out / "sheets/c-freeform.json")
     assert rows[2]["freeform_slot_ids"] == [slot["slot_id"] for slot in freeform_sheet["slots"]]
-    assert freeform_sheet["slots"][0]["evidence"]["reason"] == "derive_without_lyric_source"
-    assert "derive_without_lyric_source" in rows[2]["error"]
+    assert freeform_sheet["slots"][0]["evidence"]["reason"] == "rank_assignment_over_24_permutations"
+    assert "rank_assignment_over_24_permutations" in rows[2]["error"]
     assert rows[2]["slots_by_kind"] == {"freeform": 1}
     assert rows[3]["error"].startswith("ParseError:")
     assert "<score" not in rows[3]["error"]
