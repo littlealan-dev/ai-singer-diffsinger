@@ -587,7 +587,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
     A non-native lane's lyric choices use its default melody source for coverage
-    and onset evidence; later phases may condition them on a different melody choice.
+    and onset evidence. With no word-lyric donor, its fallback lyric options
+    mirror its melody options when the lane copies another voice.
     """
     skeleton = build_sheet_skeleton(score, planning_context)
     sheet = Sheet(
@@ -644,8 +645,22 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                 target_sung_note_count, derived_indices,
             )
             if not lyric:
-                freeform_reason = "derive_without_lyric_source"
-                break
+                reason = {"reason": "no_word_lyric_donor"}
+                source_sings = bool(_target_notes(score, lane, segment))
+                if native or source_sings:
+                    lyric = (_source_option({
+                        "part_id": lane.part_id,
+                        "part_index": lane.part_index,
+                        "voice_part_id": lane.source_voice_part_id,
+                    }, "lyric_source", evidence=reason),)
+                else:
+                    lyric = tuple(Option(
+                        option_id=option.option_id,
+                        label=option.label,
+                        fields={"lyric_source": dict(option.fields["melody_source"])},
+                        evidence={**reason, "pairs_with_melody_option": option.option_id},
+                        flags=(),
+                    ) for option in melody)
             segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_source", lyric))
             own_native = (
                 lyric[0].fields["lyric_source"] == {
@@ -654,16 +669,17 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             )
             if not own_native:
                 donor_ref = lyric[0].fields["lyric_source"]
-                donor = next(source for source in candidates if
-                             source["part_index"] == donor_ref["part_index"] and
-                             source["voice_part_id"] == donor_ref["voice_part_id"])
+                donor = next((source for source in candidates if
+                              source["part_index"] == donor_ref["part_index"] and
+                              source["voice_part_id"] == donor_ref["voice_part_id"]), None)
                 target_onsets = {
                     (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
                     for note in target_notes
                 }
                 donor_onsets = {
                     (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                    for note in donor["notes"] if _lyric_kind(note) == "word"
+                    for note in (donor["notes"] if donor is not None else target_notes)
+                    if _lyric_kind(note) == "word"
                 }
                 strategies = ("strict_onset", "overlap_best_match", "syllable_flow")
                 if not target_onsets.issubset(donor_onsets):
