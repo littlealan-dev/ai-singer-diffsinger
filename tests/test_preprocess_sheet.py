@@ -11,12 +11,16 @@ import pytest
 
 from src.api import parse_score
 from src.api import preprocess_assembler as assembler
+from src.api import preprocess_sheet as sheet_module
 from src.api.preprocess_sheet import (
     SLOT_KINDS, Lane, _rank_assignment_options, _shared_notes_in_scope,
     build_sheet, build_sheet_skeleton,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
-from src.api.voice_parts import _analyze_part_voice_parts, _staff_scope_measure_max_simultaneous_notes
+from src.api.voice_parts import (
+    _analyze_part_voice_parts, _staff_scope_measure_max_simultaneous_notes,
+    preprocess_voice_parts,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,14 +113,15 @@ def _single_staff_score(tmp_path, measures, *, part_name="Solo"):
     return _parse_inline(tmp_path, xml)
 
 
-def _note(step, *, voice=None, chord=False, duration=4):
+def _note(step, *, voice=None, chord=False, duration=4, lyric="word"):
     return (
         '<note>' + ('<chord/>' if chord else '')
         + f'<pitch><step>{step}</step><octave>5</octave></pitch>'
         + f'<duration>{duration}</duration>'
         + (f'<voice>{voice}</voice>' if voice is not None else '')
         + f'<type>{"half" if duration == 2 else "whole"}</type>'
-        + '<lyric><text>word</text></lyric></note>'
+        + (f'<lyric><text>{lyric}</text></lyric>' if lyric is not None else '')
+        + '</note>'
     )
 
 
@@ -125,6 +130,34 @@ def _rest(*, voice, duration=2):
         '<note><rest/>' + f'<duration>{duration}</duration><voice>{voice}</voice>'
         + f'<type>{"half" if duration == 2 else "whole"}</type></note>'
     )
+
+
+def _no_word_two_part_score(tmp_path):
+    target = (
+        '<part id="P1"><measure number="1"><attributes><divisions>1</divisions>'
+        '<time><beats>4</beats><beat-type>4</beat-type></time>'
+        '<clef><sign>G</sign><line>2</line></clef></attributes>'
+        + _note("G", voice="1", duration=2, lyric=None) + _rest(voice="1")
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2") + _note("E", voice="2", duration=2, lyric=None)
+        + '</measure><measure number="2">'
+        + _rest(voice="2", duration=4) + '<backup><duration>4</duration></backup>'
+        + _note("A", voice="1", lyric=None) + '</measure></part>'
+    )
+    guide = (
+        '<part id="P2"><measure number="1"><attributes><divisions>1</divisions>'
+        '<time><beats>4</beats><beat-type>4</beat-type></time>'
+        '<clef><sign>G</sign><line>2</line></clef></attributes>'
+        + _note("D", lyric=None) + '</measure><measure number="2">'
+        + _note("F", lyric=None) + '</measure></part>'
+    )
+    xml = (
+        '<score-partwise version="3.1"><part-list>'
+        '<score-part id="P1"><part-name>Choir</part-name></score-part>'
+        '<score-part id="P2"><part-name>Guide</part-name></score-part>'
+        '</part-list>' + target + guide + '</score-partwise>'
+    )
+    return _parse_inline(tmp_path, xml)
 
 
 def test_target_resolution_and_intent_flag():
@@ -365,6 +398,112 @@ def _all_options(sheet):
     return [option for slot in sheet.slots for option in slot.options] + list(sheet.fixed.values())
 
 
+def _lane_segment_options(sheet, lane, segment, kind):
+    slot_id = f"{lane.lane_id}|{segment.start_measure}-{segment.end_measure}|{kind}"
+    if slot_id in sheet.fixed:
+        return (sheet.fixed[slot_id],)
+    return next((slot.options for slot in sheet.slots if slot.slot_id == slot_id), ())
+
+
+def test_no_word_lyrics_on_native_notes_keep_own_source(tmp_path):
+    score = _single_staff_score(tmp_path, [_note("C", lyric=None)])
+    original = deepcopy(score)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    assert not sheet.issues
+    assert not any(slot.kind == "freeform" for slot in sheet.slots)
+    lane, segment = sheet.lanes[0], sheet.segments[0]
+    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
+    assert len(lyric) == 1
+    assert lyric[0].option_id == f"{lane.part_id}|{lane.source_voice_part_id}"
+    assert lyric[0].fields == {"lyric_source": {
+        "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
+    }}
+    assert lyric[0].evidence == {"reason": "no_word_lyric_donor"}
+    assert lyric[0].flags == ()
+    assert json.dumps(asdict(sheet), sort_keys=True)
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings", [])
+                if finding.get("rule") == "melody_source_requires_lyric_source"
+                and finding.get("rule_severity") == "P0"]
+    assert score == original
+
+
+def test_no_word_lyrics_on_idle_ranked_lane_keep_own_source(tmp_path):
+    score = _single_staff_score(tmp_path, [
+        _note("C", voice="1", lyric=None)
+        + _note("E", voice="1", chord=True, lyric=None),
+        _note("D", voice="1", lyric=None),
+    ])
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not any(slot.kind == "freeform" for slot in sheet.slots)
+    lane = sheet.lanes[1]
+    segment = next(segment for segment in sheet.segments if segment.start_measure == 2)
+    assert not next(native for lane_id, native, _ in segment.signature.lanes
+                    if lane_id == lane.lane_id)
+    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
+    assert len(lyric) == 1
+    assert lyric[0].fields["lyric_source"] == {
+        "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
+    }
+    assert lyric[0].evidence == {"reason": "no_word_lyric_donor"}
+    assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+
+
+def test_no_word_lyrics_on_copied_voice_mirror_melody_options(tmp_path):
+    score = _no_word_two_part_score(tmp_path)
+    original = deepcopy(score)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    assert not sheet.issues
+    assert not any(slot.kind == "freeform" and
+                   slot.evidence.get("reason") == "derive_without_lyric_source"
+                   for slot in sheet.slots)
+    lane = next(lane for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
+    segment = next(segment for segment in sheet.segments if segment.start_measure == 2)
+    assert not next(native for lane_id, native, _ in segment.signature.lanes
+                    if lane_id == lane.lane_id)
+    melody = _lane_segment_options(sheet, lane, segment, "melody_source")
+    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
+    assert len(melody) >= 2
+    assert [option.option_id for option in lyric] == [option.option_id for option in melody]
+    assert [option.fields["lyric_source"] for option in lyric] == [
+        option.fields["melody_source"] for option in melody
+    ]
+    assert [option.evidence for option in lyric] == [
+        {"reason": "no_word_lyric_donor", "pairs_with_melody_option": option.option_id}
+        for option in melody
+    ]
+    assert all(option.flags == () for option in lyric)
+    assert json.dumps(asdict(sheet), sort_keys=True)
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings", [])
+                if finding.get("rule") == "melody_source_requires_lyric_source"
+                and finding.get("rule_severity") == "P0"]
+    assert score == original
+
+
+def test_no_word_lyric_source_can_be_absent_from_candidates(monkeypatch, tmp_path):
+    score = _no_word_two_part_score(tmp_path)
+    original_candidates = sheet_module._source_candidates
+    monkeypatch.setattr(sheet_module, "_source_candidates", lambda score, segment, derived: [
+        source for source in original_candidates(score, segment, derived)
+        if source["part_index"] != 0
+    ])
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not sheet.issues
+    assert not any(slot.kind == "freeform" for slot in sheet.slots)
+    lane = next(lane for lane in sheet.lanes if lane.source_voice_part_id == "voice part 1")
+    segment = sheet.segments[0]
+    assert _lane_segment_options(sheet, lane, segment, "lyric_source")[0].fields == {
+        "lyric_source": {"part_index": 0, "voice_part_id": lane.source_voice_part_id},
+    }
+
+
 def test_sheet_excludes_rest_on_native_notes_and_is_pure_json():
     score = parse_score(SATB, verse_number=1)
     original = deepcopy(score)
@@ -488,14 +627,52 @@ def test_derived_and_generated_solfege_donors_are_excluded():
         for field in ("melody_source", "lyric_source"):
             if field in option.fields:
                 assert option.fields[field]["part_index"] != 2
-                if field == "lyric_source":
-                    assert option.fields[field] != {"part_index": 0, "voice_part_id": "voice part 1"}
+    for lane in sheet.lanes:
+        lane_options = [
+            option for slot in sheet.slots if lane.lane_id in slot.lane_ids
+            for option in slot.options
+        ] + [
+            option for slot_id, option in sheet.fixed.items()
+            if slot_id.startswith(lane.lane_id + "|")
+        ]
+        for option in lane_options:
+            if option.fields.get("lyric_source") == {
+                "part_index": 0, "voice_part_id": "voice part 1",
+            }:
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+                assert lane.source_voice_part_id == "voice part 1"
     derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
-    derived_lyric_options = [option for option in _all_options(derived_target)
-                             if "lyric_source" in option.fields]
-    assert derived_lyric_options
-    assert all(option.fields["lyric_source"]["part_index"] != 2
-               for option in derived_lyric_options)
+    own_fallback_seen = False
+    for lane in derived_target.lanes:
+        lane_options = [
+            option for slot in derived_target.slots if lane.lane_id in slot.lane_ids
+            for option in slot.options
+        ] + [
+            option for slot_id, option in derived_target.fixed.items()
+            if slot_id.startswith(lane.lane_id + "|")
+        ]
+        melody_options = [option for option in lane_options if "melody_source" in option.fields]
+        for option in lane_options:
+            source = option.fields.get("lyric_source")
+            if source is None:
+                continue
+            if source == {"part_index": 0, "voice_part_id": "voice part 1"}:
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+            if source["part_index"] == 2:
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+                own_source = {
+                    "part_index": lane.part_index,
+                    "voice_part_id": lane.source_voice_part_id,
+                }
+                if source == own_source and "pairs_with_melody_option" not in option.evidence:
+                    own_fallback_seen = True
+                else:
+                    assert any(
+                        melody.option_id == option.evidence.get("pairs_with_melody_option")
+                        and melody.fields["melody_source"] == source
+                        for melody in melody_options
+                    )
+    assert own_fallback_seen
 
 
 def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
