@@ -2367,7 +2367,21 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             staff_scope=staff_scope,
         )
         maximum = max(density_by_measure.values(), default=0)
-        if maximum <= 0 or len(lane_ids) == maximum:
+        voice_parts = _analyze_part_voice_parts(
+            score["parts"][part_index], part_index
+        )["voice_parts"]
+        real_voice_part_count = sum(
+            1
+            for voice_part in voice_parts
+            if voice_part["source_voice_id"] != "_default"
+            and staff_scope in _source_voice_staff_scopes(
+                score,
+                part_index=part_index,
+                source_voice_part_id=voice_part["voice_part_id"],
+            )
+        )
+        expected = max(maximum, real_voice_part_count)
+        if expected <= 0 or len(lane_ids) == expected:
             continue
         peak_measures = [
             measure
@@ -2383,6 +2397,8 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 failing_attributes={
                     "staff_scope": staff_scope,
                     "maximum_simultaneous_note_count": maximum,
+                    "real_voice_part_count": real_voice_part_count,
+                    "expected_lane_count": expected,
                     "visible_derived_lane_count": len(lane_ids),
                     "visible_derived_lane_ids": sorted(lane_ids),
                 },
