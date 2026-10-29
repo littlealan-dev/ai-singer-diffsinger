@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from itertools import permutations
 from math import factorial
@@ -100,6 +101,16 @@ class Sheet(SheetSkeleton):
     fixed: dict[str, Option] = field(default_factory=dict)
 
 
+def _unescaped(value: Any) -> str:
+    text = str(value or "").strip()
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.strip()
+
+
 def _target_part_index(parts: list[dict], planning_context: dict) -> int | None:
     target = planning_context.get("target") or {}
     requested = str(target.get("part_id") or "").strip()
@@ -110,9 +121,17 @@ def _target_part_index(parts: list[dict], planning_context: dict) -> int | None:
         return exact[0]
     if exact:
         return None
+    unescaped = [
+        i for i, part in enumerate(parts)
+        if _unescaped(part.get("part_id")) == _unescaped(requested)
+    ]
+    if len(unescaped) == 1:
+        return unescaped[0]
+    if unescaped:
+        return None
     by_name = [
         i for i, part in enumerate(parts)
-        if str(part.get("part_name") or "").strip().casefold() == requested.casefold()
+        if _unescaped(part.get("part_name")).casefold() == _unescaped(requested).casefold()
     ]
     return by_name[0] if len(by_name) == 1 else None
 
@@ -291,8 +310,9 @@ def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSke
         if not scoped_parts or start <= 0 or end < start:
             continue
         chord_density = indices["source_voice_chord_density"]
+        lane_parts = [vp for vp in scoped_parts if str(vp["source_voice_id"]) != "_default"] or scoped_parts
         chordal = max(
-            scoped_parts,
+            lane_parts,
             key=lambda vp: (
                 max(
                     (int(value) for value in chord_density.get(vp["voice_part_id"], {}).get(
@@ -300,10 +320,10 @@ def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSke
                     ).values()),
                     default=1,
                 ),
-                -scoped_parts.index(vp),
+                -lane_parts.index(vp),
             ),
         )
-        sources = [vp["voice_part_id"] for vp in scoped_parts[:max_density]]
+        sources = [vp["voice_part_id"] for vp in lane_parts]
         sources.extend([chordal["voice_part_id"]] * (max_density - len(sources)))
         source_ordinal: dict[str, int] = {}
         scope_lanes: list[Lane] = []
