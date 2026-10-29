@@ -10,12 +10,13 @@ from pathlib import Path
 import pytest
 
 from src.api import parse_score
+from src.api import preprocess_assembler as assembler
 from src.api.preprocess_sheet import (
     SLOT_KINDS, Lane, _rank_assignment_options, _shared_notes_in_scope,
     build_sheet, build_sheet_skeleton,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
-from src.api.voice_parts import _staff_scope_measure_max_simultaneous_notes
+from src.api.voice_parts import _analyze_part_voice_parts, _staff_scope_measure_max_simultaneous_notes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,41 @@ def _chord_score(tmp_path):
   </measure>
 </part></score-partwise>"""
     return _parse_inline(tmp_path, xml)
+
+
+def _single_staff_score(tmp_path, measures, *, part_name="Solo"):
+    xml = (
+        '<score-partwise version="3.1"><part-list><score-part id="P1">'
+        f'<part-name>{part_name}</part-name></score-part></part-list><part id="P1">'
+        + "".join(
+            f'<measure number="{number}">'
+            + ('<attributes><divisions>1</divisions><time><beats>4</beats>'
+               '<beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line>'
+               '</clef></attributes>' if number == 1 else '')
+            + notes + '</measure>'
+            for number, notes in enumerate(measures, start=1)
+        )
+        + '</part></score-partwise>'
+    )
+    return _parse_inline(tmp_path, xml)
+
+
+def _note(step, *, voice=None, chord=False, duration=4):
+    return (
+        '<note>' + ('<chord/>' if chord else '')
+        + f'<pitch><step>{step}</step><octave>5</octave></pitch>'
+        + f'<duration>{duration}</duration>'
+        + (f'<voice>{voice}</voice>' if voice is not None else '')
+        + f'<type>{"half" if duration == 2 else "whole"}</type>'
+        + '<lyric><text>word</text></lyric></note>'
+    )
+
+
+def _rest(*, voice, duration=2):
+    return (
+        '<note><rest/>' + f'<duration>{duration}</duration><voice>{voice}</voice>'
+        + f'<type>{"half" if duration == 2 else "whole"}</type></note>'
+    )
 
 
 def test_target_resolution_and_intent_flag():
@@ -171,6 +207,91 @@ def test_same_voice_chord_adds_second_lane_and_density_boundary(tmp_path):
     assert not sheet.segments[1].signature.lanes[1][1]
     _assert_contiguous_segments(sheet, score)
     assert score == original
+
+
+def test_turn_taking_real_voices_exclude_default_lane_and_assemble(tmp_path):
+    score = _single_staff_score(tmp_path, [
+        _note("C"),
+        _note("G", voice="1", duration=2) + _rest(voice="1")
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2") + _note("E", voice="2", duration=2),
+    ])
+    voice_parts = _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]
+    assert {str(vp["source_voice_id"]) for vp in voice_parts} == {"1", "2", "_default"}
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not sheet.issues
+    assert [lane.source_voice_part_id for lane in sheet.lanes] == [
+        "voice part 1", "voice part 2",
+    ]
+    assert [lane.default_rank for lane in sheet.lanes] == [0, 1]
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 2
+
+
+def test_real_voices_plus_three_note_chord_get_one_ranked_extra(tmp_path):
+    score = _single_staff_score(tmp_path, [
+        _note("C", voice="1", duration=2)
+        + _note("E", voice="1", chord=True, duration=2)
+        + _note("G", voice="1", chord=True, duration=2)
+        + _rest(voice="1") + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2") + _note("D", voice="2", duration=2),
+    ])
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not sheet.issues
+    assert [lane.source_voice_part_id for lane in sheet.lanes] == [
+        "voice part 1", "voice part 2", "voice part 1",
+    ]
+    assert [lane.default_rank for lane in sheet.lanes] == [0, 1, 2]
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 3
+
+
+def test_default_only_scope_keeps_default_lane_and_assembles(tmp_path):
+    score = _single_staff_score(tmp_path, [_note("C"), _note("D")])
+    voice_parts = _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]
+    assert [str(vp["source_voice_id"]) for vp in voice_parts] == ["_default"]
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not sheet.issues
+    assert len(sheet.lanes) == 1
+    assert sheet.lanes[0].source_voice_part_id == "voice part 1"
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 1
+
+
+def test_target_part_id_resolves_double_escaped_ampersand(tmp_path):
+    score = _single_staff_score(tmp_path, [_note("C")], part_name="Soprano &amp;amp; Alto")
+    parsed_id = score["parts"][0]["part_id"]
+    assert parsed_id == "Soprano &amp; Alto"
+    sheet = build_sheet_skeleton(score, {"target": {"part_id": "Soprano & Alto"}})
+    assert sheet.target_part_index == 0
+    assert not sheet.issues
+    assert sheet.lanes
+    assert all(lane.part_id == parsed_id and lane.lane_id.startswith(parsed_id + "|")
+               for lane in sheet.lanes)
+
+
+def test_ambiguous_unescaped_part_ids_leave_target_unresolved(tmp_path):
+    xml = (
+        '<score-partwise version="3.1"><part-list>'
+        '<score-part id="P1"><part-name>Soprano &amp;amp; Alto</part-name></score-part>'
+        '<score-part id="P2"><part-name>Soprano &amp; Alto</part-name></score-part>'
+        '</part-list>'
+        + ''.join(
+            f'<part id="P{number}"><measure number="1"><attributes><divisions>1</divisions>'
+            '<time><beats>4</beats><beat-type>4</beat-type></time>'
+            '<clef><sign>G</sign><line>2</line></clef></attributes>'
+            + _note("C") + '</measure></part>'
+            for number in (1, 2)
+        )
+        + '</score-partwise>'
+    )
+    score = _parse_inline(tmp_path, xml)
+    assert [part["part_id"] for part in score["parts"]] == [
+        "Soprano &amp; Alto", "Soprano & Alto",
+    ]
+    sheet = build_sheet_skeleton(score, {"target": {"part_id": "Soprano &amp;amp; Alto"}})
+    assert sheet.target_part_index is None
+    assert sheet.lanes == []
+    assert sheet.issues == ["target_unresolved"]
+    exact = build_sheet_skeleton(score, {"target": {"part_id": "Soprano & Alto"}})
+    assert exact.target_part_index == 1
 
 
 def test_lyric_kind_change_starts_new_segment():
