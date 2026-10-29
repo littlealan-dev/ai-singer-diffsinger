@@ -627,8 +627,20 @@ def test_derived_and_generated_solfege_donors_are_excluded():
         for field in ("melody_source", "lyric_source"):
             if field in option.fields:
                 assert option.fields[field]["part_index"] != 2
-                if field == "lyric_source":
-                    assert option.fields[field] != {"part_index": 0, "voice_part_id": "voice part 1"}
+    for lane in sheet.lanes:
+        lane_options = [
+            option for slot in sheet.slots if lane.lane_id in slot.lane_ids
+            for option in slot.options
+        ] + [
+            option for slot_id, option in sheet.fixed.items()
+            if slot_id.startswith(lane.lane_id + "|")
+        ]
+        for option in lane_options:
+            if option.fields.get("lyric_source") == {
+                "part_index": 0, "voice_part_id": "voice part 1",
+            }:
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+                assert lane.source_voice_part_id == "voice part 1"
     derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
     derived_lyric_options = [option for option in _all_options(derived_target)
                              if "lyric_source" in option.fields]
