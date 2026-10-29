@@ -790,8 +790,10 @@ def test_invalid_melodic_route_preset_names_valid_shape(tmp_path: Path) -> None:
     )
     assert action is not None
     assert "melodic route" in action["message"]
-    assert "bank 0" in action["message"]
-    assert "program 0-127" in action["message"]
+    assert "melodic preset" in action["message"]
+    assert "soundfont_id" not in action["message"]
+    assert "FluidR3_GM" not in action["message"]
+    assert "bank" not in action["message"]
 
 
 def test_invalid_percussion_route_preset_names_valid_shape(tmp_path: Path) -> None:
@@ -807,8 +809,10 @@ def test_invalid_percussion_route_preset_names_valid_shape(tmp_path: Path) -> No
     )
     assert action is not None
     assert "percussion route" in action["message"]
-    assert "bank 128" in action["message"]
-    assert "0, 8, 16, 24, 25, 32, 40, 48" in action["message"]
+    assert "percussion_kit preset" in action["message"]
+    assert "soundfont_id" not in action["message"]
+    assert "FluidR3_GM" not in action["message"]
+    assert "bank" not in action["message"]
 
 
 def test_mixed_note_kinds_without_midi_channel_remain_awaited(tmp_path: Path) -> None:

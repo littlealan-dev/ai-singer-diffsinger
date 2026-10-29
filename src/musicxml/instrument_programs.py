@@ -242,16 +242,9 @@ def apply_llm_program_assignments(
             continue
         if not _valid_preset_for_instrument(preset, matching_instruments[0]):
             if matching_instruments[0].get("is_percussion"):
-                programs = ", ".join(str(program) for program in sorted(FLUIDR3_PERCUSSION_PROGRAMS))
-                expected_preset = (
-                    "it is a percussion route, so use soundfont_id FluidR3_GM, "
-                    f"bank 128, kind percussion_kit, program one of {programs}."
-                )
+                expected_preset = "it is a percussion route, so use a percussion_kit preset."
             else:
-                expected_preset = (
-                    "it is a melodic route, so use soundfont_id FluidR3_GM, "
-                    "bank 0, kind melodic, program 0-127."
-                )
+                expected_preset = "it is a melodic route, so use a melodic preset."
             invalid.append(
                 f"{instrument_id} needs a valid FluidR3 playback_preset for this route: "
                 f"{expected_preset}"
