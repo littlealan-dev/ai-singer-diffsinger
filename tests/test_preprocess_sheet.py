@@ -642,11 +642,33 @@ def test_derived_and_generated_solfege_donors_are_excluded():
                 assert option.evidence.get("reason") == "no_word_lyric_donor"
                 assert lane.source_voice_part_id == "voice part 1"
     derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
-    derived_lyric_options = [option for option in _all_options(derived_target)
-                             if "lyric_source" in option.fields]
-    assert derived_lyric_options
-    assert all(option.fields["lyric_source"]["part_index"] != 2
-               for option in derived_lyric_options)
+    assert not any(
+        option.fields["melody_source"]["part_index"] == 2
+        for option in _all_options(derived_target) if "melody_source" in option.fields
+    )
+    own_fallback_seen = False
+    for lane in derived_target.lanes:
+        lane_options = [
+            option for slot in derived_target.slots if lane.lane_id in slot.lane_ids
+            for option in slot.options
+        ] + [
+            option for slot_id, option in derived_target.fixed.items()
+            if slot_id.startswith(lane.lane_id + "|")
+        ]
+        for option in lane_options:
+            source = option.fields.get("lyric_source")
+            if source is None:
+                continue
+            if source == {"part_index": 0, "voice_part_id": "voice part 1"}:
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+            if source["part_index"] == 2:
+                own_fallback_seen = True
+                assert option.evidence.get("reason") == "no_word_lyric_donor"
+                assert source == {
+                    "part_index": lane.part_index,
+                    "voice_part_id": lane.source_voice_part_id,
+                }
+    assert own_fallback_seen
 
 
 def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
