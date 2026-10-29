@@ -642,10 +642,6 @@ def test_derived_and_generated_solfege_donors_are_excluded():
                 assert option.evidence.get("reason") == "no_word_lyric_donor"
                 assert lane.source_voice_part_id == "voice part 1"
     derived_target = build_sheet(score, {"target": {"part_id": "P_DERIVED_TEST"}})
-    assert not any(
-        option.fields["melody_source"]["part_index"] == 2
-        for option in _all_options(derived_target) if "melody_source" in option.fields
-    )
     own_fallback_seen = False
     for lane in derived_target.lanes:
         lane_options = [
@@ -655,6 +651,7 @@ def test_derived_and_generated_solfege_donors_are_excluded():
             option for slot_id, option in derived_target.fixed.items()
             if slot_id.startswith(lane.lane_id + "|")
         ]
+        melody_options = [option for option in lane_options if "melody_source" in option.fields]
         for option in lane_options:
             source = option.fields.get("lyric_source")
             if source is None:
@@ -662,12 +659,19 @@ def test_derived_and_generated_solfege_donors_are_excluded():
             if source == {"part_index": 0, "voice_part_id": "voice part 1"}:
                 assert option.evidence.get("reason") == "no_word_lyric_donor"
             if source["part_index"] == 2:
-                own_fallback_seen = True
                 assert option.evidence.get("reason") == "no_word_lyric_donor"
-                assert source == {
+                own_source = {
                     "part_index": lane.part_index,
                     "voice_part_id": lane.source_voice_part_id,
                 }
+                if source == own_source and "pairs_with_melody_option" not in option.evidence:
+                    own_fallback_seen = True
+                else:
+                    assert any(
+                        melody.option_id == option.evidence.get("pairs_with_melody_option")
+                        and melody.fields["melody_source"] == source
+                        for melody in melody_options
+                    )
     assert own_fallback_seen
 
 
