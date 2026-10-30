@@ -90,6 +90,7 @@ from src.musicxml.io import (
     MusicXmlArchiveTooLargeError,
     read_musicxml_content as read_musicxml_content_bounded,
 )
+from src.musicxml.measure_numbers import renumber_unnumbered_measures
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -824,6 +825,17 @@ def create_app() -> FastAPI:
                     max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
                 )
                 normalize_mxl_ms = (time.monotonic() - normalize_start) * 1000.0
+
+            renumbered = await asyncio.to_thread(
+                _renumber_unnumbered_measures_in_file, temp_canonical_path
+            )
+            if renumbered:
+                logger.info(
+                    "upload_measures_renumbered session_id=%s suffix=%s measures=%s",
+                    session_id,
+                    suffix,
+                    renumbered,
+                )
 
             rel_path = str(temp_canonical_path.relative_to(settings.project_root))
             try:
@@ -2669,6 +2681,19 @@ def _normalize_uploaded_mxl(
         ),
         encoding="utf-8",
     )
+
+
+def _renumber_unnumbered_measures_in_file(path: Path) -> int:
+    """Renumber a UTF-8 canonical score in place, leaving other bytes alone."""
+    original_bytes = path.read_bytes()
+    try:
+        xml_text = original_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return 0
+    updated, count = renumber_unnumbered_measures(xml_text)
+    if count:
+        path.write_bytes(updated.encode("utf-8"))
+    return count
 
 
 def _sign_audio_payload_urls(
