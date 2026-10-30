@@ -930,8 +930,8 @@ def test_upload_waiting_for_worker_returns_temporary_unavailability(client, monk
     assert response.headers["Retry-After"] == "10"
 
 
-def _upload_score(test_client, session_id, filename="score.xml"):
-    xml = b"<score-partwise version='3.1'></score-partwise>"
+def _upload_score(test_client, session_id, filename="score.xml", content=None):
+    xml = content if content is not None else b"<score-partwise version='3.1'></score-partwise>"
     content = xml
     content_type = "application/xml"
     if filename.endswith(".mxl"):
@@ -1351,6 +1351,67 @@ def test_upload_musicxml_parses_and_saves(client):
     assert snapshot["original_score"] == snapshot["current_score"]["score"]
     assert "instrumental_midi_source_signature" not in snapshot["files"]
     assert not list(score_path.parent.glob("*.mid"))
+
+
+def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    original = (Path(__file__).parent / "fixtures" / "all_zero_measure_numbers.musicxml").read_bytes()
+
+    with caplog.at_level(logging.INFO):
+        response = _upload_score(test_client, session_id, filename="zero.xml", content=original)
+
+    assert response.status_code == 200
+    score_path = (
+        app.state.settings.sessions_dir / session_id / "scores"
+        / response.json()["score_id"] / "upload" / "score.xml"
+    )
+    expected = original
+    for number in (1, 2, 3, 1, 2):
+        expected = expected.replace(b'<measure number="0">', f'<measure number="{number}">'.encode(), 1)
+    assert score_path.read_bytes() == expected
+    assert "upload_measures_renumbered" in caplog.text
+    assert "measures=5" in caplog.text
+
+
+def test_upload_all_zero_mxl_changes_only_canonical_score(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    original = (Path(__file__).parent / "fixtures" / "all_zero_measure_numbers.musicxml").read_bytes()
+    archive = _build_mxl_archive(score_xml=original)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("zero.mxl", archive, "application/vnd.recordare.musicxml")},
+    )
+
+    assert response.status_code == 200
+    upload_dir = (
+        app.state.settings.sessions_dir / session_id / "scores"
+        / response.json()["score_id"] / "upload"
+    )
+    expected = original
+    for number in (1, 2, 3, 1, 2):
+        expected = expected.replace(b'<measure number="0">', f'<measure number="{number}">'.encode(), 1)
+    assert (upload_dir / "score.xml").read_bytes() == expected
+    assert (upload_dir / "score.mxl").read_bytes() == archive
+
+
+def test_upload_numbered_score_keeps_original_bytes(client, caplog):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    original = (Path(__file__).parent / "fixtures" / "late_first_tempo.musicxml").read_bytes()
+
+    with caplog.at_level(logging.INFO):
+        response = _upload_score(test_client, session_id, filename="tempo.xml", content=original)
+
+    assert response.status_code == 200
+    score_path = (
+        app.state.settings.sessions_dir / session_id / "scores"
+        / response.json()["score_id"] / "upload" / "score.xml"
+    )
+    assert score_path.read_bytes() == original
+    assert "upload_measures_renumbered" not in caplog.text
 
 
 def test_upload_resets_previous_score_specific_state(client):
