@@ -239,6 +239,8 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
                                                if slot.kind == "freeform")
             if "target_unresolved" in sheet.issues:
                 row["status"] = "target_unresolved"
+            elif "score_has_no_lyrics" in sheet.issues:
+                row["status"] = "needs_lyrics"
             else:
                 plan = assemble_plan(sheet, first_option_choices(sheet))
                 result = preprocess_voice_parts(copy.deepcopy(score), request={"plan": plan})
@@ -283,14 +285,16 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
 
 def _summary(rows: list[dict]) -> str:
     status_counts = {status: sum(row["status"] == status for row in rows)
-                     for status in ("assembled", "target_unresolved", "freeform_unresolved",
+                     for status in ("assembled", "target_unresolved", "needs_lyrics", "freeform_unresolved",
                                     "assembly_error", "error")}
     clean = sum(row["lint_clean"] for row in rows)
     runs_clean = sum(row["runs_clean"] for row in rows)
     intent = sum("intent_requires_llm" in row["issues"] for row in rows)
     lines = [
         "# Sheet construction proof", "",
-        f"Jobs total: {len(rows)}", f"Runs clean: {runs_clean} / {len(rows)}",
+        f"Jobs total: {len(rows)}",
+        f"Runs clean: {runs_clean} / {len(rows)} "
+        f"(plus {status_counts['needs_lyrics']} stopped: score has no lyrics)",
         f"Lint-clean: {clean} / {len(rows)}",
         f"Intent requires LLM: {intent}", "", "## Status counts", "",
         "| Status | Jobs |", "| --- | ---: |",
@@ -327,9 +331,11 @@ def _summary(rows: list[dict]) -> str:
         f"| {row['job_id']} | {row['unsung_chord_notes']} | {', '.join(map(str, row['unsung_chord_bars']))} |"
         for row in rows if row["unsung_chord_notes"] is not None and row["unsung_chord_notes"] > 0
     )
+    lines.extend(["", "## Stopped: score has no lyrics", "", "| Job |", "| --- |"])
+    lines.extend(f"| {row['job_id']} |" for row in rows if row["status"] == "needs_lyrics")
     lines.extend(["", "## Jobs not runs-clean", "", "| Job | First failing rule or status |", "| --- | --- |"])
     for row in rows:
-        if not row["runs_clean"]:
+        if not row["runs_clean"] and row["status"] != "needs_lyrics":
             failing = next((finding["rule"] for finding in row["findings"]
                             if finding["severity"] == "P0"), None)
             reason = (

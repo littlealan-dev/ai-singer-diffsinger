@@ -260,7 +260,7 @@ def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
         assembler.assemble_plan(missing_id, choices)
 
 
-def test_real_two_staff_without_word_lyrics_assembles_first_options(tmp_path):
+def test_real_two_staff_with_one_lyric_donor_assembles_first_options(tmp_path):
     score = _two_staff_score(tmp_path)
     original = deepcopy(score)
     for part in score["parts"]:

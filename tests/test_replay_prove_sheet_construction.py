@@ -65,7 +65,8 @@ def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     chord_notes = "".join(
         f'<note>{"<chord/>" if index else ""}<pitch><step>{step}</step>'
         '<octave>5</octave></pitch><duration>4</duration><voice>1</voice>'
-        '<type>whole</type></note>'
+        '<type>whole</type>'
+        + ('<lyric><text>word</text></lyric>' if index == 0 else '') + '</note>'
         for index, step in enumerate("CDEFG")
     )
     (corpus / "c-freeform/input.xml").write_text(
@@ -115,6 +116,26 @@ def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     assert "| — | none | 0 |" in summary
     assert "| c-freeform | freeform_unresolved |" in summary
     assert "## Jobs not runs-clean" in summary
+
+
+def test_lyricless_job_stops_without_assembly_or_executor(tmp_path):
+    corpus = tmp_path / "corpus"
+    xml = CHORD.replace(b'<lyric number="1"><text>la</text></lyric>', b'')
+    _job(corpus, "lyricless", xml, "Choir")
+    out = tmp_path / "proof"
+    rows = proof.prove(corpus, out)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "needs_lyrics"
+    assert row["issues"] == ["score_has_no_lyrics"]
+    assert row["lanes"] == row["segments"] == row["slots"] == 0
+    assert row["executor_status"] is None and not row["runs_clean"]
+    assert _json(out / "plans/lyricless.json") is None
+    summary = (out / "summary.md").read_text(encoding="utf-8")
+    assert "Runs clean: 0 / 1 (plus 1 stopped: score has no lyrics)" in summary
+    assert "| needs_lyrics | 1 |" in summary
+    assert "## Stopped: score has no lyrics\n\n| Job |\n| --- |\n| lyricless |" in summary
+    assert "| lyricless |" not in summary.split("## Jobs not runs-clean", 1)[1]
 
 
 def test_selection_job_filter_and_repo_output_refusal(tmp_path):
