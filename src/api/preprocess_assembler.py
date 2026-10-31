@@ -93,6 +93,9 @@ def _covers_fixed(slot_id: str, option: Option, lane: Lane, measure: int) -> boo
     return prefix == lane.lane_id or (
         kind == "rank_assignment"
         and lane.lane_id in option.fields.get("rank_index_by_lane", {})
+    ) or (
+        kind == "voice_assignment"
+        and lane.lane_id in option.fields.get("melody_source_by_lane", {})
     )
 
 
@@ -130,12 +133,24 @@ def _action_for_measure(
     sheet: Sheet, selected: dict[str, Option], lane: Lane, segment: Segment, measure: int,
 ) -> dict:
     fields: dict = {}
+    assigned_group_size: int | None = None
     for kind, option in _options_for_measure(sheet, selected, lane, measure):
         if kind == "split_shared_note_policy":
             continue
         for key, value in option.fields.items():
-            if key == "rank_index_by_lane":
+            if key == "melody_source_by_lane":
+                source = value.get(lane.lane_id)
+                if not isinstance(source, dict):
+                    raise AssemblyError(f"Missing voice assignment for {lane.lane_id}")
+                part_id, voice_part_id = source.get("part_id"), source.get("voice_part_id")
+                if not isinstance(part_id, str) or not part_id or not isinstance(voice_part_id, str) or not voice_part_id:
+                    raise AssemblyError(f"Invalid voice assignment for {lane.lane_id}")
+                assigned_group_size = sum(item == source for item in value.values())
+                key, value = "melody_source", {"part_id": part_id, "voice_part_id": voice_part_id}
+            elif key == "rank_index_by_lane":
                 if lane.lane_id not in value:
+                    if kind == "voice_assignment":
+                        continue
                     raise AssemblyError(f"Missing rank for {lane.lane_id}")
                 key, value = "rank_index", value[lane.lane_id]
             elif key in {"melody_source", "lyric_source"}:
@@ -170,7 +185,8 @@ def _action_for_measure(
          and other.source_voice_part_id == melody["voice_part_id"]),
         key=lambda other: other.default_rank,
     )
-    if len(siblings) > 1:
+    if ((assigned_group_size is not None and assigned_group_size > 1)
+            or (assigned_group_size is None and len(siblings) > 1)):
         fields["decision_type"] = "SPLIT_CHORDS_SELECT_NOTES"
         fields["method"] = "ranked"
         fields.setdefault("rank_index", next(
