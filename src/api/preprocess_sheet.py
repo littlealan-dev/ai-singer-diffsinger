@@ -18,6 +18,7 @@ from src.api.voice_parts import (
     _build_part_region_indices,
     _derived_part_indices,
     _generated_solfege_lyric_stats_for_voice_part_range,
+    _is_generated_solfege_lyric,
     _is_countable_sung_note,
     _is_cross_staff_lyric_source_with_stronger_local_alternative,
     _is_cross_staff_weak_lyric_source_with_better_alternative,
@@ -268,6 +269,37 @@ def _segments(
     return result
 
 
+def _eligible_lyric_sources(score: dict) -> list[dict]:
+    """Non-derived voice parts with at least one non-generated lyric."""
+    derived_indices = _derived_part_indices(score)
+    sources: list[dict] = []
+    for part_index, part in enumerate(score.get("parts") or []):
+        if part_index in derived_indices:
+            continue
+        for voice_part in _analyze_part_voice_parts(part, part_index)["voice_parts"]:
+            lyric_count = int(voice_part["lyric_note_count"])
+            if lyric_count <= 0:
+                continue
+            voice = str(voice_part["source_voice_id"])
+            notes = [note for note in part.get("notes") or []
+                     if _is_countable_sung_note(note)
+                     and _voice_key(note.get("voice")) == voice]
+            generated_count = sum(
+                _lyric_kind(note) != "empty" and _is_generated_solfege_lyric(note)
+                for note in notes
+            )
+            if generated_count >= lyric_count:
+                continue
+            sources.append({
+                "part_id": str(part.get("part_id") or ""),
+                "part_index": part_index,
+                "voice_part_id": str(voice_part["voice_part_id"]),
+                "lyric_note_count": lyric_count,
+                "scopes": {_staff_scope_key(note) for note in notes},
+            })
+    return sources
+
+
 def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSkeleton:
     """Build scope lanes and exact signature runs without changing the score."""
     context = planning_context or {}
@@ -281,6 +313,9 @@ def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSke
         return skeleton
 
     skeleton.target_part_index = part_index
+    if not _eligible_lyric_sources(score):
+        skeleton.issues.append("score_has_no_lyrics")
+        return skeleton
     part = parts[part_index]
     part_id = str(part["part_id"])
     analysis = _analyze_part_voice_parts(part, part_index)
@@ -764,9 +799,12 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
         segments=list(skeleton.segments),
         issues=list(skeleton.issues),
     )
-    if sheet.target_part_index is None:
+    if sheet.target_part_index is None or "score_has_no_lyrics" in sheet.issues:
         return sheet
     derived_indices = _derived_part_indices(score)
+    eligible_lyrics = _eligible_lyric_sources(score)
+    eligible_by_ref = {(source["part_index"], source["voice_part_id"])
+                       for source in eligible_lyrics}
     for segment in sheet.segments:
         lanes = [lane for lane in sheet.lanes
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
@@ -855,13 +893,13 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                 reason = {"reason": "no_word_lyric_donor"}
                 source_sings = bool(_target_notes(score, lane, segment))
                 if native or source_sings:
-                    lyric = (_source_option({
+                    fallback = (_source_option({
                         "part_id": lane.part_id,
                         "part_index": lane.part_index,
                         "voice_part_id": lane.source_voice_part_id,
                     }, "lyric_source", evidence=reason),)
                 else:
-                    lyric = tuple(Option(
+                    fallback = tuple(Option(
                         option_id=option.option_id,
                         label=option.label,
                         fields={"lyric_source": dict(option.fields["melody_source"])},
@@ -869,6 +907,24 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                                   assignment[0].option_id if assignment is not None else option.option_id},
                         flags=(),
                     ) for option in melody)
+                lyric = tuple(option for option in fallback
+                              if (option.fields["lyric_source"]["part_index"],
+                                  option.fields["lyric_source"]["voice_part_id"]) in eligible_by_ref)
+                if not lyric:
+                    ordered = sorted(eligible_lyrics, key=lambda source: (
+                        0 if source["part_index"] == lane.part_index
+                        and lane.scope_key in source["scopes"] else
+                        1 if source["part_index"] == lane.part_index else 2,
+                        -source["lyric_note_count"],
+                        source["part_index"], source["voice_part_id"],
+                    ))
+                    lyric = tuple(_source_option(
+                        source, "lyric_source",
+                        evidence={"reason": "no_lyrics_in_source_voice"},
+                    ) for source in ordered)
+                if not lyric:
+                    freeform_reason = "no_valid_lyric_source"
+                    break
             segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_source", lyric))
             own_native = (
                 lyric[0].fields["lyric_source"] == {
