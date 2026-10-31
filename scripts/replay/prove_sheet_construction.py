@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove offline that first-option decision sheets construct lint-clean plans."""
+"""Prove offline that first-option decision sheets construct runnable plans."""
 
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ from src.api.voice_part_lint_rules import LINT_RULE_SPECS, POSTFLIGHT_VALIDATION
 
 
 JOB_COLUMNS = (
-    "job_id", "status", "lint_clean", "p0", "p1", "p2", "lanes", "segments",
+    "job_id", "status", "lint_clean", "runs_clean", "executor_status",
+    "executor_action", "executor_codes", "unsung_chord_notes", "p0", "p1", "p2", "lanes", "segments",
     "slots", "freeform", "issues",
 )
 
@@ -136,6 +137,64 @@ def _findings(result: dict) -> list[dict]:
     return normalized
 
 
+def _executor_codes(result: dict) -> list[str]:
+    codes: set[str] = set()
+    payloads = [result]
+    payloads.extend(target for target in result.get("targets") or [] if isinstance(target, dict))
+    for payload in payloads:
+        for issue in payload.get("section_quality_issues") or []:
+            if isinstance(issue, dict) and isinstance(issue.get("code"), str) and issue["code"]:
+                codes.add(issue["code"])
+    return sorted(codes)
+
+
+def _pitched_notes_by_onset(part: dict) -> dict[tuple[int, float], set[float]]:
+    onsets: dict[tuple[int, float], set[float]] = {}
+    for note in part.get("notes") or []:
+        if note.get("is_rest") or note.get("pitch_midi") is None:
+            continue
+        key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0.0), 6))
+        onsets.setdefault(key, set()).add(float(note["pitch_midi"]))
+    return onsets
+
+
+def unsung_chord_notes(score: dict, plan: dict, result: dict) -> tuple[int, list[int]]:
+    """Count original chord pitches absent from visible derived lanes of complete splits."""
+    source_parts = {
+        index for target in plan.get("targets") or []
+        if target.get("split_coverage") == "complete"
+        for index, part in enumerate(score["parts"])
+        if part.get("part_id") == (target.get("source") or {}).get("part_id")
+    }
+    output_parts: dict[int, list[dict]] = {index: [] for index in source_parts}
+    targets = result.get("targets")
+    for target in targets if isinstance(targets, list) and targets else [result]:
+        if not isinstance(target, dict) or target.get("hidden_default_lane"):
+            continue
+        ref = target.get("appended_part_ref")
+        source = (target.get("derived_lane") or {}).get("source") or {}
+        if not isinstance(ref, dict) or source.get("part_index") not in output_parts:
+            continue
+        output_parts[source["part_index"]].append(result["score"]["parts"][ref["part_index"]])
+
+    missing = 0
+    bars: set[int] = set()
+    for source_index in sorted(source_parts):
+        original = _pitched_notes_by_onset(score["parts"][source_index])
+        sung: dict[tuple[int, float], set[float]] = {}
+        for part in output_parts[source_index]:
+            for key, pitches in _pitched_notes_by_onset(part).items():
+                sung.setdefault(key, set()).update(pitches)
+        for (bar, onset), pitches in original.items():
+            if len(pitches) < 2:
+                continue
+            absent = pitches - sung.get((bar, onset), set())
+            missing += len(absent)
+            if absent:
+                bars.add(bar)
+    return missing, sorted(bars)[:20]
+
+
 def _exception_text(exc: Exception) -> str:
     message = str(exc).splitlines()[0][:200]
     if "<" in message or ">" in message:
@@ -149,7 +208,9 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
         "job_id": job_id, "status": "error", "error": None, "issues": [],
         "lanes": 0, "segments": 0, "slots": 0, "fixed": 0,
         "slots_by_kind": {}, "freeform_slot_ids": [], "findings": [],
-        "p0": 0, "p1": 0, "p2": 0, "lint_clean": False, "wall_time_ms": 0,
+        "p0": 0, "p1": 0, "p2": 0, "lint_clean": False, "runs_clean": False,
+        "executor_status": None, "executor_action": None, "executor_codes": [],
+        "unsung_chord_notes": None, "unsung_chord_bars": None, "wall_time_ms": 0,
     }
     sheet = None
     plan = None
@@ -181,6 +242,16 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
             else:
                 plan = assemble_plan(sheet, first_option_choices(sheet))
                 result = preprocess_voice_parts(copy.deepcopy(score), request={"plan": plan})
+                row["executor_status"] = result.get("status")
+                row["executor_action"] = result.get("action")
+                row["executor_codes"] = _executor_codes(result)
+                if row["executor_status"] == "ready" and any(
+                    target.get("split_coverage") == "complete"
+                    for target in plan.get("targets") or []
+                ):
+                    row["unsung_chord_notes"], row["unsung_chord_bars"] = unsung_chord_notes(
+                        score, plan, result
+                    )
                 row["findings"] = _findings(result)
                 row["status"] = "assembled"
     except FreeformUnresolved as exc:
@@ -202,6 +273,10 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
     for severity in ("P0", "P1", "P2"):
         row[severity.lower()] = sum(item["severity"] == severity for item in row["findings"])
     row["lint_clean"] = row["status"] == "assembled" and row["p0"] == 0
+    row["runs_clean"] = (
+        row["lint_clean"] and row["executor_status"] == "ready"
+        and row["unsung_chord_notes"] in (0, None)
+    )
     row["wall_time_ms"] = round((time.monotonic() - started) * 1000)
     return row, asdict(sheet) if sheet is not None else None, plan
 
@@ -211,10 +286,12 @@ def _summary(rows: list[dict]) -> str:
                      for status in ("assembled", "target_unresolved", "freeform_unresolved",
                                     "assembly_error", "error")}
     clean = sum(row["lint_clean"] for row in rows)
+    runs_clean = sum(row["runs_clean"] for row in rows)
     intent = sum("intent_requires_llm" in row["issues"] for row in rows)
     lines = [
         "# Sheet construction proof", "",
-        f"Jobs total: {len(rows)}", f"Lint-clean: {clean} / {len(rows)}",
+        f"Jobs total: {len(rows)}", f"Runs clean: {runs_clean} / {len(rows)}",
+        f"Lint-clean: {clean} / {len(rows)}",
         f"Intent requires LLM: {intent}", "", "## Status counts", "",
         "| Status | Jobs |", "| --- | ---: |",
     ]
@@ -229,12 +306,39 @@ def _summary(rows: list[dict]) -> str:
                  for (severity, rule), jobs in sorted(rule_jobs.items()))
     if not rule_jobs:
         lines.append("| — | none | 0 |")
-    lines.extend(["", "## Jobs not lint-clean", "", "| Job | First failing rule or status |", "| --- | --- |"])
+    action_counts = {
+        action: sum(row["executor_action"] == action for row in rows)
+        for action in sorted({row["executor_action"] for row in rows if row["executor_action"]})
+    }
+    lines.extend(["", "## Executor result", "", "| Result | Jobs |", "| --- | ---: |",
+                  f"| ready | {sum(row['executor_status'] == 'ready' for row in rows)} |"])
+    lines.extend(f"| {action} | {count} |" for action, count in action_counts.items())
+    lines.append(f"| not run | {sum(row['executor_status'] is None for row in rows)} |")
+    code_jobs: dict[str, int] = {}
     for row in rows:
-        if not row["lint_clean"]:
+        for code in row["executor_codes"]:
+            code_jobs[code] = code_jobs.get(code, 0) + 1
+    lines.extend(["", "## Section quality codes", "", "| Code | Jobs |", "| --- | ---: |"])
+    lines.extend(f"| {code} | {count} |" for code, count in sorted(code_jobs.items()))
+    if not code_jobs:
+        lines.append("| — | none | 0 |")
+    lines.extend(["", "## Unsung chord notes", "", "| Job | Notes | Bars |", "| --- | ---: | --- |"])
+    lines.extend(
+        f"| {row['job_id']} | {row['unsung_chord_notes']} | {', '.join(map(str, row['unsung_chord_bars']))} |"
+        for row in rows if row["unsung_chord_notes"] is not None and row["unsung_chord_notes"] > 0
+    )
+    lines.extend(["", "## Jobs not runs-clean", "", "| Job | First failing rule or status |", "| --- | --- |"])
+    for row in rows:
+        if not row["runs_clean"]:
             failing = next((finding["rule"] for finding in row["findings"]
                             if finding["severity"] == "P0"), None)
-            lines.append(f"| {row['job_id']} | {failing or row['status']} |")
+            reason = (
+                row["status"] if row["status"] != "assembled" else
+                failing or row["executor_action"] or
+                (f"unsung_chord_notes={row['unsung_chord_notes']}"
+                 if row["unsung_chord_notes"] else row["executor_status"])
+            )
+            lines.append(f"| {row['job_id']} | {reason} |")
     return "\n".join(lines) + "\n"
 
 
@@ -259,6 +363,7 @@ def prove(corpus: Path, out: Path, *, selection: Path | None = None,
             values = {key: row[key] for key in JOB_COLUMNS if key not in {"freeform", "issues"}}
             values["freeform"] = len(row["freeform_slot_ids"])
             values["issues"] = ";".join(row["issues"])
+            values["executor_codes"] = ";".join(row["executor_codes"])
             writer.writerow(values)
     (out / "summary.md").write_text(_summary(rows), encoding="utf-8")
     return rows
