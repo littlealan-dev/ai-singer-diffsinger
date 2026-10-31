@@ -89,7 +89,7 @@ def instrumental_programs_by_part(
     assignments: Mapping[str, Any] | None = None,
     include_ineligible: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    """Return the factual/validated program choice for each MIDI-eligible part.
+    """Return the program choice or user-assignable drum route for each playable part.
 
     This is used at MIDI-export time.  The caller must already have validated
     ``assignments``; values in the mapping are never guessed here. Export
@@ -111,13 +111,17 @@ def instrumental_programs_by_part(
             ):
                 item["eligible_for_instrumental_midi"] = True
         eligible = [item for item in instruments if item["eligible_for_instrumental_midi"]]
-        if not eligible and (not include_ineligible or not instruments):
+        user_assignable = [item for item in instruments if item["user_assignable"]]
+        if not eligible and not user_assignable and (not include_ineligible or not instruments):
             continue
         # The existing MIDI exporter emits one track per score part.  MusicXML
         # files with in-score instrument changes retain all declarations in the
         # parse summary, but their event-level routing is outside this first
         # per-part playback implementation.
-        primary = eligible[0] if eligible else instruments[0]
+        primary = (
+            eligible[0] if eligible else
+            user_assignable[0] if user_assignable else instruments[0]
+        )
         instrument_id = primary["score_instrument_id"]
         override = (
             _normalise_preset(assignments.get(instrument_id))
@@ -237,8 +241,18 @@ def apply_llm_program_assignments(
             continue
         preset = _normalise_preset(item.get("playback_preset"))
         matching_instruments = instrument_index.get(instrument_id, [])
-        if not preset or not matching_instruments or not _valid_preset_for_instrument(preset, matching_instruments[0]):
+        if not preset or not matching_instruments:
             invalid.append(f"{instrument_id} needs a valid FluidR3 playback_preset for this route.")
+            continue
+        if not _valid_preset_for_instrument(preset, matching_instruments[0]):
+            if matching_instruments[0].get("is_percussion"):
+                expected_preset = "it is a percussion route, so use a percussion_kit preset."
+            else:
+                expected_preset = "it is a melodic route, so use a melodic preset."
+            invalid.append(
+                f"{instrument_id} needs a valid FluidR3 playback_preset for this route: "
+                f"{expected_preset}"
+            )
             continue
         supplied[instrument_id] = {"playback_preset": preset, "evidence": list(evidence)}
 
@@ -367,13 +381,23 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
             "direction_words": [],
             "has_lyrics": False,
             "has_unpitched_notes": False,
+            "note_kinds_by_instrument": {},
         }
 
     for part in _children_named(root, "part"):
         raw_part_id = str(part.attrib.get("id") or "")
         declaration = score_parts.setdefault(
             raw_part_id,
-            {"part_name": None, "midi_devices": {}, "instruments": [], "midi_by_id": {}, "direction_words": [], "has_lyrics": False, "has_unpitched_notes": False},
+            {
+                "part_name": None,
+                "midi_devices": {},
+                "instruments": [],
+                "midi_by_id": {},
+                "direction_words": [],
+                "has_lyrics": False,
+                "has_unpitched_notes": False,
+                "note_kinds_by_instrument": {},
+            },
         )
         for measure in _children_named(part, "measure"):
             measure_number = str(measure.attrib.get("number") or "")
@@ -396,6 +420,14 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
                 declaration["has_lyrics"] = True
             if _descendants_named(measure, "unpitched"):
                 declaration["has_unpitched_notes"] = True
+            for note in _descendants_named(measure, "note"):
+                route = _first_child_named(note, "instrument")
+                route_id = str(route.attrib.get("id") or "") if route is not None else ""
+                kinds = declaration["note_kinds_by_instrument"].setdefault(route_id, set())
+                if _first_child_named(note, "unpitched") is not None:
+                    kinds.add("unpitched")
+                elif _first_child_named(note, "pitch") is not None:
+                    kinds.add("pitched")
     return score_parts
 
 
@@ -412,6 +444,7 @@ def _part_instruments(
     declared = declared if isinstance(declared, list) else []
     midi_by_id = declaration.get("midi_by_id")
     midi_by_id = midi_by_id if isinstance(midi_by_id, dict) else {}
+    note_kinds_by_instrument = declaration.get("note_kinds_by_instrument") or {}
     if not declared:
         # Malformed-but-common exports can omit score-instrument while still
         # declaring a MIDI instrument. Keep that declaration addressable
@@ -446,6 +479,16 @@ def _part_instruments(
         native_bank = native.get("native_midi_bank")
         percussion = native_channel == 10
         synthetic = bool(source.get("synthetic"))
+        route_kinds = note_kinds_by_instrument.get(score_instrument_id) or set()
+        unrouted_kinds = (note_kinds_by_instrument.get("") or set()) if index == 0 else set()
+        kinds = route_kinds | unrouted_kinds
+        # Without MIDI drum facts, an unpitched-only route needs a kit chosen
+        # by the user. It must not await an LLM preset.
+        no_drum_sounds = (
+            native_channel is None
+            and kinds == {"unpitched"}
+            and not native.get("midi_unpitched_notes")
+        )
         # A part that declares no instrument is either an accompaniment or a
         # vocal line written without lyrics; the score cannot tell which, so it
         # becomes a candidate the LLM decides (a preset, or not instrumental).
@@ -461,10 +504,12 @@ def _part_instruments(
         sound_id = source.get("instrument_sound")
         is_explicit_vocal = isinstance(sound_id, str) and sound_id.startswith("voice.")
         # A part with lyrics is sung, whatever instrument or program it declares.
-        eligible = not synthetic and not is_explicit_vocal and not has_lyrics
+        eligible = not synthetic and not is_explicit_vocal and not has_lyrics and not no_drum_sounds
         preset, program_source = _portable_preset(
             channel=native_channel, bank=native_bank, program=native_program
         )
+        if no_drum_sounds:
+            preset = None
         result.append(
             {
                 "score_instrument_id": score_instrument_id,
@@ -491,10 +536,11 @@ def _part_instruments(
                 },
                 "playback_preset": preset,
                 "resolved_gm_program": preset["program"] if preset else None,
-                "program_source": program_source,
-                "program_evidence": ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
+                "program_source": "user_assignable" if no_drum_sounds else program_source,
+                "program_evidence": [] if no_drum_sounds else ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
                 "direction_words": list(declaration.get("direction_words") or []),
                 "eligible_for_instrumental_midi": eligible,
+                "user_assignable": no_drum_sounds,
                 "instrumental_candidate": instrumental_candidate,
                 "is_explicit_vocal": is_explicit_vocal,
                 "is_percussion": percussion,

@@ -15,6 +15,7 @@ from src.musicxml.instrument_programs import (
     llm_program_assignments_from_summary,
 )
 from src.musicxml.performance_midi import build_instrumental_performance_midis
+from src.backend.orchestrator import _part_feeds_instrumental_midi
 
 
 MISSING_PROGRAM_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -638,3 +639,280 @@ def test_only_the_resolved_assignments_are_dropped_when_others_are_awaited() -> 
     # Nothing to drop: the assignments come back as they were.
     assert drop_resolved_program_assignments(summary, [awaited]) == ([awaited], [])
     assert drop_resolved_program_assignments(summary, None) == (None, [])
+
+
+UNDECLARED_DRUM_ROUTE = Path(__file__).resolve().parent / "fixtures" / "undeclared_drum_route.musicxml"
+
+
+def _undeclared_drum_summary() -> dict[str, object]:
+    return parse_score(UNDECLARED_DRUM_ROUTE)["score_summary"]
+
+
+def _drum_assignment() -> dict[str, object]:
+    return {
+        "score_instrument_id": "P3-I1",
+        "playback_preset": fluidr3_preset(bank=128, program=32, kind="percussion_kit"),
+        "source": "llm_inferred",
+        "evidence": ["instrument-name: Drum Set (Jazz)"],
+    }
+
+
+def test_declared_drum_route_without_drum_sounds_is_not_awaited() -> None:
+    summary = _undeclared_drum_summary()
+    piano = summary["parts"][1]["instruments"][0]
+    drum = summary["parts"][2]["instruments"][0]
+    resolution = summary["instrument_program_resolution"]
+
+    assert drum["instrument_name"] == "Drum Set (Jazz)"
+    assert drum["virtual_instrument_name"] == "Orchestral percussion"
+    assert drum["native_midi_channel"] is None
+    assert drum["midi_unpitched_notes"] == []
+    assert drum.get("user_assignable") is True
+    assert drum["eligible_for_instrumental_midi"] is False
+    assert drum["program_source"] == "user_assignable"
+    assert "P3-I1" not in resolution["instrumental_score_instrument_ids"]
+    assert "P3-I1" not in resolution["unresolved_score_instrument_ids"]
+    assert piano["eligible_for_instrumental_midi"] is True
+    assert piano.get("user_assignable") is False
+    assert "P2-I1" in resolution["instrumental_score_instrument_ids"]
+    assert "P2-I1" in resolution["unresolved_score_instrument_ids"]
+    assert resolution["unresolved_reasons"]["P2-I1"] == "unresolved_missing_melodic_program"
+
+
+def test_piano_assignment_suffices_when_drum_route_has_no_sounds() -> None:
+    summary = _undeclared_drum_summary()
+    _resolved, action = apply_llm_program_assignments(summary, [_piano_assignment("P2-I1")])
+    assert action is None
+
+
+def test_stale_drum_kit_assignment_is_dropped_before_validation() -> None:
+    summary = _undeclared_drum_summary()
+    piano = _piano_assignment("P2-I1")
+    kept, dropped = drop_resolved_program_assignments(summary, [piano, _drum_assignment()])
+    assert kept == [piano]
+    assert dropped == ["P3-I1"]
+    assert apply_llm_program_assignments(summary, kept)[1] is None
+
+
+def test_undeclared_drum_route_keeps_muted_assignable_track(tmp_path: Path) -> None:
+    assignments = {
+        "P2-I1": fluidr3_preset(program=0),
+        "P3-I1": fluidr3_preset(bank=128, program=32, kind="percussion_kit"),
+    }
+    facts = instrumental_programs_by_part(
+        UNDECLARED_DRUM_ROUTE, assignments=assignments, include_ineligible=True
+    )
+    assert facts["P2"]["eligible_for_instrumental_midi"] is True
+    assert facts["P3"]["eligible_for_instrumental_midi"] is False
+    assert facts["P3"].get("user_assignable") is True
+    assert facts["P3"]["playback_preset"] is None
+    assert facts["P3"]["resolved_gm_program"] is None
+    assert "P3" in instrumental_programs_by_part(UNDECLARED_DRUM_ROUTE)
+
+    written = tmp_path / "written.mid"
+    result = build_instrumental_performance_midis(
+        UNDECLARED_DRUM_ROUTE,
+        original_output_path=written,
+        expanded_output_path=tmp_path / "expanded.mid",
+        instrument_program_assignments=assignments,
+    )
+    assert result["original_midi_available"] is True
+    assert [part["label"] for part in result["instrumental_parts"] if part["eligible"]] == ["Piano", "Drum Set"]
+    drum = result["instrumental_parts"][2]
+    assert drum["program_source"] == "user_assignable"
+    assert drum["percussion"] is True
+    assert drum["midi_program"] is None
+    assert drum["playback_preset"] is None
+    assert drum["soundfont_bank"] is None
+    assert drum["diagnostic"] == "The score gives this drum part no drum sounds. Choose a kit to hear it."
+    midi_file = midi.MidiFile()
+    midi_file.open(str(written))
+    midi_file.read()
+    midi_file.close()
+    note_tracks = [
+        track for track in midi_file.tracks
+        if any(
+            event.type == midi.ChannelVoiceMessages.NOTE_ON and event.velocity > 0
+            for event in track.events
+        )
+    ]
+    assert len(note_tracks) == 2
+    assert any(
+        event.type == midi.MetaEvents.SEQUENCE_TRACK_NAME and event.data == b"Piano"
+        for event in note_tracks[0].events
+    )
+    drum_notes = [
+        (event.channel, event.pitch)
+        for event in note_tracks[1].events
+        if event.type == midi.ChannelVoiceMessages.NOTE_ON and event.velocity > 0
+    ]
+    assert sorted(drum_notes) == [(10, 36)] * 4 + [(10, 38)] * 4
+
+
+def test_unassigned_drum_is_not_billed_but_has_midi(tmp_path: Path) -> None:
+    xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0"><part-list>
+<score-part id="V"><part-name>Voice</part-name></score-part>
+<score-part id="D"><part-name>Drums</part-name><score-instrument id="D-I1"><instrument-name>Drum Set</instrument-name></score-instrument></score-part>
+</part-list><part id="V"><measure number="1"><attributes><divisions>1</divisions></attributes>
+<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric><text>sing</text></lyric></note>
+</measure></part><part id="D"><measure number="1"><attributes><divisions>1</divisions></attributes>
+<note><unpitched><display-step>F</display-step><display-octave>4</display-octave></unpitched><duration>1</duration><type>quarter</type><instrument id="D-I1"/></note>
+</measure></part></score-partwise>'''
+    source = tmp_path / "voice-drums.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+    assert score_has_instrumental_parts(summary) is False
+    result = build_instrumental_performance_midis(
+        source, original_output_path=tmp_path / "written.mid", expanded_output_path=tmp_path / "expanded.mid"
+    )
+    assert result["has_instrumental_parts"] is True
+    assert result["instrumental_parts"][1]["eligible"] is True
+
+
+def test_unassigned_drum_part_feeds_midi_signature() -> None:
+    summary = _undeclared_drum_summary()
+    assert _part_feeds_instrumental_midi(summary["parts"][2]) is True
+
+
+def _route_xml(*, instruments: str, midi: str = "", notes: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="X"><part-name>Routes</part-name>{instruments}{midi}</score-part></part-list>
+  <part id="X"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    {notes}
+  </measure></part>
+</score-partwise>"""
+
+
+def _pitched_note(route: str = "X-I1") -> str:
+    return (
+        '<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration>'
+        f'<type>quarter</type><instrument id="{route}"/></note>'
+    )
+
+
+def _unpitched_note(route: str = "X-I1") -> str:
+    return (
+        '<note><unpitched><display-step>F</display-step><display-octave>4</display-octave>'
+        '</unpitched><duration>1</duration><type>quarter</type>'
+        f'<instrument id="{route}"/></note>'
+    )
+
+
+def _parse_route_xml(tmp_path: Path, xml: str) -> dict[str, object]:
+    source = tmp_path / "routes.musicxml"
+    source.write_text(xml, encoding="utf-8")
+    return parse_score(source)["score_summary"]
+
+
+def test_only_unpitched_route_is_excluded_in_multi_route_part(tmp_path: Path) -> None:
+    xml = _route_xml(
+        instruments=(
+            '<score-instrument id="X-I1"><instrument-name>Piano</instrument-name></score-instrument>'
+            '<score-instrument id="X-I2"><instrument-name>Drum Set</instrument-name></score-instrument>'
+        ),
+        notes=_pitched_note("X-I1") + _unpitched_note("X-I2"),
+    )
+    summary = _parse_route_xml(tmp_path, xml)
+    routes = {item["score_instrument_id"]: item for item in summary["parts"][0]["instruments"]}
+    resolution = summary["instrument_program_resolution"]
+    assert routes["X-I1"]["eligible_for_instrumental_midi"] is True
+    assert routes["X-I2"]["eligible_for_instrumental_midi"] is False
+    assert routes["X-I2"].get("user_assignable") is True
+    assert instrumental_programs_by_part(tmp_path / "routes.musicxml", include_ineligible=True)["X"]["score_instrument_id"] == "X-I1"
+    assert resolution["instrumental_score_instrument_ids"] == ["X-I1"]
+    assert resolution["unresolved_score_instrument_ids"] == ["X-I1"]
+
+
+def test_invalid_melodic_route_preset_names_valid_shape(tmp_path: Path) -> None:
+    summary = _parse_route_xml(tmp_path, MISSING_PROGRAM_XML)
+    _unchanged, action = apply_llm_program_assignments(
+        summary,
+        [{
+            "score_instrument_id": "P1-I1",
+            "playback_preset": fluidr3_preset(bank=128, program=32, kind="percussion_kit"),
+            "source": "llm_inferred",
+            "evidence": [],
+        }],
+    )
+    assert action is not None
+    assert "melodic route" in action["message"]
+    assert "melodic preset" in action["message"]
+    assert "soundfont_id" not in action["message"]
+    assert "FluidR3_GM" not in action["message"]
+    assert "bank" not in action["message"]
+
+
+def test_invalid_percussion_route_preset_names_valid_shape(tmp_path: Path) -> None:
+    summary = _parse_route_xml(tmp_path, BANKED_PERCUSSION_XML)
+    _unchanged, action = apply_llm_program_assignments(
+        summary,
+        [{
+            "score_instrument_id": "P1-I1",
+            "playback_preset": fluidr3_preset(bank=0, program=24, kind="melodic"),
+            "source": "llm_inferred",
+            "evidence": [],
+        }],
+    )
+    assert action is not None
+    assert "percussion route" in action["message"]
+    assert "percussion_kit preset" in action["message"]
+    assert "soundfont_id" not in action["message"]
+    assert "FluidR3_GM" not in action["message"]
+    assert "bank" not in action["message"]
+
+
+def test_mixed_note_kinds_without_midi_channel_remain_awaited(tmp_path: Path) -> None:
+    xml = _route_xml(
+        instruments='<score-instrument id="X-I1"><instrument-name>Mixed</instrument-name></score-instrument>',
+        notes=_pitched_note() + _unpitched_note(),
+    )
+    summary = _parse_route_xml(tmp_path, xml)
+    assert summary["parts"][0]["instruments"][0]["eligible_for_instrumental_midi"] is True
+    assert summary["parts"][0]["instruments"][0].get("user_assignable", False) is False
+    assert summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] == ["X-I1"]
+
+
+def test_midi_unpitched_without_channel_remains_awaited(tmp_path: Path) -> None:
+    xml = _route_xml(
+        instruments='<score-instrument id="X-I1"><instrument-name>Drum</instrument-name></score-instrument>',
+        midi='<midi-instrument id="X-I1"><midi-unpitched>37</midi-unpitched></midi-instrument>',
+        notes=_unpitched_note(),
+    )
+    summary = _parse_route_xml(tmp_path, xml)
+    assert summary["parts"][0]["instruments"][0]["eligible_for_instrumental_midi"] is True
+    assert summary["parts"][0]["instruments"][0].get("user_assignable", False) is False
+    assert summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] == ["X-I1"]
+
+
+def test_drum_without_keys_keeps_program_unassigned(tmp_path: Path) -> None:
+    xml = _route_xml(
+        instruments='<score-instrument id="X-I1"><instrument-name>Drum Set</instrument-name></score-instrument>',
+        midi='<midi-instrument id="X-I1"><midi-program>1</midi-program></midi-instrument>',
+        notes=_unpitched_note(),
+    )
+    summary = _parse_route_xml(tmp_path, xml)
+    route = summary["parts"][0]["instruments"][0]
+    assert route.get("user_assignable") is True
+    assert route["eligible_for_instrumental_midi"] is False
+    assert route["program_source"] == "user_assignable"
+    assert route["playback_preset"] is None
+    assert route["resolved_gm_program"] is None
+
+
+def test_non_ten_midi_channel_keeps_gm_program_for_unpitched_notes(tmp_path: Path) -> None:
+    xml = _route_xml(
+        instruments='<score-instrument id="X-I1"><instrument-name>Drum</instrument-name></score-instrument>',
+        midi=(
+            '<midi-instrument id="X-I1"><midi-channel>2</midi-channel>'
+            '<midi-program>1</midi-program><midi-unpitched>37</midi-unpitched></midi-instrument>'
+        ),
+        notes=_unpitched_note(),
+    )
+    summary = _parse_route_xml(tmp_path, xml)
+    route = summary["parts"][0]["instruments"][0]
+    assert route["eligible_for_instrumental_midi"] is True
+    assert route.get("user_assignable", False) is False
+    assert route["program_source"] == "musicxml_gm_program"
