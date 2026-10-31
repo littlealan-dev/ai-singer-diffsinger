@@ -271,6 +271,7 @@ export type InstrumentalTrackState = {
   partIndex: number;
   label: string;
   muted: boolean;
+  unassigned: boolean;
   solo: boolean;
   volume: number;
   gmProgram: number;
@@ -482,6 +483,7 @@ type GroupedInstrumentPickerProps = {
   percussion?: boolean;
   soundfontBank?: number;
   presetKind?: "melodic" | "percussion_kit";
+  unassigned?: boolean;
   onChange: (gmProgram: number) => void;
 };
 
@@ -491,6 +493,7 @@ const GroupedInstrumentPicker = ({
   percussion = false,
   soundfontBank,
   presetKind,
+  unassigned = false,
   onChange,
 }: GroupedInstrumentPickerProps) => {
   const groups = percussion
@@ -653,7 +656,7 @@ const GroupedInstrumentPicker = ({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="score-track-instrument-label">{selectedInstrument.label}</span>
+        <span className="score-track-instrument-label">{unassigned ? "Choose a kit" : selectedInstrument.label}</span>
         <ChevronsUpDown size={13} aria-hidden="true" />
       </button>
       {typeof document !== "undefined" && pickerMenu && createPortal(pickerMenu, document.body)}
@@ -1803,8 +1806,9 @@ const ScoreTrackControlsPanel = ({
                   type="button"
                   className={clsx("score-track-solo-btn", { active: inst.solo })}
                   onClick={() => onUpdateInstrumentalSolo(inst.key, !inst.solo)}
+                  disabled={inst.unassigned}
                   aria-pressed={inst.solo}
-                  title={inst.solo ? "Unsolo track" : "Solo track"}
+                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.solo ? "Unsolo track" : "Solo track"}
                 >
                   S
                 </button>
@@ -1812,8 +1816,9 @@ const ScoreTrackControlsPanel = ({
                   type="button"
                   className={clsx("score-track-mute-btn", { muted: inst.muted })}
                   onClick={() => onUpdateInstrumentalMute(inst.key, !inst.muted)}
+                  disabled={inst.unassigned}
                   aria-pressed={inst.muted}
-                  title={inst.muted ? "Unmute track" : "Mute track"}
+                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.muted ? "Unmute track" : "Mute track"}
                 >
                   {inst.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
                 </button>
@@ -1827,6 +1832,7 @@ const ScoreTrackControlsPanel = ({
                 percussion={inst.percussion}
                 soundfontBank={inst.soundfontBank}
                 presetKind={inst.presetKind}
+                unassigned={inst.unassigned}
                 onChange={(gmProgram) => onUpdateInstrumentalGmProgram(inst.key, gmProgram)}
               />
 
@@ -3155,13 +3161,14 @@ export default function MainApp() {
           rawPartId: part.raw_part_id,
           partIndex: part.part_index,
           label: part.label || `Part ${part.part_index + 1}`,
-          muted: existing ? existing.muted : false,
+          unassigned: part.program_source === "user_assignable" ? (existing ? existing.unassigned : true) : false,
+          muted: existing ? existing.muted : part.program_source === "user_assignable",
           solo: existing ? existing.solo : false,
           volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
           gmProgram: existing ? existing.gmProgram : (part.playback_preset?.program ?? part.midi_program ?? 0),
-          soundfontBank: existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
-          presetKind: existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
-          percussion: part.percussion,
+          soundfontBank: part.program_source === "user_assignable" ? 128 : existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
+          presetKind: part.program_source === "user_assignable" ? "percussion_kit" : existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
+          percussion: part.program_source === "user_assignable" ? true : part.percussion,
         };
       });
     });
@@ -3170,7 +3177,7 @@ export default function MainApp() {
   const updateInstrumentalTrackMute = useCallback((key: string, muted: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.key === key ? { ...track, muted, solo: muted ? false : track.solo } : track
+        track.key === key && !track.unassigned ? { ...track, muted, solo: muted ? false : track.solo } : track
       )
     );
   }, []);
@@ -3178,7 +3185,7 @@ export default function MainApp() {
   const updateInstrumentalTrackSolo = useCallback((key: string, solo: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.key === key ? { ...track, solo, muted: solo ? false : track.muted } : track
+        track.key === key && !track.unassigned ? { ...track, solo, muted: solo ? false : track.muted } : track
       )
     );
   }, []);
@@ -3192,7 +3199,7 @@ export default function MainApp() {
 
   const updateInstrumentalTrackGmProgram = useCallback((key: string, gmProgram: number) => {
     setInstrumentalTracks((current) =>
-      current.map((track) => (track.key === key ? { ...track, gmProgram } : track))
+      current.map((track) => (track.key === key ? { ...track, gmProgram, unassigned: false, muted: false } : track))
     );
   }, []);
 

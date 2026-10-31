@@ -89,7 +89,7 @@ def instrumental_programs_by_part(
     assignments: Mapping[str, Any] | None = None,
     include_ineligible: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    """Return the factual/validated program choice for each MIDI-eligible part.
+    """Return the program choice or user-assignable drum route for each playable part.
 
     This is used at MIDI-export time.  The caller must already have validated
     ``assignments``; values in the mapping are never guessed here. Export
@@ -111,13 +111,17 @@ def instrumental_programs_by_part(
             ):
                 item["eligible_for_instrumental_midi"] = True
         eligible = [item for item in instruments if item["eligible_for_instrumental_midi"]]
-        if not eligible and (not include_ineligible or not instruments):
+        user_assignable = [item for item in instruments if item["user_assignable"]]
+        if not eligible and not user_assignable and (not include_ineligible or not instruments):
             continue
         # The existing MIDI exporter emits one track per score part.  MusicXML
         # files with in-score instrument changes retain all declarations in the
         # parse summary, but their event-level routing is outside this first
         # per-part playback implementation.
-        primary = eligible[0] if eligible else instruments[0]
+        primary = (
+            eligible[0] if eligible else
+            user_assignable[0] if user_assignable else instruments[0]
+        )
         instrument_id = primary["score_instrument_id"]
         override = (
             _normalise_preset(assignments.get(instrument_id))
@@ -419,13 +423,11 @@ def _read_part_declarations(source_path: Path) -> Dict[str, Dict[str, Any]]:
             for note in _descendants_named(measure, "note"):
                 route = _first_child_named(note, "instrument")
                 route_id = str(route.attrib.get("id") or "") if route is not None else ""
-                kinds = declaration["note_kinds_by_instrument"].setdefault(
-                    route_id, {"pitched": 0, "unpitched": 0}
-                )
+                kinds = declaration["note_kinds_by_instrument"].setdefault(route_id, set())
                 if _first_child_named(note, "unpitched") is not None:
-                    kinds["unpitched"] += 1
+                    kinds.add("unpitched")
                 elif _first_child_named(note, "pitch") is not None:
-                    kinds["pitched"] += 1
+                    kinds.add("pitched")
     return score_parts
 
 
@@ -477,16 +479,14 @@ def _part_instruments(
         native_bank = native.get("native_midi_bank")
         percussion = native_channel == 10
         synthetic = bool(source.get("synthetic"))
-        route_kinds = note_kinds_by_instrument.get(score_instrument_id) or {}
-        unrouted_kinds = (note_kinds_by_instrument.get("") or {}) if index == 0 else {}
-        pitched_count = route_kinds.get("pitched", 0) + unrouted_kinds.get("pitched", 0)
-        unpitched_count = route_kinds.get("unpitched", 0) + unrouted_kinds.get("unpitched", 0)
-        # Without a declared instrument or MIDI drum facts, unpitched-only
-        # notes have no playable drum keys and must not await an LLM preset.
+        route_kinds = note_kinds_by_instrument.get(score_instrument_id) or set()
+        unrouted_kinds = (note_kinds_by_instrument.get("") or set()) if index == 0 else set()
+        kinds = route_kinds | unrouted_kinds
+        # Without MIDI drum facts, an unpitched-only route needs a kit chosen
+        # by the user. It must not await an LLM preset.
         no_drum_sounds = (
             native_channel is None
-            and unpitched_count > 0
-            and pitched_count == 0
+            and kinds == {"unpitched"}
             and not native.get("midi_unpitched_notes")
         )
         # A part that declares no instrument is either an accompaniment or a
@@ -508,6 +508,8 @@ def _part_instruments(
         preset, program_source = _portable_preset(
             channel=native_channel, bank=native_bank, program=native_program
         )
+        if no_drum_sounds:
+            preset = None
         result.append(
             {
                 "score_instrument_id": score_instrument_id,
@@ -534,10 +536,11 @@ def _part_instruments(
                 },
                 "playback_preset": preset,
                 "resolved_gm_program": preset["program"] if preset else None,
-                "program_source": program_source,
-                "program_evidence": ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
+                "program_source": "user_assignable" if no_drum_sounds else program_source,
+                "program_evidence": [] if no_drum_sounds else ["midi-channel"] if program_source == "standard_gm_percussion" else ["midi-program"] if program_source == "musicxml_gm_program" else [],
                 "direction_words": list(declaration.get("direction_words") or []),
                 "eligible_for_instrumental_midi": eligible,
+                "user_assignable": no_drum_sounds,
                 "instrumental_candidate": instrumental_candidate,
                 "is_explicit_vocal": is_explicit_vocal,
                 "is_percussion": percussion,

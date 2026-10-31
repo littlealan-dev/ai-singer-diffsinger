@@ -16,7 +16,24 @@ from src.musicxml.instrument_programs import instrumental_programs_by_part
 from src.musicxml.tempo_map import score_tempo_events
 
 
-PERFORMANCE_MIDI_VERSION = 9
+PERFORMANCE_MIDI_VERSION = 10
+
+# Common five-line drum staff positions and noteheads to General MIDI keys.
+STAFF_POSITION_DRUM_KEYS = {
+    ("F4", "normal"): 36,
+    ("E4", "normal"): 35,
+    ("C5", "normal"): 38,
+    ("C5", "x"): 37,
+    ("G5", "x"): 42,
+    ("G5", "circle-x"): 46,
+    ("D4", "x"): 44,
+    ("F5", "x"): 51,
+    ("A5", "x"): 49,
+    ("F5", "normal"): 50,
+    ("E5", "normal"): 48,
+    ("D5", "normal"): 47,
+    ("A4", "normal"): 43,
+}
 
 
 def build_instrumental_performance_midis(
@@ -106,12 +123,14 @@ def _instrumental_part_metadata(
         percussion = channel == 9 or isinstance(score_instrument, instrument.UnpitchedPercussion)
         resolved_program = program_facts.get("resolved_gm_program")
         playback_preset = program_facts.get("playback_preset")
+        user_assignable = bool(program_facts.get("user_assignable"))
         score_instrument_id = program_facts.get("score_instrument_id")
-        eligible = (
-            source_eligible
-            and bool(program_facts.get("eligible_for_instrumental_midi"))
-            and isinstance(resolved_program, int)
+        eligible = source_eligible and (
+            (bool(program_facts.get("eligible_for_instrumental_midi")) and isinstance(resolved_program, int))
+            or user_assignable
         )
+        selected_preset = None if user_assignable else playback_preset if isinstance(playback_preset, dict) else None
+        selected_program = None if user_assignable else resolved_program if isinstance(resolved_program, int) else None
         result.append(
             {
                 "part_index": index,
@@ -123,18 +142,20 @@ def _instrumental_part_metadata(
                 # ``None`` means the MusicXML supplied no explicit program and
                 # the synthesize caller did not provide an LLM assignment.  Do
                 # not silently report it as piano (GM 0).
-                "midi_program": resolved_program if isinstance(resolved_program, int) else None,
-                "playback_preset": playback_preset if isinstance(playback_preset, dict) else None,
-                "soundfont_bank": playback_preset.get("bank") if isinstance(playback_preset, dict) else None,
+                "midi_program": selected_program,
+                "playback_preset": selected_preset,
+                "soundfont_bank": selected_preset.get("bank") if selected_preset else None,
                 "score_instrument_id": score_instrument_id,
-                "program_source": program_facts.get("program_source", "unresolved"),
+                "program_source": "user_assignable" if user_assignable else program_facts.get("program_source", "unresolved"),
                 "midi_channel": int(channel) if isinstance(channel, int) else None,
-                "percussion": percussion,
+                "percussion": True if user_assignable else percussion,
                 "diagnostic": (
                     "MusicXML instrument-sound explicitly declares a vocal part."
                     if is_explicit_vocal
                     else "Part has lyrics, so it is sung, not played."
                     if has_lyrics
+                    else "The score gives this drum part no drum sounds. Choose a kit to hear it."
+                    if user_assignable
                     else "Part has no resolved General MIDI program."
                     if source_eligible and not isinstance(resolved_program, int)
                     else None
@@ -163,7 +184,11 @@ def _write_instrumental_midi(
 ) -> None:
     score = load_musicxml_score(source_path)
     written_raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=score)
-    _restore_unpitched_midi_pitches(score, source_path, written_raw_part_ids)
+    user_assignable_ids = {
+        raw_part_id for raw_part_id, facts in programs_by_part.items()
+        if facts.get("user_assignable")
+    }
+    _restore_unpitched_midi_pitches(score, source_path, written_raw_part_ids, user_assignable_ids)
     if expand_repeats:
         score = _expand_repeat_navigation(score, source_path)
     else:
@@ -180,6 +205,8 @@ def _write_instrumental_midi(
             )
             if isinstance(resolved_program, int):
                 part.getInstrument(returnDefault=True).midiProgram = resolved_program
+            elif isinstance(program_facts, dict) and program_facts.get("user_assignable"):
+                part.getInstrument(returnDefault=True).midiProgram = None
             instrumental_score.insert(0, deepcopy(part))
     _copy_score_tempos(score, instrumental_score)
     if not instrumental_score.parts:
@@ -197,18 +224,19 @@ def _restore_unpitched_midi_pitches(
     score: stream.Score,
     source_path: Path,
     raw_part_ids: Dict[int, str],
+    user_assignable_ids: set[str] | None = None,
 ) -> None:
-    """Restore MusicXML's per-note GM drum pitches before MIDI export.
+    """Restore per-note GM drum pitches before MIDI export.
 
     music21 imports the first declared percussion instrument for an entire
     part and discards each ``note/instrument`` route. Its MIDI writer then
     emits that first instrument's pitch for every note (commonly bass drum).
-    MusicXML's ``midi-unpitched`` value is the explicit source fact for every
-    route. It uses the MusicXML 1-128 numbering, so convert it to MIDI's
-    0-127 pitch numbering before attaching it to parsed atomic Unpitched notes
-    ahead of repeat expansion or MIDI writing.
+    MusicXML's ``midi-unpitched`` is the explicit source fact for a route. For
+    user-assignable routes without one, common staff positions and noteheads
+    provide a limited mapping. Unmapped notes retain music21's fallback.
+    Attach mapped keys to parsed atomic Unpitched notes before repeat expansion.
     """
-    source_pitches_by_part = _unpitched_midi_pitches_by_part(source_path)
+    source_pitches_by_part = _unpitched_midi_pitches_by_part(source_path, user_assignable_ids or set())
     for index, part in enumerate(score.parts):
         source_pitches = source_pitches_by_part.get(raw_part_ids.get(index, ""))
         if not source_pitches:
@@ -240,8 +268,11 @@ def _atomic_unpitched_notes(part: stream.Part) -> List[note.Unpitched]:
     return result
 
 
-def _unpitched_midi_pitches_by_part(source_path: Path) -> Dict[str, List[int | None]]:
+def _unpitched_midi_pitches_by_part(
+    source_path: Path, user_assignable_ids: set[str] | None = None
+) -> Dict[str, List[int | None]]:
     root = ElementTree.fromstring(read_musicxml_content(source_path))
+    user_assignable_ids = user_assignable_ids or set()
     result: Dict[str, List[int | None]] = {}
     pitches_by_part_and_instrument: Dict[str, Dict[str, int]] = {}
     for score_part in _children_named(_first_child_named(root, "part-list"), "score-part"):
@@ -252,7 +283,7 @@ def _unpitched_midi_pitches_by_part(source_path: Path) -> Dict[str, List[int | N
             pitch = _valid_midi_unpitched(_child_text(midi_instrument, "midi-unpitched"))
             if instrument_id and pitch is not None:
                 pitches_by_instrument_id[instrument_id] = pitch
-        if not pitches_by_instrument_id:
+        if not pitches_by_instrument_id and raw_part_id not in user_assignable_ids:
             continue
         result[raw_part_id] = []
         pitches_by_part_and_instrument[raw_part_id] = pitches_by_instrument_id
@@ -263,6 +294,16 @@ def _unpitched_midi_pitches_by_part(source_path: Path) -> Dict[str, List[int | N
             continue
         for source_note in _descendants_named(raw_part, "note"):
             if _first_child_named(source_note, "unpitched") is None:
+                continue
+            if raw_part_id in user_assignable_ids:
+                unpitched = _first_child_named(source_note, "unpitched")
+                step = _child_text(unpitched, "display-step")
+                octave = _child_text(unpitched, "display-octave")
+                notehead = _child_text(source_note, "notehead") or "normal"
+                result[raw_part_id].append(
+                    STAFF_POSITION_DRUM_KEYS.get((f"{step}{octave}", notehead))
+                    if step and octave else None
+                )
                 continue
             source_instrument = _first_child_named(source_note, "instrument")
             instrument_id = (

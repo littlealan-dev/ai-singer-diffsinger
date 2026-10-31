@@ -73,7 +73,7 @@ function multiTrackMidi(programs: number[]): Buffer {
   return Buffer.concat([header, ...tracks]);
 }
 
-async function mockBackend(page: Page) {
+async function mockBackend(page: Page, performanceMidi: unknown = PERFORMANCE_MIDI, midiPrograms = [0, 0, 24]) {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   const completed = {
     status: "done",
@@ -86,7 +86,7 @@ async function mockBackend(page: Page) {
     audio_track: { key: "id:Voice", label: "Voice", part_id: "Voice", verse_number: "1" },
     expand_repeats: true,
     actual_duration_seconds: 1,
-    performance_midi: PERFORMANCE_MIDI,
+    performance_midi: performanceMidi,
     performance_midi_published: true,
   };
   // The fallback synth is enough here; the 148 MB SoundFont would only slow the test.
@@ -121,7 +121,7 @@ async function mockBackend(page: Page) {
     if (route_.endsWith("/score")) return route.fulfill({ contentType: "application/xml", body: xml });
     if (route_.endsWith("/synthesis-estimate")) return route.fulfill({ status: 503, json: {} });
     if (route_.endsWith("/instrumental-midi")) {
-      return route.fulfill({ contentType: "audio/midi", body: multiTrackMidi([0, 0, 24]) });
+      return route.fulfill({ contentType: "audio/midi", body: multiTrackMidi(midiPrograms) });
     }
     if (route_.endsWith("/audio")) return route.fulfill({ contentType: "audio/wav", body: silentWav(1) });
     if (route_.endsWith("/chat")) {
@@ -241,4 +241,53 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
     .toEqual([0.5, 0.5, expect.any(Number)]);
 
   expect(consoleMessages.filter((text) => text.includes("same key"))).toEqual([]);
+});
+
+test("a drum part without sounds stays muted until the user chooses a kit", async ({ page }) => {
+  test.setTimeout(120_000);
+  const performanceMidi = {
+    ...PERFORMANCE_MIDI,
+    instrumental_parts: [
+      part(1, "P2", "P2", "Piano", 0),
+      {
+        ...part(2, "P3", "P3", "Drum Set", 0),
+        midi_program: null,
+        program_source: "user_assignable",
+        percussion: true,
+      },
+    ],
+  };
+  await mockBackend(page, performanceMidi, [0, 0]);
+  await signInAsE2EUser(page, "score-player-unassigned-drum");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
+
+  const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
+  await page.getByTestId("score-upload-input").setInputFiles({ name: "score.xml", mimeType: "application/xml", buffer: xml });
+  await expect(page.getByTestId("score-preview-surface").locator("svg").first()).toBeVisible();
+  await page.getByTestId("chat-input").fill("sing Voice");
+  await page.getByTestId("send-message").click();
+
+  const drum = page.getByTestId("score-inst-track-P3");
+  await expect(instrumentRows(page)).toHaveCount(2);
+  const picker = drum.locator(".score-track-instrument-trigger");
+  const mute = drum.locator(".score-track-mute-btn");
+  const solo = drum.locator(".score-track-solo-btn");
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Choose a kit");
+  await expect(mute).toHaveAttribute("aria-pressed", "true");
+  await expect(mute).toBeDisabled();
+  await expect(solo).toBeDisabled();
+  await expect(mute).toHaveAttribute("title", "Choose a kit to hear this part");
+  await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(true);
+
+  await picker.click();
+  await page.getByRole("menuitem", { name: "FluidR3 Drum Kits" }).click();
+  await page.getByRole("menuitemradio", { name: "Jazz Kit" }).click();
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Jazz Kit");
+  await expect(mute).toHaveAttribute("aria-pressed", "false");
+  await expect(mute).toBeEnabled();
+  await expect(solo).toBeEnabled();
+  await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(false);
 });
