@@ -658,6 +658,33 @@ def test_two_chord_sources_get_disjoint_covering_lanes(tmp_path):
                 }]
 
 
+def test_leftover_silent_lane_joins_chord_with_distinct_rank_and_fallback(tmp_path):
+    second = '<backup><duration>4</duration></backup>'.join(
+        _note(step, voice=voice) for step, voice in (("G", "2"), ("B", "3"), ("D", "4"))
+    )
+    score = _single_staff_score(tmp_path, [
+        _note("C", voice="1") + _note("E", voice="1", chord=True, lyric=None), second,
+    ])
+    original = deepcopy(score)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    assert len(sheet.lanes) == 3 and len(slot.options) == 6
+    assert slot.evidence["need"] == {"voice part 4": 2}
+    assert len(set(source["voice_part_id"] for source in
+                   slot.options[0].fields["melody_source_by_lane"].values())) == 1
+    assert sorted(slot.options[0].fields["rank_index_by_lane"].values()) == [0, 1, 2]
+    assert sum(slot.kind == "rank_fallback" for slot in sheet.slots) == 3
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    assert all(target["sections"][0]["rank_fallback"] == "greedy" for target in plan["targets"])
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings") or []
+                if finding.get("rule_severity") == "P0"]
+    assert score == original
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    assert json.dumps(asdict(sheet), sort_keys=True)
+
+
 def test_four_note_chord_moves_only_needed_native_lanes(tmp_path):
     score = _four_note_chord_with_native_lanes(tmp_path)
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})

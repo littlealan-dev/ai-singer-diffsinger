@@ -588,7 +588,9 @@ def _voice_assignment_options(
     score: dict, segment: Segment, lanes: list[Lane], candidates: list[dict],
 ) -> tuple[tuple[Option, ...] | None, dict, str | None]:
     """Assign chord coverage jointly, then rank every final source group."""
-    local = [source for source in candidates
+    local = [{**source, "notes": [note for note in source["notes"]
+                                  if _staff_scope_key(note) == segment.scope_key]}
+             for source in candidates
              if source["part_index"] == segment.part_index and segment.scope_key in source["scopes"]]
     needs: dict[str, int] = {}
     for source in local:
@@ -828,9 +830,13 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             )
             if not native or assigned_elsewhere:
                 default_melody = melody[0].fields["melody_source"]
-                target_notes = next(source["notes"] for source in candidates if
-                                    source["part_index"] == default_melody["part_index"] and
-                                    source["voice_part_id"] == default_melody["voice_part_id"])
+                target_notes = next(
+                    [note for note in source["notes"]
+                     if _staff_scope_key(note) == lane.scope_key]
+                    for source in candidates if
+                    source["part_index"] == default_melody["part_index"] and
+                    source["voice_part_id"] == default_melody["voice_part_id"]
+                )
             else:
                 default_melody = {"part_index": lane.part_index,
                                   "voice_part_id": lane.source_voice_part_id}
@@ -908,6 +914,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                                   and item["voice_part_id"] == source_ref["voice_part_id"])
                     counts: dict[tuple[int, float], int] = {}
                     for note in source["notes"]:
+                        if _staff_scope_key(note) != lane.scope_key:
+                            continue
                         key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
                         counts[key] = counts.get(key, 0) + 1
                     if group_size > 1 and any(count < group_size for count in counts.values()):
