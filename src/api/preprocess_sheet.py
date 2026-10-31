@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import html
 import re
-from itertools import permutations
+from itertools import combinations, permutations, product
 from math import factorial
+from statistics import median
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,7 +72,7 @@ class SheetSkeleton:
 
 SLOT_KINDS = (
     "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_policy",
-    "rank_fallback", "rank_assignment", "split_shared_note_policy", "freeform",
+    "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "freeform",
 )
 
 
@@ -583,6 +584,171 @@ def _rank_assignment_options(groups: list[list[Lane]]) -> tuple[Option, ...]:
     ) for assignment in assignments)
 
 
+def _voice_assignment_options(
+    score: dict, segment: Segment, lanes: list[Lane], candidates: list[dict],
+) -> tuple[tuple[Option, ...] | None, dict, str | None]:
+    """Assign chord coverage jointly, then rank every final source group."""
+    local = [{**source, "notes": [note for note in source["notes"]
+                                  if _staff_scope_key(note) == segment.scope_key]}
+             for source in candidates
+             if source["part_index"] == segment.part_index and segment.scope_key in source["scopes"]]
+    needs: dict[str, int] = {}
+    for source in local:
+        counts: dict[tuple[int, float], int] = {}
+        for note in source["notes"]:
+            key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+            counts[key] = counts.get(key, 0) + 1
+        needs[source["voice_part_id"]] = max(counts.values(), default=0)
+    chord_sources = sorted(
+        (source for source in local if needs[source["voice_part_id"]] >= 2),
+        key=lambda source: (-median(float(note["pitch_midi"]) for note in source["notes"]),
+                            source["voice_part_id"]),
+    )
+    if not chord_sources:
+        return None, {}, None
+    evidence = {
+        "need": {source["voice_part_id"]: needs[source["voice_part_id"]]
+                 for source in chord_sources},
+        "median_pitch_midi": {source["voice_part_id"]: median(
+            float(note["pitch_midi"]) for note in source["notes"]
+        ) for source in chord_sources},
+    }
+    if sum(needs[source["voice_part_id"]] for source in chord_sources) > len(lanes):
+        return (), evidence, "chord_claims_exceed_lanes"
+
+    native = {lane_id: is_native for lane_id, is_native, _ in segment.signature.lanes}
+    source_voice = {
+        vp["voice_part_id"]: str(vp["source_voice_id"])
+        for vp in _analyze_part_voice_parts(score["parts"][segment.part_index], segment.part_index)["voice_parts"]
+    }
+    whole_part = score["parts"][segment.part_index]
+    heights: dict[str, float | None] = {}
+    native_counts: dict[str, int] = {}
+    for lane in lanes:
+        notes = [note for note in whole_part.get("notes") or []
+                 if _is_countable_sung_note(note)
+                 and _staff_scope_key(note) == lane.scope_key
+                 and _voice_key(note.get("voice")) == source_voice[lane.source_voice_part_id]]
+        heights[lane.lane_id] = median(float(note["pitch_midi"]) for note in notes) if notes else None
+        native_counts[lane.lane_id] = sum(
+            segment.start_measure <= int(note["measure_number"]) <= segment.end_measure
+            for note in notes
+        )
+    ordered_lanes = sorted(lanes, key=lambda lane: (
+        heights[lane.lane_id] is None,
+        -(heights[lane.lane_id] or 0), lane.default_rank,
+    ))
+    mandatory = {
+        source["voice_part_id"]: [lane for lane in ordered_lanes
+                                  if native[lane.lane_id]
+                                  and lane.source_voice_part_id == source["voice_part_id"]]
+        for source in chord_sources
+    }
+    if any(len(mandatory[source["voice_part_id"]]) > needs[source["voice_part_id"]]
+           for source in chord_sources):
+        return (), evidence, "chord_claims_exceed_lanes"
+    mandatory_ids = {lane.lane_id for group in mandatory.values() for lane in group}
+    owner_count = len(mandatory_ids)
+    silent_count = sum(not native[lane.lane_id] for lane in lanes)
+    minimum_moved = max(0, sum(needs[source["voice_part_id"]] for source in chord_sources)
+                        - owner_count - silent_count)
+
+    options: list[Option] = []
+    seen: set[tuple] = set()
+
+    def add_options(cover: dict[str, str]) -> None:
+        source_by_lane: dict[str, dict] = {}
+        for lane in ordered_lanes:
+            selected = cover.get(lane.lane_id)
+            if selected is None:
+                if native[lane.lane_id]:
+                    selected = lane.source_voice_part_id
+                else:
+                    melody = _melody_options(lane, candidates)
+                    if not melody:
+                        return
+                    ref = melody[0].fields["melody_source"]
+                    source = next((item for item in candidates
+                                   if item["part_index"] == ref["part_index"]
+                                   and item["voice_part_id"] == ref["voice_part_id"]), None)
+                    if source is None:
+                        return
+                    source_by_lane[lane.lane_id] = source
+                    continue
+            source = next((item for item in candidates
+                           if item["part_index"] == segment.part_index
+                           and item["voice_part_id"] == selected), None)
+            if source is None:
+                return
+            source_by_lane[lane.lane_id] = source
+        groups: dict[tuple[int, str], list[Lane]] = {}
+        for lane in ordered_lanes:
+            source = source_by_lane[lane.lane_id]
+            groups.setdefault((source["part_index"], source["voice_part_id"]), []).append(lane)
+        ranked_groups = [group for group in groups.values() if len(group) > 1]
+        for chosen_ranks in product(*(permutations(range(len(group))) for group in ranked_groups)):
+            ranks = {lane.lane_id: rank for group, rank_tuple in zip(ranked_groups, chosen_ranks)
+                     for lane, rank in zip(group, rank_tuple)}
+            key = tuple((source_by_lane[lane.lane_id]["part_index"],
+                         source_by_lane[lane.lane_id]["voice_part_id"], ranks.get(lane.lane_id))
+                        for lane in ordered_lanes)
+            if key in seen:
+                continue
+            seen.add(key)
+            moved = any(native[lane.lane_id] and lane.lane_id in cover
+                        and cover[lane.lane_id] != lane.source_voice_part_id for lane in lanes)
+            options.append(Option(
+                option_id=f"va:{len(options)}", label=f"Voice assignment {len(options) + 1}",
+                fields={
+                    "melody_source_by_lane": {
+                        lane.lane_id: {"part_id": source_by_lane[lane.lane_id]["part_id"],
+                                       "part_index": source_by_lane[lane.lane_id]["part_index"],
+                                       "voice_part_id": source_by_lane[lane.lane_id]["voice_part_id"]}
+                        for lane in ordered_lanes
+                    },
+                    "rank_index_by_lane": ranks,
+                },
+                evidence={"need": evidence["need"], "lane_height_midi": heights},
+                flags=("P1 drops_native_notes",) if moved else (),
+            ))
+            if len(options) > 24:
+                return
+
+    def allocate(index: int, cover: dict[str, str]) -> None:
+        if len(options) > 24:
+            return
+        if index == len(chord_sources):
+            moved = sum(native[lane.lane_id] and cover.get(lane.lane_id) != lane.source_voice_part_id
+                        for lane in lanes if lane.lane_id in cover)
+            if moved == minimum_moved:
+                add_options(cover)
+            return
+        source = chord_sources[index]
+        source_id = source["voice_part_id"]
+        owners = mandatory[source_id]
+        need = needs[source_id] - len(owners)
+        available = [lane for lane in ordered_lanes
+                     if lane.lane_id not in cover and lane.lane_id not in mandatory_ids]
+        available.sort(key=lambda lane: (
+            native[lane.lane_id],
+            native_counts[lane.lane_id] if native[lane.lane_id] else 0,
+            heights[lane.lane_id] is None,
+            -(heights[lane.lane_id] or 0), lane.default_rank,
+        ))
+        for selected in combinations(available, need):
+            assigned = {**cover, **{lane.lane_id: source_id for lane in owners + list(selected)}}
+            allocate(index + 1, assigned)
+            if len(options) > 24:
+                return
+
+    allocate(0, {})
+    if len(options) > 24:
+        return (), evidence, "voice_assignment_over_24_options"
+    if not options:
+        return (), evidence, "chord_claims_exceed_lanes"
+    return tuple(options), evidence, None
+
+
 def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
@@ -609,27 +775,68 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
         candidates = _source_candidates(score, segment, derived_indices)
         segment_slots: list[Slot] = []
         freeform_reason: str | None = None
+        assignment, assignment_evidence, freeform_reason = _voice_assignment_options(
+            score, segment, lanes, candidates
+        )
+        if freeform_reason is not None:
+            sheet.slots.append(_freeform_slot(segment, lanes, freeform_reason))
+            continue
+        if assignment is not None:
+            segment_slots.append(_choice_slot(
+                tuple(option_lane.lane_id for option_lane in sorted(
+                    lanes, key=lambda option_lane: (
+                        assignment[0].evidence["lane_height_midi"][option_lane.lane_id] is None,
+                        -(assignment[0].evidence["lane_height_midi"][option_lane.lane_id] or 0),
+                        option_lane.default_rank,
+                    )
+                )), segment, "voice_assignment", assignment,
+                joint_id=f"{lanes[0].part_id}|{segment.scope_key}",
+                evidence=assignment_evidence,
+            ))
         for lane in lanes:
             native = next(fact[1] for fact in segment.signature.lanes if fact[0] == lane.lane_id)
             native_lyric_kind = next(fact[2] for fact in segment.signature.lanes if fact[0] == lane.lane_id)
             target_notes = _target_notes(score, lane, segment)
-            melody = _melody_options(lane, candidates)
+            if assignment is None:
+                melody = _melody_options(lane, candidates)
+            else:
+                source_ref = assignment[0].fields["melody_source_by_lane"][lane.lane_id]
+                chosen_source = next(source for source in candidates
+                                     if source["part_index"] == source_ref["part_index"]
+                                     and source["voice_part_id"] == source_ref["voice_part_id"])
+                melody = (_source_option(chosen_source, "melody_source"),)
             if native and not melody:
                 freeform_reason = "singing_lane_without_melody"
                 break
-            mode_ids = ("derive",) if native else ("derive", "rest") if melody else ("rest",)
+            may_take_chord = assignment is not None and any(
+                option.fields["melody_source_by_lane"][lane.lane_id]["voice_part_id"]
+                in assignment_evidence["need"] for option in assignment
+            )
+            mode_ids = ("derive",) if native or may_take_chord else (
+                ("derive", "rest") if melody else ("rest",)
+            )
             segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", tuple(
                 Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
                 for mode in mode_ids
             )))
             if not melody:
                 continue
-            segment_slots.append(_choice_slot((lane.lane_id,), segment, "melody_source", melody))
-            if not native:
+            if assignment is None:
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "melody_source", melody))
+            assigned_elsewhere = assignment is not None and (
+                melody[0].fields["melody_source"] != {
+                    "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id
+                }
+            )
+            if not native or assigned_elsewhere:
                 default_melody = melody[0].fields["melody_source"]
-                target_notes = next(source["notes"] for source in candidates if
-                                    source["part_index"] == default_melody["part_index"] and
-                                    source["voice_part_id"] == default_melody["voice_part_id"])
+                target_notes = next(
+                    [note for note in source["notes"]
+                     if _staff_scope_key(note) == lane.scope_key]
+                    for source in candidates if
+                    source["part_index"] == default_melody["part_index"] and
+                    source["voice_part_id"] == default_melody["voice_part_id"]
+                )
             else:
                 default_melody = {"part_index": lane.part_index,
                                   "voice_part_id": lane.source_voice_part_id}
@@ -658,7 +865,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                         option_id=option.option_id,
                         label=option.label,
                         fields={"lyric_source": dict(option.fields["melody_source"])},
-                        evidence={**reason, "pairs_with_melody_option": option.option_id},
+                        evidence={**reason, "pairs_with_melody_option":
+                                  assignment[0].option_id if assignment is not None else option.option_id},
                         flags=(),
                     ) for option in melody)
             segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_source", lyric))
@@ -695,19 +903,39 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                     Option(value, value, {"lyric_policy": value}, {}, ())
                     for value in ("fill_missing_only", "replace_all")
                 )))
-            siblings = [other for other in lanes
-                        if other.source_voice_part_id == lane.source_voice_part_id]
-            if len(siblings) > 1 and target_notes:
-                counts: dict[tuple[int, float], int] = {}
-                for note in target_notes:
-                    key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                    counts[key] = counts.get(key, 0) + 1
-                if any(count < len(siblings) for count in counts.values()):
-                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", tuple(
-                        Option(value, value, {"rank_fallback": value}, {}, ())
-                        for value in ("greedy", "skip")
-                    )))
-        if freeform_reason is None and segment.signature.density > 1:
+            needs_fallback = False
+            if assignment is not None:
+                for option in assignment:
+                    mapping = option.fields["melody_source_by_lane"]
+                    source_ref = mapping[lane.lane_id]
+                    group_size = sum(ref == source_ref for ref in mapping.values())
+                    source = next(item for item in candidates
+                                  if item["part_index"] == source_ref["part_index"]
+                                  and item["voice_part_id"] == source_ref["voice_part_id"])
+                    counts: dict[tuple[int, float], int] = {}
+                    for note in source["notes"]:
+                        if _staff_scope_key(note) != lane.scope_key:
+                            continue
+                        key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                        counts[key] = counts.get(key, 0) + 1
+                    if group_size > 1 and any(count < group_size for count in counts.values()):
+                        needs_fallback = True
+                        break
+            else:
+                siblings = [other for other in lanes
+                            if other.source_voice_part_id == lane.source_voice_part_id]
+                if len(siblings) > 1 and target_notes:
+                    counts: dict[tuple[int, float], int] = {}
+                    for note in target_notes:
+                        key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                        counts[key] = counts.get(key, 0) + 1
+                    needs_fallback = any(count < len(siblings) for count in counts.values())
+            if needs_fallback:
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", tuple(
+                    Option(value, value, {"rank_fallback": value}, {}, ())
+                    for value in ("greedy", "skip")
+                )))
+        if freeform_reason is None and assignment is None and segment.signature.density > 1:
             by_source: dict[str, list[Lane]] = {}
             for lane in lanes:
                 by_source.setdefault(lane.source_voice_part_id, []).append(lane)

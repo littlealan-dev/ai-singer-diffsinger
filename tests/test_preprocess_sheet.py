@@ -160,6 +160,52 @@ def _no_word_two_part_score(tmp_path):
     return _parse_inline(tmp_path, xml)
 
 
+def _unnumbered_chord_with_opposite_voice_heights(tmp_path):
+    first = _note("D", lyric="sing") + _note("F", chord=True, lyric=None)
+    second = (_note("C", voice="1", lyric="low")
+              + '<backup><duration>4</duration></backup>'
+              + _note("G", voice="2", lyric="high"))
+    return _single_staff_score(tmp_path, [first, second])
+
+
+def _two_chord_voices_with_silent_lanes(tmp_path):
+    first = (_note("C", voice="1") + _note("E", voice="1", chord=True, lyric=None)
+             + '<backup><duration>4</duration></backup>'
+             + _note("G", voice="2") + _note("B", voice="2", chord=True, lyric=None))
+    second = (_note("D", voice="3") + '<backup><duration>4</duration></backup>'
+              + _note("A", voice="4"))
+    return _single_staff_score(tmp_path, [first, second])
+
+
+def _four_note_chord_with_native_lanes(tmp_path):
+    first = (
+        _note("C", voice="1", duration=2)
+        + "".join(_note(step, voice="1", chord=True, duration=2, lyric=None)
+                  for step in "EGB")
+        + _rest(voice="1", duration=2)
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2", duration=2) + _note("D", voice="2", duration=2)
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="3", duration=2) + _note("F", voice="3", duration=2)
+    )
+    second = (_note("A", voice="3") + '<backup><duration>4</duration></backup>'
+              + _note("B", voice="4"))
+    return _single_staff_score(tmp_path, [first, second])
+
+
+def _too_many_chord_claims(tmp_path):
+    first = (
+        _note("C", voice="1", duration=2)
+        + _note("E", voice="1", chord=True, duration=2, lyric=None)
+        + _rest(voice="1", duration=2)
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2", duration=2)
+        + _note("G", voice="2", duration=2)
+        + _note("B", voice="2", chord=True, duration=2, lyric=None)
+    )
+    return _single_staff_score(tmp_path, [first])
+
+
 def test_target_resolution_and_intent_flag():
     score = parse_score(SATB, verse_number=1)
     original = deepcopy(score)
@@ -527,10 +573,10 @@ def test_sheet_excludes_rest_on_native_notes_and_is_pure_json():
     assert score == original
 
 
-def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
+def test_chord_voice_assignment_and_fixed_single_options(tmp_path):
     score = _chord_score(tmp_path)
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-    rank_slots = [slot for slot in sheet.slots if slot.kind == "rank_assignment"]
+    rank_slots = [slot for slot in sheet.slots if slot.kind == "voice_assignment"]
     assert len(rank_slots) == 1
     assert len(rank_slots[0].lane_ids) == 2
     mappings = [option.fields["rank_index_by_lane"] for option in rank_slots[0].options]
@@ -554,6 +600,146 @@ def test_chord_rank_assignment_and_fixed_single_options(tmp_path):
     assert all(option.evidence["target_sung_note_count"] == 2
                and option.evidence["word_lyric_coverage_ratio"] == 1.0
                for option in first_measure_lyric)
+
+
+def test_unnumbered_chord_uses_pitch_order_not_voice_number(tmp_path):
+    score = _unnumbered_chord_with_opposite_voice_heights(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    assert slot.start_measure == slot.end_measure == 1
+    assert not [slot for slot in sheet.slots if slot.kind == "melody_source"
+                and slot.start_measure == 1]
+    first = slot.options[0]
+    ranks = first.fields["rank_index_by_lane"]
+    raw_voice = {vp["voice_part_id"]: vp["source_voice_id"]
+                 for vp in _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]}
+    high_lane = next(lane for lane in sheet.lanes
+                     if raw_voice[lane.source_voice_part_id] == "2")
+    low_lane = next(lane for lane in sheet.lanes
+                    if raw_voice[lane.source_voice_part_id] == "1")
+    assert ranks[high_lane.lane_id] == 0
+    assert ranks[low_lane.lane_id] == 1
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    sections = [next(section for section in target["sections"]
+                     if section["start_measure"] <= 1 <= section["end_measure"])
+                for target in plan["targets"]]
+    assert all(section["decision_type"] == "SPLIT_CHORDS_SELECT_NOTES"
+               and section["method"] == "ranked" for section in sections)
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert result["status"] == "ready"
+    pitch_by_lane = {}
+    for lane, target in zip(sheet.lanes, result["targets"]):
+        part = result["score"]["parts"][target["appended_part_ref"]["part_index"]]
+        pitch_by_lane[lane.lane_id] = {
+            note["pitch_midi"] for note in part["notes"]
+            if note["measure_number"] == 1 and not note["is_rest"]
+        }
+    assert pitch_by_lane[high_lane.lane_id] == {77.0}
+    assert pitch_by_lane[low_lane.lane_id] == {74.0}
+
+
+def test_two_chord_sources_get_disjoint_covering_lanes(tmp_path):
+    score = _two_chord_voices_with_silent_lanes(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    slots = [slot for slot in sheet.slots if slot.kind == "voice_assignment"]
+    assert len(slots) == 1 and len(slots[0].lane_ids) == 4
+    first = slots[0].options[0]
+    raw_voice = {vp["voice_part_id"]: vp["source_voice_id"]
+                 for vp in _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]}
+    sources = [raw_voice[source["voice_part_id"]]
+               for source in first.fields["melody_source_by_lane"].values()]
+    assert sources.count("1") == sources.count("2") == 2
+    assert sorted(first.fields["rank_index_by_lane"].values()) == [0, 0, 1, 1]
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings") or []
+                if finding.get("rule") in {
+                    "complete_split_source_underclaimed", "complete_split_duplicate_rank",
+                }]
+
+
+def test_leftover_silent_lane_joins_chord_with_distinct_rank_and_fallback(tmp_path):
+    second = '<backup><duration>4</duration></backup>'.join(
+        _note(step, voice=voice) for step, voice in (("G", "2"), ("B", "3"), ("D", "4"))
+    )
+    score = _single_staff_score(tmp_path, [
+        _note("C", voice="1") + _note("E", voice="1", chord=True, lyric=None), second,
+    ])
+    original = deepcopy(score)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    assert len(sheet.lanes) == 3 and len(slot.options) == 6
+    assert slot.evidence["need"] == {"voice part 4": 2}
+    assert len(set(source["voice_part_id"] for source in
+                   slot.options[0].fields["melody_source_by_lane"].values())) == 1
+    assert sorted(slot.options[0].fields["rank_index_by_lane"].values()) == [0, 1, 2]
+    assert sum(slot.kind == "rank_fallback" for slot in sheet.slots) == 3
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    assert all(target["sections"][0]["rank_fallback"] == "greedy" for target in plan["targets"])
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings") or []
+                if finding.get("rule_severity") == "P0"]
+    assert score == original
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    assert json.dumps(asdict(sheet), sort_keys=True)
+
+
+def test_four_note_chord_moves_only_needed_native_lanes(tmp_path):
+    score = _four_note_chord_with_native_lanes(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    assert len(sheet.lanes) == 4
+    assert len(slot.options) == 24
+    assert all("P1 drops_native_notes" in option.flags for option in slot.options)
+    raw_voice = {vp["voice_part_id"]: vp["source_voice_id"]
+                 for vp in _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]}
+    assert all(set(raw_voice[source["voice_part_id"]] for source in
+                   option.fields["melody_source_by_lane"].values()) == {"1"}
+               for option in slot.options)
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert not [finding for finding in result.get("lint_findings") or []
+                if finding.get("rule_severity") == "P0"]
+
+
+def test_chord_claims_exceed_available_lanes(tmp_path):
+    score = _too_many_chord_claims(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert len(sheet.lanes) == 2
+    assert len(sheet.slots) == 1
+    assert sheet.slots[0].kind == "freeform"
+    assert sheet.slots[0].evidence["reason"] == "chord_claims_exceed_lanes"
+
+
+def test_first_option_never_simple_copies_a_chord_source(tmp_path):
+    scores = [
+        parse_score(SATB, verse_number=1), _chord_score(tmp_path),
+        _two_staff_score(tmp_path), _unnumbered_chord_with_opposite_voice_heights(tmp_path),
+        _two_chord_voices_with_silent_lanes(tmp_path), _four_note_chord_with_native_lanes(tmp_path),
+    ]
+    for score in scores:
+        sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+        plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+        for target in plan["targets"]:
+            for section in target["sections"]:
+                if section["decision_type"] not in {"COPY_UNISON_SECTION", "EXTRACT_FROM_VOICE"}:
+                    continue
+                source = section["melody_source"]
+                part_index = next(index for index, part in enumerate(score["parts"])
+                                  if part["part_id"] == source["part_id"])
+                part = score["parts"][part_index]
+                voice = next(vp["source_voice_id"]
+                             for vp in _analyze_part_voice_parts(part, part_index)["voice_parts"]
+                             if vp["voice_part_id"] == source["voice_part_id"])
+                counts = {}
+                for note in part["notes"]:
+                    if (note.get("is_rest") or note.get("voice") != voice
+                            or not section["start_measure"] <= note["measure_number"] <= section["end_measure"]):
+                        continue
+                    key = (note["measure_number"], round(note["offset_beats"], 6))
+                    counts[key] = counts.get(key, 0) + 1
+                assert max(counts.values(), default=0) < 2
 
 
 def test_lyric_donor_order_flags_and_extension_policy():

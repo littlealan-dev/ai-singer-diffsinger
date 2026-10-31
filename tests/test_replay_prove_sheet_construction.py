@@ -60,7 +60,7 @@ CHORD = b'''<score-partwise version="3.1"><part-list><score-part id="P1">
 
 def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     corpus = _corpus(tmp_path)
-    # Five simultaneous notes in one voice require 5! rank assignments.
+    # Five simultaneous notes in one voice require 5! joint rank assignments.
     # Keep this job freeform while the two-staff score now assembles.
     chord_notes = "".join(
         f'<note>{"<chord/>" if index else ""}<pitch><step>{step}</step>'
@@ -87,8 +87,8 @@ def test_temp_corpus_statuses_reports_and_input_purity(tmp_path):
     assert "target_unresolved" in rows[1]["issues"]
     freeform_sheet = _json(out / "sheets/c-freeform.json")
     assert rows[2]["freeform_slot_ids"] == [slot["slot_id"] for slot in freeform_sheet["slots"]]
-    assert freeform_sheet["slots"][0]["evidence"]["reason"] == "rank_assignment_over_24_permutations"
-    assert "rank_assignment_over_24_permutations" in rows[2]["error"]
+    assert freeform_sheet["slots"][0]["evidence"]["reason"] == "voice_assignment_over_24_options"
+    assert "voice_assignment_over_24_options" in rows[2]["error"]
     assert rows[2]["slots_by_kind"] == {"freeform": 1}
     assert rows[3]["error"].startswith("ParseError:")
     assert "<score" not in rows[3]["error"]
