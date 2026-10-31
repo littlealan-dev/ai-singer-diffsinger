@@ -5257,7 +5257,7 @@ class Orchestrator:
                 "The request object states target and synthesis intent only; it is not an executable line-preparation plan.",
                 "Generate exactly one preprocess_voice_parts tool call.",
                 "Do not call synthesize in this planning turn.",
-                "Use split_coverage=selective only for an explicit user request for a particular lane, chord rank, or note subset. Otherwise, for each requested staff scope, use complete coverage and create all visible derived lanes required by that scope's maximum simultaneous note count.",
+                "Use split_coverage=selective only for an explicit user request for a particular lane, chord rank, or note subset. Otherwise, for each requested staff scope, use complete coverage and create one visible derived lane per real source voice part, plus extra ranked lanes up to that scope's maximum simultaneous note count.",
                 "Interpret other_instruction only as part-splitting/source-selection guidance for constructing a valid preprocess_voice_parts.request.plan.",
                 "Allowed other_instruction examples: take the lower note in each chord; use a named part/staff/voice as the melody or lyric source; use one source for some measures and another source for other measures; select a verse lyric line.",
                 "Disallowed other_instruction examples: transpose down an octave; change key; change tempo or rhythm; rewrite lyrics; change musical style; tune, mix, or process audio.",
