@@ -3199,7 +3199,11 @@ export default function MainApp() {
 
   const updateInstrumentalTrackGmProgram = useCallback((key: string, gmProgram: number) => {
     setInstrumentalTracks((current) =>
-      current.map((track) => (track.key === key ? { ...track, gmProgram, unassigned: false, muted: false } : track))
+      current.map((track) =>
+        track.key === key
+          ? { ...track, gmProgram, ...(track.unassigned ? { unassigned: false, muted: false } : {}) }
+          : track
+      )
     );
   }, []);
 

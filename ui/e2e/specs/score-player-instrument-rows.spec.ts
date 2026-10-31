@@ -229,6 +229,11 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
   const pianoMute = page.getByTestId("score-inst-track-P2").locator(".score-track-mute-btn");
   await pianoMute.click();
   await expect.poll(() => mutedStates(page)).toEqual([true, true, false]);
+  await pianoSound.click();
+  await page.getByRole("menuitem", { name: "Piano", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Bright Acoustic Piano" }).click();
+  await expect(pianoSound.locator(".score-track-instrument-label")).toHaveText("Bright Acoustic Piano");
+  await expect(pianoMute).toHaveAttribute("aria-pressed", "true");
   await pianoMute.click();
 
   // The guitar row controls the third MIDI track, not the piano's second staff.
