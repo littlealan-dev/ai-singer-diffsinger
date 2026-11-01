@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
@@ -973,3 +974,54 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     assert "VOICEBANK OVERRIDE ACTIVE" in bundle.dynamic_prompt_text
     assert "while it supports the resolved singing language" in bundle.dynamic_prompt_text
     assert "list the compatible available voices" in bundle.dynamic_prompt_text
+
+
+def test_prompt_points_users_to_app_controls_instead_of_refusing() -> None:
+    prompt = _role_prompt("default")
+
+    for text in (
+        "App controls outside the chat:",
+        "Do not say it cannot be done, and do not claim you did it.",
+        "Name only the controls listed here.",
+        "`.musicxml`, `.xml` or compressed `.mxl`",
+        "Mute, Solo and a volume slider",
+        '"Download mix (real-time)"',
+        "as one WAV file",
+        "up to 5 minutes long",
+        "render each part as its own take, then download the mix",
+    ):
+        assert text in prompt
+    assert prompt.count("App controls outside the chat:") == 1
+
+
+def test_app_controls_are_in_the_cached_static_prompt() -> None:
+    bundle = build_prompt_bundle([], score_available=True)
+
+    assert "App controls outside the chat:" in bundle.static_prompt_text
+    assert "App controls outside the chat:" not in bundle.dynamic_prompt_text
+
+
+def test_app_controls_name_only_controls_that_exist_in_the_ui() -> None:
+    prompt = _role_prompt("default")
+    ui_source = (
+        Path(__file__).resolve().parents[1] / "ui" / "src" / "MainApp.tsx"
+    ).read_text()
+
+    for label in (
+        "Add a score",
+        "Upload MusicXML…",
+        "Tracks & Stems",
+        "Download mix (real-time)",
+        "Download score",
+        "Print score",
+        "Page view",
+        "Horizontal view",
+        "With Repeats",
+        "Instrumental Level",
+    ):
+        assert label in prompt
+        assert label in ui_source
+
+    assert 'accept=".musicxml,.xml,.mxl"' in ui_source
+    assert "BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60" in ui_source
+    assert 'BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav"' in ui_source
