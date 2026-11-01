@@ -50,11 +50,10 @@ class GeminiRestClient:
                 static_prompt_text=prompt_bundle,
                 dynamic_prompt_text="Dynamic Context:\nnone\nEnd Dynamic Context.",
             )
-        role_config = (
-            self._settings.gemini_preprocess
-            if role == LlmRole.PREPROCESS
-            else self._settings.gemini_default
-        )
+        role_config = {
+            LlmRole.PREPROCESS: self._settings.gemini_preprocess,
+            LlmRole.PREPROCESS_CHOOSER: self._settings.gemini_preprocess_chooser,
+        }.get(role, self._settings.gemini_default)
         model = role_config.model
         timeout = role_config.timeout_seconds
         thinking_level = role_config.thinking_level.strip()

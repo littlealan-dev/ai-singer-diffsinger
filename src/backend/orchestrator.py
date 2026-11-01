@@ -12,6 +12,7 @@ import contextvars
 import hashlib
 import logging
 import copy
+import functools
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from src.backend.quote_presentation import (
 )
 from src.backend.llm_prompt import (
     LlmResponse,
+    PromptBundle,
     ToolCall,
     build_prompt_bundle,
     parse_llm_response,
@@ -2490,7 +2492,17 @@ class Orchestrator:
             current_credit_availability = await self._get_current_credit_availability(
                 user_id,
             )
-            if not tool_calls and isinstance(planning_context, dict):
+            planned_by_v2 = False
+            if (
+                not tool_calls
+                and isinstance(planning_context, dict)
+                and self._settings.preprocess_planner == "v2"
+            ):
+                tool_calls, initial_thought_summary = await self._plan_preprocess_v2(
+                    score, planning_context
+                )
+                planned_by_v2 = True
+            elif not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
                     snapshot,
                     score,
@@ -2524,6 +2536,8 @@ class Orchestrator:
                 preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
                 originating_turn_id=originating_turn_id,
+                # Planner v2 has no repair step yet: one attempt, then stop.
+                single_attempt_stop_reason="planner_v2_repair_pending" if planned_by_v2 else None,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
@@ -2728,8 +2742,13 @@ class Orchestrator:
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
         originating_turn_id: Optional[str] = None,
+        single_attempt_stop_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Execute an LLM-driven tool workflow with bounded repair turns."""
+        """Execute an LLM-driven tool workflow with bounded repair turns.
+
+        single_attempt_stop_reason allows one preprocess attempt with no repair,
+        and is the stop reason recorded when that attempt is not good enough.
+        """
         include_score = initial_include_score
         if current_credit_availability is None:
             current_credit_availability = await self._get_current_credit_availability(
@@ -2763,7 +2782,9 @@ class Orchestrator:
         fixed_other_issue_keys: set[str] = set()
         current_repair_scopes: List[Dict[str, Any]] = []
         attempt_number = 0
-        max_attempts = max(1, self._settings.preprocess_max_attempts)
+        max_attempts = (
+            1 if single_attempt_stop_reason else max(1, self._settings.preprocess_max_attempts)
+        )
         attempt_messages: List[Dict[str, Any]] = []
         preprocess_run_id = preprocess_job_id or f"interactive-{uuid.uuid4().hex}"
         pending_thought_summary = initial_thought_summary or ""
@@ -3015,6 +3036,12 @@ class Orchestrator:
                     break
 
                 if attempt_number >= max_attempts:
+                    if single_attempt_stop_reason:
+                        self._logger.info(
+                            "preprocess_single_attempt_stop reason=%s quality_class=%s",
+                            single_attempt_stop_reason,
+                            best_valid_candidate.quality_class if best_valid_candidate else None,
+                        )
                     best_valid_candidate = await self._materialize_review_candidate_if_needed(
                         session_id, best_valid_candidate
                     )
@@ -3025,7 +3052,7 @@ class Orchestrator:
                         best_valid_candidate,
                         user_email=user_email,
                         current_credit_availability=current_credit_availability,
-                        stop_reason="attempt_budget_exhausted",
+                        stop_reason=single_attempt_stop_reason or "attempt_budget_exhausted",
                     )
                     if candidate_response is not None:
                         response = candidate_response
@@ -6179,6 +6206,77 @@ class Orchestrator:
                 response = replace(response, tool_calls=preprocess_calls)
             return response, None
         return None, PREPROCESS_PLANNING_ERROR_MESSAGE
+
+    async def _plan_preprocess_v2(
+        self,
+        score: Dict[str, Any],
+        planning_context: Dict[str, Any],
+    ) -> tuple[List[ToolCall], str]:
+        """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
+        from src.api.preprocess_assembler import (
+            AssemblyError,
+            FreeformUnresolved,
+            assemble_plan,
+        )
+        from src.api.preprocess_chooser import ChooserError, choose
+        from src.api.preprocess_sheet import build_sheet_skeleton
+
+        issues = build_sheet_skeleton(score, planning_context).issues
+        if "score_has_no_lyrics" in issues:
+            raise PreprocessPlanningError(backend_message("preprocess.score_needs_lyrics"))
+        if "target_unresolved" in issues:
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE)
+        started = time.monotonic()
+        try:
+            sheet, choices, stats = await choose(
+                score, planning_context, call=self._call_preprocess_chooser
+            )
+        except FreeformUnresolved as exc:
+            self._logger.warning(
+                "planner_v2_freeform_segment slots=%s",
+                exc.slot_ids,
+            )
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        except ChooserError as exc:
+            self._logger.warning("planner_v2_chooser_error error=%s", exc)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        try:
+            plan = assemble_plan(sheet, choices, score=score)
+        except AssemblyError as exc:
+            self._logger.error("planner_v2_construction_violation error=%s", exc)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        self._logger.info(
+            "planner_v2_choose requests=%s retries=%s slots_asked=%s second_pass_slots=%s "
+            "wall_seconds=%.2f",
+            stats.requests,
+            stats.retries,
+            stats.slots_asked,
+            stats.second_pass_slots,
+            time.monotonic() - started,
+        )
+        tool_calls = self._apply_preprocess_planning_context_defaults(
+            [ToolCall(name=TOOL_PREPROCESS_VOICE_PARTS, arguments={"request": {"plan": plan}})],
+            planning_context,
+        )
+        summary = (
+            f"planner v2: {stats.slots_asked} choices in {stats.requests} requests, "
+            f"{stats.retries} retries, {stats.second_pass_slots} second-pass"
+        )
+        return tool_calls, summary
+
+    async def _call_preprocess_chooser(self, request: Any) -> str:
+        """Ask the chooser role one request: the v2 prompt, no history, an enum-only schema."""
+        bundle = PromptBundle(
+            static_prompt_text=_planner_v2_prompt(),
+            dynamic_prompt_text=request.dynamic_text,
+        )
+        return await asyncio.to_thread(
+            self._call_llm_client_generate,
+            bundle,
+            [],
+            LlmRole.PREPROCESS_CHOOSER,
+            request.response_schema,
+        )
 
     def _preprocess_planning_context_for_attempt(
         self,
@@ -9871,6 +9969,15 @@ def _score_player_takes_removed_by(
         if recorded and current and recorded != current:
             removed.append({"label": label, "reason": "score_edited"})
     return removed
+
+
+_PLANNER_V2_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt_planner_v2.txt"
+
+
+@functools.lru_cache(maxsize=1)
+def _planner_v2_prompt() -> str:
+    """The planner v2 chooser's static prompt, read once."""
+    return _PLANNER_V2_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def _snapshot_score_version(snapshot: Any) -> Any:

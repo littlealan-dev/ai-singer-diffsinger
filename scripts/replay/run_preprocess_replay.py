@@ -70,6 +70,9 @@ PROD_ENV_KEYS = (
     "GEMINI_PREPROCESS_MODEL",
     "GEMINI_PREPROCESS_THINKING_LEVEL",
     "GEMINI_PREPROCESS_TIMEOUT_SECONDS",
+    "GEMINI_PREPROCESS_CHOOSER_MODEL",
+    "GEMINI_PREPROCESS_CHOOSER_THINKING_LEVEL",
+    "GEMINI_PREPROCESS_CHOOSER_TIMEOUT_SECONDS",
     "GEMINI_INCLUDE_THOUGHT_SUMMARY",
     "GEMINI_PROMPT_CACHE_ENABLED",
     "PREPROCESS_MAX_ATTEMPTS",
@@ -122,7 +125,9 @@ def _read_prod_model_settings() -> Dict[str, str]:
     return values
 
 
-def _prepare_environment(label: str, static_responses: Optional[str] = None) -> None:
+def _prepare_environment(
+    label: str, static_responses: Optional[str] = None, *, planner: str = "v1"
+) -> None:
     """Build the process environment before any backend module reads it."""
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not gemini_key and static_responses is None:
@@ -137,6 +142,7 @@ def _prepare_environment(label: str, static_responses: Optional[str] = None) -> 
     merged.update(REPLAY_ENV_OVERRIDES)
     # One build id per label keeps one Gemini prompt cache for the whole run.
     merged["BACKEND_BUILD_ID"] = f"replay-{label}"
+    merged["PREPROCESS_PLANNER"] = planner
     for key, value in merged.items():
         if key == "GEMINI_API_KEY":
             continue
@@ -269,6 +275,8 @@ class JobRecorder:
     def record_llm_call(self, role: str, usage: Dict[str, Any], latency: float) -> None:
         if role == "preprocess":
             phase = "repair" if self.attempt_issues else "initial"
+        elif role == "preprocess_chooser":
+            phase = "initial"
         elif role == "default":
             phase = "message"
         else:
@@ -577,7 +585,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     static_responses = None
     if args.static_llm_responses:
         static_responses = Path(args.static_llm_responses).read_text(encoding="utf-8")
-    _prepare_environment(args.label, static_responses)
+    _prepare_environment(args.label, static_responses, planner=args.planner)
 
     from src.backend.config import Settings
     from src.backend.llm_factory import create_llm_client
