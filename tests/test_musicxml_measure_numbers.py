@@ -22,12 +22,12 @@ def test_all_zero_fixture_renumbers_only_measure_values():
     original = FIXTURE.read_text(encoding="utf-8")
     updated, count = renumber_unnumbered_measures(original)
     expected = original
-    for number in (1, 2, 3, 1, 2):
+    for number in (1, 2, 3, 1, 2, 3):
         expected = expected.replace('<measure number="0">', f'<measure number="{number}">', 1)
 
-    assert count == 5
+    assert count == 6
     assert updated == expected
-    assert "<measure-style><multiple-rest>1</multiple-rest></measure-style>" in updated
+    assert '<measure-style><slash type="stop"/></measure-style>' in updated
     assert "<measure-numbering>measure</measure-numbering>" in updated
 
 
@@ -61,7 +61,7 @@ def test_renumbered_score_has_addressable_section_range(tmp_path):
     assert old_error is not None and old_error["code"] == "invalid_section_range"
 
     updated, count = renumber_unnumbered_measures(original)
-    assert count == 5
+    assert count == 6
     source.write_text(updated, encoding="utf-8")
     score = parse_score(source)
     assert all(note["measure_number"] >= 1 for part in score["parts"] for note in part["notes"])

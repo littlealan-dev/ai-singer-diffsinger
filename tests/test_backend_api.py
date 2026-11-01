@@ -1367,11 +1367,11 @@ def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
         / response.json()["score_id"] / "upload" / "score.xml"
     )
     expected = original
-    for number in (1, 2, 3, 1, 2):
+    for number in (1, 2, 3, 1, 2, 3):
         expected = expected.replace(b'<measure number="0">', f'<measure number="{number}">'.encode(), 1)
     assert score_path.read_bytes() == expected
     assert "upload_measures_renumbered" in caplog.text
-    assert "measures=5" in caplog.text
+    assert "measures=6" in caplog.text
 
 
 def test_upload_all_zero_mxl_changes_only_canonical_score(client):
@@ -1391,7 +1391,7 @@ def test_upload_all_zero_mxl_changes_only_canonical_score(client):
         / response.json()["score_id"] / "upload"
     )
     expected = original
-    for number in (1, 2, 3, 1, 2):
+    for number in (1, 2, 3, 1, 2, 3):
         expected = expected.replace(b'<measure number="0">', f'<measure number="{number}">'.encode(), 1)
     assert (upload_dir / "score.xml").read_bytes() == expected
     assert (upload_dir / "score.mxl").read_bytes() == archive
