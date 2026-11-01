@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import pytest
 from music21 import converter, midi, tempo
 
-from src.musicxml.performance_midi import build_instrumental_performance_midis
+from src.musicxml.performance_midi import PERFORMANCE_MIDI_VERSION, build_instrumental_performance_midis
 
 
 PIANO_REPEAT_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -212,6 +212,57 @@ def test_preserves_per_note_musicxml_percussion_routes() -> None:
         and event.channel == 10
     ]
     assert note_pitches == [36, 38, 42]
+
+
+def test_unassigned_drum_staff_keys_keep_unmapped_music21_fallback(tmp_path: Path) -> None:
+    def score_xml(midi_declaration: str) -> str:
+        notes = "".join(
+            f'<note><unpitched><display-step>{step}</display-step><display-octave>{octave}</display-octave></unpitched>'
+            f'<duration>1</duration><type>quarter</type><instrument id="D-I1"/>{notehead}</note>'
+            for step, octave, notehead in [
+                ("G", 5, "<notehead>x</notehead>"),
+                ("C", 5, "<notehead>x</notehead>"),
+                ("F", 4, ""),
+                ("B", 4, ""),
+            ]
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">'
+            '<part-list><score-part id="D"><part-name>Drum Set</part-name>'
+            '<score-instrument id="D-I1"><instrument-name>Drum Set</instrument-name></score-instrument>'
+            f'{midi_declaration}</score-part></part-list><part id="D"><measure number="1">'
+            '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>'
+            '<clef><sign>percussion</sign></clef></attributes>'
+            f'{notes}</measure></part></score-partwise>'
+        )
+
+    def pitches(source: Path, output: Path) -> list[int]:
+        result = build_instrumental_performance_midis(
+            source, original_output_path=output, expanded_output_path=output.with_name(output.stem + "-expanded.mid")
+        )
+        assert result["original_midi_available"] is True
+        midi_file = midi.MidiFile()
+        midi_file.open(str(output))
+        midi_file.read()
+        midi_file.close()
+        return [
+            event.pitch for track in midi_file.tracks for event in track.events
+            if event.type == midi.ChannelVoiceMessages.NOTE_ON and event.velocity > 0
+        ]
+
+    unassigned = tmp_path / "unassigned.musicxml"
+    unassigned.write_text(score_xml(""), encoding="utf-8")
+    standard = tmp_path / "standard.musicxml"
+    standard.write_text(
+        score_xml('<midi-instrument id="D-I1"><midi-channel>10</midi-channel></midi-instrument>'),
+        encoding="utf-8",
+    )
+    fallback = pitches(standard, tmp_path / "standard.mid")[3]
+    assert pitches(unassigned, tmp_path / "unassigned.mid") == [42, 37, 36, fallback]
+
+
+def test_performance_midi_version_rebuilds_unassigned_drum_track() -> None:
+    assert PERFORMANCE_MIDI_VERSION == 10
 
 
 def test_preserves_vocal_owned_tempo_map_in_instrumental_midi() -> None:

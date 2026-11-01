@@ -9990,12 +9990,13 @@ def _changed_render_choices(
 
 
 def _part_feeds_instrumental_midi(part: Dict[str, Any]) -> bool:
-    """A part that can become an instrumental MIDI track: declared, or for the LLM to decide."""
+    """A part that can become an instrumental MIDI track, including a user-assignable drum part."""
     return any(
         isinstance(instrument, dict)
         and (
             instrument.get("eligible_for_instrumental_midi")
             or instrument.get("instrumental_candidate")
+            or instrument.get("user_assignable")
         )
         for instrument in part.get("instruments") or []
     )

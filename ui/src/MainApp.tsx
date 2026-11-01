@@ -271,6 +271,7 @@ export type InstrumentalTrackState = {
   partIndex: number;
   label: string;
   muted: boolean;
+  unassigned: boolean;
   solo: boolean;
   volume: number;
   gmProgram: number;
@@ -482,6 +483,7 @@ type GroupedInstrumentPickerProps = {
   percussion?: boolean;
   soundfontBank?: number;
   presetKind?: "melodic" | "percussion_kit";
+  unassigned?: boolean;
   onChange: (gmProgram: number) => void;
 };
 
@@ -491,6 +493,7 @@ const GroupedInstrumentPicker = ({
   percussion = false,
   soundfontBank,
   presetKind,
+  unassigned = false,
   onChange,
 }: GroupedInstrumentPickerProps) => {
   const groups = percussion
@@ -653,7 +656,7 @@ const GroupedInstrumentPicker = ({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="score-track-instrument-label">{selectedInstrument.label}</span>
+        <span className="score-track-instrument-label">{unassigned ? "Choose a kit" : selectedInstrument.label}</span>
         <ChevronsUpDown size={13} aria-hidden="true" />
       </button>
       {typeof document !== "undefined" && pickerMenu && createPortal(pickerMenu, document.body)}
@@ -905,17 +908,27 @@ const ScorePlayerMixerBridge = ({
   instrumentalTracks = [],
   instrumentalMidiTrackKeys = [],
   instrumentalBus,
+  engineGeneration,
 }: {
   midiTrackCount: number;
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks?: InstrumentalTrackState[];
   instrumentalMidiTrackKeys?: readonly string[];
   instrumentalBus: InstrumentalBusState;
+  engineGeneration: number;
 }) => {
   const controls = usePlaylistControls();
-  const { isReady } = usePlaylistData();
+  const { isReady, trackStates } = usePlaylistData();
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
+  // The provider gives every track it adds to the engine, and every track of a
+  // rebuilt engine, the mute, solo and volume from its own track states, which
+  // keep only the last of several mixer edits made in one render. So apply the
+  // rows' state again once the engine holds those tracks: after a rebuild
+  // (engineGeneration), and after tracks are added to the live engine (such as
+  // the MIDI arriving after a take), which the provider follows by growing its
+  // track states.
+  const engineTrackCount = trackStates.length;
   const vocalMixerSignature = vocalTracks
     .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
     .join("\u0001");
@@ -961,6 +974,8 @@ const ScorePlayerMixerBridge = ({
     instrumentalMidiTrackKeys,
     instrumentalBus,
     vocalTracks,
+    engineGeneration,
+    engineTrackCount,
   ]);
 
   return null;
@@ -1017,6 +1032,13 @@ const ScorePlayerEngine = ({
   }, []);
   const handleProviderError = useCallback((error: Error) => {
     callbacksRef.current.onError(error.message);
+  }, []);
+  // The provider calls onReady after every engine rebuild (a new sound, a
+  // replaced take), but not after an incremental add. Count the rebuilds, so
+  // the mixer bridge applies the rows' state to each new engine.
+  const [engineGeneration, setEngineGeneration] = useState(0);
+  const handleEngineRebuilt = useCallback(() => {
+    setEngineGeneration((generation) => generation + 1);
   }, []);
   const adapterRef = useRef<ToneAdapter | null>(null);
   const soundFontCacheRef = useRef<SoundFontCache | null>(null);
@@ -1264,6 +1286,7 @@ const ScorePlayerEngine = ({
       tracks={tracks}
       soundFontCache={soundFontCache ?? undefined}
       createAdapter={createScorePlayerAdapter}
+      onReady={handleEngineRebuilt}
       onError={handleProviderError}
     >
       <ScorePlayerEngineBridge
@@ -1280,6 +1303,7 @@ const ScorePlayerEngine = ({
         instrumentalTracks={instrumentalTracks}
         instrumentalMidiTrackKeys={instrumentalMidiTrackKeys}
         instrumentalBus={instrumentalBus}
+        engineGeneration={engineGeneration}
       />
       <ScorePlayerSeekBar
         host={seekBarHost}
@@ -1803,8 +1827,9 @@ const ScoreTrackControlsPanel = ({
                   type="button"
                   className={clsx("score-track-solo-btn", { active: inst.solo })}
                   onClick={() => onUpdateInstrumentalSolo(inst.key, !inst.solo)}
+                  disabled={inst.unassigned}
                   aria-pressed={inst.solo}
-                  title={inst.solo ? "Unsolo track" : "Solo track"}
+                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.solo ? "Unsolo track" : "Solo track"}
                 >
                   S
                 </button>
@@ -1812,8 +1837,9 @@ const ScoreTrackControlsPanel = ({
                   type="button"
                   className={clsx("score-track-mute-btn", { muted: inst.muted })}
                   onClick={() => onUpdateInstrumentalMute(inst.key, !inst.muted)}
+                  disabled={inst.unassigned}
                   aria-pressed={inst.muted}
-                  title={inst.muted ? "Unmute track" : "Mute track"}
+                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.muted ? "Unmute track" : "Mute track"}
                 >
                   {inst.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
                 </button>
@@ -1827,6 +1853,7 @@ const ScoreTrackControlsPanel = ({
                 percussion={inst.percussion}
                 soundfontBank={inst.soundfontBank}
                 presetKind={inst.presetKind}
+                unassigned={inst.unassigned}
                 onChange={(gmProgram) => onUpdateInstrumentalGmProgram(inst.key, gmProgram)}
               />
 
@@ -3155,13 +3182,14 @@ export default function MainApp() {
           rawPartId: part.raw_part_id,
           partIndex: part.part_index,
           label: part.label || `Part ${part.part_index + 1}`,
-          muted: existing ? existing.muted : false,
+          unassigned: part.program_source === "user_assignable" ? (existing ? existing.unassigned : true) : false,
+          muted: existing ? existing.muted : part.program_source === "user_assignable",
           solo: existing ? existing.solo : false,
           volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
           gmProgram: existing ? existing.gmProgram : (part.playback_preset?.program ?? part.midi_program ?? 0),
-          soundfontBank: existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
-          presetKind: existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
-          percussion: part.percussion,
+          soundfontBank: part.program_source === "user_assignable" ? 128 : existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
+          presetKind: part.program_source === "user_assignable" ? "percussion_kit" : existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
+          percussion: part.program_source === "user_assignable" ? true : part.percussion,
         };
       });
     });
@@ -3170,7 +3198,7 @@ export default function MainApp() {
   const updateInstrumentalTrackMute = useCallback((key: string, muted: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.key === key ? { ...track, muted, solo: muted ? false : track.solo } : track
+        track.key === key && !track.unassigned ? { ...track, muted, solo: muted ? false : track.solo } : track
       )
     );
   }, []);
@@ -3178,7 +3206,7 @@ export default function MainApp() {
   const updateInstrumentalTrackSolo = useCallback((key: string, solo: boolean) => {
     setInstrumentalTracks((current) =>
       current.map((track) =>
-        track.key === key ? { ...track, solo, muted: solo ? false : track.muted } : track
+        track.key === key && !track.unassigned ? { ...track, solo, muted: solo ? false : track.muted } : track
       )
     );
   }, []);
@@ -3192,7 +3220,11 @@ export default function MainApp() {
 
   const updateInstrumentalTrackGmProgram = useCallback((key: string, gmProgram: number) => {
     setInstrumentalTracks((current) =>
-      current.map((track) => (track.key === key ? { ...track, gmProgram } : track))
+      current.map((track) =>
+        track.key === key
+          ? { ...track, gmProgram, ...(track.unassigned ? { unassigned: false, muted: false } : {}) }
+          : track
+      )
     );
   }, []);
 
