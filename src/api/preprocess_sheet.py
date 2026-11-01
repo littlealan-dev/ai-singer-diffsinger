@@ -14,7 +14,6 @@ from src.api.voice_parts import (
     _analyze_part_voice_parts,
     _avg_pitch,
     _best_same_part_word_lyric_source_for_range,
-    _build_measure_lyric_coverage,
     _build_part_region_indices,
     _derived_part_indices,
     _generated_solfege_lyric_stats_for_voice_part_range,
@@ -49,7 +48,7 @@ class Lane:
 @dataclass(frozen=True)
 class MeasureSignature:
     density: int
-    lanes: tuple[tuple[str, bool, str], ...]
+    lanes: tuple[tuple[str, bool], ...]
     annotation: str | None
 
 
@@ -72,7 +71,7 @@ class SheetSkeleton:
 
 
 SLOT_KINDS = (
-    "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_policy",
+    "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line",
     "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "freeform",
 )
 
@@ -101,6 +100,116 @@ class Slot:
 class Sheet(SheetSkeleton):
     slots: list[Slot] = field(default_factory=list)
     fixed: dict[str, Option] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StaffLyricLine:
+    """Every word typed under one staff, by beat, whichever voice carries it."""
+
+    words: dict[tuple[int, float], list[tuple[str, str]]]
+    multiple: bool
+
+
+def _beat(note: dict) -> tuple[int, float]:
+    return int(note.get("measure_number") or 0), round(float(note.get("offset_beats") or 0.0), 6)
+
+
+def _word_text(note: dict) -> str | None:
+    if _lyric_kind(note) != "word" or _is_generated_solfege_lyric(note):
+        return None
+    return str(note["lyric"]).strip()
+
+
+def _voice_part_ids(part: dict, part_index: int) -> dict[str, str]:
+    return {
+        str(voice_part["source_voice_id"]): str(voice_part["voice_part_id"])
+        for voice_part in _analyze_part_voice_parts(part, part_index)["voice_parts"]
+    }
+
+
+def staff_lyric_lines(score: dict) -> dict[tuple[int, str], StaffLyricLine]:
+    """Step 1 of the lyric rule: the words typed at each beat on any voice of a staff."""
+    collected: dict[tuple[int, str], dict[tuple[int, float], list[tuple[str, str]]]] = {}
+    for part_index, part in enumerate(score.get("parts") or []):
+        voice_part_ids: dict[str, str] | None = None
+        for note in part.get("notes") or []:
+            text = _word_text(note) if _is_countable_sung_note(note) else None
+            if text is None:
+                continue
+            if voice_part_ids is None:
+                voice_part_ids = _voice_part_ids(part, part_index)
+            voice_part_id = voice_part_ids.get(_voice_key(note.get("voice")))
+            if voice_part_id is None:
+                continue
+            words = collected.setdefault((part_index, _staff_scope_key(note)), {})
+            words.setdefault(_beat(note), []).append((voice_part_id, text))
+    return {
+        staff: StaffLyricLine(
+            words=dict(sorted(words.items())),
+            multiple=any(len({text.casefold() for _, text in entries}) > 1
+                         for entries in words.values()),
+        )
+        for staff, words in sorted(collected.items())
+    }
+
+
+def line_voice_for_staff(
+    line: StaffLyricLine, part_index: int, line_voice: tuple[int, str] | None,
+) -> str | None:
+    """The chosen line's voice when it carries words on this staff, else None (the whole line)."""
+    if line_voice is None or line_voice[0] != part_index:
+        return None
+    if any(voice_part_id == line_voice[1] for entries in line.words.values()
+           for voice_part_id, _ in entries):
+        return line_voice[1]
+    return None
+
+
+def read_lane_lyrics(
+    line: StaffLyricLine, notes: list[dict], line_voice: str | None = None,
+) -> list[str | None]:
+    """Step 3 of the lyric rule: the word on each note's beat, else "+" after an earlier word."""
+    words: dict[tuple[int, float], str] = {}
+    for beat, entries in line.words.items():
+        texts = [text for voice_part_id, text in entries
+                 if line_voice is None or voice_part_id == line_voice]
+        if texts:
+            words[beat] = texts[0]
+    first = min(words, default=None)
+    readings: list[str | None] = []
+    for note in notes:
+        beat = _beat(note)
+        if beat in words:
+            readings.append(words[beat])
+        elif first is not None and first < beat:
+            readings.append("+")
+        else:
+            readings.append(None)
+    return readings
+
+
+def note_staffs_by_measure(score: dict) -> dict[tuple[int, str], dict[int, set[tuple[int, str]]]]:
+    """Per voice part and measure, the staffs its sung notes sit on (each note's line staff)."""
+    index: dict[tuple[int, str], dict[int, set[tuple[int, str]]]] = {}
+    for part_index, part in enumerate(score.get("parts") or []):
+        voice_part_ids = _voice_part_ids(part, part_index)
+        for note in part.get("notes") or []:
+            voice_part_id = voice_part_ids.get(_voice_key(note.get("voice")))
+            if voice_part_id is None or not _is_countable_sung_note(note):
+                continue
+            index.setdefault((part_index, voice_part_id), {}).setdefault(
+                int(note.get("measure_number") or 0), set()
+            ).add((part_index, _staff_scope_key(note)))
+    return index
+
+
+def melody_line_staffs(
+    index: dict[tuple[int, str], dict[int, set[tuple[int, str]]]],
+    part_index: int, voice_part_id: str, start: int, end: int,
+) -> set[tuple[int, str]]:
+    """The staffs a melody source's notes sit on in a measure range."""
+    by_measure = index.get((part_index, voice_part_id), {})
+    return set().union(*(by_measure.get(measure, set()) for measure in range(start, end + 1)))
 
 
 def _unescaped(value: Any) -> str:
@@ -214,11 +323,6 @@ def _segments(
     end: int,
 ) -> list[Segment]:
     density = _staff_scope_measure_max_simultaneous_notes(score, part_index=part_index, staff_scope=scope)
-    coverage_rows = _build_measure_lyric_coverage({"notes": scope_notes}, voice_parts)
-    coverage = {
-        (int(row["measure_number"]), vp["voice_part_id"]): vp
-        for row in coverage_rows for vp in row["voice_parts"]
-    }
     source_voice = {vp["voice_part_id"]: str(vp["source_voice_id"]) for vp in voice_parts}
     source_counts: dict[tuple[str, int, float], int] = {}
     for note in scope_notes:
@@ -243,18 +347,10 @@ def _segments(
     run_start = start
     previous: MeasureSignature | None = None
     for measure in range(start, end + 1):
-        lane_facts: list[tuple[str, bool, str]] = []
+        lane_facts: list[tuple[str, bool]] = []
         for lane, ordinal in zip(lanes, lane_ordinals):
-            vp_id = lane.source_voice_part_id
-            native = max_source_density.get((source_voice[vp_id], measure), 0) > ordinal
-            stats = coverage.get((measure, vp_id)) or {}
-            if not native or not stats.get("lyric_note_count"):
-                lyric_kind = "none"
-            elif stats.get("word_lyric_note_count"):
-                lyric_kind = "words"
-            else:
-                lyric_kind = "extension_only"
-            lane_facts.append((lane.lane_id, native, lyric_kind))
+            native = max_source_density.get((source_voice[lane.source_voice_part_id], measure), 0) > ordinal
+            lane_facts.append((lane.lane_id, native))
         signature = MeasureSignature(
             density=density.get(measure, 0),
             lanes=tuple(lane_facts),
@@ -543,6 +639,45 @@ def _lyric_options(
     return tuple(options)
 
 
+def _line_label(notes: list[dict]) -> str:
+    """Words in time order, joined by syllabic ("in ex-cel-sis"), at most 80 characters."""
+    label = ""
+    previous_syllabic = None
+    for note in notes:
+        if label:
+            label += "-" if previous_syllabic in {"begin", "middle"} else " "
+        label += _word_text(note) or ""
+        previous_syllabic = note.get("syllabic")
+    return label[:80]
+
+
+def _lyric_line_options(
+    score: dict, lane: Lane, segment: Segment, staffs: list[tuple[int, str]],
+) -> tuple[Option, ...]:
+    """One option per voice carrying words on these staffs in the segment (step 2, 2+ lines)."""
+    carried: dict[tuple[int, str], dict[tuple[int, float], dict]] = {}
+    for part_index, scope in staffs:
+        part = score["parts"][part_index]
+        voice_part_ids = _voice_part_ids(part, part_index)
+        for note in part.get("notes") or []:
+            if (not _is_countable_sung_note(note) or _staff_scope_key(note) != scope
+                    or not segment.start_measure <= int(note.get("measure_number") or 0) <= segment.end_measure
+                    or _word_text(note) is None):
+                continue
+            voice_part_id = voice_part_ids.get(_voice_key(note.get("voice")))
+            if voice_part_id is not None:
+                carried.setdefault((part_index, voice_part_id), {}).setdefault(_beat(note), note)
+    own = (lane.part_index, lane.source_voice_part_id)
+    ordered = sorted(carried, key=lambda key: (key != own, -len(carried[key]), key[1], key[0]))
+    return tuple(Option(
+        option_id=f"{score['parts'][part_index].get('part_id')}|{voice_part_id}",
+        label=_line_label([note for _, note in sorted(carried[(part_index, voice_part_id)].items())]),
+        fields={"lyric_line_voice": {"part_index": part_index, "voice_part_id": voice_part_id}},
+        evidence={"word_count": len(carried[(part_index, voice_part_id)])},
+        flags=(),
+    ) for part_index, voice_part_id in ordered)
+
+
 def _choice_slot(
     lane_ids: tuple[str, ...], segment: Segment, kind: str,
     options: tuple[Option, ...], *, joint_id: str | None = None, evidence: dict | None = None,
@@ -651,7 +786,7 @@ def _voice_assignment_options(
     if sum(needs[source["voice_part_id"]] for source in chord_sources) > len(lanes):
         return (), evidence, "chord_claims_exceed_lanes"
 
-    native = {lane_id: is_native for lane_id, is_native, _ in segment.signature.lanes}
+    native = dict(segment.signature.lanes)
     source_voice = {
         vp["voice_part_id"]: str(vp["source_voice_id"])
         for vp in _analyze_part_voice_parts(score["parts"][segment.part_index], segment.part_index)["voice_parts"]
@@ -787,9 +922,12 @@ def _voice_assignment_options(
 def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
-    A non-native lane's lyric choices use its default melody source for coverage
-    and onset evidence. With no word-lyric donor, its fallback lyric options
-    mirror its melody options when the lane copies another voice.
+    Lyrics follow the reading rule: when every melody option reads from staffs
+    with a lyric line, code reads the words by beat and the sheet only asks which
+    line (``lyric_line``) where a staff has two. Otherwise the lyric source and
+    strategy menus remain; a non-native lane's lyric choices use its default
+    melody source for coverage and onset evidence, and with no word-lyric donor
+    its fallback lyric options mirror its melody options.
     """
     skeleton = build_sheet_skeleton(score, planning_context)
     sheet = Sheet(
@@ -805,6 +943,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     eligible_lyrics = _eligible_lyric_sources(score)
     eligible_by_ref = {(source["part_index"], source["voice_part_id"])
                        for source in eligible_lyrics}
+    lines = staff_lyric_lines(score)
+    staff_index = note_staffs_by_measure(score)
     for segment in sheet.segments:
         lanes = [lane for lane in sheet.lanes
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
@@ -832,8 +972,7 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                 evidence=assignment_evidence,
             ))
         for lane in lanes:
-            native = next(fact[1] for fact in segment.signature.lanes if fact[0] == lane.lane_id)
-            native_lyric_kind = next(fact[2] for fact in segment.signature.lanes if fact[0] == lane.lane_id)
+            native = dict(segment.signature.lanes)[lane.lane_id]
             target_notes = _target_notes(score, lane, segment)
             if assignment is None:
                 melody = _melody_options(lane, candidates)
@@ -861,6 +1000,22 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                 continue
             if assignment is None:
                 segment_slots.append(_choice_slot((lane.lane_id,), segment, "melody_source", melody))
+            melody_refs = ([option.fields["melody_source"] for option in melody] if assignment is None
+                           else [option.fields["melody_source_by_lane"][lane.lane_id] for option in assignment])
+            staffs_by_ref = [melody_line_staffs(staff_index, ref["part_index"], ref["voice_part_id"],
+                                                segment.start_measure, segment.end_measure)
+                             for ref in melody_refs]
+            lyric_needed = not all(staffs and staffs <= lines.keys() for staffs in staffs_by_ref)
+            if not lyric_needed:
+                # Lyric rule: code reads the page; the LLM only picks a line when a staff has two.
+                multiple = sorted({staff for staffs in staffs_by_ref for staff in staffs
+                                   if lines[staff].multiple})
+                if multiple:
+                    line_options = _lyric_line_options(score, lane, segment, multiple)
+                    if line_options:
+                        segment_slots.append(_choice_slot(
+                            (lane.lane_id,), segment, "lyric_line", line_options
+                        ))
             assigned_elsewhere = assignment is not None and (
                 melody[0].fields["melody_source"] != {
                     "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id
@@ -878,87 +1033,86 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             else:
                 default_melody = {"part_index": lane.part_index,
                                   "voice_part_id": lane.source_voice_part_id}
-            target_sung_note_count = _target_sung_note_count_for_section(
-                score=score, target_part_index=lane.part_index,
-                target_voice_part_id=lane.source_voice_part_id,
-                start_measure=segment.start_measure, end_measure=segment.end_measure,
-                melody_source_part_index=default_melody["part_index"],
-                melody_source_voice_part_id=default_melody["voice_part_id"],
-            )
-            lyric = _lyric_options(
-                score, lane, segment, candidates, target_notes,
-                target_sung_note_count, derived_indices,
-            )
-            if not lyric:
-                reason = {"reason": "no_word_lyric_donor"}
-                source_sings = bool(_target_notes(score, lane, segment))
-                if native or source_sings:
-                    fallback = (_source_option({
-                        "part_id": lane.part_id,
-                        "part_index": lane.part_index,
-                        "voice_part_id": lane.source_voice_part_id,
-                    }, "lyric_source", evidence=reason),)
-                else:
-                    fallback = tuple(Option(
-                        option_id=option.option_id,
-                        label=option.label,
-                        fields={"lyric_source": dict(option.fields["melody_source"])},
-                        evidence={**reason, "pairs_with_melody_option":
-                                  assignment[0].option_id if assignment is not None else option.option_id},
-                        flags=(),
-                    ) for option in melody)
-                lyric = tuple(option for option in fallback
-                              if (option.fields["lyric_source"]["part_index"],
-                                  option.fields["lyric_source"]["voice_part_id"]) in eligible_by_ref)
+            if lyric_needed:
+                used_when = {"used_when": "melody from a staff without a lyric line"}
+                target_sung_note_count = _target_sung_note_count_for_section(
+                    score=score, target_part_index=lane.part_index,
+                    target_voice_part_id=lane.source_voice_part_id,
+                    start_measure=segment.start_measure, end_measure=segment.end_measure,
+                    melody_source_part_index=default_melody["part_index"],
+                    melody_source_voice_part_id=default_melody["voice_part_id"],
+                )
+                lyric = _lyric_options(
+                    score, lane, segment, candidates, target_notes,
+                    target_sung_note_count, derived_indices,
+                )
                 if not lyric:
-                    ordered = sorted(eligible_lyrics, key=lambda source: (
-                        0 if source["part_index"] == lane.part_index
-                        and lane.scope_key in source["scopes"] else
-                        1 if source["part_index"] == lane.part_index else 2,
-                        -source["lyric_note_count"],
-                        source["part_index"], source["voice_part_id"],
-                    ))
-                    lyric = tuple(_source_option(
-                        source, "lyric_source",
-                        evidence={"reason": "no_lyrics_in_source_voice"},
-                    ) for source in ordered)
-                if not lyric:
-                    freeform_reason = "no_valid_lyric_source"
-                    break
-            segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_source", lyric))
-            own_native = (
-                lyric[0].fields["lyric_source"] == {
-                    "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id
-                } and native_lyric_kind == "words"
-            )
-            if not own_native:
-                donor_ref = lyric[0].fields["lyric_source"]
-                donor = next((source for source in candidates if
-                              source["part_index"] == donor_ref["part_index"] and
-                              source["voice_part_id"] == donor_ref["voice_part_id"]), None)
-                target_onsets = {
-                    (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                    for note in target_notes
-                }
-                donor_onsets = {
-                    (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                    for note in (donor["notes"] if donor is not None else target_notes)
-                    if _lyric_kind(note) == "word"
-                }
-                strategies = ("strict_onset", "overlap_best_match", "syllable_flow")
-                if not target_onsets.issubset(donor_onsets):
-                    strategies = ("overlap_best_match", "strict_onset", "syllable_flow")
-                segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_strategy", tuple(
-                    Option(value, value, {"lyric_strategy": value}, {
-                        "aligned_onsets": len(target_onsets & donor_onsets),
-                        "target_onsets": len(target_onsets),
-                    }, ()) for value in strategies
-                )))
-            if native_lyric_kind == "extension_only":
-                segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_policy", tuple(
-                    Option(value, value, {"lyric_policy": value}, {}, ())
-                    for value in ("fill_missing_only", "replace_all")
-                )))
+                    reason = {"reason": "no_word_lyric_donor"}
+                    source_sings = bool(_target_notes(score, lane, segment))
+                    if native or source_sings:
+                        fallback = (_source_option({
+                            "part_id": lane.part_id,
+                            "part_index": lane.part_index,
+                            "voice_part_id": lane.source_voice_part_id,
+                        }, "lyric_source", evidence=reason),)
+                    else:
+                        fallback = tuple(Option(
+                            option_id=option.option_id,
+                            label=option.label,
+                            fields={"lyric_source": dict(option.fields["melody_source"])},
+                            evidence={**reason, "pairs_with_melody_option":
+                                      assignment[0].option_id if assignment is not None else option.option_id},
+                            flags=(),
+                        ) for option in melody)
+                    lyric = tuple(option for option in fallback
+                                  if (option.fields["lyric_source"]["part_index"],
+                                      option.fields["lyric_source"]["voice_part_id"]) in eligible_by_ref)
+                    if not lyric:
+                        ordered = sorted(eligible_lyrics, key=lambda source: (
+                            0 if source["part_index"] == lane.part_index
+                            and lane.scope_key in source["scopes"] else
+                            1 if source["part_index"] == lane.part_index else 2,
+                            -source["lyric_note_count"],
+                            source["part_index"], source["voice_part_id"],
+                        ))
+                        lyric = tuple(_source_option(
+                            source, "lyric_source",
+                            evidence={"reason": "no_lyrics_in_source_voice"},
+                        ) for source in ordered)
+                    if not lyric:
+                        freeform_reason = "no_valid_lyric_source"
+                        break
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_source", lyric,
+                                                  evidence=used_when))
+                own_native = (
+                    lyric[0].fields["lyric_source"] == {
+                        "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id
+                    } and native
+                    and any(_lyric_kind(note) == "word" for note in _target_notes(score, lane, segment))
+                )
+                if not own_native:
+                    donor_ref = lyric[0].fields["lyric_source"]
+                    donor = next((source for source in candidates if
+                                  source["part_index"] == donor_ref["part_index"] and
+                                  source["voice_part_id"] == donor_ref["voice_part_id"]), None)
+                    target_onsets = {
+                        (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                        for note in target_notes
+                    }
+                    donor_onsets = {
+                        (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                        for note in (donor["notes"] if donor is not None else target_notes)
+                        if _lyric_kind(note) == "word"
+                    }
+                    strategies = ("strict_onset", "overlap_best_match", "syllable_flow")
+                    if not target_onsets.issubset(donor_onsets):
+                        strategies = ("overlap_best_match", "strict_onset", "syllable_flow")
+                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "lyric_strategy", tuple(
+                        Option(value, value, {"lyric_strategy": value}, {
+                            "aligned_onsets": len(target_onsets & donor_onsets),
+                            "target_onsets": len(target_onsets),
+                        }, ()) for value in strategies
+                    ), evidence=used_when))
             needs_fallback = False
             if assignment is not None:
                 for option in assignment:

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from src.api.preprocess_sheet import Lane, Option, Segment, Sheet
+from src.api.preprocess_sheet import (
+    Lane, Option, Segment, Sheet, StaffLyricLine, line_voice_for_staff, melody_line_staffs,
+    note_staffs_by_measure, staff_lyric_lines,
+)
 
 
 class AssemblyError(ValueError):
@@ -129,13 +132,43 @@ def _public_source_ref(option: Option, source: dict) -> dict[str, str]:
     return {"part_id": part_id, "voice_part_id": voice_part_id}
 
 
+def _line_voice(sheet: Sheet, selected: dict[str, Option], lane: Lane, measure: int) -> tuple[int, str] | None:
+    """The lyric_line voice chosen for a lane at a measure, if any."""
+    voices = {
+        (option.fields["lyric_line_voice"]["part_index"], option.fields["lyric_line_voice"]["voice_part_id"])
+        for kind, option in _options_for_measure(sheet, selected, lane, measure)
+        if kind == "lyric_line"
+    }
+    if len(voices) > 1:
+        raise AssemblyError(f"Conflicting lyric_line choices for {lane.lane_id}")
+    return voices.pop() if voices else None
+
+
+def chosen_line_voices(sheet: Sheet, choices: dict[str, str]) -> dict[str, dict[int, tuple[int, str]]]:
+    """Per lane and measure, the (part_index, voice_part_id) whose line was chosen."""
+    selected = _selected_options(sheet, choices)
+    result: dict[str, dict[int, tuple[int, str]]] = {}
+    for lane in sheet.lanes:
+        for segment in sheet.segments:
+            if (segment.part_index, segment.scope_key) != (lane.part_index, lane.scope_key):
+                continue
+            for measure in range(segment.start_measure, segment.end_measure + 1):
+                voice = _line_voice(sheet, selected, lane, measure)
+                if voice is not None:
+                    result.setdefault(lane.lane_id, {})[measure] = voice
+    return result
+
+
 def _action_for_measure(
     sheet: Sheet, selected: dict[str, Option], lane: Lane, segment: Segment, measure: int,
-) -> dict:
+    score: dict, lines: dict[tuple[int, str], StaffLyricLine], staff_index: dict,
+) -> tuple[dict, tuple | None]:
+    """The measure's action, and its lyric reading (staffs, line voice, melody ref) when code reads the page."""
     fields: dict = {}
     assigned_group_size: int | None = None
+    melody_ref: tuple[int, str] | None = None
     for kind, option in _options_for_measure(sheet, selected, lane, measure):
-        if kind == "split_shared_note_policy":
+        if kind in {"split_shared_note_policy", "lyric_line"}:
             continue
         for key, value in option.fields.items():
             if key == "melody_source_by_lane":
@@ -146,6 +179,7 @@ def _action_for_measure(
                 if not isinstance(part_id, str) or not part_id or not isinstance(voice_part_id, str) or not voice_part_id:
                     raise AssemblyError(f"Invalid voice assignment for {lane.lane_id}")
                 assigned_group_size = sum(item == source for item in value.values())
+                melody_ref = (source.get("part_index"), voice_part_id)
                 key, value = "melody_source", {"part_id": part_id, "voice_part_id": voice_part_id}
             elif key == "rank_index_by_lane":
                 if lane.lane_id not in value:
@@ -154,6 +188,8 @@ def _action_for_measure(
                     raise AssemblyError(f"Missing rank for {lane.lane_id}")
                 key, value = "rank_index", value[lane.lane_id]
             elif key in {"melody_source", "lyric_source"}:
+                if key == "melody_source":
+                    melody_ref = (value.get("part_index"), value.get("voice_part_id"))
                 value = _public_source_ref(option, value)
             if key in fields and fields[key] != value:
                 raise AssemblyError(f"Conflicting {key} choices for {lane.lane_id}")
@@ -161,21 +197,27 @@ def _action_for_measure(
 
     mode = fields.get("mode")
     if mode == "rest":
-        return {"mode": "rest", "decision_type": "INSERT_RESTS"}
+        return {"mode": "rest", "decision_type": "INSERT_RESTS"}, None
     if mode != "derive":
         raise AssemblyError(f"Missing mode for {lane.lane_id} measure {measure}")
-    melody, lyric = fields.get("melody_source"), fields.get("lyric_source")
-    if not isinstance(melody, dict) or not isinstance(lyric, dict):
-        raise AssemblyError(f"Derive needs melody and lyric sources for {lane.lane_id}")
+    melody = fields.get("melody_source")
+    if not isinstance(melody, dict) or melody_ref is None or not isinstance(melody_ref[0], int):
+        raise AssemblyError(f"Derive needs a melody source for {lane.lane_id}")
 
-    lyric_kind = next((kind for lane_id, _, kind in segment.signature.lanes
-                       if lane_id == lane.lane_id), None)
-    if lyric_kind is None:
-        raise AssemblyError(f"Missing lane facts for {lane.lane_id}")
-    if lyric_kind == "extension_only" and "lyric_policy" not in fields:
-        raise AssemblyError(f"Extension-only lyric policy is unresolved for {lane.lane_id}")
-    fields.setdefault("lyric_policy", "fill_missing_only" if lyric_kind == "words" else "replace_all")
-    fields.setdefault("lyric_strategy", "strict_onset")
+    staffs = (melody_line_staffs(staff_index, *melody_ref, measure, measure)
+              or melody_line_staffs(staff_index, *melody_ref, segment.start_measure, segment.end_measure))
+    reading = None
+    if staffs and staffs <= lines.keys():
+        # Lyric rule: the carrier is filled in per measure once the whole lane is known.
+        fields.pop("lyric_source", None)
+        fields.pop("lyric_strategy", None)
+        reading = (staffs, _line_voice(sheet, selected, lane, measure), melody_ref)
+    elif not isinstance(fields.get("lyric_source"), dict):
+        raise AssemblyError(f"Derive needs a lyric source for {lane.lane_id}")
+    else:
+        fields.setdefault("lyric_strategy", "strict_onset")
+    # Rule 19: copied lyrics always replace the lane's own marks.
+    fields["lyric_policy"] = "replace_all"
 
     same_part = melody["part_id"] == lane.part_id
     siblings = sorted(
@@ -199,7 +241,53 @@ def _action_for_measure(
     else:
         fields["decision_type"] = "COPY_UNISON_SECTION"
         fields["method"] = "trivial"
-    return fields
+    return fields, reading
+
+
+def _carriers(
+    score: dict, lines: dict[tuple[int, str], StaffLyricLine], readings: dict[int, tuple],
+) -> dict[int, dict[str, str]]:
+    """Encode the read words as the voice they are typed on, measure by measure.
+
+    Several carriers: the melody-source voice if it carries any, else the most
+    words, then the lowest voice_part_id. A measure with no word takes the
+    carrier of the measure before it (the first ones: the next measure's).
+    """
+    words_by_bar: dict[tuple[int, str], dict[int, list[str]]] = {}
+    for staff, line in lines.items():
+        for (bar, _), entries in line.words.items():
+            words_by_bar.setdefault(staff, {}).setdefault(bar, []).extend(
+                voice_part_id for voice_part_id, _ in entries
+            )
+    carriers: dict[int, tuple[int, str]] = {}
+    for measure, (staffs, line_voice, melody_ref) in sorted(readings.items()):
+        counts: dict[tuple[int, str], int] = {}
+        for staff in sorted(staffs):
+            only = line_voice_for_staff(lines[staff], staff[0], line_voice)
+            for voice_part_id in words_by_bar.get(staff, {}).get(measure, []):
+                if only is None or voice_part_id == only:
+                    counts[(staff[0], voice_part_id)] = counts.get((staff[0], voice_part_id), 0) + 1
+        if counts:
+            carriers[measure] = melody_ref if melody_ref in counts else min(
+                counts, key=lambda key: (-counts[key], key[1], key[0])
+            )
+    if not carriers and readings:
+        staffs, line_voice, _ = readings[min(readings)]
+        staff = min(staffs)
+        only = line_voice_for_staff(lines[staff], staff[0], line_voice)
+        counts = {}
+        for entries in lines[staff].words.values():
+            for voice_part_id, _ in entries:
+                if only is None or voice_part_id == only:
+                    counts[voice_part_id] = counts.get(voice_part_id, 0) + 1
+        carriers[min(readings)] = (staff[0], min(counts, key=lambda key: (-counts[key], key)))
+    previous = carriers[min(carriers)] if carriers else None
+    refs: dict[int, dict[str, str]] = {}
+    for measure in sorted(readings):
+        previous = carriers.get(measure, previous)
+        part_index, voice_part_id = previous
+        refs[measure] = {"part_id": str(score["parts"][part_index]["part_id"]), "voice_part_id": voice_part_id}
+    return refs
 
 
 def assemble_plan(
@@ -207,9 +295,12 @@ def assemble_plan(
     choices: dict[str, str],
     *,
     freeform_sections: dict[str, list[dict]] | None = None,
+    score: dict,
 ) -> dict:
     """Fill code-owned fields and merge equal per-measure actions exactly."""
     selected = _selected_options(sheet, choices)
+    lines = staff_lyric_lines(score)
+    staff_index = note_staffs_by_measure(score)
     freeform = {slot.slot_id: slot for slot in sheet.slots if slot.kind == "freeform"}
     supplied = freeform_sections or {}
     missing = sorted(freeform.keys() - supplied.keys())
@@ -229,6 +320,7 @@ def assemble_plan(
         segments = [segment for segment in sheet.segments
                     if segment.part_index == lane.part_index and segment.scope_key == lane.scope_key]
         per_measure: dict[int, dict] = {}
+        readings: dict[int, tuple] = {}
         for segment in segments:
             freeform_slot = next((slot for slot in freeform.values()
                                   if lane.lane_id in slot.lane_ids
@@ -237,11 +329,16 @@ def assemble_plan(
             for measure in range(segment.start_measure, segment.end_measure + 1):
                 if measure in per_measure:
                     raise AssemblyError(f"Overlapping segments for {lane.lane_id} at {measure}")
-                per_measure[measure] = (
-                    deepcopy(freeform_actions[freeform_slot.slot_id][measure])
-                    if freeform_slot is not None else
-                    _action_for_measure(sheet, selected, lane, segment, measure)
+                if freeform_slot is not None:
+                    per_measure[measure] = deepcopy(freeform_actions[freeform_slot.slot_id][measure])
+                    continue
+                per_measure[measure], reading = _action_for_measure(
+                    sheet, selected, lane, segment, measure, score, lines, staff_index
                 )
+                if reading is not None:
+                    readings[measure] = reading
+        for measure, carrier in _carriers(score, lines, readings).items():
+            per_measure[measure].update(lyric_source=carrier, lyric_strategy="strict_onset")
         if not per_measure:
             raise AssemblyError(f"No measures for {lane.lane_id}")
         measure_numbers = sorted(per_measure)
