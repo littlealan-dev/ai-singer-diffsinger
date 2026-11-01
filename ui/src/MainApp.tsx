@@ -908,17 +908,27 @@ const ScorePlayerMixerBridge = ({
   instrumentalTracks = [],
   instrumentalMidiTrackKeys = [],
   instrumentalBus,
+  engineGeneration,
 }: {
   midiTrackCount: number;
   vocalTracks: MultiTrackAudioTrack[];
   instrumentalTracks?: InstrumentalTrackState[];
   instrumentalMidiTrackKeys?: readonly string[];
   instrumentalBus: InstrumentalBusState;
+  engineGeneration: number;
 }) => {
   const controls = usePlaylistControls();
-  const { isReady } = usePlaylistData();
+  const { isReady, trackStates } = usePlaylistData();
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
+  // The provider gives every track it adds to the engine, and every track of a
+  // rebuilt engine, the mute, solo and volume from its own track states, which
+  // keep only the last of several mixer edits made in one render. So apply the
+  // rows' state again once the engine holds those tracks: after a rebuild
+  // (engineGeneration), and after tracks are added to the live engine (such as
+  // the MIDI arriving after a take), which the provider follows by growing its
+  // track states.
+  const engineTrackCount = trackStates.length;
   const vocalMixerSignature = vocalTracks
     .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
     .join("\u0001");
@@ -964,6 +974,8 @@ const ScorePlayerMixerBridge = ({
     instrumentalMidiTrackKeys,
     instrumentalBus,
     vocalTracks,
+    engineGeneration,
+    engineTrackCount,
   ]);
 
   return null;
@@ -1020,6 +1032,13 @@ const ScorePlayerEngine = ({
   }, []);
   const handleProviderError = useCallback((error: Error) => {
     callbacksRef.current.onError(error.message);
+  }, []);
+  // The provider calls onReady after every engine rebuild (a new sound, a
+  // replaced take), but not after an incremental add. Count the rebuilds, so
+  // the mixer bridge applies the rows' state to each new engine.
+  const [engineGeneration, setEngineGeneration] = useState(0);
+  const handleEngineRebuilt = useCallback(() => {
+    setEngineGeneration((generation) => generation + 1);
   }, []);
   const adapterRef = useRef<ToneAdapter | null>(null);
   const soundFontCacheRef = useRef<SoundFontCache | null>(null);
@@ -1267,6 +1286,7 @@ const ScorePlayerEngine = ({
       tracks={tracks}
       soundFontCache={soundFontCache ?? undefined}
       createAdapter={createScorePlayerAdapter}
+      onReady={handleEngineRebuilt}
       onError={handleProviderError}
     >
       <ScorePlayerEngineBridge
@@ -1283,6 +1303,7 @@ const ScorePlayerEngine = ({
         instrumentalTracks={instrumentalTracks}
         instrumentalMidiTrackKeys={instrumentalMidiTrackKeys}
         instrumentalBus={instrumentalBus}
+        engineGeneration={engineGeneration}
       />
       <ScorePlayerSeekBar
         host={seekBarHost}

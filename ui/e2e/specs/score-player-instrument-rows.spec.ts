@@ -150,13 +150,21 @@ async function mockBackend(page: Page, performanceMidi: unknown = PERFORMANCE_MI
  * track order, so its tracks are matched to the provider's by ID. (The
  * provider's own `trackStates` is not used: it keeps only the last of several
  * mixer edits made in one render, while the engine receives them all.)
+ * `midiProgram` is the sound the engine plays, which changes only once the
+ * provider has rebuilt its engine for a new sound.
  */
 async function playerTrackStates(page: Page) {
   return page.evaluate(() => {
     const node = document.querySelector(".score-player-seek-time");
     if (!node) return null;
     const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$"));
-    type EngineTrack = { id: string; muted: boolean; soloed: boolean; volume: number };
+    type EngineTrack = {
+      id: string;
+      muted: boolean;
+      soloed: boolean;
+      volume: number;
+      clips: Array<{ midiProgram?: number }>;
+    };
     type Engine = { getState: () => { tracks: EngineTrack[] } };
     type ContextValue = { tracks?: Array<{ id: string }>; playoutRef?: { current: Engine | null } };
     type Fiber = { return: Fiber | null; memoizedProps?: { value?: ContextValue } };
@@ -167,7 +175,9 @@ async function playerTrackStates(page: Page) {
         const engineTracks = value.playoutRef.current?.getState().tracks ?? [];
         return value.tracks.map(({ id }) => {
           const track = engineTracks.find((engineTrack) => engineTrack.id === id);
-          return track ? { muted: track.muted, soloed: track.soloed, volume: track.volume } : null;
+          if (!track) return null;
+          const midiProgram = track.clips.find((clip) => clip.midiProgram !== undefined)?.midiProgram;
+          return { muted: track.muted, soloed: track.soloed, volume: track.volume, midiProgram };
         });
       }
       fiber = fiber.return;
@@ -234,6 +244,10 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
   await page.getByRole("menuitemradio", { name: "Bright Acoustic Piano" }).click();
   await expect(pianoSound.locator(".score-track-instrument-label")).toHaveText("Bright Acoustic Piano");
   await expect(pianoMute).toHaveAttribute("aria-pressed", "true");
+  // The new sound rebuilds the engine; the piano's staves stay muted in it.
+  await expect.poll(() => midiTrackStates(page).then((states) => states?.map((state) => state?.midiProgram)))
+    .toEqual([1, 1, expect.any(Number)]);
+  await expect.poll(() => mutedStates(page)).toEqual([true, true, false]);
   await pianoMute.click();
 
   // The guitar row controls the third MIDI track, not the piano's second staff.
