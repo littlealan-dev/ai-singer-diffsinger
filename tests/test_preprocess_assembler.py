@@ -13,7 +13,7 @@ from src.api import preprocess_assembler as assembler
 from src.api.preprocess_sheet import build_sheet
 from src.api.voice_parts import parse_voice_part_plan, preprocess_voice_parts
 from src.mcp.tools import _PREPROCESS_PLAN_REQUEST_SCHEMA
-from tests.test_preprocess_sheet import SATB, _chord_score, _two_staff_score
+from tests.test_preprocess_sheet import SATB, _chord_score, _silence_voice_in_bar, _two_staff_score
 
 
 def _assert_schema(value, schema):
@@ -167,7 +167,8 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
     assert {"method", "melody_source", "lyric_source"}.isdisjoint(rest_section)
     assert parse_voice_part_plan(plan, score=score)["ok"]
 
-    satb = parse_score(SATB, verse_number=1)
+    # The alto is silent in bar 2, so its lane there copies another voice.
+    satb = _silence_voice_in_bar(parse_score(SATB, verse_number=1), 0, "2", 2)
     sheet = _sheet(satb, "P1-Staff1")
     choices = assembler.first_option_choices(sheet)
     source_slot = next(slot for slot in sheet.slots
