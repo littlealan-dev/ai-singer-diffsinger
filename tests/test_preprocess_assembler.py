@@ -90,8 +90,8 @@ def test_first_option_plan_is_public_valid_deterministic_and_executable(tmp_path
     original = deepcopy(score)
     sheet = _sheet(score, part_id)
     choices = assembler.first_option_choices(sheet)
-    plan = assembler.assemble_plan(sheet, choices)
-    assert plan == assembler.assemble_plan(sheet, choices)
+    plan = assembler.assemble_plan(sheet, choices, score=score)
+    assert plan == assembler.assemble_plan(sheet, choices, score=score)
     _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
     assert parse_voice_part_plan(plan, score=score)["ok"]
     result = preprocess_voice_parts(score, request={"plan": plan})
@@ -112,7 +112,7 @@ def test_first_option_plan_is_public_valid_deterministic_and_executable(tmp_path
 def test_chord_split_always_ranked_even_when_density_falls(tmp_path):
     score = _chord_score(tmp_path)
     sheet = _sheet(score, score["parts"][0]["part_id"])
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     for target in plan["targets"]:
         for section in target["sections"]:
             assert section["decision_type"] == "SPLIT_CHORDS_SELECT_NOTES"
@@ -125,36 +125,32 @@ def test_chord_split_always_ranked_even_when_density_falls(tmp_path):
 def test_own_density_one_source_extracts_trivially():
     score = parse_score(SATB, verse_number=1)
     sheet = _sheet(score, "P1-Staff1")
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     assert all(section["decision_type"] == "EXTRACT_FROM_VOICE"
                and section["method"] == "trivial"
                for target in plan["targets"] for section in target["sections"])
 
 
-def test_rule_19_lyric_policy_for_words_none_and_extension_only():
+def test_read_lines_encode_as_carrier_replace_all_strict_onset():
     score = parse_score(SATB, verse_number=1)
     sheet = _sheet(score, "P1-Staff1")
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
-    assert plan["targets"][0]["sections"][0]["lyric_policy"] == "fill_missing_only"
-    assert plan["targets"][1]["sections"][0]["lyric_policy"] == "replace_all"
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    for target in plan["targets"]:
+        for section in target["sections"]:
+            assert section["lyric_policy"] == "replace_all"
+            assert section["lyric_strategy"] == "strict_onset"
+    # The soprano carries the staff's words, so it is every lane's carrier.
+    assert {section["lyric_source"]["voice_part_id"]
+            for target in plan["targets"] for section in target["sections"]} == {"voice part 1"}
 
     for note in score["parts"][0]["notes"]:
         if note.get("voice") == "1" and note.get("measure_number") == 2:
             note["lyric"] = "+"
-    next(note for note in score["parts"][1]["notes"]
-         if note.get("voice") == "5" and note.get("measure_number") == 2)["lyric"] = "next"
     extension = _sheet(score, "P1-Staff1")
-    policy_slot = next(slot for slot in extension.slots if slot.kind == "lyric_policy")
-    choices = assembler.first_option_choices(extension)
-    for desired in ("fill_missing_only", "replace_all"):
-        choices[policy_slot.slot_id] = next(option.option_id for option in policy_slot.options
-                                           if option.fields["lyric_policy"] == desired)
-        plan = assembler.assemble_plan(extension, choices)
-        target = next(target for lane, target in zip(extension.lanes, plan["targets"])
-                      if lane.lane_id in policy_slot.lane_ids)
-        section = next(section for section in target["sections"]
-                       if section["start_measure"] <= 2 <= section["end_measure"])
-        assert section["lyric_policy"] == desired
+    assert not any(slot.kind == "lyric_policy" for slot in extension.slots)
+    plan = assembler.assemble_plan(extension, assembler.first_option_choices(extension), score=score)
+    # Bar 2 has no word, so it keeps bar 1's carrier and merges with it.
+    assert all(len(target["sections"]) == 1 for target in plan["targets"])
 
 
 def test_rest_and_copy_unison_decision_rows(tmp_path):
@@ -164,7 +160,7 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
     rest_slot = next(slot for slot in sheet.slots if slot.kind == "mode")
     choices[rest_slot.slot_id] = next(option.option_id for option in rest_slot.options
                                       if option.fields["mode"] == "rest")
-    plan = assembler.assemble_plan(sheet, choices)
+    plan = assembler.assemble_plan(sheet, choices, score=score)
     rest_section = plan["targets"][1]["sections"][-1]
     assert rest_section["decision_type"] == "INSERT_RESTS"
     assert rest_section["mode"] == "rest"
@@ -180,7 +176,7 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
     copy_option = next(option for option in source_slot.options
                        if option.fields["melody_source"]["voice_part_id"] != own_voice)
     choices[source_slot.slot_id] = copy_option.option_id
-    plan = assembler.assemble_plan(sheet, choices)
+    plan = assembler.assemble_plan(sheet, choices, score=satb)
     chosen = copy_option.fields["melody_source"]
     expected_source = {
         "part_id": satb["parts"][chosen["part_index"]]["part_id"],
@@ -201,16 +197,16 @@ def test_invalid_choices_freeform_and_forced_roundtrip_failure(monkeypatch, tmp_
     choices = assembler.first_option_choices(sheet)
     first_id = next(iter(choices))
     with pytest.raises(ValueError, match="Missing choices"):
-        assembler.assemble_plan(sheet, {key: value for key, value in choices.items() if key != first_id})
+        assembler.assemble_plan(sheet, {key: value for key, value in choices.items() if key != first_id}, score=score)
     with pytest.raises(ValueError, match="Unknown option ID"):
-        assembler.assemble_plan(sheet, {**choices, first_id: "missing"})
+        assembler.assemble_plan(sheet, {**choices, first_id: "missing"}, score=score)
     with pytest.raises(ValueError, match="unknown slot IDs"):
-        assembler.assemble_plan(sheet, {**choices, "not-a-slot": "x"})
+        assembler.assemble_plan(sheet, {**choices, "not-a-slot": "x"}, score=score)
 
     monkeypatch.setattr("src.api.preprocess_sheet._source_candidates", lambda *_: [])
     freeform_sheet = _sheet(score, score["parts"][0]["part_id"])
     with pytest.raises(assembler.FreeformUnresolved) as error:
-        assembler.assemble_plan(freeform_sheet, assembler.first_option_choices(freeform_sheet))
+        assembler.assemble_plan(freeform_sheet, assembler.first_option_choices(freeform_sheet), score=score)
     assert error.value.slot_ids == sorted(slot.slot_id for slot in freeform_sheet.slots)
     supplied = {
         slot.slot_id: [{
@@ -225,14 +221,13 @@ def test_invalid_choices_freeform_and_forced_roundtrip_failure(monkeypatch, tmp_
     }
     freeform_plan = assembler.assemble_plan(
         freeform_sheet, assembler.first_option_choices(freeform_sheet),
-        freeform_sections=supplied,
-    )
+        freeform_sections=supplied, score=score)
     _assert_schema(freeform_plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
     assert parse_voice_part_plan(freeform_plan, score=score)["ok"]
 
     monkeypatch.setattr(assembler, "expand", lambda sections: {})
     with pytest.raises(assembler.AssemblyError, match="Round-trip mismatch"):
-        assembler.assemble_plan(sheet, choices)
+        assembler.assemble_plan(sheet, choices, score=score)
 
 
 def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
@@ -249,7 +244,7 @@ def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
     }
     sheet = _sheet(score, score["parts"][0]["part_id"])
     choices = assembler.first_option_choices(sheet)
-    plan = assembler.assemble_plan(sheet, choices)
+    plan = assembler.assemble_plan(sheet, choices, score=score)
     assert [target["output"] for target in plan["targets"]] == [
         {"mode": "append_new_derived_lane"},
         {"mode": "update_existing_derived_lane", "derived_lane_id": "dl:test:2"},
@@ -257,7 +252,7 @@ def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
     assert parse_voice_part_plan(plan, score=score)["ok"]
     missing_id = replace(sheet, lanes=[sheet.lanes[0], replace(sheet.lanes[1], existing_derived_lane_id=None)])
     with pytest.raises(assembler.AssemblyError, match="lacks derived_lane_id"):
-        assembler.assemble_plan(missing_id, choices)
+        assembler.assemble_plan(missing_id, choices, score=score)
 
 
 def test_real_two_staff_with_one_lyric_donor_assembles_first_options(tmp_path):
@@ -266,7 +261,7 @@ def test_real_two_staff_with_one_lyric_donor_assembles_first_options(tmp_path):
     for part in score["parts"]:
         sheet = _sheet(score, part["part_id"])
         assert not any(slot.kind == "freeform" for slot in sheet.slots)
-        plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+        plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
         _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
         assert parse_voice_part_plan(plan, score=score)["ok"]
         result = preprocess_voice_parts(score, request={"plan": plan})

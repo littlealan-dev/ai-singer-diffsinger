@@ -310,7 +310,7 @@ def test_assembly_error_and_intent_count(tmp_path, monkeypatch):
     job["spec"]["planningContext"]["other_instruction"] = "keep the soprano"
     path.write_text(json.dumps(job), encoding="utf-8")
 
-    def fail_assembly(_sheet, _choices):
+    def fail_assembly(_sheet, _choices, **_kwargs):
         raise proof.AssemblyError("uncovered measure 2")
 
     monkeypatch.setattr(proof, "assemble_plan", fail_assembly)
@@ -319,3 +319,47 @@ def test_assembly_error_and_intent_count(tmp_path, monkeypatch):
     assert rows[0]["error"] == "AssemblyError: uncovered measure 2"
     assert "intent_requires_llm" in rows[0]["issues"]
     assert "Intent requires LLM: 1" in (tmp_path / "report/summary.md").read_text(encoding="utf-8")
+
+
+def test_lyric_reading_check_counts_mismatches_and_gates_runs_clean(tmp_path, monkeypatch):
+    from tests.test_preprocess_sheet import SHARED_LINE, lyric_line_xml
+
+    corpus = tmp_path / "corpus"
+    xml = lyric_line_xml(SHARED_LINE).encode("utf-8")
+    _job(corpus, "follows", xml, "Choir")
+    _job(corpus, "wrong", xml, "Choir")
+    real_assemble = proof.assemble_plan
+    calls = []
+
+    def assemble(sheet, choices, **kwargs):
+        plan = real_assemble(sheet, choices, **kwargs)
+        calls.append(sheet)
+        if len(calls) == 2:  # jobs run in id order, so this is "wrong"
+            # Copy bar 2's words by overlap: the soprano's half-beat notes repeat a word.
+            for section in plan["targets"][0]["sections"]:
+                if section["start_measure"] <= 2 <= section["end_measure"]:
+                    section["lyric_strategy"] = "overlap_best_match"
+        return plan
+
+    monkeypatch.setattr(proof, "assemble_plan", assemble)
+    rows = {row["job_id"]: row for row in proof.prove(corpus, tmp_path / "report")}
+    follows, wrong = rows["follows"], rows["wrong"]
+    assert follows["executor_status"] == wrong["executor_status"] == "ready"
+    assert follows["lyric_reading_mismatches"] == 0
+    assert follows["lyric_notes_checked"] == 12
+    assert follows["no_previous_syllable"] == 0
+    assert follows["runs_clean"]
+    assert wrong["lyric_reading_mismatches"] == 2
+    assert wrong["lyric_mismatch_bars"] == [2]
+    assert not wrong["runs_clean"]
+
+    with (tmp_path / "report/jobs.csv").open(newline="", encoding="utf-8") as file:
+        records = {record["job_id"]: record for record in csv.DictReader(file)}
+    assert records["wrong"]["lyric_reading_mismatches"] == "2"
+    assert records["wrong"]["lyric_mismatch_bars"] == "2"
+    assert records["follows"]["lyric_notes_checked"] == "12"
+    summary = (tmp_path / "report/summary.md").read_text(encoding="utf-8")
+    assert "## Lyric reading mismatches" in summary
+    assert "| wrong | 12 | 2 | 2 |" in summary
+    assert "| follows | 12 |" not in summary
+    assert "| wrong | lyric_reading_mismatches=2 |" in summary

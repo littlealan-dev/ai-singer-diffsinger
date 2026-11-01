@@ -309,7 +309,7 @@ def test_turn_taking_real_voices_exclude_default_lane_and_assemble(tmp_path):
         "voice part 1", "voice part 2",
     ]
     assert [lane.default_rank for lane in sheet.lanes] == [0, 1]
-    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 2
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)["targets"]) == 2
 
 
 def test_real_voices_plus_three_note_chord_get_one_ranked_extra(tmp_path):
@@ -326,7 +326,7 @@ def test_real_voices_plus_three_note_chord_get_one_ranked_extra(tmp_path):
         "voice part 1", "voice part 2", "voice part 1",
     ]
     assert [lane.default_rank for lane in sheet.lanes] == [0, 1, 2]
-    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 3
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)["targets"]) == 3
 
 
 def test_default_only_scope_keeps_default_lane_and_assembles(tmp_path):
@@ -337,7 +337,7 @@ def test_default_only_scope_keeps_default_lane_and_assembles(tmp_path):
     assert not sheet.issues
     assert len(sheet.lanes) == 1
     assert sheet.lanes[0].source_voice_part_id == "voice part 1"
-    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))["targets"]) == 1
+    assert len(assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)["targets"]) == 1
 
 
 def test_target_part_id_resolves_double_escaped_ampersand(tmp_path):
@@ -379,14 +379,17 @@ def test_ambiguous_unescaped_part_ids_leave_target_unresolved(tmp_path):
     assert exact.target_part_index == 1
 
 
-def test_lyric_kind_change_starts_new_segment():
+def test_lyric_kind_change_does_not_start_new_segment():
     score = parse_score(SATB, verse_number=1)
     for note in score["parts"][0]["notes"]:
         if note.get("measure_number") == 2 and note.get("voice") == "1":
             note["lyric"] = "+"
     original = deepcopy(score)
     sheet = build_sheet_skeleton(score, {"target": {"part_id": "P1-Staff1"}})
-    assert [segment.signature.lanes[0][2] for segment in sheet.segments] == ["words", "extension_only"]
+    unchanged = build_sheet_skeleton(parse_score(SATB, verse_number=1), {"target": {"part_id": "P1-Staff1"}})
+    # Only density, native notes and annotations cut segments (bar 1 has a tempo mark).
+    assert sheet.segments == unchanged.segments
+    assert all(len(fact) == 2 for segment in sheet.segments for fact in segment.signature.lanes)
     _assert_contiguous_segments(sheet, score)
     assert score == original
 
@@ -469,13 +472,13 @@ def test_native_lyricless_voice_uses_eligible_voice_on_same_staff(tmp_path):
     sheet = build_sheet(score, context)
     lane = next(lane for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
     segment = next(segment for segment in sheet.segments if segment.start_measure == 2)
-    assert next(native for lane_id, native, _ in segment.signature.lanes
+    assert next(native for lane_id, native in segment.signature.lanes
                 if lane_id == lane.lane_id)
-    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
-    assert len(lyric) == 1
-    assert lyric[0].fields["lyric_source"] == {"part_index": 0, "voice_part_id": "voice part 1"}
-    assert lyric[0].evidence == {"reason": "no_lyrics_in_source_voice"}
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    # The staff's line is read by code: no lyric menu for the lyric-less voice.
+    assert not _lyric_slot_kinds(sheet, lane)
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    target = plan["targets"][sheet.lanes.index(lane)]
+    assert {section["lyric_source"]["voice_part_id"] for section in target["sections"]} == {"voice part 1"}
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert result.get("action") != "invalid_section_source"
     assert score == original
@@ -513,18 +516,11 @@ def test_no_word_lyrics_on_native_notes_keep_own_source(tmp_path):
     sheet = build_sheet(score, context)
     assert not sheet.issues
     assert not any(slot.kind == "freeform" for slot in sheet.slots)
-    lane, segment = sheet.lanes[0], sheet.segments[0]
-    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
-    assert len(lyric) == 1
-    assert lyric[0].option_id == f"{lane.part_id}|{lane.source_voice_part_id}"
-    assert lyric[0].fields == {"lyric_source": {
-        "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
-    }}
-    assert lyric[0].evidence == {"reason": "no_word_lyric_donor"}
-    assert lyric[0].flags == ()
+    lane = sheet.lanes[0]
+    assert not _lyric_slot_kinds(sheet, lane)
     assert json.dumps(asdict(sheet), sort_keys=True)
     assert asdict(sheet) == asdict(build_sheet(score, context))
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert result.get("action") != "invalid_section_source"
     assert not [finding for finding in result.get("lint_findings", [])
@@ -543,15 +539,10 @@ def test_no_word_lyrics_on_idle_ranked_lane_keep_own_source(tmp_path):
     assert not any(slot.kind == "freeform" for slot in sheet.slots)
     lane = sheet.lanes[1]
     segment = next(segment for segment in sheet.segments if segment.start_measure == 2)
-    assert not next(native for lane_id, native, _ in segment.signature.lanes
+    assert not next(native for lane_id, native in segment.signature.lanes
                     if lane_id == lane.lane_id)
-    lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
-    assert len(lyric) == 1
-    assert lyric[0].fields["lyric_source"] == {
-        "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
-    }
-    assert lyric[0].evidence == {"reason": "no_word_lyric_donor"}
-    assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    assert not _lyric_slot_kinds(sheet, lane)
+    assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
 
 
 def test_no_word_lyrics_on_copied_voice_use_eligible_donor(tmp_path):
@@ -565,7 +556,7 @@ def test_no_word_lyrics_on_copied_voice_use_eligible_donor(tmp_path):
                    for slot in sheet.slots)
     lane = next(lane for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
     segment = next(segment for segment in sheet.segments if segment.start_measure == 2)
-    assert not next(native for lane_id, native, _ in segment.signature.lanes
+    assert not next(native for lane_id, native in segment.signature.lanes
                     if lane_id == lane.lane_id)
     melody = _lane_segment_options(sheet, lane, segment, "melody_source")
     lyric = _lane_segment_options(sheet, lane, segment, "lyric_source")
@@ -576,7 +567,7 @@ def test_no_word_lyrics_on_copied_voice_use_eligible_donor(tmp_path):
     assert all(option.flags == () for option in lyric)
     assert json.dumps(asdict(sheet), sort_keys=True)
     assert asdict(sheet) == asdict(build_sheet(score, context))
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert result.get("action") != "invalid_section_source"
     assert not [finding for finding in result.get("lint_findings", [])
@@ -608,7 +599,7 @@ def test_sheet_excludes_rest_on_native_notes_and_is_pure_json():
     assert set(slot.kind for slot in sheet.slots).issubset(SLOT_KINDS)
     native_by_lane_segment = {
         (lane_id, segment.start_measure, segment.end_measure)
-        for segment in sheet.segments for lane_id, native, _ in segment.signature.lanes if native
+        for segment in sheet.segments for lane_id, native in segment.signature.lanes if native
     }
     for slot in sheet.slots:
         if slot.kind == "mode" and (
@@ -641,15 +632,8 @@ def test_chord_voice_assignment_and_fixed_single_options(tmp_path):
     assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
     assert sheet.fixed
     assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)
-    first_measure_lyric = [
-        option for slot_id, option in sheet.fixed.items()
-        if slot_id.endswith("|1-1|lyric_source")
-    ]
-    assert first_measure_lyric
-    # Lint counts both notes of the chord, even though they share one onset.
-    assert all(option.evidence["target_sung_note_count"] == 2
-               and option.evidence["word_lyric_coverage_ratio"] == 1.0
-               for option in first_measure_lyric)
+    # The one-staff line is read by code, so no lane gets a lyric menu.
+    assert not any(_lyric_slot_kinds(sheet, lane) for lane in sheet.lanes)
 
 
 def test_unnumbered_chord_uses_pitch_order_not_voice_number(tmp_path):
@@ -669,7 +653,7 @@ def test_unnumbered_chord_uses_pitch_order_not_voice_number(tmp_path):
                     if raw_voice[lane.source_voice_part_id] == "1")
     assert ranks[high_lane.lane_id] == 0
     assert ranks[low_lane.lane_id] == 1
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     sections = [next(section for section in target["sections"]
                      if section["start_measure"] <= 1 <= section["end_measure"])
                 for target in plan["targets"]]
@@ -700,7 +684,7 @@ def test_two_chord_sources_get_disjoint_covering_lanes(tmp_path):
                for source in first.fields["melody_source_by_lane"].values()]
     assert sources.count("1") == sources.count("2") == 2
     assert sorted(first.fields["rank_index_by_lane"].values()) == [0, 0, 1, 1]
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert not [finding for finding in result.get("lint_findings") or []
                 if finding.get("rule") in {
@@ -725,7 +709,7 @@ def test_leftover_silent_lane_joins_chord_with_distinct_rank_and_fallback(tmp_pa
                    slot.options[0].fields["melody_source_by_lane"].values())) == 1
     assert sorted(slot.options[0].fields["rank_index_by_lane"].values()) == [0, 1, 2]
     assert sum(slot.kind == "rank_fallback" for slot in sheet.slots) == 3
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     assert all(target["sections"][0]["rank_fallback"] == "greedy" for target in plan["targets"])
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert not [finding for finding in result.get("lint_findings") or []
@@ -747,7 +731,7 @@ def test_four_note_chord_moves_only_needed_native_lanes(tmp_path):
     assert all(set(raw_voice[source["voice_part_id"]] for source in
                    option.fields["melody_source_by_lane"].values()) == {"1"}
                for option in slot.options)
-    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert not [finding for finding in result.get("lint_findings") or []
                 if finding.get("rule_severity") == "P0"]
@@ -770,7 +754,7 @@ def test_first_option_never_simple_copies_a_chord_source(tmp_path):
     ]
     for score in scores:
         sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-        plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet))
+        plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
         for target in plan["targets"]:
             for section in target["sections"]:
                 if section["decision_type"] not in {"COPY_UNISON_SECTION", "EXTRACT_FROM_VOICE"}:
@@ -792,8 +776,26 @@ def test_first_option_never_simple_copies_a_chord_source(tmp_path):
                 assert max(counts.values(), default=0) < 2
 
 
-def test_lyric_donor_order_flags_and_extension_policy():
-    score = parse_score(SATB, verse_number=1)
+def _with_wordless_part(score):
+    """Append a staff with no words, so melody options read from a staff without a line."""
+    wordless = deepcopy(score["parts"][0])
+    wordless["part_id"] = "P_WORDLESS"
+    for note in wordless["notes"]:
+        note["lyric"] = None
+        note["lyric_is_extended"] = False
+    score["parts"].append(wordless)
+    return score
+
+
+def _lyric_slot_kinds(sheet, lane):
+    kinds = {slot.kind for slot in sheet.slots if lane.lane_id in slot.lane_ids}
+    kinds.update(slot_id.rsplit("|", 1)[-1] for slot_id in sheet.fixed
+                 if slot_id.startswith(lane.lane_id + "|"))
+    return kinds & {"lyric_source", "lyric_strategy", "lyric_line"}
+
+
+def test_lyric_donor_order_flags_and_no_extension_policy():
+    score = _with_wordless_part(parse_score(SATB, verse_number=1))
     # The local soprano has eight words; the distant tenor has just one.
     tenor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
     tenor["lyric"] = "one"
@@ -801,11 +803,12 @@ def test_lyric_donor_order_flags_and_extension_policy():
     alto_id = next(lane.lane_id for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
     donors = [slot for slot in sheet.slots if slot.kind == "lyric_source" and alto_id in slot.lane_ids]
     assert donors
+    assert donors[0].evidence == {"used_when": "melody from a staff without a lyric line"}
     assert donors[0].options[0].fields["lyric_source"]["part_index"] == 0
     cross = next(option for option in donors[0].options
                  if option.fields["lyric_source"]["part_index"] == 1)
     assert "P1 cross_staff_lyric_source_with_stronger_local_alternative" in cross.flags
-    assert not any(slot.kind == "lyric_policy" for slot in sheet.slots)
+    assert "lyric_policy" not in SLOT_KINDS
 
     for note in score["parts"][0]["notes"]:
         if note.get("voice") == "1" and note.get("measure_number") == 2:
@@ -813,11 +816,8 @@ def test_lyric_donor_order_flags_and_extension_policy():
     next(note for note in score["parts"][1]["notes"]
          if note.get("voice") == "5" and note.get("measure_number") == 2)["lyric"] = "next"
     extension = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
-    policies = [slot for slot in extension.slots if slot.kind == "lyric_policy"]
-    assert policies
-    assert [option.fields["lyric_policy"] for option in policies[0].options] == [
-        "fill_missing_only", "replace_all"
-    ]
+    assert not any(slot.kind == "lyric_policy" for slot in extension.slots)
+    assert not any(slot_id.endswith("|lyric_policy") for slot_id in extension.fixed)
 
 
 def test_same_part_other_staff_uses_weak_source_flag():
@@ -830,15 +830,22 @@ def test_same_part_other_staff_uses_weak_source_flag():
         for note in part["notes"]
     ]
     next(note for note in combined["notes"] if note.get("voice") == "5")["lyric"] = "one"
+    # A third staff with no words keeps the lyric source menu in play.
+    combined["notes"] += [
+        {**note, "staff": "3", "voice": "9", "lyric": None, "lyric_is_extended": False}
+        for note in score["parts"][0]["notes"] if note.get("voice") == "1"
+    ]
     score["parts"] = [combined]
+    voice_part_by_voice = {vp["source_voice_id"]: vp["voice_part_id"]
+                           for vp in _analyze_part_voice_parts(combined, 0)["voice_parts"]}
     sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes
-                   if lane.source_voice_part_id == "voice part 2")
+                   if lane.source_voice_part_id == voice_part_by_voice["2"])
     donors = [option for slot in sheet.slots
               if slot.kind == "lyric_source" and alto_id in slot.lane_ids
               for option in slot.options]
     weak_other_scope = next(option for option in donors
-                            if option.fields["lyric_source"]["voice_part_id"] == "voice part 3")
+                            if option.fields["lyric_source"]["voice_part_id"] == voice_part_by_voice["5"])
     assert "P1 weak_lyric_source_with_better_alternative" in weak_other_scope.flags
     assert not any("cross_staff" in flag for flag in weak_other_scope.flags)
 
@@ -893,11 +900,22 @@ def test_derived_and_generated_solfege_donors_are_excluded():
             assert source != {"part_index": 0, "voice_part_id": "voice part 1"}
 
 
-def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
+def test_every_derive_section_gets_a_lyric_source():
     score = parse_score(SATB, verse_number=1)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    for target in plan["targets"]:
+        for section in target["sections"]:
+            if section["mode"] == "derive":
+                assert section["lyric_source"]["voice_part_id"]
+                assert section["lyric_policy"] == "replace_all"
+
+
+def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
+    score = _with_wordless_part(parse_score(SATB, verse_number=1))
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
     for segment in sheet.segments:
-        for lane_id, _, _ in segment.signature.lanes:
+        for lane_id, _ in segment.signature.lanes:
             relevant = [slot for slot in sheet.slots
                         if lane_id in slot.lane_ids and
                         (slot.start_measure, slot.end_measure) ==
@@ -933,3 +951,181 @@ def test_shared_note_policy_requires_same_measure_and_note():
     assert not _shared_notes_in_scope(score, lane)
     another_measure["measure_number"] = 1
     assert _shared_notes_in_scope(score, lane)
+
+
+# --- Lyric reading rule (SIG-162) -------------------------------------------
+
+_TYPES = {1: "eighth", 2: "quarter", 4: "half", 8: "whole"}
+
+
+def _lyric_note(step, duration, lyric=None, syllabic="single", tie=None, *, voice, octave=5):
+    """One note in divisions of 2 per quarter; tie is "start" or "stop"."""
+    return (
+        f'<note><pitch><step>{step}</step><octave>{octave}</octave></pitch>'
+        f'<duration>{duration}</duration>'
+        + (f'<tie type="{tie}"/>' if tie else '')
+        + f'<voice>{voice}</voice><type>{_TYPES[duration]}</type>'
+        + (f'<notations><tied type="{tie}"/></notations>' if tie else '')
+        + (f'<lyric number="1"><syllabic>{syllabic}</syllabic><text>{lyric}</text></lyric>'
+           if lyric is not None else '')
+        + '</note>'
+    )
+
+
+def lyric_line_xml(bars):
+    """One staff; each bar is a list of voices, each voice a list of _lyric_note kwargs tuples."""
+    measures = []
+    for number, voices in enumerate(bars, start=1):
+        body = []
+        for index, notes in enumerate(voices):
+            if index:
+                body.append('<backup><duration>8</duration></backup>')
+            body.extend(_lyric_note(*args, voice=str(index + 1), octave=5 - index) for args in notes)
+        measures.append(
+            f'<measure number="{number}">'
+            + ('<attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type>'
+               '</time><clef><sign>G</sign><line>2</line></clef></attributes>' if number == 1 else '')
+            + "".join(body) + '</measure>'
+        )
+    return (
+        '<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Choir</part-name>'
+        '</score-part></part-list><part id="P1">' + "".join(measures) + '</part></score-partwise>'
+    )
+
+
+# Bar 1: both voices sing "Glo". Bar 2: the words are typed on voice 2 only, and
+# voice 1 has extra notes on the half beats (beats 1, 1½, 2, 2½, 3, 4).
+SHARED_LINE = [
+    [[("G", 8, "Glo")], [("E", 8, "Glo")]],
+    [[("G", 1), ("A", 1), ("G", 1), ("A", 1), ("G", 2), ("G", 2)],
+     [("E", 2, "in"), ("E", 2, "ex", "begin"), ("E", 2, "cel", "middle"), ("E", 2, "sis", "end")]],
+]
+
+
+def _sung(result, lane_index):
+    part = result["score"]["parts"][result["targets"][lane_index]["appended_part_ref"]["part_index"]]
+    return [note.get("lyric") for note in part["notes"] if not note.get("is_rest")]
+
+
+def _plan_and_run(score, sheet, choices=None):
+    plan = assembler.assemble_plan(sheet, choices or assembler.first_option_choices(sheet), score=score)
+    return plan, preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+
+
+def test_staff_lyric_lines_and_reading_follow_the_page(tmp_path):
+    score = _parse_inline(tmp_path, lyric_line_xml(SHARED_LINE))
+    lines = sheet_module.staff_lyric_lines(score)
+    line = lines[(0, "1")]
+    assert not line.multiple
+    assert line.words[(2, 4.0)] == [("voice part 2", "in")]
+    assert line.words[(1, 0.0)] == [("voice part 1", "Glo"), ("voice part 2", "Glo")]
+    soprano = [note for note in score["parts"][0]["notes"] if note.get("voice") == "1"]
+    assert sheet_module.read_lane_lyrics(line, soprano) == ["Glo", "in", "+", "ex", "+", "cel", "sis"]
+    assert sheet_module.read_lane_lyrics(line, [{"measure_number": 0, "offset_beats": -1.0}]) == [None]
+
+
+def test_shared_line_with_extra_notes_is_read_by_code(tmp_path):
+    score = _parse_inline(tmp_path, lyric_line_xml(SHARED_LINE))
+    original = deepcopy(score)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    assert not any(_lyric_slot_kinds(sheet, lane) for lane in sheet.lanes)
+    plan, result = _plan_and_run(score, sheet)
+    assert result["status"] in {"ready", "ready_with_warnings"}
+    assert _sung(result, 0) == ["Glo", "in", "+", "ex", "+", "cel", "sis"]
+    assert _sung(result, 1) == ["Glo", "in", "ex", "cel", "sis"]
+    bar_two = next(section for section in plan["targets"][0]["sections"]
+                   if section["start_measure"] <= 2 <= section["end_measure"])
+    assert bar_two["lyric_source"]["voice_part_id"] == "voice part 2"
+    assert (bar_two["lyric_policy"], bar_two["lyric_strategy"]) == ("replace_all", "strict_onset")
+    assert score == original
+    assert asdict(sheet) == asdict(build_sheet(score, context))
+    assert json.dumps(asdict(sheet), sort_keys=True)
+
+
+def test_words_typed_on_different_voices_reach_both_lanes(tmp_path):
+    score = _parse_inline(tmp_path, lyric_line_xml([
+        [[("G", 4, "one"), ("G", 4, "two")], [("E", 4), ("E", 4)]],
+        [[("G", 4), ("G", 4)], [("E", 4, "three"), ("E", 4, "four")]],
+    ]))
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not any(_lyric_slot_kinds(sheet, lane) for lane in sheet.lanes)
+    _, result = _plan_and_run(score, sheet)
+    assert result["status"] in {"ready", "ready_with_warnings"}
+    assert _sung(result, 0) == _sung(result, 1) == ["one", "two", "three", "four"]
+
+
+def test_held_note_keeps_its_syllable_in_one_section(tmp_path):
+    score = _parse_inline(tmp_path, lyric_line_xml([
+        [[("G", 4, "la"), ("A", 4, "Ah", "single", "start")]],
+        [[("A", 8, None, "single", "stop")]],
+        [[("G", 8, "end")]],
+    ]))
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert len(sheet.segments) == 1
+    plan, result = _plan_and_run(score, sheet)
+    assert [(section["start_measure"], section["end_measure"])
+            for section in plan["targets"][0]["sections"]] == [(1, 3)]
+    assert result["status"] in {"ready", "ready_with_warnings"}
+    assert "section_lyric_quality_failed" not in json.dumps(result.get("targets"))
+    assert _sung(result, 0) == ["la", "Ah", "+", "end"]
+
+
+def test_two_lines_on_one_staff_ask_which_line(tmp_path):
+    score = _parse_inline(tmp_path, lyric_line_xml([
+        [[("G", 4, "ex", "begin"), ("G", 4, "cel", "end")],
+         [("E", 4, "uno"), ("E", 4, "dos")]],
+    ]))
+    assert sheet_module.staff_lyric_lines(score)[(0, "1")].multiple
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    line_slots = {slot.lane_ids[0]: slot for slot in sheet.slots if slot.kind == "lyric_line"}
+    assert set(line_slots) == {lane.lane_id for lane in sheet.lanes}
+    assert "lyric_line" in SLOT_KINDS
+    soprano, alto = sheet.lanes
+    assert [option.label for option in line_slots[soprano.lane_id].options] == ["ex-cel", "uno dos"]
+    assert [option.label for option in line_slots[alto.lane_id].options] == ["uno dos", "ex-cel"]
+    assert line_slots[soprano.lane_id].options[0].fields == {
+        "lyric_line_voice": {"part_index": 0, "voice_part_id": "voice part 1"},
+    }
+    assert line_slots[soprano.lane_id].options[0].evidence == {"word_count": 2}
+    assert not _lyric_slot_kinds(sheet, soprano) - {"lyric_line"}
+
+    _, result = _plan_and_run(score, sheet)
+    assert _sung(result, 0) == ["ex", "cel"]
+    assert _sung(result, 1) == ["uno", "dos"]
+    choices = assembler.first_option_choices(sheet)
+    slot = line_slots[soprano.lane_id]
+    choices[slot.slot_id] = slot.options[1].option_id
+    _, result = _plan_and_run(score, sheet, choices)
+    assert _sung(result, 0) == ["uno", "dos"]
+
+
+def test_melody_from_a_staff_without_words_keeps_the_lyric_source_menu(tmp_path):
+    xml = (
+        '<score-partwise version="3.1"><part-list>'
+        '<score-part id="P1"><part-name>Piano</part-name></score-part>'
+        '<score-part id="P2"><part-name>Voice</part-name></score-part></part-list>'
+        + "".join(
+            f'<part id="{part_id}"><measure number="1"><attributes><divisions>2</divisions>'
+            '<time><beats>4</beats><beat-type>4</beat-type></time>'
+            '<clef><sign>G</sign><line>2</line></clef></attributes>'
+            + _lyric_note("G", 4, lyric, voice="1") + _lyric_note("A", 4, lyric, voice="1")
+            + '</measure></part>'
+            for part_id, lyric in (("P1", None), ("P2", "la"))
+        )
+        + '</score-partwise>'
+    )
+    score = _parse_inline(tmp_path, xml)
+    sheet = build_sheet(score, {"target": {"part_id": "Piano"}})
+    lane = sheet.lanes[0]
+    # One donor, so the menu is fixed; the lane's melody options include its own wordless staff.
+    donors = [option for slot_id, option in sheet.fixed.items() if slot_id.endswith("|lyric_source")]
+    assert [option.fields["lyric_source"] for option in donors] == [
+        {"part_index": 1, "voice_part_id": "voice part 1"},
+    ]
+    assert not any(slot.kind == "lyric_policy" for slot in sheet.slots)
+    plan, _ = _plan_and_run(score, sheet)
+    section = plan["targets"][0]["sections"][0]
+    assert section["lyric_policy"] == "replace_all"
+    assert section["lyric_source"] == {"part_id": "Voice", "voice_part_id": "voice part 1"}
+    assert _lyric_slot_kinds(sheet, lane) & {"lyric_source"}

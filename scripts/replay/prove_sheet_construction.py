@@ -20,16 +20,20 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.api import parse_score, preprocess_voice_parts
 from src.api.preprocess_assembler import (
-    AssemblyError, FreeformUnresolved, assemble_plan, first_option_choices,
+    AssemblyError, FreeformUnresolved, assemble_plan, chosen_line_voices, first_option_choices,
 )
-from src.api.preprocess_sheet import build_sheet
+from src.api.preprocess_sheet import (
+    build_sheet, line_voice_for_staff, read_lane_lyrics, staff_lyric_lines,
+)
+from src.api.voice_parts import _analyze_part_voice_parts, _lyric_kind, _staff_scope_key, _voice_key
 from src.api.voice_part_lint_rules import LINT_RULE_SPECS, POSTFLIGHT_VALIDATION_SPECS
 
 
 JOB_COLUMNS = (
     "job_id", "status", "lint_clean", "runs_clean", "executor_status",
-    "executor_action", "executor_codes", "unsung_chord_notes", "p0", "p1", "p2", "lanes", "segments",
-    "slots", "freeform", "issues",
+    "executor_action", "executor_codes", "unsung_chord_notes", "lyric_notes_checked",
+    "lyric_reading_mismatches", "lyric_mismatch_bars", "no_previous_syllable",
+    "p0", "p1", "p2", "lanes", "segments", "slots", "freeform", "issues",
 )
 
 
@@ -195,6 +199,65 @@ def unsung_chord_notes(score: dict, plan: dict, result: dict) -> tuple[int, list
     return missing, sorted(bars)[:20]
 
 
+def lyric_reading_check(score: dict, sheet: Any, choices: dict, plan: dict, result: dict) -> dict:
+    """Compare each derived note's lyric with the reading rule (word on its beat, else "+")."""
+    lines = staff_lyric_lines(score)
+    line_voices = chosen_line_voices(sheet, choices)
+    part_index_by_id = {str(part.get("part_id")): index for index, part in enumerate(score["parts"])}
+    outputs = result.get("targets") if isinstance(result.get("targets"), list) else [result]
+    checked = mismatches = no_previous = 0
+    bars: set[int] = set()
+    for lane, target, output in zip(sheet.lanes, plan.get("targets") or [], outputs):
+        ref = output.get("appended_part_ref") if isinstance(output, dict) else None
+        if not isinstance(ref, dict) or not isinstance(ref.get("part_index"), int):
+            continue
+        out_notes = [note for note in result["score"]["parts"][ref["part_index"]].get("notes") or []
+                     if not note.get("is_rest") and note.get("pitch_midi") is not None]
+        for section in target.get("sections") or []:
+            if section.get("mode") != "derive":
+                continue
+            melody = section.get("melody_source") or {}
+            part_index = part_index_by_id.get(str(melody.get("part_id")))
+            if part_index is None:
+                continue
+            part = score["parts"][part_index]
+            voice = next((str(vp["source_voice_id"]) for vp in
+                          _analyze_part_voice_parts(part, part_index)["voice_parts"]
+                          if vp["voice_part_id"] == melody.get("voice_part_id")), None)
+            staff_at: dict[tuple[int, float], str] = {}
+            for note in part.get("notes") or []:
+                if not note.get("is_rest") and _voice_key(note.get("voice")) == voice:
+                    key = (int(note.get("measure_number") or 0), round(float(note.get("offset_beats") or 0.0), 6))
+                    staff_at.setdefault(key, _staff_scope_key(note))
+            for note in out_notes:
+                bar = int(note.get("measure_number") or 0)
+                if not section["start_measure"] <= bar <= section["end_measure"]:
+                    continue
+                staff = staff_at.get((bar, round(float(note.get("offset_beats") or 0.0), 6)))
+                line = lines.get((part_index, staff)) if staff is not None else None
+                if line is None:
+                    continue
+                only = line_voice_for_staff(line, part_index, line_voices.get(lane.lane_id, {}).get(bar))
+                expected = read_lane_lyrics(line, [note], only)[0]
+                if expected is None:
+                    no_previous += 1
+                    continue
+                checked += 1
+                if expected == "+":
+                    ok = _lyric_kind(note) == "extension"
+                else:
+                    ok = str(note.get("lyric") or "").strip().casefold() == expected.casefold()
+                if not ok:
+                    mismatches += 1
+                    bars.add(bar)
+    return {
+        "lyric_notes_checked": checked,
+        "lyric_reading_mismatches": mismatches,
+        "lyric_mismatch_bars": sorted(bars)[:5],
+        "no_previous_syllable": no_previous,
+    }
+
+
 def _exception_text(exc: Exception) -> str:
     message = str(exc).splitlines()[0][:200]
     if "<" in message or ">" in message:
@@ -210,7 +273,9 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
         "slots_by_kind": {}, "freeform_slot_ids": [], "findings": [],
         "p0": 0, "p1": 0, "p2": 0, "lint_clean": False, "runs_clean": False,
         "executor_status": None, "executor_action": None, "executor_codes": [],
-        "unsung_chord_notes": None, "unsung_chord_bars": None, "wall_time_ms": 0,
+        "unsung_chord_notes": None, "unsung_chord_bars": None,
+        "lyric_notes_checked": None, "lyric_reading_mismatches": None,
+        "lyric_mismatch_bars": None, "no_previous_syllable": None, "wall_time_ms": 0,
     }
     sheet = None
     plan = None
@@ -242,7 +307,8 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
             elif "score_has_no_lyrics" in sheet.issues:
                 row["status"] = "needs_lyrics"
             else:
-                plan = assemble_plan(sheet, first_option_choices(sheet))
+                choices = first_option_choices(sheet)
+                plan = assemble_plan(sheet, choices, score=score)
                 result = preprocess_voice_parts(copy.deepcopy(score), request={"plan": plan})
                 row["executor_status"] = result.get("status")
                 row["executor_action"] = result.get("action")
@@ -254,6 +320,8 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
                     row["unsung_chord_notes"], row["unsung_chord_bars"] = unsung_chord_notes(
                         score, plan, result
                     )
+                if row["executor_status"] == "ready":
+                    row.update(lyric_reading_check(score, sheet, choices, plan, result))
                 row["findings"] = _findings(result)
                 row["status"] = "assembled"
     except FreeformUnresolved as exc:
@@ -278,6 +346,7 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
     row["runs_clean"] = (
         row["lint_clean"] and row["executor_status"] == "ready"
         and row["unsung_chord_notes"] in (0, None)
+        and row["lyric_reading_mismatches"] == 0
     )
     row["wall_time_ms"] = round((time.monotonic() - started) * 1000)
     return row, asdict(sheet) if sheet is not None else None, plan
@@ -331,6 +400,13 @@ def _summary(rows: list[dict]) -> str:
         f"| {row['job_id']} | {row['unsung_chord_notes']} | {', '.join(map(str, row['unsung_chord_bars']))} |"
         for row in rows if row["unsung_chord_notes"] is not None and row["unsung_chord_notes"] > 0
     )
+    lines.extend(["", "## Lyric reading mismatches", "", "| Job | Notes checked | Mismatches | Bars |",
+                  "| --- | ---: | ---: | --- |"])
+    lines.extend(
+        f"| {row['job_id']} | {row['lyric_notes_checked']} | {row['lyric_reading_mismatches']} | "
+        f"{', '.join(map(str, row['lyric_mismatch_bars']))} |"
+        for row in rows if row["lyric_reading_mismatches"]
+    )
     lines.extend(["", "## Stopped: score has no lyrics", "", "| Job |", "| --- |"])
     lines.extend(f"| {row['job_id']} |" for row in rows if row["status"] == "needs_lyrics")
     lines.extend(["", "## Jobs not runs-clean", "", "| Job | First failing rule or status |", "| --- | --- |"])
@@ -342,7 +418,9 @@ def _summary(rows: list[dict]) -> str:
                 row["status"] if row["status"] != "assembled" else
                 failing or row["executor_action"] or
                 (f"unsung_chord_notes={row['unsung_chord_notes']}"
-                 if row["unsung_chord_notes"] else row["executor_status"])
+                 if row["unsung_chord_notes"] else
+                 f"lyric_reading_mismatches={row['lyric_reading_mismatches']}"
+                 if row["lyric_reading_mismatches"] else row["executor_status"])
             )
             lines.append(f"| {row['job_id']} | {reason} |")
     return "\n".join(lines) + "\n"
@@ -370,6 +448,7 @@ def prove(corpus: Path, out: Path, *, selection: Path | None = None,
             values["freeform"] = len(row["freeform_slot_ids"])
             values["issues"] = ";".join(row["issues"])
             values["executor_codes"] = ";".join(row["executor_codes"])
+            values["lyric_mismatch_bars"] = ";".join(map(str, row["lyric_mismatch_bars"] or []))
             writer.writerow(values)
     (out / "summary.md").write_text(_summary(rows), encoding="utf-8")
     return rows
