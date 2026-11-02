@@ -150,6 +150,7 @@ class Settings:
     gemini_thinking_level: str
     gemini_default: GeminiModelRoleConfig
     gemini_preprocess: GeminiModelRoleConfig
+    gemini_preprocess_chooser: GeminiModelRoleConfig
     gemini_include_thought_summary: bool
     openai_api_key: str
     openai_api_key_secret: str
@@ -169,6 +170,8 @@ class Settings:
     llm_max_history_items: int
     preprocess_max_attempts: int
     preprocess_initial_plan_llm_max_responses: int
+    preprocess_planner: str
+    preprocess_chooser_max_slots_per_request: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -341,6 +344,12 @@ class Settings:
                 gemini_timeout_seconds,
             ),
         )
+        gemini_preprocess_chooser = GeminiModelRoleConfig(
+            model=os.getenv("GEMINI_PREPROCESS_CHOOSER_MODEL", gemini_preprocess.model).strip()
+            or gemini_preprocess.model,
+            thinking_level=os.getenv("GEMINI_PREPROCESS_CHOOSER_THINKING_LEVEL", "medium").strip(),
+            timeout_seconds=_env_float("GEMINI_PREPROCESS_CHOOSER_TIMEOUT_SECONDS", 120.0),
+        )
         gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
         openai_api_key = os.getenv("OPENAI_API_KEY", "")
         openai_api_key_secret = os.getenv("OPENAI_API_KEY_SECRET", "OPENAI_API_KEY")
@@ -396,6 +405,14 @@ class Settings:
             1,
             _env_int("PREPROCESS_INITIAL_PLAN_LLM_MAX_RESPONSES", 3),
         )
+        preprocess_planner = os.getenv("PREPROCESS_PLANNER", "v1").strip().lower() or "v1"
+        if preprocess_planner not in {"v1", "v2"}:
+            raise ValueError("PREPROCESS_PLANNER must be either 'v1' or 'v2'.")
+        preprocess_chooser_max_slots_per_request = _env_int(
+            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 200
+        )
+        if preprocess_chooser_max_slots_per_request < 1:
+            raise ValueError("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST must be at least 1.")
         app_env = _app_env()
         app_env_lower = app_env.lower()
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
@@ -673,6 +690,7 @@ class Settings:
             gemini_thinking_level=gemini_thinking_level,
             gemini_default=gemini_default,
             gemini_preprocess=gemini_preprocess,
+            gemini_preprocess_chooser=gemini_preprocess_chooser,
             gemini_include_thought_summary=gemini_include_thought_summary,
             openai_api_key=openai_api_key,
             openai_api_key_secret=openai_api_key_secret,
@@ -692,6 +710,8 @@ class Settings:
             llm_max_history_items=llm_max_history_items,
             preprocess_max_attempts=preprocess_max_attempts,
             preprocess_initial_plan_llm_max_responses=preprocess_initial_plan_llm_max_responses,
+            preprocess_planner=preprocess_planner,
+            preprocess_chooser_max_slots_per_request=preprocess_chooser_max_slots_per_request,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,
