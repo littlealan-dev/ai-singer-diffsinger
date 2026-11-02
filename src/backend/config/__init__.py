@@ -171,6 +171,7 @@ class Settings:
     preprocess_max_attempts: int
     preprocess_initial_plan_llm_max_responses: int
     preprocess_planner: str
+    preprocess_chooser_max_slots_per_request: int
     mcp_cpu_device: str
     mcp_gpu_device: str
     mcp_timeout_seconds: float
@@ -407,6 +408,11 @@ class Settings:
         preprocess_planner = os.getenv("PREPROCESS_PLANNER", "v1").strip().lower() or "v1"
         if preprocess_planner not in {"v1", "v2"}:
             raise ValueError("PREPROCESS_PLANNER must be either 'v1' or 'v2'.")
+        preprocess_chooser_max_slots_per_request = _env_int(
+            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 200
+        )
+        if preprocess_chooser_max_slots_per_request < 1:
+            raise ValueError("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST must be at least 1.")
         app_env = _app_env()
         app_env_lower = app_env.lower()
         mcp_cpu_device = os.getenv("MCP_CPU_DEVICE", "cpu")
@@ -705,6 +711,7 @@ class Settings:
             preprocess_max_attempts=preprocess_max_attempts,
             preprocess_initial_plan_llm_max_responses=preprocess_initial_plan_llm_max_responses,
             preprocess_planner=preprocess_planner,
+            preprocess_chooser_max_slots_per_request=preprocess_chooser_max_slots_per_request,
             mcp_cpu_device=mcp_cpu_device,
             mcp_gpu_device=mcp_gpu_device,
             mcp_timeout_seconds=mcp_timeout_seconds,

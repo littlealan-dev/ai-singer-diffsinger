@@ -21,6 +21,7 @@ from src.backend.config import Settings
 from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.backend.message_catalog import backend_message
+from src.backend import orchestrator as orchestrator_module
 from src.backend.orchestrator import PREPROCESS_PLANNING_ERROR_MESSAGE, _planner_v2_prompt
 from tests.test_backend_api import (  # noqa: F401 - pytest fixture
     _create_session, _preprocess_plan_response, _upload_score, client,
@@ -123,6 +124,16 @@ def test_chooser_role_defaults_follow_the_preprocess_model_and_can_be_overridden
     assert (chooser.model, chooser.thinking_level, chooser.timeout_seconds) == ("chooser-model", "low", 45.0)
 
 
+def test_chooser_batch_size_defaults_to_200_and_must_be_positive(monkeypatch):
+    monkeypatch.delenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", raising=False)
+    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 200
+    monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "50")
+    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 50
+    monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "0")
+    with pytest.raises(ValueError, match="PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST"):
+        Settings.from_env()
+
+
 def test_gemini_client_uses_the_chooser_role_config(monkeypatch):
     from src.backend.llm_gemini import GeminiRestClient
 
@@ -194,6 +205,47 @@ def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_pla
     expected = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     assert len(executed) == 1
     assert executed[0]["request"]["plan"] == expected
+
+
+def _with_budget(calls):
+    budget = orchestrator_module._LlmTurnBudget(reference="test", started_at=0.0, calls=calls)
+    return budget, orchestrator_module._llm_turn_budget.set(budget)
+
+
+def test_v2_batches_follow_the_setting_and_the_chooser_step_counts_as_one_call(client, monkeypatch):
+    score = _two_staff_part()
+    context = {"target": {"part_id": "P1-Combined"}}
+    sheet = build_sheet(score, context)
+    small = build_requests(sheet, build_request_context(score, context, sheet), max_slots_per_request=1)
+    assert len(small) > 2
+    llm = FakeLlm()
+    orchestrator, _, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    monkeypatch.setattr(orchestrator, "_settings",
+                        replace(orchestrator._settings, preprocess_chooser_max_slots_per_request=1))
+    budget, token = _with_budget(0)
+    try:
+        job = run(score, context)
+    finally:
+        orchestrator_module._llm_turn_budget.reset(token)
+    assert job["status"] == "completed", job
+    chooser_calls = llm.roles().count(LlmRole.PREPROCESS_CHOOSER)
+    assert chooser_calls == len(small)
+    # One charge for the whole chooser step, one per other call (the closing message).
+    assert budget.calls == 1 + len(llm.calls) - chooser_calls
+
+
+def test_v2_chooser_step_stops_when_the_turn_budget_is_used_up(client, monkeypatch):
+    score = _two_staff_part()
+    llm = FakeLlm()
+    _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    budget, token = _with_budget(orchestrator_module.LLM_CALLS_PER_TURN_LIMIT)
+    try:
+        job = run(score, {"target": {"part_id": "P1-Combined"}})
+    finally:
+        orchestrator_module._llm_turn_budget.reset(token)
+    assert job["status"] == "failed"
+    assert job["errorMessage"] == backend_message("chat.llm_turn_limit_reached", reference="test")
+    assert llm.calls == [] and executed == []
 
 
 def test_v2_job_without_lyrics_stops_with_the_catalog_message_and_no_llm_call(client, monkeypatch):

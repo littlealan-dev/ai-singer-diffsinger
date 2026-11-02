@@ -6228,8 +6228,17 @@ class Orchestrator:
             raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE)
         started = time.monotonic()
         try:
+            # The chooser's whole step is one call against the turn budget: code,
+            # not the LLM, decides how many requests it makes.
+            self._charge_llm_turn_budget()
+        except LlmTurnLimitReached as exc:
+            raise PreprocessPlanningError(str(exc)) from exc
+        try:
             sheet, choices, stats = await choose(
-                score, planning_context, call=self._call_preprocess_chooser
+                score,
+                planning_context,
+                call=self._call_preprocess_chooser,
+                max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
             )
         except FreeformUnresolved as exc:
             self._logger.warning(
@@ -6276,6 +6285,7 @@ class Orchestrator:
             [],
             LlmRole.PREPROCESS_CHOOSER,
             request.response_schema,
+            count_against_turn_budget=False,
         )
 
     def _preprocess_planning_context_for_attempt(
@@ -6346,33 +6356,42 @@ class Orchestrator:
         cleaned = message.strip()
         return cleaned == LLM_ERROR_FALLBACK or cleaned.startswith("LLM error ")
 
+    def _charge_llm_turn_budget(self) -> None:
+        """Count one LLM call against this turn's budget, or raise when it is used up."""
+        budget = _llm_turn_budget.get()
+        if budget is None:
+            return
+        if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
+            self._logger.error(
+                "llm_turn_limit_reached calls=%s limit=%s elapsed_seconds=%.1f",
+                budget.calls,
+                LLM_CALLS_PER_TURN_LIMIT,
+                time.monotonic() - budget.started_at,
+            )
+            raise LlmTurnLimitReached(
+                backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
+            )
+        budget.calls += 1
+
     def _call_llm_client_generate(
         self,
         prompt_bundle: Any,
         history: List[Dict[str, str]],
         role: LlmRole,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        count_against_turn_budget: bool = True,
     ) -> str:
         """Call the LLM client with role fallback for legacy test clients.
 
         A response_schema is always passed through: a client that cannot honour
-        it must fail rather than answer without the structure.
+        it must fail rather than answer without the structure. A caller that
+        charges the turn budget for a whole step passes count_against_turn_budget=False.
         """
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
-        budget = _llm_turn_budget.get()
-        if budget is not None:
-            if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
-                self._logger.error(
-                    "llm_turn_limit_reached calls=%s limit=%s elapsed_seconds=%.1f",
-                    budget.calls,
-                    LLM_CALLS_PER_TURN_LIMIT,
-                    time.monotonic() - budget.started_at,
-                )
-                raise LlmTurnLimitReached(
-                    backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
-                )
-            budget.calls += 1
+        if count_against_turn_budget:
+            self._charge_llm_turn_budget()
         if response_schema is not None:
             return self._llm_client.generate(
                 prompt_bundle, history, role=role, response_schema=response_schema
