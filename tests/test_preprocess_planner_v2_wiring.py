@@ -36,8 +36,24 @@ ROOT = Path(__file__).resolve().parents[1]
 DONE_MESSAGE = json.dumps({"tool_calls": [], "final_message": "Done.", "include_score": True})
 
 
-def _first_enum(schema):
+def _first_enum(schema, dynamic_text=None):
     return json.dumps({key: prop["enum"][0] for key, prop in schema["properties"].items()})
+
+
+def _rest_when_repairing(schema, dynamic_text):
+    """Answer rest for a mode slot asked again with findings; else the first option."""
+    reply = {}
+    for entry in json.loads(dynamic_text.split("\n")[0])["slots"]:
+        enum = schema["properties"][entry["key"]].get("enum") or []
+        if entry["kind"] == "freeform":
+            start, end = (int(bar) for bar in entry["bars"].split("-"))
+            reply[entry["key"]] = [{"lane": lane, "sections": [
+                {"start_measure": start, "end_measure": end, "mode": "rest"}]} for lane in entry["lanes"]]
+        elif entry["kind"] == "mode" and entry.get("findings") and "rest" in enum:
+            reply[entry["key"]] = "rest"
+        else:
+            reply[entry["key"]] = enum[0]
+    return json.dumps(reply)
 
 
 class FakeLlm:
@@ -56,7 +72,7 @@ class FakeLlm:
         if role == LlmRole.PREPROCESS_CHOOSER:
             if self._barrier is not None:
                 self._barrier.wait()
-            return self._chooser_reply(response_schema)
+            return self._chooser_reply(response_schema, prompt_bundle.dynamic_prompt_text)
         if role == LlmRole.PREPROCESS:
             return _preprocess_plan_response(voice_part_id="voice part 1")
         return DONE_MESSAGE
@@ -318,21 +334,23 @@ def test_v2_job_without_lyrics_stops_with_the_catalog_message_and_no_llm_call(cl
     assert llm.calls == [] and executed == []
 
 
-def test_v2_freeform_segment_fails_with_the_planning_message_and_no_v1_fallback(client, monkeypatch, tmp_path, caplog):
+def test_v2_freeform_segment_is_written_by_the_chooser_and_runs(client, monkeypatch, tmp_path, caplog):
     score = _too_many_chord_claims(tmp_path)
-    llm = FakeLlm()
+    llm = FakeLlm(chooser_reply=_rest_when_repairing)
     _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         job = run(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-    assert job["status"] == "failed"
-    assert job["errorMessage"] == PREPROCESS_PLANNING_ERROR_MESSAGE
+    assert job["status"] == "completed", job
     assert "planner_v2_freeform_segment" in caplog.text
-    assert llm.calls == [] and executed == []
+    assert LlmRole.PREPROCESS not in llm.roles()
+    targets = executed[0]["request"]["plan"]["targets"]
+    assert targets and all(target["sections"] == [{"start_measure": 1, "end_measure": 1, "mode": "rest"}]
+                           for target in targets)
 
 
 def test_v2_invalid_chooser_replies_fail_with_the_planning_message(client, monkeypatch, tmp_path, caplog):
     score = _chord_score(tmp_path)
-    llm = FakeLlm(chooser_reply=lambda schema: "{}")
+    llm = FakeLlm(chooser_reply=lambda schema, dynamic_text: "{}")
     _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
     with caplog.at_level(logging.WARNING):
         job = run(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
@@ -343,36 +361,225 @@ def test_v2_invalid_chooser_replies_fail_with_the_planning_message(client, monke
     assert executed == []
 
 
-def test_v2_attempt_that_needs_action_stops_without_repair(client, monkeypatch, tmp_path):
-    def needs_review(arguments):
-        return {
-            "status": "action_required",
-            "action": "validation_failed_needs_review",
-            "message": "Needs review.",
-            "failed_validation_rules": [{
-                "rule": "validation_failed_needs_review", "rule_name": "Coverage Needs Review",
-                "rule_severity": "P1", "rule_domain": "LYRIC",
-                "impacted_measures": [1], "impacted_ranges": [{"start": 1, "end": 1}],
-            }],
-        }
+_SILENT_BAR_XML = """<score-partwise version="3.1"><part-list>
+<score-part id="P1"><part-name>Choir</part-name></score-part>
+<score-part id="P2"><part-name>Lead</part-name></score-part></part-list>
+<part id="P1">
+  <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+    <clef><sign>G</sign><line>2</line></clef></attributes>
+    <note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><lyric><text>one</text></lyric></note>
+    <backup><duration>4</duration></backup>
+    <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>2</voice><type>whole</type><lyric><text>one</text></lyric></note>
+  </measure>
+  <measure number="2">
+    <note><rest/><duration>4</duration><voice>1</voice><type>whole</type></note>
+    <backup><duration>4</duration></backup>
+    <note><rest/><duration>4</duration><voice>2</voice><type>whole</type></note>
+  </measure>
+  <measure number="3">
+    <note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><lyric><text>three</text></lyric></note>
+    <backup><duration>4</duration></backup>
+    <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>2</voice><type>whole</type><lyric><text>three</text></lyric></note>
+  </measure>
+</part>
+<part id="P2">
+  <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+    <clef><sign>G</sign><line>2</line></clef></attributes>
+    <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><lyric><text>a</text></lyric></note>
+  </measure>
+  <measure number="2">
+    <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><lyric><text>b</text></lyric></note>
+  </measure>
+  <measure number="3">
+    <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><lyric><text>c</text></lyric></note>
+  </measure>
+</part></score-partwise>"""
 
-    llm = FakeLlm()
-    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm, tool_result=needs_review)
+
+def _silent_bar_score(tmp_path):
+    from tests.test_preprocess_sheet import _parse_inline
+
+    return _parse_inline(tmp_path, _SILENT_BAR_XML)
+
+
+def _section_at(plan, target_index, measure):
+    return assembler.expand(plan["targets"][target_index]["sections"])[measure]
+
+
+def _failing(part_index, voice_part_id, measure, *, severity="P1", domain="LYRIC"):
+    return {
+        "status": "action_required",
+        "action": "validation_failed_needs_review",
+        "message": "Needs review.",
+        "part_index": part_index,
+        "target_voice_part_id": voice_part_id,
+        "failed_validation_rules": [{
+            "rule": "partial_lyric_coverage", "rule_name": "Partial Lyric Coverage",
+            "rule_severity": severity, "rule_domain": domain,
+            "impacted_measures": [measure], "impacted_ranges": [{"start": measure, "end": measure}],
+        }],
+    }
+
+
+def _record_stops(orchestrator, monkeypatch):
     notices, stops = [], []
     monkeypatch.setattr(orchestrator, "_start_repair_notice", lambda *args, **kwargs: notices.append(1))
     render = orchestrator._render_selected_candidate_response
 
     async def recording_render(*args, **kwargs):
-        stops.append(kwargs["stop_reason"])
+        stops.append((kwargs["stop_reason"], args[3].attempt_number if args[3] is not None else None))
         return await render(*args, **kwargs)
 
     monkeypatch.setattr(orchestrator, "_render_selected_candidate_response", recording_render)
-    score = _chord_score(tmp_path)
-    run(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-    assert len(executed) == 1
+    return notices, stops
+
+
+def test_v2_repair_rests_a_silent_bar_and_the_next_attempt_passes(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    top = sheet.lanes[0]
+
+    def rest_in_bar_two_passes(arguments):
+        plan = arguments["request"]["plan"]
+        if _section_at(plan, 0, 2)["mode"] == "rest":
+            return _ready(arguments)
+        return _failing(0, top.source_voice_part_id, 2)
+
+    llm = FakeLlm(chooser_reply=_rest_when_repairing)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=rest_in_bar_two_passes)
+    notices, _ = _record_stops(orchestrator, monkeypatch)
+    published = []
+    update_job = orchestrator._job_store.update_job
+
+    def recording_update(job_id, **fields):
+        published.extend(item.get("message") for item in (fields.get("details") or {}).get("attempt_messages") or [])
+        return update_job(job_id, **fields)
+
+    monkeypatch.setattr(orchestrator._job_store, "update_job", recording_update)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert len(executed) == 2
+    first, second = (call["request"]["plan"] for call in executed)
+    assert _section_at(first, 0, 2)["mode"] == "derive" and _section_at(second, 0, 2)["mode"] == "rest"
+    for index in range(len(first["targets"])):
+        before = assembler.expand(first["targets"][index]["sections"])
+        after = assembler.expand(second["targets"][index]["sections"])
+        assert {measure for measure in before if before[measure] != after[measure]} <= ({2} if index == 0 else set())
     assert LlmRole.PREPROCESS not in llm.roles()
     assert notices == []
-    assert stops == ["planner_v2_repair_pending"]
+    assert backend_message("preprocess.v2_repairing") in published
+
+
+def _lint_failed(top, measure):
+    return {
+        "status": "action_required",
+        "action": "plan_lint_failed",
+        "code": "plan_lint_failed",
+        "message": "Plan lint failed.",
+        "lint_findings": [{
+            "rule": "weak_lyric_source_with_better_alternative", "rule_severity": "P1",
+            "rule_domain": "LYRIC", "severity": "error", "message": "A better lyric source exists.",
+            "part_index": top.part_index, "target_index": 0,
+            "target_voice_part_id": top.source_voice_part_id,
+            "section": {"start_measure": measure, "end_measure": measure},
+        }],
+    }
+
+
+def _section_quality_failed(top, measure):
+    return {
+        "status": "action_required",
+        "action": "section_lyric_quality_failed",
+        "message": "Section-level lyric quality check failed.",
+        "part_index": top.part_index,
+        "target_voice_part": top.source_voice_part_id,
+        "section_quality_issues": [{
+            "code": "extension_only_output_with_word_source_available",
+            "start_measure": measure, "end_measure": measure,
+        }],
+    }
+
+
+@pytest.mark.parametrize("failure, rule", [
+    (_lint_failed, "weak_lyric_source_with_better_alternative"),
+    (_section_quality_failed, "extension_only_output_with_word_source_available"),
+])
+def test_v2_repair_reads_the_failing_bar_from_each_payload_shape(client, monkeypatch, tmp_path, failure, rule):
+    score = _silent_bar_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+
+    def rest_in_bar_two_passes(arguments):
+        plan = arguments["request"]["plan"]
+        return _ready(arguments) if _section_at(plan, 0, 2)["mode"] == "rest" else failure(top, 2)
+
+    asked = []
+
+    def recording_reply(schema, dynamic_text):
+        asked.append(dynamic_text)
+        return _rest_when_repairing(schema, dynamic_text)
+
+    llm = FakeLlm(chooser_reply=recording_reply)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=rest_in_bar_two_passes)
+    _, stops = _record_stops(orchestrator, monkeypatch)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert len(executed) == 2 and "planner_v2_nothing_to_rechoose" not in [reason for reason, _ in stops]
+    assert _section_at(executed[1]["request"]["plan"], 0, 2)["mode"] == "rest"
+    repair_slots = [slot for text in asked for slot in json.loads(text)["slots"] if slot.get("findings")]
+    assert repair_slots and all(finding["rule"] == rule and finding["bars"] == "2-2" and finding["message"]
+                                for slot in repair_slots for finding in slot["findings"])
+
+
+def test_v2_failures_list_a_finding_given_at_both_levels_once(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    top = sheet.lanes[0]
+    orchestrator, _, _ = _job(client, monkeypatch, planner="v2", llm=FakeLlm())
+    payload = _section_quality_failed(top, 2)
+    payload["targets"] = [{**payload, "target_index": 0}]
+    failing, findings = orchestrator._planner_v2_failures(sheet, payload)
+    assert failing == {top.lane_id: [(2, 2)]} and len(findings[top.lane_id]) == 1
+
+
+def test_v2_repair_with_nothing_to_rechoose_stops_without_an_llm_call(client, monkeypatch):
+    score = parse_score(SATB, verse_number=1)
+    sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    llm = FakeLlm()
+    orchestrator, executed, run = _job(
+        client, monkeypatch, planner="v2", llm=llm,
+        tool_result=lambda arguments: _failing(0, sheet.lanes[0].source_voice_part_id, 1),
+    )
+    _, stops = _record_stops(orchestrator, monkeypatch)
+    run(score, {"target": {"part_id": "P1-Staff1"}})
+    assert len(executed) == 1
+    assert LlmRole.PREPROCESS_CHOOSER not in llm.roles() and LlmRole.PREPROCESS not in llm.roles()
+    assert [reason for reason, _ in stops] == ["planner_v2_nothing_to_rechoose"]
+
+
+def test_v2_repairs_stay_within_the_attempt_budget_and_keep_the_better_candidate(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+    # Attempt 1 has only a P2 (quality class 2); both repairs come back worse, with a P1 (class 1).
+    outcomes = iter([
+        _failing(0, top.source_voice_part_id, 2, severity="P2"),
+        _failing(0, top.source_voice_part_id, 2),
+        _failing(0, top.source_voice_part_id, 2),
+    ])
+    llm = FakeLlm(chooser_reply=_rest_when_repairing)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=lambda arguments: next(outcomes))
+    monkeypatch.setattr(orchestrator, "_settings", replace(orchestrator._settings, preprocess_max_attempts=3))
+    _, stops = _record_stops(orchestrator, monkeypatch)
+    run(score, context)
+    assert len(executed) == 3
+    # The first attempt's chooser step, then one per repair round.
+    assert llm.roles().count(LlmRole.PREPROCESS_CHOOSER) == 3
+    assert stops == [("attempt_budget_exhausted", 1)]
 
 
 # --- Replay ---------------------------------------------------------------------

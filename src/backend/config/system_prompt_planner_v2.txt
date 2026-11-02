@@ -14,6 +14,12 @@ What each kind decides
 - lyric_line: which line of words a lane sings when its staff has two. Pick the line that belongs to this lane's voice and fits its rhythm.
 - lyric_source and lyric_strategy: only for a lane whose notes come from a staff with no words. Pick the staff whose words fit this lane's notes best (see the coverage evidence). strict_onset when the rhythms line up, overlap_best_match when they are shifted, syllable_flow only when both are weak.
 
+Repairs
+- A slot with "findings" is being asked again because the app's checks failed in those bars with your previous choice ("previous"). Choose differently unless the findings are clearly about something else. "neighbours" are the choices around it, for context.
+
+Freeform segments
+- A slot of kind freeform has no menu: write that segment's sections for each listed lane, using the per-measure facts given, so the bars are covered exactly once with no gaps.
+
 Rules
 - Never assume voice part 1 is the melody.
 - Decide each segment on its own evidence; neighbouring segments are context, not a rule.
