@@ -6338,6 +6338,17 @@ class Orchestrator:
                     slot.evidence.get("reason"),
                 )
 
+    def _planner_v2_issue_spans(self, issue: Dict[str, Any]) -> List[Dict[str, int]]:
+        """Bars of a failing issue: its impacted spans, a lint finding's section, or its own bounds."""
+        spans = self._normalize_issue_spans(issue)
+        if spans:
+            return spans
+        section = issue.get("section")
+        bounds = section if isinstance(section, dict) else issue
+        return self._normalize_spans(
+            [{"start": bounds.get("start_measure"), "end": bounds.get("end_measure")}]
+        )
+
     def _planner_v2_failures(
         self, sheet: Any, payload: Dict[str, Any]
     ) -> tuple[Dict[str, List[Tuple[int, int]]], Dict[str, List[Any]]]:
@@ -6357,12 +6368,26 @@ class Orchestrator:
             return [lane for lane in lanes
                     if lane.part_index == part_index and lane.source_voice_part_id == voice_part_id]
 
-        entries: List[Tuple[List[Any], Dict[str, Any]]] = []
+        def section_quality_entries(
+            result: Dict[str, Any], index: Any = None
+        ) -> List[Tuple[List[Any], Dict[str, Any]]]:
+            issue_lanes = lanes_for(
+                index, result.get("part_index"),
+                result.get("target_voice_part_id") or result.get("target_voice_part"),
+            )
+            return [
+                (issue_lanes, {**issue, "message": issue.get("message") or result.get("message")})
+                for issue in result.get("section_quality_issues") or []
+                if isinstance(issue, dict)
+            ]
+
+        entries: List[Tuple[List[Any], Dict[str, Any]]] = section_quality_entries(payload)
         targets = self._extract_target_results(payload)
         for position, target in enumerate(targets):
             index = target.get("target_index")
             if index is None and len(targets) == len(lanes):
                 index = position
+            entries.extend(section_quality_entries(target, index))
             for issue in target.get("issues") or []:
                 entries.append((
                     lanes_for(issue.get("target_index", index), target.get("part_index"),
@@ -6379,16 +6404,17 @@ class Orchestrator:
         failing: Dict[str, List[Tuple[int, int]]] = {}
         findings: Dict[str, List[Any]] = {}
         for issue_lanes, issue in entries:
-            spans = self._normalize_issue_spans(issue)
+            spans = self._planner_v2_issue_spans(issue)
             rule = str(issue.get("rule") or issue.get("code") or issue.get("action") or "unknown")
             severity = str(issue.get("rule_severity") or issue.get("severity") or "")
             message = str(issue.get("message") or issue.get("rule_name") or "")
             for lane in issue_lanes:
                 for span in spans:
                     failing.setdefault(lane.lane_id, []).append((span["start"], span["end"]))
-                    findings.setdefault(lane.lane_id, []).append(
-                        SlotFinding(rule, severity, message, span["start"], span["end"])
-                    )
+                    finding = SlotFinding(rule, severity, message, span["start"], span["end"])
+                    lane_findings = findings.setdefault(lane.lane_id, [])
+                    if finding not in lane_findings:
+                        lane_findings.append(finding)
         merged = {
             lane_id: [(span["start"], span["end"]) for span in self._normalize_spans(
                 [{"start": start, "end": end} for start, end in spans]

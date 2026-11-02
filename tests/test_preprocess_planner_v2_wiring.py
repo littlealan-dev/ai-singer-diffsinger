@@ -472,6 +472,79 @@ def test_v2_repair_rests_a_silent_bar_and_the_next_attempt_passes(client, monkey
     assert backend_message("preprocess.v2_repairing") in published
 
 
+def _lint_failed(top, measure):
+    return {
+        "status": "action_required",
+        "action": "plan_lint_failed",
+        "code": "plan_lint_failed",
+        "message": "Plan lint failed.",
+        "lint_findings": [{
+            "rule": "weak_lyric_source_with_better_alternative", "rule_severity": "P1",
+            "rule_domain": "LYRIC", "severity": "error", "message": "A better lyric source exists.",
+            "part_index": top.part_index, "target_index": 0,
+            "target_voice_part_id": top.source_voice_part_id,
+            "section": {"start_measure": measure, "end_measure": measure},
+        }],
+    }
+
+
+def _section_quality_failed(top, measure):
+    return {
+        "status": "action_required",
+        "action": "section_lyric_quality_failed",
+        "message": "Section-level lyric quality check failed.",
+        "part_index": top.part_index,
+        "target_voice_part": top.source_voice_part_id,
+        "section_quality_issues": [{
+            "code": "extension_only_output_with_word_source_available",
+            "start_measure": measure, "end_measure": measure,
+        }],
+    }
+
+
+@pytest.mark.parametrize("failure, rule", [
+    (_lint_failed, "weak_lyric_source_with_better_alternative"),
+    (_section_quality_failed, "extension_only_output_with_word_source_available"),
+])
+def test_v2_repair_reads_the_failing_bar_from_each_payload_shape(client, monkeypatch, tmp_path, failure, rule):
+    score = _silent_bar_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+
+    def rest_in_bar_two_passes(arguments):
+        plan = arguments["request"]["plan"]
+        return _ready(arguments) if _section_at(plan, 0, 2)["mode"] == "rest" else failure(top, 2)
+
+    asked = []
+
+    def recording_reply(schema, dynamic_text):
+        asked.append(dynamic_text)
+        return _rest_when_repairing(schema, dynamic_text)
+
+    llm = FakeLlm(chooser_reply=recording_reply)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=rest_in_bar_two_passes)
+    _, stops = _record_stops(orchestrator, monkeypatch)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert len(executed) == 2 and "planner_v2_nothing_to_rechoose" not in [reason for reason, _ in stops]
+    assert _section_at(executed[1]["request"]["plan"], 0, 2)["mode"] == "rest"
+    repair_slots = [slot for text in asked for slot in json.loads(text)["slots"] if slot.get("findings")]
+    assert repair_slots and all(finding["rule"] == rule and finding["bars"] == "2-2" and finding["message"]
+                                for slot in repair_slots for finding in slot["findings"])
+
+
+def test_v2_failures_list_a_finding_given_at_both_levels_once(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    top = sheet.lanes[0]
+    orchestrator, _, _ = _job(client, monkeypatch, planner="v2", llm=FakeLlm())
+    payload = _section_quality_failed(top, 2)
+    payload["targets"] = [{**payload, "target_index": 0}]
+    failing, findings = orchestrator._planner_v2_failures(sheet, payload)
+    assert failing == {top.lane_id: [(2, 2)]} and len(findings[top.lane_id]) == 1
+
+
 def test_v2_repair_with_nothing_to_rechoose_stops_without_an_llm_call(client, monkeypatch):
     score = parse_score(SATB, verse_number=1)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})

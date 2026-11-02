@@ -428,14 +428,28 @@ def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= span_end and span_start <= end for span_start, span_end in spans)
 
 
+def _clip_sections(sections: list[dict], start: int, end: int) -> list[dict]:
+    """The sections' parts inside bars start..end."""
+    return [{**section, "start_measure": max(section["start_measure"], start),
+             "end_measure": min(section["end_measure"], end)}
+            for section in sections
+            if section["start_measure"] <= end and start <= section["end_measure"]]
+
+
 def _selection_lookup(selected: dict[str, Any]) -> Callable[[str], Any]:
-    """The earlier choice for a slot id: same lane prefix and kind, covering its bars."""
+    """The earlier choice for a slot id: same lane prefix and kind, covering its bars.
+
+    Freeform sections are clipped to the slot's bars, since a cut can shrink the slot.
+    """
     by_key = [(_slot_key(slot_id), value) for slot_id, value in selected.items()]
 
     def lookup(slot_id: str) -> Any:
         prefix, start, end, kind = _slot_key(slot_id)
         for (old_prefix, old_start, old_end, old_kind), value in by_key:
             if (old_prefix, old_kind) == (prefix, kind) and old_start <= start and end <= old_end:
+                if kind == "freeform" and isinstance(value, dict):
+                    return {lane_id: _clip_sections(sections, start, end)
+                            for lane_id, sections in value.items()}
                 return value
         return None
 
@@ -467,10 +481,13 @@ async def choose_repair(
     """Re-ask only the slots over the failing lanes and bars; carry every other choice over.
 
     ``failing`` maps a lane id to its failing (start, end) bar spans. Each span
-    becomes its own segment, so the repair can change just those bars.
+    becomes its own segment, so the repair can change just those bars. The sheet's
+    segments stay cut as they are, so an earlier repair's bars keep their own choices.
     """
     lanes = {lane.lane_id: lane for lane in sheet.lanes}
     cuts: dict[tuple[int, str], set[int]] = {}
+    for segment in sheet.segments:
+        cuts.setdefault((segment.part_index, segment.scope_key), set()).add(segment.start_measure)
     for lane_id, spans in failing.items():
         lane = lanes[lane_id]
         for start, end in spans:

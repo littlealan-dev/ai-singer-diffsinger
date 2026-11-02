@@ -415,6 +415,73 @@ def test_repair_drops_an_option_that_failed_with_a_p0(tmp_path):
     assert request.response_schema["properties"]["s1"]["enum"] == ["rest"]
 
 
+def _mode_section(plan, voice_part, measure):
+    target = next(target for target in plan["targets"] if target["source"]["voice_part_id"] == voice_part)
+    return assembler.expand(target["sections"])[measure]["mode"]
+
+
+def test_second_repair_keeps_the_first_repairs_cuts_and_answer(tmp_path):
+    score = _silent_second_voice(tmp_path)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    lane = _silent_lane(sheet)
+
+    async def repair(sheet, choices, span):
+        asked = []
+        result = await chooser.choose_repair(
+            score, context, sheet=sheet, choices=choices, failing={lane.lane_id: [span]},
+            findings_by_lane={}, pinned=None, call=_rest_when_asked(asked),
+        )
+        return (*result, asked)
+
+    first_sheet, first_choices, _, _ = asyncio.run(repair(sheet, _first_choices(sheet), (5, 6)))
+    second_sheet, second_choices, _, asked = asyncio.run(repair(first_sheet, first_choices, (1, 2)))
+    assert [(segment.start_measure, segment.end_measure) for segment in second_sheet.segments] == [
+        (1, 2), (3, 4), (5, 6), (7, 8), (9, 9)]
+    assert list(asked[0].key_to_slot.values()) == [f"{lane.lane_id}|1-2|mode"]
+    plan = chooser.assemble_chosen(second_sheet, second_choices, score=score)
+    modes = [_mode_section(plan, "voice part 2", measure) for measure in range(1, 9)]
+    assert modes == ["rest", "rest", "derive", "derive", "rest", "rest", "derive", "derive"]
+
+
+def test_repair_inside_a_freeform_slot_clips_the_carried_sections(tmp_path):
+    bar = (
+        _note("C", voice="1", duration=2)
+        + _note("E", voice="1", chord=True, duration=2, lyric=None)
+        + _rest(voice="1", duration=2)
+        + '<backup><duration>4</duration></backup>'
+        + _rest(voice="2", duration=2)
+        + _note("G", voice="2", duration=2)
+        + _note("B", voice="2", chord=True, duration=2, lyric=None)
+    )
+    score = _single_staff_score(tmp_path, [bar] * 8)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    freeform, = [slot for slot in sheet.slots if slot.kind == "freeform"]
+    assert (freeform.start_measure, freeform.end_measure) == (1, 8)
+    head = {"start_measure": 1, "end_measure": 4, "mode": "rest"}
+    tail = {"start_measure": 5, "end_measure": 8, "mode": "rest"}
+    choices = {freeform.slot_id: {lane_id: [dict(head), dict(tail)] for lane_id in freeform.lane_ids}}
+    asked = []
+
+    async def call(request):
+        asked.append(request)
+        return _gap_then_full(freeform.lane_ids)(request, gap=False)
+
+    new_sheet, new_choices, stats = asyncio.run(chooser.choose_repair(
+        score, context, sheet=sheet, choices=choices, failing={freeform.lane_ids[0]: [(5, 6)]},
+        findings_by_lane={}, pinned=None, call=call,
+    ))
+    prefix = freeform.slot_id.rsplit("|", 2)[0]
+    assert stats.slots_asked == 1 and list(asked[0].key_to_slot.values()) == [f"{prefix}|5-6|freeform"]
+    assert new_choices[f"{prefix}|1-4|freeform"] == {lane_id: [head] for lane_id in freeform.lane_ids}
+    assert new_choices[f"{prefix}|7-8|freeform"] == {
+        lane_id: [{**tail, "start_measure": 7}] for lane_id in freeform.lane_ids}
+    plan = chooser.assemble_chosen(new_sheet, new_choices, score=score)
+    assert all(target["sections"] == [{"start_measure": 1, "end_measure": 8, "mode": "rest"}]
+               for target in plan["targets"])
+
+
 def test_repair_over_fixed_slots_asks_nothing(tmp_path):
     score = parse_score(SATB, verse_number=1)
     context = {"target": {"part_id": "P1-Staff1"}}
