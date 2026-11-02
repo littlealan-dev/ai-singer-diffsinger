@@ -9,6 +9,7 @@ import logging
 import subprocess
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,9 @@ from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.backend.message_catalog import backend_message
 from src.backend import orchestrator as orchestrator_module
-from src.backend.orchestrator import PREPROCESS_PLANNING_ERROR_MESSAGE, _planner_v2_prompt
+from src.backend.orchestrator import (
+    PREPROCESS_PLANNING_ERROR_MESSAGE, _planner_v2_prompt, _without_thought_summary,
+)
 from tests.test_backend_api import (  # noqa: F401 - pytest fixture
     _create_session, _preprocess_plan_response, _upload_score, client,
 )
@@ -262,6 +265,59 @@ def test_v2_chooser_step_stops_when_the_turn_budget_is_used_up(client, monkeypat
     assert job["status"] == "failed"
     assert job["errorMessage"] == backend_message("chat.llm_turn_limit_reached", reference="test")
     assert llm.calls == [] and executed == []
+
+
+def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to(
+    client, monkeypatch, tmp_path, caplog,
+):
+    from src.backend.llm_gemini import GeminiRestClient
+
+    class NoCache:
+        def ensure_prompt_cache(self, **kwargs):
+            return None
+
+    class Reply:
+        def __init__(self, text):
+            self._text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"candidates": [{"content": {"parts": [
+                {"thought": True, "text": "thinking it over"}, {"text": self._text},
+            ]}}]}).encode("utf-8")
+
+    chooser_requests = []
+
+    def fake_urlopen(request, timeout=None):
+        schema = json.loads(request.data.decode("utf-8"))["generationConfig"].get("responseSchema")
+        if schema is None:
+            return Reply(DONE_MESSAGE)
+        chooser_requests.append(schema)
+        return Reply(_first_enum(schema))
+
+    monkeypatch.setenv("GEMINI_INCLUDE_THOUGHT_SUMMARY", "1")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    gemini = GeminiRestClient(Settings.from_env(), api_key="dummy", cache_manager=NoCache())
+    score = _chord_score(tmp_path)
+    _, executed, run = _job(client, monkeypatch, planner="v2", llm=gemini)
+    with caplog.at_level(logging.INFO):
+        job = run(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert job["status"] == "completed", job
+    assert len(chooser_requests) == 1
+    assert "retries=0" in caplog.text
+    assert len(executed) == 1
+
+
+def test_thought_summary_is_dropped_only_from_json_objects():
+    assert json.loads(_without_thought_summary('{"s1": "a", "thought_summary": "x"}')) == {"s1": "a"}
+    assert _without_thought_summary('{"s1": "a"}') == '{"s1": "a"}'
+    assert _without_thought_summary("not json") == "not json"
+    assert _without_thought_summary("[1]") == "[1]"
 
 
 def test_v2_job_without_lyrics_stops_with_the_catalog_message_and_no_llm_call(client, monkeypatch):

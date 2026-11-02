@@ -6467,7 +6467,7 @@ class Orchestrator:
             static_prompt_text=_planner_v2_prompt(),
             dynamic_prompt_text=request.dynamic_text,
         )
-        return await asyncio.to_thread(
+        reply = await asyncio.to_thread(
             self._call_llm_client_generate,
             bundle,
             [],
@@ -6475,6 +6475,7 @@ class Orchestrator:
             request.response_schema,
             count_against_turn_budget=False,
         )
+        return _without_thought_summary(reply)
 
     def _preprocess_planning_context_for_attempt(
         self,
@@ -10185,6 +10186,18 @@ _PLANNER_V2_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_p
 def _planner_v2_prompt() -> str:
     """The planner v2 chooser's static prompt, read once."""
     return _PLANNER_V2_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _without_thought_summary(reply: str) -> str:
+    """Drop the key the Gemini client adds to a JSON reply; other text stays for the chooser's retry."""
+    try:
+        payload = json.loads(reply)
+    except (TypeError, ValueError):
+        return reply
+    if not isinstance(payload, dict) or "thought_summary" not in payload:
+        return reply
+    del payload["thought_summary"]
+    return json.dumps(payload)
 
 
 def _snapshot_score_version(snapshot: Any) -> Any:
