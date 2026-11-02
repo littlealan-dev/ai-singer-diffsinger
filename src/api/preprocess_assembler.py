@@ -294,10 +294,13 @@ def assemble_plan(
     sheet: Sheet,
     choices: dict[str, str],
     *,
-    freeform_sections: dict[str, list[dict]] | None = None,
+    freeform_sections: dict[str, list[dict] | dict[str, list[dict]]] | None = None,
     score: dict,
 ) -> dict:
-    """Fill code-owned fields and merge equal per-measure actions exactly."""
+    """Fill code-owned fields and merge equal per-measure actions exactly.
+
+    A freeform slot's sections are one list for all its lanes, or one list per lane id.
+    """
     selected = _selected_options(sheet, choices)
     lines = staff_lyric_lines(score)
     staff_index = note_staffs_by_measure(score)
@@ -308,12 +311,17 @@ def assemble_plan(
         raise FreeformUnresolved(missing)
     if supplied.keys() - freeform.keys():
         raise ValueError(f"Unknown freeform slot IDs: {sorted(supplied.keys() - freeform.keys())}")
-    freeform_actions: dict[str, dict[int, dict]] = {}
+    freeform_actions: dict[tuple[str, str], dict[int, dict]] = {}
     for slot_id, slot in freeform.items():
-        actions = expand(supplied[slot_id])
-        if set(actions) != set(range(slot.start_measure, slot.end_measure + 1)):
-            raise AssemblyError(f"Freeform sections do not cover {slot_id} exactly")
-        freeform_actions[slot_id] = actions
+        value = supplied[slot_id]
+        by_lane = value if isinstance(value, dict) else {lane_id: value for lane_id in slot.lane_ids}
+        if set(by_lane) != set(slot.lane_ids):
+            raise AssemblyError(f"Freeform sections must name each lane of {slot_id} once")
+        for lane_id, sections in by_lane.items():
+            actions = expand(sections)
+            if set(actions) != set(range(slot.start_measure, slot.end_measure + 1)):
+                raise AssemblyError(f"Freeform sections do not cover {slot_id} exactly")
+            freeform_actions[(slot_id, lane_id)] = actions
 
     targets: list[dict] = []
     for lane in sheet.lanes:
@@ -330,7 +338,9 @@ def assemble_plan(
                 if measure in per_measure:
                     raise AssemblyError(f"Overlapping segments for {lane.lane_id} at {measure}")
                 if freeform_slot is not None:
-                    per_measure[measure] = deepcopy(freeform_actions[freeform_slot.slot_id][measure])
+                    per_measure[measure] = deepcopy(
+                        freeform_actions[(freeform_slot.slot_id, lane.lane_id)][measure]
+                    )
                     continue
                 per_measure[measure], reading = _action_for_measure(
                     sheet, selected, lane, segment, measure, score, lines, staff_index

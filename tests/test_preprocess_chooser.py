@@ -282,14 +282,154 @@ def test_staves_are_asked_concurrently():
     assert stats.requests >= 2 and started == stats.requests
 
 
-def test_freeform_sheet_raises_before_any_call(tmp_path):
+def _gap_then_full(slot_lanes):
+    """Freeform answers: the first leaves a gap, the retry covers the bar."""
+    def answer(request, *, gap):
+        reply = {}
+        for key, slot_id in request.key_to_slot.items():
+            if key in request.freeform_bars:
+                start, end = request.freeform_bars[key]
+                lanes = request.response_schema["properties"][key]["items"]["properties"]["lane"]["enum"]
+                sections = [] if gap else [{"start_measure": start, "end_measure": end, "mode": "rest"}]
+                reply[key] = [{"lane": lane, "sections": sections} for lane in lanes]
+            else:
+                reply[key] = request.response_schema["properties"][key]["enum"][0]
+        return json.dumps(reply)
+    return answer
+
+
+def test_freeform_slot_is_one_array_key_and_a_gap_is_retried_once(tmp_path):
     score = _too_many_chord_claims(tmp_path)
+    sheet = build_sheet(score, _context(score))
+    freeform = next(slot for slot in sheet.slots if slot.kind == "freeform")
+    request, = chooser.build_requests(sheet, chooser.build_request_context(score, _context(score), sheet))
+    key = next(key for key, slot_id in request.key_to_slot.items() if slot_id == freeform.slot_id)
+    schema = request.response_schema["properties"][key]
+    assert schema["type"] == "array" and schema["minItems"] == len(freeform.lane_ids)
+    section = schema["items"]["properties"]["sections"]["items"]
+    assert {"start_measure", "end_measure", "mode", "melody_source"} <= set(section["properties"])
+    assert "additionalProperties" not in json.dumps(schema)
+    payload = json.loads(request.dynamic_text)
+    assert payload["slots"][0]["evidence"]["per_measure_facts"]
+    answer = _gap_then_full(freeform.lane_ids)
+    calls = []
+
+    async def call(request):
+        calls.append(request)
+        return answer(request, gap=len(calls) == 1)
+
+    sheet, choices, stats = asyncio.run(chooser.choose(score, _context(score), call=call))
+    assert stats.retries == 1 and len(calls) == 2
+    assert "must cover bars" in calls[1].dynamic_text
+    assert set(choices[freeform.slot_id]) == set(freeform.lane_ids)
+    plan = chooser.assemble_chosen(sheet, choices, score=score)
+    assert all(target["sections"] == [{"start_measure": 1, "end_measure": 1, "mode": "rest"}]
+               for target in plan["targets"])
+
+
+def _silent_second_voice(tmp_path, bars=8):
+    """Voice 1 sings bars 1..bars; voice 2 is silent there and joins in the bar after."""
+    measures = [_note("G", voice="1", lyric=f"w{index}") + '<backup><duration>4</duration></backup>'
+                + _rest(voice="2", duration=4) for index in range(bars)]
+    measures.append(_note("G", voice="1", lyric="end") + '<backup><duration>4</duration></backup>'
+                    + _note("C", voice="2", lyric="low"))
+    return _single_staff_score(tmp_path, measures)
+
+
+def test_cuts_split_a_segment_and_none_changes_nothing(tmp_path):
+    score = _silent_second_voice(tmp_path)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    assert [(segment.start_measure, segment.end_measure) for segment in sheet.segments] == [(1, 8), (9, 9)]
+    cut = build_sheet(score, context, cuts={(0, "1"): {5}})
+    assert [(segment.start_measure, segment.end_measure) for segment in cut.segments] == [(1, 4), (5, 8), (9, 9)]
+    assert build_sheet(score, context, cuts=None) == sheet
+
+
+def _first_choices(sheet):
+    return assembler.first_option_choices(sheet)
+
+
+def _silent_lane(sheet):
+    return next(lane for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
+
+
+def _rest_when_asked(asked):
+    async def call(request):
+        asked.append(request)
+        payload = json.loads(request.dynamic_text)
+        reply = {}
+        for entry in payload["slots"]:
+            enum = request.response_schema["properties"][entry["key"]]["enum"]
+            reply[entry["key"]] = "rest" if entry["kind"] == "mode" and "rest" in enum else enum[0]
+        return json.dumps(reply)
+    return call
+
+
+def test_repair_asks_only_the_failing_bars_with_findings_previous_and_neighbours(tmp_path):
+    score = _silent_second_voice(tmp_path)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    choices = _first_choices(sheet)
+    lane = _silent_lane(sheet)
+    finding = chooser.SlotFinding("partial_lyric_coverage", "P1", "Words missing.", 5, 6)
+    asked = []
+    new_sheet, new_choices, stats = asyncio.run(chooser.choose_repair(
+        score, context, sheet=sheet, choices=choices, failing={lane.lane_id: [(5, 6)]},
+        findings_by_lane={lane.lane_id: [finding]}, pinned=None, call=_rest_when_asked(asked),
+    ))
+    request, = asked
+    assert list(request.key_to_slot.values()) == [f"{lane.lane_id}|5-6|mode"]
+    entry = json.loads(request.dynamic_text)["slots"][0]
+    assert entry["previous"] == "derive"
+    assert entry["findings"] == [{"rule": "partial_lyric_coverage", "severity": "P1",
+                                  "message": "Words missing.", "bars": "5-6"}]
+    # Neighbours give every choice next door, fixed ones included.
+    assert entry["neighbours"]["before"]["mode"] == entry["neighbours"]["after"]["mode"] == "derive"
+    flagged = next(option for option in entry["options"] if option["id"] == "derive")
+    assert flagged["flags"] == ["failed_last_attempt: partial_lyric_coverage"]
+    assert stats.slots_asked == 1
+    assert new_choices[f"{lane.lane_id}|1-4|mode"] == "derive"
+    assert new_choices[f"{lane.lane_id}|7-8|mode"] == "derive"
+    # A non-default structure answer is pinned by the second pass, so it is fixed now.
+    assert new_sheet.fixed[f"{lane.lane_id}|5-6|mode"].option_id == "rest"
+    before = assembler.expand(next(target for target in assembler.assemble_plan(
+        sheet, choices, score=score)["targets"] if target["source"]["voice_part_id"] == "voice part 2")["sections"])
+    after = assembler.expand(next(target for target in chooser.assemble_chosen(
+        new_sheet, new_choices, score=score)["targets"] if target["source"]["voice_part_id"] == "voice part 2")["sections"])
+    assert {measure for measure in before if before[measure] != after[measure]} == {5, 6}
+
+
+def test_repair_drops_an_option_that_failed_with_a_p0(tmp_path):
+    score = _silent_second_voice(tmp_path)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    lane = _silent_lane(sheet)
+    asked = []
+    asyncio.run(chooser.choose_repair(
+        score, context, sheet=sheet, choices=_first_choices(sheet), failing={lane.lane_id: [(5, 6)]},
+        findings_by_lane={lane.lane_id: [chooser.SlotFinding("unsung_notes", "P0", "Broken.", 5, 6)]},
+        pinned=None, call=_rest_when_asked(asked),
+    ))
+    request, = asked
+    assert request.response_schema["properties"]["s1"]["enum"] == ["rest"]
+
+
+def test_repair_over_fixed_slots_asks_nothing(tmp_path):
+    score = parse_score(SATB, verse_number=1)
+    context = {"target": {"part_id": "P1-Staff1"}}
+    sheet = build_sheet(score, context)
+    lane = sheet.lanes[0]
 
     async def call(request):
         raise AssertionError("no call expected")
 
-    with pytest.raises(assembler.FreeformUnresolved):
-        asyncio.run(chooser.choose(score, _context(score), call=call))
+    new_sheet, choices, stats = asyncio.run(chooser.choose_repair(
+        score, context, sheet=sheet, choices=_first_choices(sheet), failing={lane.lane_id: [(1, 1)]},
+        findings_by_lane={}, pinned=None, call=call,
+    ))
+    assert stats.slots_asked == 0 and stats.requests == 0
+    assert choices == _first_choices(new_sheet)
 
 
 def test_non_default_voice_assignment_asks_only_the_changed_slots(tmp_path):

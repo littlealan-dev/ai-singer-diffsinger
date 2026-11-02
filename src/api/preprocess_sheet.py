@@ -321,6 +321,7 @@ def _segments(
     scope_notes: list[dict],
     start: int,
     end: int,
+    cuts: set[int] = frozenset(),
 ) -> list[Segment]:
     density = _staff_scope_measure_max_simultaneous_notes(score, part_index=part_index, staff_scope=scope)
     source_voice = {vp["voice_part_id"]: str(vp["source_voice_id"]) for vp in voice_parts}
@@ -356,7 +357,7 @@ def _segments(
             lanes=tuple(lane_facts),
             annotation=annotations.get(measure),
         )
-        if previous is not None and signature != previous:
+        if previous is not None and (signature != previous or measure in cuts):
             result.append(Segment(part_index, scope, run_start, measure - 1, previous))
             run_start = measure
         previous = signature
@@ -396,8 +397,14 @@ def _eligible_lyric_sources(score: dict) -> list[dict]:
     return sources
 
 
-def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSkeleton:
-    """Build scope lanes and exact signature runs without changing the score."""
+def build_sheet_skeleton(
+    score: dict, planning_context: dict | None, *,
+    cuts: dict[tuple[int, str], set[int]] | None = None,
+) -> SheetSkeleton:
+    """Build scope lanes and exact signature runs without changing the score.
+
+    ``cuts`` maps (part_index, scope_key) to measures that also start a new segment.
+    """
     context = planning_context or {}
     parts = score.get("parts") or []
     skeleton = SheetSkeleton(verse_number=_verse_number(context))
@@ -479,7 +486,8 @@ def build_sheet_skeleton(score: dict, planning_context: dict | None) -> SheetSke
             ))
         skeleton.lanes.extend(scope_lanes)
         skeleton.segments.extend(_segments(
-            score, part, part_index, scope, scope_lanes, scoped_parts, scope_notes, start, end
+            score, part, part_index, scope, scope_lanes, scoped_parts, scope_notes, start, end,
+            set((cuts or {}).get((part_index, scope), ())),
         ))
     skeleton.segments.sort(key=lambda segment: (
         segment.part_index, segment.scope_key, segment.start_measure
@@ -927,6 +935,7 @@ PINNABLE_KINDS = ("mode", "melody_source", "voice_assignment")
 
 def build_sheet(
     score: dict, planning_context: dict | None, *, pinned: dict[str, str] | None = None,
+    cuts: dict[tuple[int, str], set[int]] | None = None,
 ) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
@@ -940,6 +949,7 @@ def build_sheet(
     ``pinned`` maps mode / melody_source / voice_assignment slot ids to a chosen
     option: that slot keeps only the pinned option (so it becomes fixed), and the
     slots that depend on it are built from it instead of from the first option.
+    ``cuts`` adds segment starts (see ``build_sheet_skeleton``).
     """
     pins = dict(pinned or {})
     used_pins: set[str] = set()
@@ -953,7 +963,7 @@ def build_sheet(
         used_pins.add(slot_id)
         return chosen
 
-    skeleton = build_sheet_skeleton(score, planning_context)
+    skeleton = build_sheet_skeleton(score, planning_context, cuts=cuts)
     sheet = Sheet(
         target_part_index=skeleton.target_part_index,
         verse_number=skeleton.verse_number,

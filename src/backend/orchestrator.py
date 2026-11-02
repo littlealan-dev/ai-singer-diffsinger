@@ -109,6 +109,16 @@ class _LlmTurnBudget:
     calls: int = 0
 
 
+@dataclass
+class _PlannerV2State:
+    """Planner v2's latest sheet and choices for one preprocess job; each repair builds on them."""
+
+    score: Dict[str, Any]
+    planning_context: Dict[str, Any]
+    sheet: Any
+    choices: Dict[str, Any]
+
+
 class LlmTurnLimitReached(RuntimeError):
     """The turn reached LLM_CALLS_PER_TURN_LIMIT; carries the user-facing message."""
 
@@ -2492,16 +2502,15 @@ class Orchestrator:
             current_credit_availability = await self._get_current_credit_availability(
                 user_id,
             )
-            planned_by_v2 = False
+            planner_v2: Optional[_PlannerV2State] = None
             if (
                 not tool_calls
                 and isinstance(planning_context, dict)
                 and self._settings.preprocess_planner == "v2"
             ):
-                tool_calls, initial_thought_summary = await self._plan_preprocess_v2(
+                tool_calls, initial_thought_summary, planner_v2 = await self._plan_preprocess_v2(
                     score, planning_context
                 )
-                planned_by_v2 = True
             elif not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
                     snapshot,
@@ -2536,8 +2545,7 @@ class Orchestrator:
                 preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
                 originating_turn_id=originating_turn_id,
-                # Planner v2 has no repair step yet: one attempt, then stop.
-                single_attempt_stop_reason="planner_v2_repair_pending" if planned_by_v2 else None,
+                planner_v2=planner_v2,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
@@ -2742,12 +2750,13 @@ class Orchestrator:
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
         originating_turn_id: Optional[str] = None,
-        single_attempt_stop_reason: Optional[str] = None,
+        planner_v2: Optional["_PlannerV2State"] = None,
     ) -> Dict[str, Any]:
         """Execute an LLM-driven tool workflow with bounded repair turns.
 
-        single_attempt_stop_reason allows one preprocess attempt with no repair,
-        and is the stop reason recorded when that attempt is not good enough.
+        With planner_v2 (the job's first attempt came from planner v2), a repair
+        re-asks the chooser only about the failing bars instead of asking the
+        LLM for a new plan.
         """
         include_score = initial_include_score
         if current_credit_availability is None:
@@ -2782,9 +2791,7 @@ class Orchestrator:
         fixed_other_issue_keys: set[str] = set()
         current_repair_scopes: List[Dict[str, Any]] = []
         attempt_number = 0
-        max_attempts = (
-            1 if single_attempt_stop_reason else max(1, self._settings.preprocess_max_attempts)
-        )
+        max_attempts = max(1, self._settings.preprocess_max_attempts)
         attempt_messages: List[Dict[str, Any]] = []
         preprocess_run_id = preprocess_job_id or f"interactive-{uuid.uuid4().hex}"
         pending_thought_summary = initial_thought_summary or ""
@@ -3036,43 +3043,18 @@ class Orchestrator:
                     break
 
                 if attempt_number >= max_attempts:
-                    if single_attempt_stop_reason:
-                        self._logger.info(
-                            "preprocess_single_attempt_stop reason=%s quality_class=%s",
-                            single_attempt_stop_reason,
-                            best_valid_candidate.quality_class if best_valid_candidate else None,
-                        )
-                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
-                        session_id, best_valid_candidate
-                    )
-                    candidate_response = await self._render_selected_candidate_response(
+                    best_valid_candidate, response, has_candidate = await self._final_attempt_response(
                         session_id,
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        best_invalid_candidate,
                         user_email=user_email,
                         current_credit_availability=current_credit_availability,
-                        stop_reason=single_attempt_stop_reason or "attempt_budget_exhausted",
+                        max_attempts=max_attempts,
+                        stop_reason="attempt_budget_exhausted",
                     )
-                    if candidate_response is not None:
-                        response = candidate_response
-                        include_score = True
-                    elif best_invalid_candidate is not None:
-                        response = self._build_invalid_candidate_error(best_invalid_candidate) or {
-                            "type": "chat_error",
-                            "message": (
-                                f"Unable to produce a clean single singing line after "
-                                f"{max_attempts} attempts."
-                            ),
-                        }
-                    else:
-                        response = {
-                            "type": "chat_text",
-                            "message": (
-                                f"I couldn't finish preparing a clean singing line after {max_attempts} attempts. "
-                                "Please revise the request or part details."
-                            ),
-                        }
+                    include_score = include_score or has_candidate
                     break
 
                 latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -3090,6 +3072,41 @@ class Orchestrator:
                         include_score = True
                     score_version = _snapshot_score_version(latest_snapshot)
                     score_summary = latest_snapshot.get("score_summary")
+                if planner_v2 is not None:
+                    v2_calls, v2_stop_reason = await self._plan_preprocess_v2_repair(
+                        planner_v2, last_action_required_payload or {}
+                    )
+                    if v2_calls is None:
+                        best_valid_candidate, response, has_candidate = await self._final_attempt_response(
+                            session_id,
+                            user_id,
+                            working_score,
+                            best_valid_candidate,
+                            best_invalid_candidate,
+                            user_email=user_email,
+                            current_credit_availability=current_credit_availability,
+                            max_attempts=max_attempts,
+                            stop_reason=v2_stop_reason or "planner_v2_nothing_to_rechoose",
+                        )
+                        include_score = include_score or has_candidate
+                        break
+                    attempt_messages.append({
+                        "attempt_number": attempt_number + 1,
+                        "message": backend_message("preprocess.v2_repairing"),
+                    })
+                    if progress_callback is not None:
+                        await progress_callback(attempt_messages)
+                    current_repair_scopes = self._build_repair_scopes(
+                        last_action_required_payload or {},
+                        baseline_plan=self._select_repair_baseline(
+                            best_candidate=best_valid_candidate,
+                            bootstrap_baseline=bootstrap_plan_baseline,
+                            latest_attempted_plan=attempted_plan,
+                        )[1],
+                    )
+                    pending_calls = v2_calls
+                    pending_thought_summary = ""
+                    continue
                 repair_envelope = self._build_repair_planning_envelope(
                     best_valid_candidate,
                     bootstrap_plan_baseline,
@@ -4800,6 +4817,54 @@ class Orchestrator:
             session_id, score, summary=summary if isinstance(summary, dict) else None
         )
 
+    async def _final_attempt_response(
+        self,
+        session_id: str,
+        user_id: str,
+        working_score: Dict[str, Any],
+        best_valid_candidate: Optional["WorkflowCandidate"],
+        best_invalid_candidate: Optional["WorkflowCandidate"],
+        *,
+        user_email: Optional[str],
+        current_credit_availability: Optional[Dict[str, int]],
+        max_attempts: int,
+        stop_reason: str,
+    ) -> tuple[Optional["WorkflowCandidate"], Dict[str, Any], bool]:
+        """Stop the preprocess attempts: the best candidate, else the best invalid one's error.
+
+        Returns the (materialized) best candidate, the response, and whether the
+        response shows a candidate.
+        """
+        best_valid_candidate = await self._materialize_review_candidate_if_needed(
+            session_id, best_valid_candidate
+        )
+        candidate_response = await self._render_selected_candidate_response(
+            session_id,
+            user_id,
+            working_score,
+            best_valid_candidate,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            stop_reason=stop_reason,
+        )
+        if candidate_response is not None:
+            return best_valid_candidate, candidate_response, True
+        if best_invalid_candidate is not None:
+            return best_valid_candidate, self._build_invalid_candidate_error(best_invalid_candidate) or {
+                "type": "chat_error",
+                "message": (
+                    f"Unable to produce a clean single singing line after "
+                    f"{max_attempts} attempts."
+                ),
+            }, False
+        return best_valid_candidate, {
+            "type": "chat_text",
+            "message": (
+                f"I couldn't finish preparing a clean singing line after {max_attempts} attempts. "
+                "Please revise the request or part details."
+            ),
+        }, False
+
     async def _render_selected_candidate_response(
         self,
         session_id: str,
@@ -6211,14 +6276,10 @@ class Orchestrator:
         self,
         score: Dict[str, Any],
         planning_context: Dict[str, Any],
-    ) -> tuple[List[ToolCall], str]:
+    ) -> tuple[List[ToolCall], str, "_PlannerV2State"]:
         """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
-        from src.api.preprocess_assembler import (
-            AssemblyError,
-            FreeformUnresolved,
-            assemble_plan,
-        )
-        from src.api.preprocess_chooser import ChooserError, choose
+        from src.api.preprocess_assembler import AssemblyError
+        from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose
         from src.api.preprocess_sheet import build_sheet_skeleton
 
         issues = build_sheet_skeleton(score, planning_context).issues
@@ -6240,17 +6301,12 @@ class Orchestrator:
                 call=self._call_preprocess_chooser,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
             )
-        except FreeformUnresolved as exc:
-            self._logger.warning(
-                "planner_v2_freeform_segment slots=%s",
-                exc.slot_ids,
-            )
-            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
         except ChooserError as exc:
             self._logger.warning("planner_v2_chooser_error error=%s", exc)
             raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        self._log_planner_v2_freeform(sheet)
         try:
-            plan = assemble_plan(sheet, choices, score=score)
+            plan = assemble_chosen(sheet, choices, score=score)
         except AssemblyError as exc:
             self._logger.error("planner_v2_construction_violation error=%s", exc)
             raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
@@ -6271,7 +6327,139 @@ class Orchestrator:
             f"planner v2: {stats.slots_asked} choices in {stats.requests} requests, "
             f"{stats.retries} retries, {stats.second_pass_slots} second-pass"
         )
-        return tool_calls, summary
+        return tool_calls, summary, _PlannerV2State(score, planning_context, sheet, choices)
+
+    def _log_planner_v2_freeform(self, sheet: Any) -> None:
+        for slot in sheet.slots:
+            if slot.kind == "freeform":
+                self._logger.info(
+                    "planner_v2_freeform_segment slot=%s reason=%s",
+                    slot.slot_id,
+                    slot.evidence.get("reason"),
+                )
+
+    def _planner_v2_failures(
+        self, sheet: Any, payload: Dict[str, Any]
+    ) -> tuple[Dict[str, List[Tuple[int, int]]], Dict[str, List[Any]]]:
+        """Failing bar spans and findings per sheet lane, from a failing attempt's payload.
+
+        The plan has one target per sheet lane, in sheet.lanes order, so a result
+        or finding that names its target index maps to that lane; otherwise every
+        lane with the same part and source voice part.
+        """
+        from src.api.preprocess_chooser import SlotFinding
+
+        lanes = list(sheet.lanes)
+
+        def lanes_for(index: Any, part_index: Any, voice_part_id: Any) -> List[Any]:
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(lanes):
+                return [lanes[index]]
+            return [lane for lane in lanes
+                    if lane.part_index == part_index and lane.source_voice_part_id == voice_part_id]
+
+        entries: List[Tuple[List[Any], Dict[str, Any]]] = []
+        targets = self._extract_target_results(payload)
+        for position, target in enumerate(targets):
+            index = target.get("target_index")
+            if index is None and len(targets) == len(lanes):
+                index = position
+            for issue in target.get("issues") or []:
+                entries.append((
+                    lanes_for(issue.get("target_index", index), target.get("part_index"),
+                              target.get("target_voice_part_id")),
+                    issue,
+                ))
+        if not targets:
+            for issue in self._extract_issue_entries(payload):
+                entries.append((
+                    lanes_for(issue.get("target_index"), issue.get("part_index"),
+                              issue.get("target_voice_part_id")),
+                    issue,
+                ))
+        failing: Dict[str, List[Tuple[int, int]]] = {}
+        findings: Dict[str, List[Any]] = {}
+        for issue_lanes, issue in entries:
+            spans = self._normalize_issue_spans(issue)
+            rule = str(issue.get("rule") or issue.get("code") or issue.get("action") or "unknown")
+            severity = str(issue.get("rule_severity") or issue.get("severity") or "")
+            message = str(issue.get("message") or issue.get("rule_name") or "")
+            for lane in issue_lanes:
+                for span in spans:
+                    failing.setdefault(lane.lane_id, []).append((span["start"], span["end"]))
+                    findings.setdefault(lane.lane_id, []).append(
+                        SlotFinding(rule, severity, message, span["start"], span["end"])
+                    )
+        merged = {
+            lane_id: [(span["start"], span["end"]) for span in self._normalize_spans(
+                [{"start": start, "end": end} for start, end in spans]
+            )]
+            for lane_id, spans in failing.items()
+        }
+        return merged, findings
+
+    async def _plan_preprocess_v2_repair(
+        self, state: "_PlannerV2State", payload: Dict[str, Any]
+    ) -> tuple[Optional[List[ToolCall]], Optional[str]]:
+        """Re-choose only the failing bars; None and a stop reason when there is nothing to ask."""
+        from src.api.preprocess_assembler import AssemblyError
+        from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose_repair
+
+        failing, findings = self._planner_v2_failures(state.sheet, payload)
+        p0 = any(finding.severity == "P0" for items in findings.values() for finding in items)
+        charged = False
+
+        async def call(request: Any) -> str:
+            # The repair's whole chooser step is one call against the turn budget.
+            nonlocal charged
+            if not charged:
+                charged = True
+                self._charge_llm_turn_budget()
+            return await self._call_preprocess_chooser(request)
+
+        started = time.monotonic()
+        try:
+            sheet, choices, stats = await choose_repair(
+                state.score,
+                state.planning_context,
+                sheet=state.sheet,
+                choices=state.choices,
+                failing=failing,
+                findings_by_lane=findings,
+                pinned=None,
+                call=call,
+                max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+            )
+        except (ChooserError, LlmTurnLimitReached) as exc:
+            self._logger.warning("planner_v2_repair_chooser_error error=%s", exc)
+            return None, "repair_planning_failed"
+        if stats.slots_asked == 0:
+            if p0:
+                self._logger.error(
+                    "planner_v2_construction_violation reason=p0_with_nothing_to_rechoose lanes=%s",
+                    sorted(failing),
+                )
+            self._logger.info("planner_v2_nothing_to_rechoose lanes=%s", sorted(failing))
+            return None, "planner_v2_nothing_to_rechoose"
+        self._log_planner_v2_freeform(sheet)
+        try:
+            plan = assemble_chosen(sheet, choices, score=state.score)
+        except AssemblyError as exc:
+            self._logger.error("planner_v2_construction_violation error=%s", exc)
+            return None, "repair_planning_failed"
+        self._logger.info(
+            "planner_v2_repair requests=%s retries=%s slots_asked=%s second_pass_slots=%s "
+            "wall_seconds=%.2f",
+            stats.requests,
+            stats.retries,
+            stats.slots_asked,
+            stats.second_pass_slots,
+            time.monotonic() - started,
+        )
+        state.sheet, state.choices = sheet, choices
+        return self._apply_preprocess_planning_context_defaults(
+            [ToolCall(name=TOOL_PREPROCESS_VOICE_PARTS, arguments={"request": {"plan": plan}})],
+            state.planning_context,
+        ), None
 
     async def _call_preprocess_chooser(self, request: Any) -> str:
         """Ask the chooser role one request: the v2 prompt, no history, an enum-only schema."""

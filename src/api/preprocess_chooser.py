@@ -1,18 +1,20 @@
 """Planner v2 chooser: ask the LLM for one listed option per open sheet slot.
 
 Pure and offline: requests and replies are plain data, and the LLM call is
-injected, so this module never talks to a provider itself.
+injected, so this module never talks to a provider itself. A freeform slot has
+no menu: the LLM writes its sections, one list per lane.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from statistics import median
 from typing import Any, Awaitable, Callable
 
-from src.api.preprocess_assembler import FreeformUnresolved
+from src.api.preprocess_assembler import AssemblyError, assemble_plan, expand
 from src.api.preprocess_sheet import PINNABLE_KINDS, Lane, Sheet, Slot, build_sheet
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
@@ -32,6 +34,7 @@ class ChooserRequest:
     response_schema: dict        # Gemini OpenAPI subset
     key_to_slot: dict[str, str]  # "s1" -> slot_id
     lane_keys: dict[str, str]    # "L1" -> lane_id
+    freeform_bars: dict[str, tuple[int, int]] = field(default_factory=dict)  # freeform key -> bars
 
 
 @dataclass(frozen=True)
@@ -42,10 +45,54 @@ class ChooserStats:
     second_pass_slots: int
 
 
+@dataclass(frozen=True)
+class SlotFinding:
+    rule: str
+    severity: str
+    message: str
+    start_measure: int
+    end_measure: int
+
+
 RETRY_TEXT = "Your previous answer was invalid: {errors}. Answer every key with one listed id."
 
 # Kinds whose option id alone does not say what the option does.
 _KINDS_WITH_FIELDS = ("voice_assignment", "rank_assignment")
+# Schema keywords Gemini's response schema accepts.
+_GEMINI_SCHEMA_KEYS = (
+    "type", "format", "description", "nullable", "enum", "items", "minItems", "maxItems",
+    "minimum", "maximum", "properties", "required", "propertyOrdering",
+)
+
+Call = Callable[[ChooserRequest], Awaitable[str]]
+
+
+def _gemini_schema(schema: dict) -> dict:
+    """Keep only the keywords Gemini accepts; a ["x", "null"] type becomes nullable x."""
+    result: dict[str, Any] = {}
+    for key in _GEMINI_SCHEMA_KEYS:
+        if key not in schema:
+            continue
+        value = schema[key]
+        if key == "type" and isinstance(value, list):
+            types = [item for item in value if item != "null"]
+            value = types[0] if types else "string"
+            if "null" in schema[key]:
+                result["nullable"] = True
+        elif key == "properties":
+            value = {name: _gemini_schema(item) for name, item in value.items()}
+        elif key == "items":
+            value = _gemini_schema(value)
+        result[key] = value
+    return result
+
+
+@functools.lru_cache(maxsize=1)
+def _section_schema() -> dict:
+    """The plan section the preprocess tool takes, in Gemini's schema form."""
+    from src.mcp.tools import _PREPROCESS_PLAN_SECTION_SCHEMA
+
+    return _gemini_schema(_PREPROCESS_PLAN_SECTION_SCHEMA)
 
 
 def _lane_height_midi(score: dict, lane: Lane) -> int | None:
@@ -108,7 +155,10 @@ def _sent_parts(slot: Slot) -> list[Any]:
     return parts
 
 
-def _request(sheet: Sheet, request_context: dict, slots: list[Slot]) -> ChooserRequest:
+def _request(
+    sheet: Sheet, request_context: dict, slots: list[Slot], extras: dict[str, dict] | None = None,
+) -> ChooserRequest:
+    extras = extras or {}
     known = {lane.lane_id for lane in sheet.lanes}
     used: set[str] = set()
     for slot in slots:
@@ -119,6 +169,7 @@ def _request(sheet: Sheet, request_context: dict, slots: list[Slot]) -> ChooserR
     heights = request_context.get("lane_height_midi") or {}
     slot_keys = {f"s{index}": slot for index, slot in enumerate(slots, start=1)}
     payload_slots = []
+    properties: dict[str, dict] = {}
     for key, slot in slot_keys.items():
         entry: dict[str, Any] = {
             "key": key, "kind": slot.kind, "lanes": [keys[lane_id] for lane_id in slot.lane_ids],
@@ -126,17 +177,32 @@ def _request(sheet: Sheet, request_context: dict, slots: list[Slot]) -> ChooserR
         }
         if slot.evidence:
             entry["evidence"] = _rekey(slot.evidence, keys)
-        options = []
-        for option in slot.options:
-            item: dict[str, Any] = {"id": option.option_id, "label": option.label}
-            if slot.kind in _KINDS_WITH_FIELDS and option.fields:
-                item["fields"] = _rekey(option.fields, keys)
-            if option.flags:
-                item["flags"] = list(option.flags)
-            if option.evidence:
-                item["evidence"] = _rekey(option.evidence, keys)
-            options.append(item)
-        entry["options"] = options
+        if slot.kind == "freeform":
+            properties[key] = {
+                "type": "array", "minItems": len(slot.lane_ids), "maxItems": len(slot.lane_ids),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "lane": {"type": "string", "enum": [keys[lane_id] for lane_id in slot.lane_ids]},
+                        "sections": {"type": "array", "minItems": 1, "items": _section_schema()},
+                    },
+                    "required": ["lane", "sections"],
+                },
+            }
+        else:
+            options = []
+            for option in slot.options:
+                item: dict[str, Any] = {"id": option.option_id, "label": option.label}
+                if slot.kind in _KINDS_WITH_FIELDS and option.fields:
+                    item["fields"] = _rekey(option.fields, keys)
+                if option.flags:
+                    item["flags"] = list(option.flags)
+                if option.evidence:
+                    item["evidence"] = _rekey(option.evidence, keys)
+                options.append(item)
+            entry["options"] = options
+            properties[key] = {"type": "string", "enum": [option.option_id for option in slot.options]}
+        entry.update(_rekey(extras.get(slot.slot_id, {}), keys))
         payload_slots.append(entry)
     payload = {
         "request": request_context.get("request") or {},
@@ -150,23 +216,28 @@ def _request(sheet: Sheet, request_context: dict, slots: list[Slot]) -> ChooserR
         dynamic_text=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
         response_schema={
             "type": "object",
-            "properties": {key: {"type": "string", "enum": [option.option_id for option in slot.options]}
-                           for key, slot in slot_keys.items()},
+            "properties": properties,
             "required": list(slot_keys),
             "propertyOrdering": list(slot_keys),
         },
         key_to_slot={key: slot.slot_id for key, slot in slot_keys.items()},
         lane_keys={key: lane_id for lane_id, key in keys.items()},
+        freeform_bars={key: (slot.start_measure, slot.end_measure)
+                       for key, slot in slot_keys.items() if slot.kind == "freeform"},
     )
 
 
-def build_requests(sheet: Sheet, request_context: dict, *, max_slots_per_request: int = 80) -> list[ChooserRequest]:
-    """One or more requests per staff, cut only at segment boundaries."""
+def build_requests(
+    sheet: Sheet, request_context: dict, *, max_slots_per_request: int = 80,
+    extras: dict[str, dict] | None = None,
+) -> list[ChooserRequest]:
+    """One or more requests per staff, cut only at segment boundaries.
+
+    ``extras`` adds fields to a slot's entry, by slot id (a repair's findings).
+    """
     lanes = {lane.lane_id: lane for lane in sheet.lanes}
     by_scope: dict[tuple[int, str], dict[tuple[int, int], list[Slot]]] = {}
     for slot in sheet.slots:
-        if slot.kind == "freeform":
-            continue
         lane = lanes[slot.lane_ids[0]]
         by_scope.setdefault((lane.part_index, lane.scope_key), {}).setdefault(
             (slot.start_measure, slot.end_measure), []
@@ -176,28 +247,69 @@ def build_requests(sheet: Sheet, request_context: dict, *, max_slots_per_request
         batch: list[Slot] = []
         for segment_slots in segments.values():
             if batch and len(batch) + len(segment_slots) > max_slots_per_request:
-                requests.append(_request(sheet, request_context, batch))
+                requests.append(_request(sheet, request_context, batch, extras))
                 batch = []
             batch.extend(segment_slots)
         if batch:
-            requests.append(_request(sheet, request_context, batch))
+            requests.append(_request(sheet, request_context, batch, extras))
     return requests
 
 
-def parse_reply(request: ChooserRequest, reply_text: str) -> tuple[dict[str, str], list[str]]:
-    """Map a reply to slot-id choices, with every problem as a short error."""
+def _parse_freeform(
+    request: ChooserRequest, key: str, value: Any,
+) -> tuple[dict[str, list[dict]] | None, list[str]]:
+    if not isinstance(value, list):
+        return None, [f"{key}: not a list"]
+    allowed = request.response_schema["properties"][key]["items"]["properties"]["lane"]["enum"]
+    start, end = request.freeform_bars[key]
+    by_lane: dict[str, list[dict]] = {}
+    errors: list[str] = []
+    for entry in value:
+        lane = entry.get("lane") if isinstance(entry, dict) else None
+        if lane not in allowed:
+            errors.append(f"{key}: unknown lane {lane!r}")
+            continue
+        if lane in by_lane:
+            errors.append(f"{key}: lane {lane} given twice")
+            continue
+        sections = entry.get("sections")
+        try:
+            covered = set(expand(sections if isinstance(sections, list) else [None]))
+        except AssemblyError as exc:
+            errors.append(f"{key}: lane {lane}: {exc}")
+            continue
+        if covered != set(range(start, end + 1)):
+            errors.append(f"{key}: lane {lane}: sections must cover bars {start}-{end} exactly")
+            continue
+        by_lane[lane] = sections
+    errors.extend(f"{key}: lane {lane} missing" for lane in allowed if lane not in by_lane)
+    if errors:
+        return None, errors
+    return {request.lane_keys[lane]: sections for lane, sections in by_lane.items()}, []
+
+
+def parse_reply(request: ChooserRequest, reply_text: str) -> tuple[dict[str, Any], list[str]]:
+    """Map a reply to slot-id choices, with every problem as a short error.
+
+    A menu slot's choice is an option id; a freeform slot's is {lane_id: sections}.
+    """
     try:
         reply = json.loads(reply_text)
     except (TypeError, ValueError):
         return {}, ["reply: not valid JSON"]
     if not isinstance(reply, dict):
         return {}, ["reply: not a JSON object"]
-    choices: dict[str, str] = {}
+    choices: dict[str, Any] = {}
     errors: list[str] = []
     properties = request.response_schema["properties"]
     for key, slot_id in request.key_to_slot.items():
         if key not in reply:
             errors.append(f"{key}: missing")
+        elif key in request.freeform_bars:
+            sections, problems = _parse_freeform(request, key, reply[key])
+            errors.extend(problems)
+            if sections is not None:
+                choices[slot_id] = sections
         elif reply[key] not in properties[key]["enum"]:
             errors.append(f"{key}: unknown option {reply[key]!r}")
         else:
@@ -206,7 +318,7 @@ def parse_reply(request: ChooserRequest, reply_text: str) -> tuple[dict[str, str
     return choices, errors
 
 
-async def _ask(request: ChooserRequest, call: Callable[[ChooserRequest], Awaitable[str]]) -> tuple[dict[str, str], int]:
+async def _ask(request: ChooserRequest, call: Call) -> tuple[dict[str, Any], int]:
     choices, errors = parse_reply(request, await call(request))
     if not errors:
         return choices, 0
@@ -219,63 +331,211 @@ async def _ask(request: ChooserRequest, call: Callable[[ChooserRequest], Awaitab
 
 
 async def _ask_all(
-    sheet: Sheet, request_context: dict, call: Callable[[ChooserRequest], Awaitable[str]],
-    max_slots_per_request: int,
-) -> tuple[dict[str, str], int, int]:
-    requests = build_requests(sheet, request_context, max_slots_per_request=max_slots_per_request)
+    sheet: Sheet, request_context: dict, call: Call, max_slots_per_request: int,
+    extras: dict[str, dict] | None = None,
+) -> tuple[dict[str, Any], int, int]:
+    requests = build_requests(sheet, request_context, max_slots_per_request=max_slots_per_request,
+                              extras=extras)
     answers = await asyncio.gather(*(_ask(request, call) for request in requests))
-    choices: dict[str, str] = {}
+    choices: dict[str, Any] = {}
     for answer, _ in answers:
         choices.update(answer)
     return choices, len(requests), sum(retried for _, retried in answers)
-
-
-def _raise_on_freeform(sheet: Sheet) -> None:
-    freeform = [slot.slot_id for slot in sheet.slots if slot.kind == "freeform"]
-    if freeform:
-        raise FreeformUnresolved(freeform)
 
 
 def _menus(sheet: Sheet) -> dict[str, Slot]:
     return {slot.slot_id: slot for slot in sheet.slots if slot.kind != "freeform"}
 
 
+def _structure_pins(sheet: Sheet, choices: dict[str, Any]) -> dict[str, str]:
+    """Structure choices that are not the slot's first option."""
+    return {slot.slot_id: choices[slot.slot_id] for slot in _menus(sheet).values()
+            if slot.kind in PINNABLE_KINDS and slot.slot_id in choices
+            and choices[slot.slot_id] != slot.options[0].option_id}
+
+
+def _still_valid(slot: Slot, choice: Any) -> bool:
+    if slot.kind == "freeform":
+        return isinstance(choice, dict) and set(choice) == set(slot.lane_ids)
+    return choice in {option.option_id for option in slot.options}
+
+
+async def _second_pass(
+    score: dict, planning_context: dict | None, sheet: Sheet, choices: dict[str, Any], *,
+    pinned: dict[str, str], cuts: dict | None, call: Call, max_slots_per_request: int,
+) -> tuple[Sheet, dict[str, Any], int, int, int]:
+    """Rebuild with the non-default structure choices pinned and re-ask the slots that changed."""
+    pins = {**pinned, **_structure_pins(sheet, choices)}
+    if pins == pinned:
+        return sheet, choices, 0, 0, 0
+    previous = {slot.slot_id: slot for slot in sheet.slots}
+    rebuilt = build_sheet(score, planning_context, pinned=pins, cuts=cuts)
+    changed = [slot for slot in rebuilt.slots if (
+        slot.slot_id not in previous
+        or [option.option_id for option in slot.options]
+        != [option.option_id for option in previous[slot.slot_id].options]
+        or not _still_valid(slot, choices.get(slot.slot_id))
+    )]
+    if not changed:
+        return rebuilt, choices, 0, 0, 0
+    context = build_request_context(score, planning_context, rebuilt)
+    again, requests, retries = await _ask_all(
+        replace(rebuilt, slots=changed), context, call, max_slots_per_request
+    )
+    return rebuilt, {**choices, **again}, requests, retries, len(changed)
+
+
+def _final(sheet: Sheet, choices: dict[str, Any]) -> dict[str, Any]:
+    return {slot.slot_id: choices[slot.slot_id] for slot in sheet.slots}
+
+
 async def choose(
     score: dict, planning_context: dict | None, *,
-    call: Callable[[ChooserRequest], Awaitable[str]], max_slots_per_request: int = 80,
-) -> tuple[Sheet, dict[str, str], ChooserStats]:
-    """Choose every menu slot, re-asking the slots a non-default structure choice changes."""
+    call: Call, max_slots_per_request: int = 80,
+) -> tuple[Sheet, dict[str, Any], ChooserStats]:
+    """Choose every open slot, re-asking the slots a non-default structure choice changes."""
     sheet = build_sheet(score, planning_context)
-    _raise_on_freeform(sheet)
     context = build_request_context(score, planning_context, sheet)
     choices, requests, retries = await _ask_all(sheet, context, call, max_slots_per_request)
-    slots_asked = len(_menus(sheet))
-    second_pass_slots = 0
-
-    pinned = {slot.slot_id: choices[slot.slot_id] for slot in _menus(sheet).values()
-              if slot.kind in PINNABLE_KINDS and choices[slot.slot_id] != slot.options[0].option_id}
-    if pinned:
-        first = _menus(sheet)
-        sheet = build_sheet(score, planning_context, pinned=pinned)
-        _raise_on_freeform(sheet)
-        changed = [slot for slot in sheet.slots if slot.kind != "freeform" and (
-            slot.slot_id not in first
-            or [option.option_id for option in slot.options]
-            != [option.option_id for option in first[slot.slot_id].options]
-            or choices.get(slot.slot_id) not in {option.option_id for option in slot.options}
-        )]
-        if changed:
-            context = build_request_context(score, planning_context, sheet)
-            again, more_requests, more_retries = await _ask_all(
-                replace(sheet, slots=changed), context, call, max_slots_per_request
-            )
-            choices.update(again)
-            requests += more_requests
-            retries += more_retries
-            second_pass_slots = len(changed)
-
-    final = {slot_id: choices[slot_id] for slot_id in _menus(sheet)}
-    return sheet, final, ChooserStats(
-        requests=requests, retries=retries,
+    slots_asked = len(sheet.slots)
+    sheet, choices, more_requests, more_retries, second_pass_slots = await _second_pass(
+        score, planning_context, sheet, choices, pinned={}, cuts=None,
+        call=call, max_slots_per_request=max_slots_per_request,
+    )
+    return sheet, _final(sheet, choices), ChooserStats(
+        requests=requests + more_requests, retries=retries + more_retries,
         slots_asked=slots_asked, second_pass_slots=second_pass_slots,
+    )
+
+
+def assemble_chosen(sheet: Sheet, choices: dict[str, Any], *, score: dict) -> dict:
+    """Assemble the plan from menu choices and freeform sections."""
+    freeform = {slot.slot_id for slot in sheet.slots if slot.kind == "freeform"}
+    return assemble_plan(
+        sheet, {slot_id: value for slot_id, value in choices.items() if slot_id not in freeform},
+        freeform_sections={slot_id: choices[slot_id] for slot_id in freeform if slot_id in choices},
+        score=score,
+    )
+
+
+def _slot_key(slot_id: str) -> tuple[str, int, int, str]:
+    prefix, span, kind = slot_id.rsplit("|", 2)
+    start, end = span.split("-", 1)
+    return prefix, int(start), int(end), kind
+
+
+def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= span_end and span_start <= end for span_start, span_end in spans)
+
+
+def _selection_lookup(selected: dict[str, Any]) -> Callable[[str], Any]:
+    """The earlier choice for a slot id: same lane prefix and kind, covering its bars."""
+    by_key = [(_slot_key(slot_id), value) for slot_id, value in selected.items()]
+
+    def lookup(slot_id: str) -> Any:
+        prefix, start, end, kind = _slot_key(slot_id)
+        for (old_prefix, old_start, old_end, old_kind), value in by_key:
+            if (old_prefix, old_kind) == (prefix, kind) and old_start <= start and end <= old_end:
+                return value
+        return None
+
+    return lookup
+
+
+def _repair_slot(slot: Slot, previous: str | None, findings: list[SlotFinding]) -> Slot:
+    """Drop an option that failed with a P0; flag one that failed otherwise."""
+    if previous is None or not findings or slot.kind == "freeform":
+        return slot
+    if any(finding.severity == "P0" for finding in findings):
+        kept = tuple(option for option in slot.options if option.option_id != previous)
+        return replace(slot, options=kept or slot.options)
+    flag = "failed_last_attempt: " + ", ".join(sorted({finding.rule for finding in findings}))
+    return replace(slot, options=tuple(
+        replace(option, flags=(*option.flags, flag)) if option.option_id == previous else option
+        for option in slot.options
+    ))
+
+
+async def choose_repair(
+    score: dict, planning_context: dict | None, *,
+    sheet: Sheet, choices: dict[str, Any],
+    failing: dict[str, list[tuple[int, int]]],
+    findings_by_lane: dict[str, list[SlotFinding]],
+    pinned: dict[str, str] | None,
+    call: Call, max_slots_per_request: int = 80,
+) -> tuple[Sheet, dict[str, Any], ChooserStats]:
+    """Re-ask only the slots over the failing lanes and bars; carry every other choice over.
+
+    ``failing`` maps a lane id to its failing (start, end) bar spans. Each span
+    becomes its own segment, so the repair can change just those bars.
+    """
+    lanes = {lane.lane_id: lane for lane in sheet.lanes}
+    cuts: dict[tuple[int, str], set[int]] = {}
+    for lane_id, spans in failing.items():
+        lane = lanes[lane_id]
+        for start, end in spans:
+            cuts.setdefault((lane.part_index, lane.scope_key), set()).update({start, end + 1})
+    selected = {**{slot_id: option.option_id for slot_id, option in sheet.fixed.items()},
+                **(pinned or {}), **choices}
+    earlier = _selection_lookup(selected)
+
+    def failing_here(slot: Slot) -> bool:
+        return any(_overlaps(slot.start_measure, slot.end_measure, failing.get(lane_id, []))
+                   for lane_id in slot.lane_ids)
+
+    draft = build_sheet(score, planning_context, cuts=cuts)
+    pins = {slot.slot_id: earlier(slot.slot_id) for slot in _menus(draft).values()
+            if slot.kind in PINNABLE_KINDS and not failing_here(slot)
+            and _still_valid(slot, earlier(slot.slot_id))
+            and earlier(slot.slot_id) != slot.options[0].option_id}
+    new_sheet = build_sheet(score, planning_context, pinned=pins, cuts=cuts) if pins else draft
+    carried: dict[str, Any] = {}
+    ask: list[Slot] = []
+    extras: dict[str, dict] = {}
+    current = {**{slot_id: option.option_id for slot_id, option in new_sheet.fixed.items()}}
+    for slot in new_sheet.slots:
+        value = earlier(slot.slot_id)
+        if not failing_here(slot) and _still_valid(slot, value):
+            carried[slot.slot_id] = value
+            current[slot.slot_id] = value
+    for slot in new_sheet.slots:
+        if slot.slot_id in carried:
+            continue
+        previous = earlier(slot.slot_id) if _still_valid(slot, earlier(slot.slot_id)) else None
+        findings = [finding for lane_id in slot.lane_ids for finding in findings_by_lane.get(lane_id, [])
+                    if _overlaps(slot.start_measure, slot.end_measure,
+                                 [(finding.start_measure, finding.end_measure)])]
+        ask.append(_repair_slot(slot, previous if slot.kind != "freeform" else None, findings))
+        prefix, start, end, _ = _slot_key(slot.slot_id)
+        neighbours: dict[str, dict[str, str]] = {"before": {}, "after": {}}
+        for slot_id, value in current.items():
+            other_prefix, other_start, other_end, kind = _slot_key(slot_id)
+            if other_prefix != prefix or not isinstance(value, str):
+                continue
+            if other_end == start - 1:
+                neighbours["before"][kind] = value
+            elif other_start == end + 1:
+                neighbours["after"][kind] = value
+        extra: dict[str, Any] = {"neighbours": neighbours}
+        if findings:
+            extra["findings"] = [{
+                "rule": finding.rule, "severity": finding.severity, "message": finding.message,
+                "bars": f"{finding.start_measure}-{finding.end_measure}",
+            } for finding in findings]
+        if previous is not None and slot.kind != "freeform":
+            extra["previous"] = previous
+        extras[slot.slot_id] = extra
+    if not ask:
+        return new_sheet, _final(new_sheet, carried), ChooserStats(0, 0, 0, 0)
+    context = build_request_context(score, planning_context, new_sheet)
+    answers, requests, retries = await _ask_all(
+        replace(new_sheet, slots=ask), context, call, max_slots_per_request, extras
+    )
+    final_sheet, final_choices, more_requests, more_retries, second_pass_slots = await _second_pass(
+        score, planning_context, new_sheet, {**carried, **answers}, pinned=pins, cuts=cuts,
+        call=call, max_slots_per_request=max_slots_per_request,
+    )
+    return final_sheet, _final(final_sheet, final_choices), ChooserStats(
+        requests=requests + more_requests, retries=retries + more_retries,
+        slots_asked=len(ask), second_pass_slots=second_pass_slots,
     )
