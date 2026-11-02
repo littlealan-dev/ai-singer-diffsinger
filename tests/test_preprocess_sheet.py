@@ -787,6 +787,15 @@ def _with_wordless_part(score):
     return score
 
 
+def _silence_voice_in_bar(score, part_index, voice, measure):
+    """Drop one voice's notes in one bar, so its lane copies another voice there."""
+    score["parts"][part_index]["notes"] = [
+        note for note in score["parts"][part_index]["notes"]
+        if not (note.get("voice") == voice and note.get("measure_number") == measure)
+    ]
+    return score
+
+
 def _lyric_slot_kinds(sheet, lane):
     kinds = {slot.kind for slot in sheet.slots if lane.lane_id in slot.lane_ids}
     kinds.update(slot_id.rsplit("|", 1)[-1] for slot_id in sheet.fixed
@@ -799,6 +808,8 @@ def test_lyric_donor_order_flags_and_no_extension_policy():
     # The local soprano has eight words; the distant tenor has just one.
     tenor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
     tenor["lyric"] = "one"
+    # A lane with its own notes sings them; the silent alto bar copies a voice.
+    _silence_voice_in_bar(score, 0, "2", 1)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
     donors = [slot for slot in sheet.slots if slot.kind == "lyric_source" and alto_id in slot.lane_ids]
@@ -836,6 +847,7 @@ def test_same_part_other_staff_uses_weak_source_flag():
         for note in score["parts"][0]["notes"] if note.get("voice") == "1"
     ]
     score["parts"] = [combined]
+    _silence_voice_in_bar(score, 0, "2", 1)
     voice_part_by_voice = {vp["source_voice_id"]: vp["voice_part_id"]
                            for vp in _analyze_part_voice_parts(combined, 0)["voice_parts"]}
     sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
@@ -912,8 +924,12 @@ def test_every_derive_section_gets_a_lyric_source():
 
 
 def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
-    score = _with_wordless_part(parse_score(SATB, verse_number=1))
+    score = _silence_voice_in_bar(_with_wordless_part(parse_score(SATB, verse_number=1)), 0, "2", 2)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    assert all(section["lyric_source"]["voice_part_id"]
+               for target in plan["targets"] for section in target["sections"]
+               if section["mode"] == "derive")
     for segment in sheet.segments:
         for lane_id, _ in segment.signature.lanes:
             relevant = [slot for slot in sheet.slots
@@ -925,6 +941,10 @@ def test_every_derive_lane_segment_has_a_lyric_donor_or_freeform():
             mode_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|mode"
             mode_options = next((slot.options for slot in relevant if slot.kind == "mode"),
                                 (sheet.fixed[mode_id],) if mode_id in sheet.fixed else ())
+            melody_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|melody_source"
+            if melody_id in sheet.fixed:
+                # Its own notes, on a staff with a lyric line: code reads the words.
+                continue
             if any(option.fields["mode"] == "derive" for option in mode_options):
                 lyric_id = f"{lane_id}|{segment.start_measure}-{segment.end_measure}|lyric_source"
                 assert any(slot.kind == "lyric_source" and slot.options for slot in relevant) or (

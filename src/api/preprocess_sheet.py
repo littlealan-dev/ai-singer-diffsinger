@@ -678,13 +678,16 @@ def _lyric_line_options(
     ) for part_index, voice_part_id in ordered)
 
 
+def _slot_id(lane_ids: tuple[str, ...], segment: Segment, kind: str, *, joint_id: str | None = None) -> str:
+    return f"{joint_id or lane_ids[0]}|{segment.start_measure}-{segment.end_measure}|{kind}"
+
+
 def _choice_slot(
     lane_ids: tuple[str, ...], segment: Segment, kind: str,
     options: tuple[Option, ...], *, joint_id: str | None = None, evidence: dict | None = None,
 ) -> Slot:
-    prefix = joint_id or lane_ids[0]
     return Slot(
-        slot_id=f"{prefix}|{segment.start_measure}-{segment.end_measure}|{kind}",
+        slot_id=_slot_id(lane_ids, segment, kind, joint_id=joint_id),
         kind=kind,
         lane_ids=lane_ids,
         start_measure=segment.start_measure,
@@ -919,7 +922,12 @@ def _voice_assignment_options(
     return tuple(options), evidence, None
 
 
-def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
+PINNABLE_KINDS = ("mode", "melody_source", "voice_assignment")
+
+
+def build_sheet(
+    score: dict, planning_context: dict | None, *, pinned: dict[str, str] | None = None,
+) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
     Lyrics follow the reading rule: when every melody option reads from staffs
@@ -928,7 +936,23 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
     strategy menus remain; a non-native lane's lyric choices use its default
     melody source for coverage and onset evidence, and with no word-lyric donor
     its fallback lyric options mirror its melody options.
+
+    ``pinned`` maps mode / melody_source / voice_assignment slot ids to a chosen
+    option: that slot keeps only the pinned option (so it becomes fixed), and the
+    slots that depend on it are built from it instead of from the first option.
     """
+    pins = dict(pinned or {})
+    used_pins: set[str] = set()
+
+    def pin(slot_id: str, options: tuple[Option, ...]) -> tuple[Option, ...]:
+        if slot_id not in pins:
+            return options
+        chosen = tuple(option for option in options if option.option_id == pins[slot_id])
+        if not chosen:
+            raise ValueError(f"Unknown option {pins[slot_id]!r} for pinned slot {slot_id}")
+        used_pins.add(slot_id)
+        return chosen
+
     skeleton = build_sheet_skeleton(score, planning_context)
     sheet = Sheet(
         target_part_index=skeleton.target_part_index,
@@ -938,6 +962,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
         issues=list(skeleton.issues),
     )
     if sheet.target_part_index is None or "score_has_no_lyrics" in sheet.issues:
+        if pins:
+            raise ValueError(f"Unknown pinned slot ids: {sorted(pins)}")
         return sheet
     derived_indices = _derived_part_indices(score)
     eligible_lyrics = _eligible_lyric_sources(score)
@@ -960,6 +986,8 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             sheet.slots.append(_freeform_slot(segment, lanes, freeform_reason))
             continue
         if assignment is not None:
+            joint_id = f"{lanes[0].part_id}|{segment.scope_key}"
+            assignment = pin(_slot_id((), segment, "voice_assignment", joint_id=joint_id), assignment)
             segment_slots.append(_choice_slot(
                 tuple(option_lane.lane_id for option_lane in sorted(
                     lanes, key=lambda option_lane: (
@@ -968,7 +996,7 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                         option_lane.default_rank,
                     )
                 )), segment, "voice_assignment", assignment,
-                joint_id=f"{lanes[0].part_id}|{segment.scope_key}",
+                joint_id=joint_id,
                 evidence=assignment_evidence,
             ))
         for lane in lanes:
@@ -976,6 +1004,13 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             target_notes = _target_notes(score, lane, segment)
             if assignment is None:
                 melody = _melody_options(lane, candidates)
+                own = tuple(option for option in melody if option.fields["melody_source"] == {
+                    "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
+                })
+                if native and own:
+                    # The score states these notes are this voice's: the lane sings them.
+                    melody = own
+                melody = pin(_slot_id((lane.lane_id,), segment, "melody_source"), melody)
             else:
                 source_ref = assignment[0].fields["melody_source_by_lane"][lane.lane_id]
                 chosen_source = next(source for source in candidates
@@ -992,9 +1027,11 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
             mode_ids = ("derive",) if native or may_take_chord else (
                 ("derive", "rest") if melody else ("rest",)
             )
-            segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", tuple(
-                Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
-                for mode in mode_ids
+            segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", pin(
+                _slot_id((lane.lane_id,), segment, "mode"), tuple(
+                    Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
+                    for mode in mode_ids
+                ),
             )))
             if not melody:
                 continue
@@ -1182,9 +1219,12 @@ def build_sheet(score: dict, planning_context: dict | None) -> Sheet:
                        lane_segments[0].signature)
         if any(slot.kind == "freeform" and lane.lane_id in slot.lane_ids for slot in sheet.slots):
             continue
-        _put_slot(sheet, _choice_slot((lane.lane_id,), span, "split_shared_note_policy", tuple(
-            Option(value, value, {"split_shared_note_policy": value}, {}, ())
-            for value in ("duplicate_to_all", "assign_primary_only")
+        # A shared notehead is stated for every voice on it.
+        _put_slot(sheet, _choice_slot((lane.lane_id,), span, "split_shared_note_policy", (
+            Option("duplicate_to_all", "duplicate_to_all",
+                   {"split_shared_note_policy": "duplicate_to_all"}, {}, ()),
         )))
+    if pins.keys() - used_pins:
+        raise ValueError(f"Unknown pinned slot ids: {sorted(pins.keys() - used_pins)}")
     sheet.slots.sort(key=lambda slot: (slot.start_measure, slot.slot_id))
     return sheet
