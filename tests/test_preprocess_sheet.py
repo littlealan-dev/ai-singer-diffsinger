@@ -107,6 +107,19 @@ def test_lyric_bar_cases_broken_split_word_and_tied_hold():
     assert sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[2].case == "no_word_for_lane"
 
 
+def test_tied_note_with_own_word_is_a_new_lyric_note():
+    make = _reading_note
+    tied_word = make(1, 2, "own", tie_type="stop")
+    tied_blank = make(1, 3, tie_type="continue")
+    score = _reading_score(make(1, 0, "first"), tied_word, tied_blank,
+                           make(2, 0), make(2, 3, "other"))
+    lines = sheet_module.staff_lyric_lines(score)
+    line = lines[(0, "1")]
+    assert sheet_module.read_lane_lyrics(line, [tied_word, tied_blank]) == ["own", "+"]
+    cases = sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)
+    assert cases[1].case == "shared"
+
+
 def _two_staff_score(tmp_path):
     # One MusicXML part, four simultaneous voices over two staff scopes.
     notes = []

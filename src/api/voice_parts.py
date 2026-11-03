@@ -4908,7 +4908,12 @@ def _propagate_lyrics(
             words = staff_words.get(staff, {})
             earlier = staff in first_word_offset and first_word_offset[staff] < key
             tied = str(copied.get("tie_type") or "").strip() in {"stop", "continue"}
-            if not tied:
+            if tied and _lyric_kind(copied) == "word" and not _is_generated_solfege_lyric(copied):
+                source_item = next((item for item in source_by_offset.get(key, [])
+                                    if _staff_scope_key(item["note"]) == staff
+                                    and _voice_key(item["note"].get("voice")) ==
+                                    _voice_key(copied.get("voice"))), None)
+            elif not tied:
                 source_item = words.get(key)
             if source_item is None and earlier:
                 copied.pop("lyric", None)
@@ -4934,8 +4939,13 @@ def _propagate_lyrics(
             target_note_matched_count += 1
         out.append(copied)
 
+    diagnostic_timeline = (
+        [item for item in source_timeline
+         if _note_in_measure_range(item["note"], measure_range)]
+        if strategy == "staff_line" and measure_range is not None else source_timeline
+    )
     dropped_source_lyrics: List[Dict[str, Any]] = []
-    for item in source_timeline:
+    for item in diagnostic_timeline:
         source_index = int(item.get("source_index", -1))
         if source_index in matched_source_indices:
             continue
@@ -4954,7 +4964,7 @@ def _propagate_lyrics(
 
     diagnostics = {
         "strategy": effective_strategy,
-        "source_lyric_candidates_count": len(source_timeline),
+        "source_lyric_candidates_count": len(diagnostic_timeline),
         "target_note_count_in_range": target_note_count_in_range,
         "target_note_attempted_count": target_note_attempted_count,
         "target_note_matched_count": target_note_matched_count,

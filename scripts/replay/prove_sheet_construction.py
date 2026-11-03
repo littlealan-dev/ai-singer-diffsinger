@@ -273,18 +273,23 @@ def planned_lyric_metrics(score: dict, sheet: Any, choices: dict, plan: dict, xm
                 _analyze_part_voice_parts(part, index)["voice_parts"]}
         for index, part in enumerate(score["parts"])
     }
-    slur_bars: set[tuple[int, str, int]] = set()
+    slur_bars: set[tuple[str, str, str, int]] = set()
     root = ET.fromstring(xml)
     def local(tag: str) -> str:
         return tag.rsplit("}", 1)[-1]
-    for part_index, part_node in enumerate(child for child in root if local(child.tag) == "part"):
+    for part_node in (child for child in root if local(child.tag) == "part"):
+        raw_part_id = str(part_node.get("id") or "")
         for measure in (child for child in part_node if local(child.tag) == "measure"):
-            bar = int(measure.get("number") or 0)
+            try:
+                bar = int(measure.get("number") or 0)
+            except ValueError:
+                continue
             for note in (child for child in measure if local(child.tag) == "note"):
                 if not any(local(node.tag) == "slur" for node in note.iter()):
                     continue
                 voice = next((node.text for node in note if local(node.tag) == "voice"), None)
-                slur_bars.add((part_index, _voice_key(voice), bar))
+                staff = next((node.text for node in note if local(node.tag) == "staff"), None)
+                slur_bars.add((raw_part_id, str(staff or "1").strip(), _voice_key(voice), bar))
     words_lost = 0
     staff_line_bars: set[tuple[str, int]] = set()
     borrowed_slur_bars: set[tuple[str, int]] = set()
@@ -300,6 +305,8 @@ def planned_lyric_metrics(score: dict, sheet: Any, choices: dict, plan: dict, xm
             if melody_index is None:
                 continue
             melody_voice = voices[melody_index].get(melody.get("voice_part_id"))
+            melody_raw_part_id = str(score["parts"][melody_index].get("raw_part_id")
+                                     or score["parts"][melody_index].get("part_id") or "")
             source = section.get("lyric_source") or {}
             source_index = part_by_id.get(str(source.get("part_id")))
             source_voice = voices[source_index].get(source.get("voice_part_id")) if source_index is not None else None
@@ -344,7 +351,8 @@ def planned_lyric_metrics(score: dict, sheet: Any, choices: dict, plan: dict, xm
                         continue
                     if strategy == "staff_line":
                         if (all(vp != melody.get("voice_part_id") for vp, _ in entries)
-                                and (melody_index, _voice_key(melody_voice), bar) in slur_bars):
+                                and (melody_raw_part_id, _staff_scope_key(note),
+                                     _voice_key(melody_voice), bar) in slur_bars):
                             borrowed_slur_bars.add((lane.lane_id, bar))
                     elif beat[1] not in strict_beats:
                         words_lost += 1

@@ -112,6 +112,28 @@ def test_staff_line_earlier_word_hold_tie_and_range():
     assert all(note.get("syllabic") is None for note in copied[1:])
 
 
+def test_staff_line_tied_own_word_and_section_diagnostics():
+    source = [
+        {"staff": "1", "voice": "1", "measure_number": 1, "offset_beats": 0.0,
+         "duration_beats": 1.0, "pitch_midi": 60, "lyric": "earlier"},
+        {"staff": "1", "voice": "1", "measure_number": 2, "offset_beats": 4.0,
+         "duration_beats": 1.0, "pitch_midi": 60, "lyric": "own", "tie_type": "stop"},
+        {"staff": "1", "voice": "2", "measure_number": 2, "offset_beats": 5.0,
+         "duration_beats": 1.0, "pitch_midi": 65, "lyric": "other"},
+    ]
+    targets = [dict(source[1]),
+               {"staff": "1", "voice": "1", "measure_number": 2, "offset_beats": 5.0,
+                "duration_beats": 1.0, "pitch_midi": 60, "tie_type": "continue"}]
+    copied, diagnostics = _propagate_lyrics(
+        target_notes=targets, source_notes=source, strategy="staff_line", policy="replace_all",
+        verse_number=None, copy_all_verses=False, measure_range=(2, 2),
+    )
+    assert [note.get("lyric") for note in copied] == ["own", "+"]
+    assert diagnostics["source_lyric_candidates_count"] == 2
+    assert diagnostics["dropped_source_lyrics_count"] == 1
+    assert [item["lyric"] for item in diagnostics["dropped_source_lyrics"]] == ["other"]
+
+
 def test_tied_lane_bar_uses_staff_line_and_keeps_hold(tmp_path):
     _shared_line_score(tmp_path)
     xml = (tmp_path / "synthetic.xml").read_text(encoding="utf-8")

@@ -186,7 +186,9 @@ def read_lane_lyrics(
     for note in notes:
         beat = _beat(note)
         if str(note.get("tie_type") or "").strip() in {"stop", "continue"}:
-            readings.append("+" if first is not None and first < beat else None)
+            own_word = _word_text(note)
+            readings.append(own_word if own_word is not None else
+                            ("+" if first is not None and first < beat else None))
         elif beat in words:
             readings.append(words[beat])
         elif first is not None and first < beat:
@@ -251,7 +253,8 @@ def lyric_bar_cases(
         if not words:
             continue
         new_beats = {_beat(note) for note in lane_notes
-                     if str(note.get("tie_type") or "").strip() not in {"stop", "continue"}}
+                     if str(note.get("tie_type") or "").strip() not in {"stop", "continue"}
+                     or _word_text(note) is not None}
         if not new_beats.intersection(words):
             cases[bar] = LyricBarCase("no_word_for_lane")
             continue
