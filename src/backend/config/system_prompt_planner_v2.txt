@@ -12,6 +12,7 @@ What each kind decides
 - voice_assignment: which lane sings which note of the chords in this segment. The first option is pitch order (highest note to highest lane); choose another only when the evidence shows the voices cross.
 - rank_fallback (greedy | skip): when a chord has fewer notes than lanes, greedy lets a lane double a neighbouring note and skip lets it rest. Prefer greedy for short gaps inside a phrase, skip when the lane clearly drops out.
 - lyric_line: which line of words a lane sings when its staff has two. Pick the line that belongs to this lane's voice and fits its rhythm.
+- lyric_reading (own_words_only | share_line): voices on this staff both have words in these bars, and the app could not tell whether they sing one text. share_line gives this lane the word typed on any voice at each of its new notes; own_words_only keeps only its own voice's words and holds its other notes. Choose share_line when the words read as one sentence across the voices.
 - lyric_source and lyric_strategy: only for a lane whose notes come from a staff with no words. Pick the staff whose words fit this lane's notes best (see the coverage evidence). strict_onset when the rhythms line up, overlap_best_match when they are shifted, syllable_flow only when both are weak.
 
 Repairs
