@@ -38,7 +38,9 @@ def _attribute_key(element: ET.Element) -> tuple[str, str]:
 def _carry_attributes(measure: ET.Element, state: dict[tuple[str, str], ET.Element]) -> None:
     if not state:
         return
-    attributes = next((child for child in measure if _local(child.tag) == "attributes"), None)
+    # A later attributes element can change the music midway through this bar.
+    # The carried state must precede any note or direction in the kept bar.
+    attributes = measure[0] if len(measure) and _local(measure[0].tag) == "attributes" else None
     if attributes is None:
         namespace = measure.tag.split("}", 1)[0] + "}" if "}" in measure.tag else ""
         attributes = ET.Element(namespace + "attributes")
@@ -114,12 +116,11 @@ def trim_musicxml(score: dict, raw_part_ids: list[str], measures: set[int]) -> s
                     raise EvidenceUnavailable("duplicate_measure_number")
                 found_measures.add(number)
                 keep = number in measures
-                original_attributes = next((item for item in measure
-                                            if _local(item.tag) == "attributes"), None)
                 if keep and not previous_kept:
                     _carry_attributes(measure, state)
-                if original_attributes is not None:
-                    for item in original_attributes:
+                for attributes in (item for item in measure
+                                   if _local(item.tag) == "attributes"):
+                    for item in attributes:
                         if _local(item.tag) in _CARRY:
                             state[_attribute_key(item)] = deepcopy(item)
                 if not keep:

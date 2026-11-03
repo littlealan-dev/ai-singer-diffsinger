@@ -110,6 +110,40 @@ def test_trim_uses_raw_part_id_for_split_staff_and_derived_part(tmp_path):
     assert 'id="P3"' in trim_musicxml(derived, ["P3"], {3})
 
 
+def test_trim_carries_state_before_midbar_attribute_change(tmp_path):
+    source = tmp_path / "midbar.xml"
+    source.write_text('''<score-partwise version="3.1"><part-list><score-part id="P1">
+<part-name>Voice</part-name></score-part></part-list><part id="P1">
+<measure number="1"><attributes><divisions>1</divisions><key><fifths>0</fifths></key>
+</attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration>
+<type>quarter</type></note></measure>
+<measure number="2"><note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration>
+<type>quarter</type></note><attributes><divisions>2</divisions><key><fifths>1</fifths></key>
+</attributes><note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration>
+<type>quarter</type></note></measure>
+<measure number="3"><note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration>
+<type>quarter</type></note></measure></part></score-partwise>''', encoding="utf-8")
+    score = parse_score(source, verse_number=1)
+    trimmed = trim_musicxml(score, ["P1"], {2})
+    measure = next(item for item in ET.fromstring(trimmed).iter() if _local(item.tag) == "measure")
+    assert [_local(item.tag) for item in measure] == ["attributes", "note", "attributes", "note"]
+    first, second = [item for item in measure if _local(item.tag) == "attributes"]
+    assert next(item for item in first if _local(item.tag) == "divisions").text == "1"
+    assert next(item for item in second if _local(item.tag) == "divisions").text == "2"
+    path = tmp_path / "trimmed.xml"
+    path.write_text(trimmed, encoding="utf-8")
+    reparsed = parse_score(path, verse_number=1)
+    old = [note for note in score["parts"][0]["notes"] if note["measure_number"] == 2]
+    new = reparsed["parts"][0]["notes"]
+    assert [(note["pitch_midi"], note["duration_beats"]) for note in old] == [
+        (note["pitch_midi"], note["duration_beats"]) for note in new
+    ]
+    after = trim_musicxml(score, ["P1"], {3})
+    carried = next(item for item in ET.fromstring(after).iter() if _local(item.tag) == "attributes")
+    assert next(item for item in carried if _local(item.tag) == "divisions").text == "2"
+    assert next(item for item in carried.iter() if _local(item.tag) == "fifths").text == "1"
+
+
 def test_trim_fails_closed_for_missing_duplicate_and_unreadable_bars(tmp_path):
     source = tmp_path / "source.xml"
     source.write_text(_xml(), encoding="utf-8")
