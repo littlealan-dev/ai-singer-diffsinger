@@ -94,10 +94,20 @@ def test_trim_uses_raw_part_id_for_split_staff_and_derived_part(tmp_path):
     assert '<staff>2</staff>' in xml
 
     source = tmp_path / "with-derived.xml"
-    source.write_text(_xml(), encoding="utf-8")
+    root = ET.fromstring(_xml())
+    part_list = next(item for item in root if item.tag == "part-list")
+    derived_entry = deepcopy(next(item for item in part_list if item.get("id") == "P1"))
+    derived_entry.set("id", "P3")
+    part_list.append(derived_entry)
+    derived_part = deepcopy(next(item for item in root if item.tag == "part" and item.get("id") == "P1"))
+    derived_part.set("id", "P3")
+    root.append(derived_part)
+    source.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
     derived = parse_score(source, verse_number=1)
-    derived["parts"][1]["is_derived_part"] = True
-    assert 'id="P2"' in trim_musicxml(derived, ["P2"], {3})
+    derived["parts"][2]["is_derived_part"] = True
+    assert derived["parts"][2]["raw_part_id"] == "P3"
+    assert _local(ET.fromstring(trim_musicxml(derived, ["P3"], {3})).tag) == "score-partwise"
+    assert 'id="P3"' in trim_musicxml(derived, ["P3"], {3})
 
 
 def test_trim_fails_closed_for_missing_duplicate_and_unreadable_bars(tmp_path):

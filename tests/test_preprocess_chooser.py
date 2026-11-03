@@ -192,7 +192,7 @@ def test_voice_assignment_fields_are_sent_with_lane_keys(tmp_path):
     assert all("fields" not in option for option in mode["options"])
 
 
-def _evidence_request(tmp_path, *, context_extra=None, limit=400000):
+def _evidence_request(tmp_path, *, context_extra=None, limit=400000, reading=True):
     source = tmp_path / "evidence.xml"
     source.write_text(_xml(), encoding="utf-8")
     score = parse_score(source, verse_number=1)
@@ -201,7 +201,9 @@ def _evidence_request(tmp_path, *, context_extra=None, limit=400000):
     context = {"target": {"part_id": score["parts"][0]["part_id"]}, **(context_extra or {})}
     sheet = build_sheet(score, context)
     lane = sheet.lanes[0]
-    sheet.slots = [_slot(lane.lane_id, 1), _slot(lane.lane_id, 3, "lyric_reading")]
+    sheet.slots = [_slot(lane.lane_id, 1)]
+    if reading:
+        sheet.slots.append(_slot(lane.lane_id, 3, "lyric_reading"))
     request, = chooser.build_requests(
         sheet, chooser.build_request_context(score, context, sheet, evidence_max_chars=limit),
     )
@@ -244,6 +246,13 @@ def test_request_language_uses_planning_context_and_suppresses_sample(tmp_path):
     assert "lyric_sample" not in payload
 
 
+def test_other_parts_are_omitted_without_lyric_reading(tmp_path):
+    _, request = _evidence_request(tmp_path, reading=False)
+    payload = json.loads(request.dynamic_text)
+    assert _xml_bars(payload["score_xml"]) == {"P1": [1, 2]}
+    assert "score_xml_other_parts" not in payload
+
+
 def test_request_omits_xml_when_over_limit_or_source_unavailable(tmp_path):
     score, too_large = _evidence_request(tmp_path, limit=1)
     payload = json.loads(too_large.dynamic_text)
@@ -256,6 +265,15 @@ def test_request_omits_xml_when_over_limit_or_source_unavailable(tmp_path):
     missing, = chooser.build_requests(sheet, chooser.build_request_context(score, context, sheet))
     assert "score_xml" not in json.loads(missing.dynamic_text)
     assert missing.evidence_chars == 0 and missing.evidence_unavailable == "unreadable_path"
+
+    source = tmp_path / "evidence.xml"
+    source.write_text(_xml().replace('<measure number="2">', '<measure number="1">', 1),
+                      encoding="utf-8")
+    score["source_musicxml_path"] = str(source)
+    duplicate, = chooser.build_requests(sheet, chooser.build_request_context(score, context, sheet))
+    assert "score_xml" not in json.loads(duplicate.dynamic_text)
+    assert duplicate.evidence_chars == 0
+    assert duplicate.evidence_unavailable == "duplicate_measure_number"
 
 
 def _lane(lane_id):

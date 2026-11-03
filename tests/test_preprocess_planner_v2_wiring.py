@@ -324,14 +324,20 @@ def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to
     assert len(executed) == 1
 
 
-def test_v2_job_continues_without_xml_when_evidence_exceeds_limit(client, monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("unavailable", ["too_large", "unreadable_path"])
+def test_v2_job_continues_without_xml_when_evidence_is_unavailable(
+    client, monkeypatch, tmp_path, caplog, unavailable,
+):
     score = _chord_score(tmp_path)
     context = {"target": {"part_id": score["parts"][0]["part_id"]}}
     llm = FakeLlm()
     orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
-    monkeypatch.setattr(orchestrator, "_settings", replace(
-        orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
-    ))
+    if unavailable == "too_large":
+        monkeypatch.setattr(orchestrator, "_settings", replace(
+            orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
+        ))
+    else:
+        score["source_musicxml_path"] = str(tmp_path / "missing.xml")
     with caplog.at_level(logging.INFO):
         job = run(score, context)
     assert job["status"] == "completed", job
@@ -339,7 +345,7 @@ def test_v2_job_continues_without_xml_when_evidence_exceeds_limit(client, monkey
     assert len(chooser_calls) == 1
     assert "score_xml" not in json.loads(chooser_calls[0]["bundle"].dynamic_prompt_text)
     assert "planner_v2_evidence_chars count=0" in caplog.text
-    assert "planner_v2_evidence_unavailable reason=too_large" in caplog.text
+    assert f"planner_v2_evidence_unavailable reason={unavailable}" in caplog.text
     assert len(executed) == 1
 
 
