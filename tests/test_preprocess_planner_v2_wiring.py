@@ -105,8 +105,23 @@ def _job(client, monkeypatch, *, planner, llm, tool_result=_ready):
     monkeypatch.setattr(app.state.router, "call_tool", call_tool)
     job_id = f"job-{session_id[:8]}"
     app.state.job_store.create_job(job_id=job_id, user_id="test-user", session_id=session_id, status="queued")
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+    planned_source = None
+    lookups = 0
+
+    async def source_for_planning(active_session_id, active_user_id):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1 and planned_source is not None:
+            return planned_source
+        return await original_ensure(active_session_id, active_user_id)
+
+    if planner == "v2":
+        monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
 
     def run(score, planning_context):
+        nonlocal planned_source
+        planned_source = Path(score["source_musicxml_path"])
         asyncio.run(orchestrator._run_preprocess_job(
             session_id, score, [], job_id, "test-user", "test@example.com",
             initial_message="Preparing the line.", initial_thought_summary="",
@@ -220,17 +235,6 @@ def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_pla
     assert len(requests) == 2
     llm = FakeLlm(chooser_barrier=threading.Barrier(2, timeout=5))
     orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
-    original_ensure = orchestrator._sessions.ensure_active_musicxml
-    lookups = 0
-
-    async def source_for_planning(session_id, user_id):
-        nonlocal lookups
-        lookups += 1
-        if lookups == 1:
-            return Path(score["source_musicxml_path"])
-        return await original_ensure(session_id, user_id)
-
-    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
     job = run(score, context)
     assert job["status"] == "completed", job
     chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
@@ -377,7 +381,6 @@ def test_v2_active_musicxml_lookup_retries_only_recoverable_failures(
     context = {"target": {"part_id": score["parts"][0]["part_id"]}}
     llm = FakeLlm()
     orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
-    original_ensure = orchestrator._sessions.ensure_active_musicxml
     lookups = 0
     waits = []
 
@@ -388,7 +391,9 @@ def test_v2_active_musicxml_lookup_retries_only_recoverable_failures(
             raise SessionMusicXmlUnavailableError("temporarily unavailable")
         if lookups == 3:
             return Path(score["source_musicxml_path"])
-        return await original_ensure(session_id, user_id)
+        return await type(orchestrator._sessions).ensure_active_musicxml(
+            orchestrator._sessions, session_id, user_id,
+        )
 
     async def record_sleep(delay):
         waits.append(delay)

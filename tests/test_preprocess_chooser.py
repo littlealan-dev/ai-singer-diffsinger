@@ -631,6 +631,11 @@ def test_non_default_voice_assignment_asks_only_the_changed_slots(tmp_path):
 
 def test_first_options_everywhere_means_no_second_pass_and_the_same_plan(tmp_path):
     for name, score, context in _fixtures(tmp_path):
+        if name == "no_word_two_part":
+            # The donor part has only bar 3, while the sheet asks for its neighbours.
+            with pytest.raises(EvidenceUnavailable, match="missing_measure"):
+                asyncio.run(chooser.choose(score, context, call=_first_option_call))
+            continue
         sheet, choices, stats = asyncio.run(chooser.choose(score, context, call=_first_option_call))
         expected_sheet = build_sheet(score, context)
         assert sheet == expected_sheet, name
