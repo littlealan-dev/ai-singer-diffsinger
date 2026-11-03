@@ -336,8 +336,30 @@ def test_v2_job_continues_without_xml_when_evidence_is_unavailable(
         monkeypatch.setattr(orchestrator, "_settings", replace(
             orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
         ))
+        original_ensure = orchestrator._sessions.ensure_active_musicxml
+        attempts = 0
+
+        async def source_for_planning(session_id, user_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return Path(score["source_musicxml_path"])
+            return await original_ensure(session_id, user_id)
+
+        monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
     else:
         score["source_musicxml_path"] = str(tmp_path / "missing.xml")
+        original_ensure = orchestrator._sessions.ensure_active_musicxml
+        attempts = 0
+
+        async def fail_first_lookup(session_id, user_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise FileNotFoundError("active MusicXML unavailable")
+            return await original_ensure(session_id, user_id)
+
+        monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", fail_first_lookup)
     with caplog.at_level(logging.INFO):
         job = run(score, context)
     assert job["status"] == "completed", job
@@ -346,6 +368,8 @@ def test_v2_job_continues_without_xml_when_evidence_is_unavailable(
     assert "score_xml" not in json.loads(chooser_calls[0]["bundle"].dynamic_prompt_text)
     assert "planner_v2_evidence_chars count=0" in caplog.text
     assert f"planner_v2_evidence_unavailable reason={unavailable}" in caplog.text
+    if unavailable == "unreadable_path":
+        assert "planner_v2_evidence_unavailable reason=active_musicxml_unavailable" in caplog.text
     assert len(executed) == 1
 
 
@@ -506,6 +530,46 @@ def test_v2_repair_rests_a_silent_bar_and_the_next_attempt_passes(client, monkey
     assert LlmRole.PREPROCESS not in llm.roles()
     assert notices == []
     assert backend_message("preprocess.v2_repairing") in published
+
+
+def test_v2_chooser_uses_active_musicxml_for_first_and_repair_requests(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    active = Path(score["source_musicxml_path"])
+    missing = tmp_path / "other-worker.xml"
+    score["source_musicxml_path"] = str(missing)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+
+    def fail_once(arguments):
+        plan = arguments["request"]["plan"]
+        return _ready(arguments) if _section_at(plan, 0, 2)["mode"] == "rest" else _failing(
+            0, top.source_voice_part_id, 2,
+        )
+
+    llm = FakeLlm(chooser_reply=_rest_when_repairing)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=fail_once)
+    calls = []
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+
+    async def ensure_active_musicxml(session_id, user_id):
+        calls.append((session_id, user_id))
+        return active if len(calls) == 1 else await original_ensure(session_id, user_id)
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", ensure_active_musicxml)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert len(executed) == 2 and len(calls) >= 1
+    assert score["source_musicxml_path"] == str(missing)
+    chooser_payloads = [json.loads(call["bundle"].dynamic_prompt_text) for call in llm.calls
+                        if call["role"] == LlmRole.PREPROCESS_CHOOSER]
+    assert len(chooser_payloads) >= 2
+    assert all("score_xml" in payload for payload in chooser_payloads)
+    repair = next(payload for payload in chooser_payloads
+                  if any(slot.get("findings") for slot in payload["slots"]))
+    assert 'number="2"' in repair["score_xml"]
+    entry = next(slot for slot in repair["slots"] if slot.get("findings"))
+    assert entry["previous"] and entry["findings"] and entry["neighbours"]
 
 
 def _lint_failed(top, measure):

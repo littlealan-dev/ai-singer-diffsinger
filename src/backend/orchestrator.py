@@ -2509,7 +2509,7 @@ class Orchestrator:
                 and self._settings.preprocess_planner == "v2"
             ):
                 tool_calls, initial_thought_summary, planner_v2 = await self._plan_preprocess_v2(
-                    score, planning_context
+                    score, planning_context, session_id=session_id, user_id=user_id
                 )
             elif not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
@@ -6276,12 +6276,26 @@ class Orchestrator:
         self,
         score: Dict[str, Any],
         planning_context: Dict[str, Any],
+        *,
+        session_id: str,
+        user_id: str,
     ) -> tuple[List[ToolCall], str, "_PlannerV2State"]:
         """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
         from src.api.preprocess_assembler import AssemblyError
         from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose
         from src.api.preprocess_sheet import build_sheet_skeleton
 
+        # The recorded source may belong to another worker. Resolve the active
+        # artifact before asking the chooser, and retain it for local repairs.
+        score = dict(score)
+        try:
+            score["source_musicxml_path"] = str(
+                await self._sessions.ensure_active_musicxml(session_id, user_id)
+            )
+        except Exception:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=active_musicxml_unavailable"
+            )
         issues = build_sheet_skeleton(score, planning_context).issues
         if "score_has_no_lyrics" in issues:
             raise PreprocessPlanningError(backend_message("preprocess.score_needs_lyrics"))
