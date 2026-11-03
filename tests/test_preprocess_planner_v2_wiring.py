@@ -218,7 +218,18 @@ def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_pla
     requests = build_requests(sheet, build_request_context(score, context, sheet))
     assert len(requests) == 2
     llm = FakeLlm(chooser_barrier=threading.Barrier(2, timeout=5))
-    _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+    lookups = 0
+
+    async def source_for_planning(session_id, user_id):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1:
+            return Path(score["source_musicxml_path"])
+        return await original_ensure(session_id, user_id)
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
     job = run(score, context)
     assert job["status"] == "completed", job
     chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
