@@ -98,6 +98,14 @@ def test_lyric_bar_cases_broken_split_word_and_tied_hold():
     assert sheet_module.read_lane_lyrics(lines[(0, "1")], [tied]) == ["+"]
     assert sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[1].case == "shared"
 
+    tied["measure_number"] = 2
+    tied["offset_beats"] = 4.0
+    next_word = make(2, 4, "second")
+    next_word["measure_number"] = 2
+    score = _reading_score(make(1, 0, "first"), tied, next_word)
+    lines = sheet_module.staff_lyric_lines(score)
+    assert sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[2].case == "no_word_for_lane"
+
 
 def _two_staff_score(tmp_path):
     # One MusicXML part, four simultaneous voices over two staff scopes.

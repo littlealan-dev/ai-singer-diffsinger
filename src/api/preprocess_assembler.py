@@ -286,6 +286,7 @@ def _carriers(
         carriers[min(readings)] = (staff[0], min(counts, key=lambda key: (-counts[key], key)))
     previous = carriers[min(carriers)] if carriers else None
     refs: dict[int, tuple[dict[str, str], str]] = {}
+    case_cache: dict[tuple[int, str, str, str | None], dict] = {}
     for measure in sorted(readings):
         previous = carriers.get(measure, previous)
         part_index, voice_part_id = previous
@@ -294,7 +295,10 @@ def _carriers(
         if line_voice is None and len(staffs) == 1:
             staff = next(iter(staffs))
             only = line_voice_for_staff(lines[staff], staff[0], line_voice)
-            case = lyric_bar_cases(score, lines, melody_ref[0], staff[1], melody_ref[1], only).get(measure)
+            case_key = (melody_ref[0], staff[1], melody_ref[1], only)
+            if case_key not in case_cache:
+                case_cache[case_key] = lyric_bar_cases(score, lines, *case_key)
+            case = case_cache[case_key].get(measure)
             if case is not None and (case.case in {"no_word_for_lane", "shared"}
                                      or case.case == "ambiguous" and reading_choice == "share_line"):
                 strategy = "staff_line"

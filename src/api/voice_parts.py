@@ -3303,11 +3303,13 @@ def _execute_timeline_sections(
                     )
                 if section.get("lyric_strategy") == "staff_line":
                     source_part_index = int(lyric_source["part_index"])
-                    source_part = (source_score.get("parts") or [])[source_part_index]
-                    source_meta = _find_voice_part_by_id(
+                    source_parts = source_score.get("parts") or []
+                    source_part = (source_parts[source_part_index]
+                                   if 0 <= source_part_index < len(source_parts) else None)
+                    source_meta = (_find_voice_part_by_id(
                         _analyze_part_voice_parts(source_part, source_part_index)["voice_parts"],
                         str(lyric_source["voice_part_id"]),
-                    )
+                    ) if source_part is not None else None)
                     staves = {_staff_scope_key(note) for note in working_notes
                               if _is_countable_sung_note(note)}
                     override_source_notes = (

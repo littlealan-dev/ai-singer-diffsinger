@@ -97,6 +97,30 @@ def test_staff_line_earlier_word_hold_tie_and_range():
     assert all(note.get("syllabic") is None for note in copied[1:])
 
 
+def test_tied_lane_bar_uses_staff_line_and_keeps_hold(tmp_path):
+    _shared_line_score(tmp_path)
+    xml = (tmp_path / "synthetic.xml").read_text(encoding="utf-8")
+    xml = xml.replace('<type>half</type></note><backup>',
+                      '<type>half</type><tie type="start"/></note><backup>')
+    xml = xml.replace('</measure></part>', '''</measure><measure number="2">
+<note><pitch><step>A</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice>
+<type>whole</type><tie type="stop"/></note><backup><duration>4</duration></backup>
+<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>2</voice>
+<type>whole</type><lyric><text>third</text></lyric></note></measure></part>''')
+    score = _parse_inline(tmp_path, xml)
+    sheet = _sheet(score, score["parts"][0]["part_id"])
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    lane = next(target for target in plan["targets"]
+                if target["source"]["voice_part_id"] == "voice part 1")
+    assert assembler.expand(lane["sections"])[2]["lyric_strategy"] == "staff_line"
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    ref = result["targets"][0]["appended_part_ref"]["part_index"]
+    tied = [note for note in result["score"]["parts"][ref]["notes"]
+            if note["measure_number"] == 2]
+    assert [note.get("lyric") for note in tied] == ["+"]
+
+
 def _assert_schema(value, schema):
     """Check the public schema features used by a plan, without another dependency."""
     kinds = schema.get("type", [])

@@ -234,11 +234,12 @@ def lyric_bar_cases(
         if not (prev_syllabic or next_syllabic):
             continue
         if (prev_syllabic in {"begin", "middle"}) != (next_syllabic in {"middle", "end"}):
-            for note in (previous, following):
-                beat = _beat(note)
-                own = any(vp == lane_voice_part_id for vp, _ in line.words.get(beat, []))
-                if not own:
-                    broken_bars.add(beat[0])
+            borrowed = any(
+                not any(vp == lane_voice_part_id for vp, _ in line.words.get(_beat(note), []))
+                for note in (previous, following)
+            )
+            if borrowed:
+                broken_bars.add(_beat(following)[0])
     cases: dict[int, LyricBarCase] = {}
     for bar, lane_notes in notes_by_bar.items():
         words = {beat: [(vp, text) for vp, text in entries
@@ -1067,6 +1068,7 @@ def build_sheet(
                        for source in eligible_lyrics}
     lines = staff_lyric_lines(score)
     staff_index = note_staffs_by_measure(score)
+    case_cache: dict[tuple[int, str, str, str | None], dict[int, LyricBarCase]] = {}
     for segment in sheet.segments:
         lanes = [lane for lane in sheet.lanes
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
@@ -1177,8 +1179,10 @@ def build_sheet(
                     if staff[0] != default_melody["part_index"]:
                         continue
                     only = line_voice_for_staff(lines[staff], staff[0], default_line)
-                    cases = lyric_bar_cases(score, lines, staff[0], staff[1],
-                                            default_melody["voice_part_id"], only)
+                    case_key = (staff[0], staff[1], default_melody["voice_part_id"], only)
+                    if case_key not in case_cache:
+                        case_cache[case_key] = lyric_bar_cases(score, lines, *case_key)
+                    cases = case_cache[case_key]
                     for bar, case in cases.items():
                         if (segment.start_measure <= bar <= segment.end_measure
                                 and case.case == "ambiguous"):
