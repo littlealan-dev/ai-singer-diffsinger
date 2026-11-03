@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -12,6 +13,7 @@ from src.api import parse_score
 from src.api import preprocess_assembler as assembler
 from src.api import preprocess_chooser as chooser
 from src.api.preprocess_sheet import Lane, MeasureSignature, Option, Sheet, Slot, build_sheet
+from tests.test_preprocess_evidence import _xml
 from tests.test_preprocess_sheet import (
     SATB, SHARED_LINE, _chord_score, _four_note_chord_with_native_lanes, _no_word_two_part_score,
     _note, _parse_inline, _rest, _silence_voice_in_bar, _single_staff_score, _too_many_chord_claims,
@@ -188,6 +190,72 @@ def test_voice_assignment_fields_are_sent_with_lane_keys(tmp_path):
     assert set(assignment["options"][0]["fields"]["melody_source_by_lane"]) == set(request.lane_keys)
     mode = next(slot for slot in payload["slots"] if slot["kind"] == "lyric_line")
     assert all("fields" not in option for option in mode["options"])
+
+
+def _evidence_request(tmp_path, *, context_extra=None, limit=400000):
+    source = tmp_path / "evidence.xml"
+    source.write_text(_xml(), encoding="utf-8")
+    score = parse_score(source, verse_number=1)
+    score["score_summary"]["title"] = "Shared score"
+    score["score_summary"]["composer"] = "Composer"
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}, **(context_extra or {})}
+    sheet = build_sheet(score, context)
+    lane = sheet.lanes[0]
+    sheet.slots = [_slot(lane.lane_id, 1), _slot(lane.lane_id, 3, "lyric_reading")]
+    request, = chooser.build_requests(
+        sheet, chooser.build_request_context(score, context, sheet, evidence_max_chars=limit),
+    )
+    return score, request
+
+
+def _xml_bars(xml):
+    root = ET.fromstring(xml)
+    parts = [item for item in root if item.tag == "part"]
+    return {part.get("id"): [int(measure.get("number")) for measure in part if measure.tag == "measure"]
+            for part in parts}
+
+
+def test_request_shares_trimmed_xml_and_existing_score_metadata(tmp_path):
+    score, request = _evidence_request(tmp_path)
+    payload = json.loads(request.dynamic_text)
+    assert _xml_bars(payload["score_xml"]) == {"P1": [1, 2, 3]}
+    assert _xml_bars(payload["score_xml_other_parts"]) == {"P2": [2, 3]}
+    assert request.evidence_chars == len(payload["score_xml"]) + len(payload["score_xml_other_parts"])
+    assert request.evidence_unavailable is None
+    assert payload["score"] == {
+        "title": "Shared score", "composer": "Composer", "selected_verse": "1", "available_verses": ["1"],
+    }
+    assert payload["tempos"] == score["tempos"]
+    assert payload["lyric_sample"] == ["one", "two", "three"]
+    assert payload["lanes"][0]["part_name"] == "Choir"
+    assert payload["lanes"][0]["xml_part"] == "P1"
+    assert payload["lanes"][0]["xml_voice"] == "1"
+    assert len(payload["slots"]) == 2
+    assert all("score_xml" not in slot for slot in payload["slots"])
+
+
+def test_request_language_uses_planning_context_and_suppresses_sample(tmp_path):
+    _, request = _evidence_request(tmp_path, context_extra={
+        "request": {"language": "French"},
+        "future_synthesis_request": {"language": "English"},
+    })
+    payload = json.loads(request.dynamic_text)
+    assert payload["request"]["language"] == "English"
+    assert "lyric_sample" not in payload
+
+
+def test_request_omits_xml_when_over_limit_or_source_unavailable(tmp_path):
+    score, too_large = _evidence_request(tmp_path, limit=1)
+    payload = json.loads(too_large.dynamic_text)
+    assert "score_xml" not in payload and "score_xml_other_parts" not in payload
+    assert too_large.evidence_chars == 0 and too_large.evidence_unavailable == "too_large"
+    score["source_musicxml_path"] = str(tmp_path / "missing.xml")
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    sheet.slots = [_slot(sheet.lanes[0].lane_id, 1)]
+    missing, = chooser.build_requests(sheet, chooser.build_request_context(score, context, sheet))
+    assert "score_xml" not in json.loads(missing.dynamic_text)
+    assert missing.evidence_chars == 0 and missing.evidence_unavailable == "unreadable_path"
 
 
 def _lane(lane_id):
@@ -380,7 +448,9 @@ def test_repair_asks_only_the_failing_bars_with_findings_previous_and_neighbours
     ))
     request, = asked
     assert list(request.key_to_slot.values()) == [f"{lane.lane_id}|5-6|mode"]
-    entry = json.loads(request.dynamic_text)["slots"][0]
+    payload = json.loads(request.dynamic_text)
+    assert _xml_bars(payload["score_xml"]) == {"P1": [4, 5, 6, 7]}
+    entry = payload["slots"][0]
     assert entry["previous"] == "derive"
     assert entry["findings"] == [{"rule": "partial_lyric_coverage", "severity": "P1",
                                   "message": "Words missing.", "bars": "5-6"}]
@@ -505,10 +575,10 @@ def test_non_default_voice_assignment_asks_only_the_changed_slots(tmp_path):
     assignment = next(slot for slot in first_sheet.slots if slot.kind == "voice_assignment")
     other = next(option for option in assignment.options
                  if option.fields["melody_source_by_lane"] != assignment.options[0].fields["melody_source_by_lane"])
-    asked: list[list[str]] = []
+    asked: list[chooser.ChooserRequest] = []
 
     async def call(request):
-        asked.append(list(request.key_to_slot.values()))
+        asked.append(request)
         answer = json.loads(_first_answer(request))
         for key, slot_id in request.key_to_slot.items():
             if slot_id == assignment.slot_id:
@@ -517,12 +587,13 @@ def test_non_default_voice_assignment_asks_only_the_changed_slots(tmp_path):
 
     sheet, choices, stats = asyncio.run(chooser.choose(score, _context(score), call=call))
     assert len(asked) == 2 and stats.requests == 2
+    assert all("score_xml" in json.loads(request.dynamic_text) for request in asked)
     expected = build_sheet(score, _context(score), pinned={assignment.slot_id: other.option_id})
     assert sheet == expected
     first_menus = {slot.slot_id: [option.option_id for option in slot.options] for slot in first_sheet.slots}
     changed = [slot.slot_id for slot in expected.slots
                if first_menus.get(slot.slot_id) != [option.option_id for option in slot.options]]
-    assert changed and asked[1] == changed
+    assert changed and list(asked[1].key_to_slot.values()) == changed
     assert [slot_id.rsplit("|", 1)[-1] for slot_id in changed] == ["mode"]
     assert stats.second_pass_slots == len(changed)
     assert sheet.fixed[assignment.slot_id] == other

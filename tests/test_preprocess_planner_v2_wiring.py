@@ -153,6 +153,16 @@ def test_chooser_batch_size_defaults_to_200_and_must_be_positive(monkeypatch):
         Settings.from_env()
 
 
+def test_chooser_evidence_limit_defaults_to_400000_and_must_be_positive(monkeypatch):
+    monkeypatch.delenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", raising=False)
+    assert Settings.from_env().preprocess_chooser_evidence_max_chars == 400000
+    monkeypatch.setenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", "50")
+    assert Settings.from_env().preprocess_chooser_evidence_max_chars == 50
+    monkeypatch.setenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", "0")
+    with pytest.raises(ValueError, match="PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS"):
+        Settings.from_env()
+
+
 def test_gemini_client_uses_the_chooser_role_config(monkeypatch):
     from src.backend.llm_gemini import GeminiRestClient
 
@@ -310,6 +320,26 @@ def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to
     assert job["status"] == "completed", job
     assert len(chooser_requests) == 1
     assert "retries=0" in caplog.text
+    assert "planner_v2_evidence_chars count=" in caplog.text
+    assert len(executed) == 1
+
+
+def test_v2_job_continues_without_xml_when_evidence_exceeds_limit(client, monkeypatch, tmp_path, caplog):
+    score = _chord_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    llm = FakeLlm()
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    monkeypatch.setattr(orchestrator, "_settings", replace(
+        orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
+    ))
+    with caplog.at_level(logging.INFO):
+        job = run(score, context)
+    assert job["status"] == "completed", job
+    chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
+    assert len(chooser_calls) == 1
+    assert "score_xml" not in json.loads(chooser_calls[0]["bundle"].dynamic_prompt_text)
+    assert "planner_v2_evidence_chars count=0" in caplog.text
+    assert "planner_v2_evidence_unavailable reason=too_large" in caplog.text
     assert len(executed) == 1
 
 

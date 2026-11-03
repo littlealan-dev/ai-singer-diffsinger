@@ -15,9 +15,11 @@ from statistics import median
 from typing import Any, Awaitable, Callable
 
 from src.api.preprocess_assembler import AssemblyError, assemble_plan, expand
+from src.api.preprocess_evidence import EvidenceUnavailable, trim_musicxml
 from src.api.preprocess_sheet import PINNABLE_KINDS, Lane, Sheet, Slot, build_sheet
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
+    _derived_part_indices,
     _is_countable_sung_note,
     _staff_scope_key,
     _voice_key,
@@ -35,6 +37,8 @@ class ChooserRequest:
     key_to_slot: dict[str, str]  # "s1" -> slot_id
     lane_keys: dict[str, str]    # "L1" -> lane_id
     freeform_bars: dict[str, tuple[int, int]] = field(default_factory=dict)  # freeform key -> bars
+    evidence_chars: int = 0
+    evidence_unavailable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,19 +110,110 @@ def _lane_height_midi(score: dict, lane: Lane) -> int | None:
     return round(median(pitches)) if pitches else None
 
 
-def build_request_context(score: dict, planning_context: dict | None, sheet: Sheet) -> dict:
+def build_request_context(
+    score: dict, planning_context: dict | None, sheet: Sheet, *,
+    evidence_max_chars: int = 400000,
+) -> dict:
     """The request facts and lane heights that ``build_requests`` sends."""
     context = planning_context or {}
     target = context.get("target") if isinstance(context.get("target"), dict) else {}
     instruction = str(context.get("other_instruction") or "").strip()
-    return {
-        "request": {
-            "target_part": target.get("part_id"),
-            "verse": sheet.verse_number,
-            "user_instruction": instruction or None,
-        },
-        "lane_height_midi": {lane.lane_id: _lane_height_midi(score, lane) for lane in sheet.lanes},
+    summary = score.get("score_summary") if isinstance(score.get("score_summary"), dict) else {}
+    score_fields = {field: summary[key] for field, key in (
+        ("title", "title"), ("composer", "composer"),
+        ("selected_verse", "selected_verse_number"), ("available_verses", "available_verses"),
+    ) if key in summary}
+    future = context.get("future_synthesis_request")
+    requested = context.get("request")
+    language = (str(future.get("language") or "").strip() if isinstance(future, dict) else "")
+    if not language:
+        language = (str(requested.get("language") or "").strip()
+                    if isinstance(requested, dict) else "")
+    request = {
+        "target_part": target.get("part_id"), "verse": sheet.verse_number,
+        "user_instruction": instruction or None,
     }
+    if language:
+        request["language"] = language
+    lyric_sample = None
+    if not language and sheet.target_part_index is not None:
+        summary_parts = summary.get("parts") or []
+        part_summary = next((part for part in summary_parts
+                             if part.get("part_index") == sheet.target_part_index), None)
+        if part_summary is not None:
+            verse = str(summary.get("selected_verse_number") or sheet.verse_number or "")
+            matching = next((item for item in part_summary.get("lyric_verses") or []
+                             if str(item.get("verse_number") or "") == verse), None)
+            if matching is not None:
+                lyric_sample = matching.get("sample")
+    lane_details = {}
+    for lane in sheet.lanes:
+        part = score["parts"][lane.part_index]
+        voice = next((str(vp["source_voice_id"])
+                      for vp in _analyze_part_voice_parts(part, lane.part_index)["voice_parts"]
+                      if vp["voice_part_id"] == lane.source_voice_part_id), None)
+        lane_details[lane.lane_id] = {
+            "part_name": part.get("part_name"),
+            "xml_part": part.get("raw_part_id") or part.get("part_id"),
+            "xml_voice": voice,
+        }
+    return {
+        "request": request,
+        "score": score_fields,
+        "lyric_sample": lyric_sample,
+        "tempos": score.get("tempos"),
+        "lane_details": lane_details,
+        "lane_height_midi": {lane.lane_id: _lane_height_midi(score, lane) for lane in sheet.lanes},
+        "_score": score,
+        "_evidence_max_chars": evidence_max_chars,
+    }
+
+
+def _evidence_bars(score: dict, slots: list[Slot]) -> set[int]:
+    numbers = []
+    for part in score.get("parts") or []:
+        for note in part.get("notes") or []:
+            try:
+                numbers.append(int(note.get("measure_number")))
+            except (TypeError, ValueError):
+                continue
+    if not numbers:
+        return set()
+    low, high = min(numbers), max(numbers)
+    return {bar for slot in slots
+            for bar in range(max(low, slot.start_measure - 1),
+                             min(high, slot.end_measure + 1) + 1)}
+
+
+def _request_evidence(
+    sheet: Sheet, score: dict, slots: list[Slot], limit: int,
+) -> tuple[dict[str, str], int, str | None]:
+    lanes = {lane.lane_id: lane for lane in sheet.lanes}
+    lane = lanes[slots[0].lane_ids[0]]
+    part = score["parts"][lane.part_index]
+    raw_part_id = str(part.get("raw_part_id") or part.get("part_id") or "")
+    try:
+        score_xml = trim_musicxml(score, [raw_part_id], _evidence_bars(score, slots))
+        evidence = {"score_xml": score_xml}
+        reading = [slot for slot in slots if slot.kind == "lyric_reading"]
+        if reading:
+            derived = _derived_part_indices(score)
+            other_ids = list(dict.fromkeys(
+                str(other.get("raw_part_id") or other.get("part_id"))
+                for index, other in enumerate(score.get("parts") or [])
+                if index not in derived and index != lane.part_index
+                and str(other.get("raw_part_id") or other.get("part_id")) != raw_part_id
+            ))
+            if other_ids:
+                evidence["score_xml_other_parts"] = trim_musicxml(
+                    score, other_ids, _evidence_bars(score, reading)
+                )
+        size = sum(len(xml) for xml in evidence.values())
+        if size > limit:
+            return {}, 0, "too_large"
+        return evidence, size, None
+    except EvidenceUnavailable as exc:
+        return {}, 0, exc.reason
 
 
 def _lane_ids_in(value: Any, known: set[str], found: set[str]) -> None:
@@ -167,6 +262,7 @@ def _request(
     lanes = [lane for lane in sheet.lanes if lane.lane_id in used]
     keys = {lane.lane_id: f"L{index}" for index, lane in enumerate(lanes, start=1)}
     heights = request_context.get("lane_height_midi") or {}
+    details = request_context.get("lane_details") or {}
     slot_keys = {f"s{index}": slot for index, slot in enumerate(slots, start=1)}
     payload_slots = []
     properties: dict[str, dict] = {}
@@ -209,9 +305,22 @@ def _request(
         "lanes": [{
             "lane": keys[lane.lane_id], "part": lane.part_id, "staff": lane.scope_key,
             "voice": lane.source_voice_part_id, "height_midi": heights.get(lane.lane_id),
+            **details.get(lane.lane_id, {}),
         } for lane in lanes],
         "slots": payload_slots,
     }
+    if request_context.get("score"):
+        payload["score"] = request_context["score"]
+    if request_context.get("lyric_sample"):
+        payload["lyric_sample"] = request_context["lyric_sample"]
+    if request_context.get("tempos") is not None:
+        payload["tempos"] = request_context["tempos"]
+    evidence, evidence_chars, evidence_unavailable = (
+        _request_evidence(sheet, request_context["_score"], slots,
+                          request_context["_evidence_max_chars"])
+        if "_score" in request_context else ({}, 0, None)
+    )
+    payload.update(evidence)
     return ChooserRequest(
         dynamic_text=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
         response_schema={
@@ -224,6 +333,8 @@ def _request(
         lane_keys={key: lane_id for lane_id, key in keys.items()},
         freeform_bars={key: (slot.start_measure, slot.end_measure)
                        for key, slot in slot_keys.items() if slot.kind == "freeform"},
+        evidence_chars=evidence_chars,
+        evidence_unavailable=evidence_unavailable,
     )
 
 
@@ -363,6 +474,7 @@ def _still_valid(slot: Slot, choice: Any) -> bool:
 async def _second_pass(
     score: dict, planning_context: dict | None, sheet: Sheet, choices: dict[str, Any], *,
     pinned: dict[str, str], cuts: dict | None, call: Call, max_slots_per_request: int,
+    evidence_max_chars: int,
 ) -> tuple[Sheet, dict[str, Any], int, int, int]:
     """Rebuild with the non-default structure choices pinned and re-ask the slots that changed."""
     pins = {**pinned, **_structure_pins(sheet, choices)}
@@ -378,7 +490,8 @@ async def _second_pass(
     )]
     if not changed:
         return rebuilt, choices, 0, 0, 0
-    context = build_request_context(score, planning_context, rebuilt)
+    context = build_request_context(score, planning_context, rebuilt,
+                                    evidence_max_chars=evidence_max_chars)
     again, requests, retries = await _ask_all(
         replace(rebuilt, slots=changed), context, call, max_slots_per_request
     )
@@ -391,16 +504,18 @@ def _final(sheet: Sheet, choices: dict[str, Any]) -> dict[str, Any]:
 
 async def choose(
     score: dict, planning_context: dict | None, *,
-    call: Call, max_slots_per_request: int = 80,
+    call: Call, max_slots_per_request: int = 80, evidence_max_chars: int = 400000,
 ) -> tuple[Sheet, dict[str, Any], ChooserStats]:
     """Choose every open slot, re-asking the slots a non-default structure choice changes."""
     sheet = build_sheet(score, planning_context)
-    context = build_request_context(score, planning_context, sheet)
+    context = build_request_context(score, planning_context, sheet,
+                                    evidence_max_chars=evidence_max_chars)
     choices, requests, retries = await _ask_all(sheet, context, call, max_slots_per_request)
     slots_asked = len(sheet.slots)
     sheet, choices, more_requests, more_retries, second_pass_slots = await _second_pass(
         score, planning_context, sheet, choices, pinned={}, cuts=None,
         call=call, max_slots_per_request=max_slots_per_request,
+        evidence_max_chars=evidence_max_chars,
     )
     return sheet, _final(sheet, choices), ChooserStats(
         requests=requests + more_requests, retries=retries + more_retries,
@@ -476,7 +591,7 @@ async def choose_repair(
     failing: dict[str, list[tuple[int, int]]],
     findings_by_lane: dict[str, list[SlotFinding]],
     pinned: dict[str, str] | None,
-    call: Call, max_slots_per_request: int = 80,
+    call: Call, max_slots_per_request: int = 80, evidence_max_chars: int = 400000,
 ) -> tuple[Sheet, dict[str, Any], ChooserStats]:
     """Re-ask only the slots over the failing lanes and bars; carry every other choice over.
 
@@ -544,13 +659,15 @@ async def choose_repair(
         extras[slot.slot_id] = extra
     if not ask:
         return new_sheet, _final(new_sheet, carried), ChooserStats(0, 0, 0, 0)
-    context = build_request_context(score, planning_context, new_sheet)
+    context = build_request_context(score, planning_context, new_sheet,
+                                    evidence_max_chars=evidence_max_chars)
     answers, requests, retries = await _ask_all(
         replace(new_sheet, slots=ask), context, call, max_slots_per_request, extras
     )
     final_sheet, final_choices, more_requests, more_retries, second_pass_slots = await _second_pass(
         score, planning_context, new_sheet, {**carried, **answers}, pinned=pins, cuts=cuts,
         call=call, max_slots_per_request=max_slots_per_request,
+        evidence_max_chars=evidence_max_chars,
     )
     return final_sheet, _final(final_sheet, final_choices), ChooserStats(
         requests=requests + more_requests, retries=retries + more_retries,

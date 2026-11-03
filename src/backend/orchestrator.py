@@ -6300,6 +6300,7 @@ class Orchestrator:
                 planning_context,
                 call=self._call_preprocess_chooser,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
             )
         except ChooserError as exc:
             self._logger.warning("planner_v2_chooser_error error=%s", exc)
@@ -6454,6 +6455,7 @@ class Orchestrator:
                 pinned=None,
                 call=call,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
             )
         except (ChooserError, LlmTurnLimitReached) as exc:
             self._logger.warning("planner_v2_repair_chooser_error error=%s", exc)
@@ -6489,6 +6491,11 @@ class Orchestrator:
 
     async def _call_preprocess_chooser(self, request: Any) -> str:
         """Ask the chooser role one request: the v2 prompt, no history, an enum-only schema."""
+        self._logger.info("planner_v2_evidence_chars count=%s", request.evidence_chars)
+        if request.evidence_unavailable:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=%s", request.evidence_unavailable
+            )
         bundle = PromptBundle(
             static_prompt_text=_planner_v2_prompt(),
             dynamic_prompt_text=request.dynamic_text,
