@@ -64,7 +64,7 @@ from src.backend.language_selection import (
     normalize_language_code,
     resolve_synthesis_language,
 )
-from src.backend.session import SessionStore
+from src.backend.session import SessionMusicXmlUnavailableError, SessionStore
 from src.backend.storage_client import (
     copy_blob,
     delete_blob,
@@ -2509,7 +2509,7 @@ class Orchestrator:
                 and self._settings.preprocess_planner == "v2"
             ):
                 tool_calls, initial_thought_summary, planner_v2 = await self._plan_preprocess_v2(
-                    score, planning_context
+                    score, planning_context, session_id=session_id, user_id=user_id
                 )
             elif not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
@@ -6276,12 +6276,35 @@ class Orchestrator:
         self,
         score: Dict[str, Any],
         planning_context: Dict[str, Any],
+        *,
+        session_id: str,
+        user_id: str,
     ) -> tuple[List[ToolCall], str, "_PlannerV2State"]:
         """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
         from src.api.preprocess_assembler import AssemblyError
         from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose
+        from src.api.preprocess_evidence import EvidenceUnavailable
         from src.api.preprocess_sheet import build_sheet_skeleton
 
+        # The recorded source may belong to another worker. Resolve the active
+        # artifact before asking the chooser, and retain it for local repairs.
+        score = dict(score)
+        try:
+            for attempt in range(3):
+                try:
+                    score["source_musicxml_path"] = str(
+                        await self._sessions.ensure_active_musicxml(session_id, user_id)
+                    )
+                    break
+                except SessionMusicXmlUnavailableError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(attempt + 1)
+        except Exception as exc:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=active_musicxml_unavailable"
+            )
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
         issues = build_sheet_skeleton(score, planning_context).issues
         if "score_has_no_lyrics" in issues:
             raise PreprocessPlanningError(backend_message("preprocess.score_needs_lyrics"))
@@ -6300,7 +6323,11 @@ class Orchestrator:
                 planning_context,
                 call=self._call_preprocess_chooser,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
             )
+        except EvidenceUnavailable as exc:
+            self._logger.warning("planner_v2_evidence_unavailable reason=%s", exc.reason)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
         except ChooserError as exc:
             self._logger.warning("planner_v2_chooser_error error=%s", exc)
             raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
@@ -6429,6 +6456,7 @@ class Orchestrator:
         """Re-choose only the failing bars; None and a stop reason when there is nothing to ask."""
         from src.api.preprocess_assembler import AssemblyError
         from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose_repair
+        from src.api.preprocess_evidence import EvidenceUnavailable
 
         failing, findings = self._planner_v2_failures(state.sheet, payload)
         p0 = any(finding.severity == "P0" for items in findings.values() for finding in items)
@@ -6454,7 +6482,11 @@ class Orchestrator:
                 pinned=None,
                 call=call,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
             )
+        except EvidenceUnavailable as exc:
+            self._logger.warning("planner_v2_evidence_unavailable reason=%s", exc.reason)
+            return None, "repair_planning_failed"
         except (ChooserError, LlmTurnLimitReached) as exc:
             self._logger.warning("planner_v2_repair_chooser_error error=%s", exc)
             return None, "repair_planning_failed"
@@ -6489,6 +6521,15 @@ class Orchestrator:
 
     async def _call_preprocess_chooser(self, request: Any) -> str:
         """Ask the chooser role one request: the v2 prompt, no history, an enum-only schema."""
+        from src.api.preprocess_evidence import EvidenceUnavailable
+
+        if not request.evidence_chars:
+            raise EvidenceUnavailable("missing_score_xml")
+        self._logger.info("planner_v2_evidence_chars count=%s", request.evidence_chars)
+        if request.evidence_unavailable:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=%s", request.evidence_unavailable
+            )
         bundle = PromptBundle(
             static_prompt_text=_planner_v2_prompt(),
             dynamic_prompt_text=request.dynamic_text,

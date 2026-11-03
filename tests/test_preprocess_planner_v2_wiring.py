@@ -22,6 +22,7 @@ from src.backend.config import Settings
 from src.backend.llm_client import LlmRole
 from src.backend.llm_prompt import PromptBundle
 from src.backend.message_catalog import backend_message
+from src.backend.session import SessionMusicXmlUnavailableError
 from src.backend import orchestrator as orchestrator_module
 from src.backend.orchestrator import (
     PREPROCESS_PLANNING_ERROR_MESSAGE, _planner_v2_prompt, _without_thought_summary,
@@ -104,8 +105,23 @@ def _job(client, monkeypatch, *, planner, llm, tool_result=_ready):
     monkeypatch.setattr(app.state.router, "call_tool", call_tool)
     job_id = f"job-{session_id[:8]}"
     app.state.job_store.create_job(job_id=job_id, user_id="test-user", session_id=session_id, status="queued")
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+    planned_source = None
+    lookups = 0
+
+    async def source_for_planning(active_session_id, active_user_id):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1 and planned_source is not None:
+            return planned_source
+        return await original_ensure(active_session_id, active_user_id)
+
+    if planner == "v2":
+        monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
 
     def run(score, planning_context):
+        nonlocal planned_source
+        planned_source = Path(score["source_musicxml_path"])
         asyncio.run(orchestrator._run_preprocess_job(
             session_id, score, [], job_id, "test-user", "test@example.com",
             initial_message="Preparing the line.", initial_thought_summary="",
@@ -150,6 +166,16 @@ def test_chooser_batch_size_defaults_to_200_and_must_be_positive(monkeypatch):
     assert Settings.from_env().preprocess_chooser_max_slots_per_request == 50
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "0")
     with pytest.raises(ValueError, match="PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST"):
+        Settings.from_env()
+
+
+def test_chooser_evidence_limit_defaults_to_400000_and_must_be_positive(monkeypatch):
+    monkeypatch.delenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", raising=False)
+    assert Settings.from_env().preprocess_chooser_evidence_max_chars == 400000
+    monkeypatch.setenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", "50")
+    assert Settings.from_env().preprocess_chooser_evidence_max_chars == 50
+    monkeypatch.setenv("PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS", "0")
+    with pytest.raises(ValueError, match="PREPROCESS_CHOOSER_EVIDENCE_MAX_CHARS"):
         Settings.from_env()
 
 
@@ -208,7 +234,7 @@ def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_pla
     requests = build_requests(sheet, build_request_context(score, context, sheet))
     assert len(requests) == 2
     llm = FakeLlm(chooser_barrier=threading.Barrier(2, timeout=5))
-    _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
     job = run(score, context)
     assert job["status"] == "completed", job
     chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
@@ -310,7 +336,103 @@ def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to
     assert job["status"] == "completed", job
     assert len(chooser_requests) == 1
     assert "retries=0" in caplog.text
+    assert "planner_v2_evidence_chars count=" in caplog.text
     assert len(executed) == 1
+
+
+@pytest.mark.parametrize("unavailable", ["too_large", "unreadable_path", "duplicate_measure_number"])
+def test_v2_job_fails_without_chooser_when_evidence_is_unavailable(
+    client, monkeypatch, tmp_path, caplog, unavailable,
+):
+    score = _chord_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    llm = FakeLlm()
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    if unavailable == "too_large":
+        monkeypatch.setattr(orchestrator, "_settings", replace(
+            orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
+        ))
+    elif unavailable == "duplicate_measure_number":
+        source = Path(score["source_musicxml_path"])
+        source.write_text(source.read_text(encoding="utf-8").replace(
+            '<measure number="2">', '<measure number="1">', 1,
+        ), encoding="utf-8")
+    source = (tmp_path / "missing.xml" if unavailable == "unreadable_path"
+              else Path(score["source_musicxml_path"]))
+
+    async def source_for_planning(session_id, user_id):
+        return source
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_for_planning)
+    with caplog.at_level(logging.INFO):
+        job = run(score, context)
+    assert job["status"] == "failed", job
+    assert job["errorMessage"] == PREPROCESS_PLANNING_ERROR_MESSAGE
+    chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
+    assert chooser_calls == [] and executed == []
+    assert f"planner_v2_evidence_unavailable reason={unavailable}" in caplog.text
+
+
+@pytest.mark.parametrize("failures", [2, 3])
+def test_v2_active_musicxml_lookup_retries_only_recoverable_failures(
+    client, monkeypatch, tmp_path, caplog, failures,
+):
+    score = _chord_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    llm = FakeLlm()
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    lookups = 0
+    waits = []
+
+    async def source_after_retries(session_id, user_id):
+        nonlocal lookups
+        lookups += 1
+        if lookups <= failures:
+            raise SessionMusicXmlUnavailableError("temporarily unavailable")
+        if lookups == 3:
+            return Path(score["source_musicxml_path"])
+        return await type(orchestrator._sessions).ensure_active_musicxml(
+            orchestrator._sessions, session_id, user_id,
+        )
+
+    async def record_sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", source_after_retries)
+    monkeypatch.setattr(orchestrator_module.asyncio, "sleep", record_sleep)
+    with caplog.at_level(logging.INFO):
+        job = run(score, context)
+    assert lookups == (3 if failures == 3 else 4) and waits == [1, 2]
+    if failures == 3:
+        assert job["status"] == "failed" and job["errorMessage"] == PREPROCESS_PLANNING_ERROR_MESSAGE
+        assert llm.roles().count(LlmRole.PREPROCESS_CHOOSER) == 0 and executed == []
+        assert "planner_v2_evidence_unavailable reason=active_musicxml_unavailable" in caplog.text
+    else:
+        assert job["status"] == "completed", job
+        chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
+        assert chooser_calls and executed
+        assert all("score_xml" in json.loads(call["bundle"].dynamic_prompt_text)
+                   for call in chooser_calls)
+
+
+def test_v2_active_musicxml_lookup_does_not_retry_other_errors(client, monkeypatch, tmp_path, caplog):
+    score = _chord_score(tmp_path)
+    llm = FakeLlm()
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    lookups = 0
+
+    async def fail_lookup(session_id, user_id):
+        nonlocal lookups
+        lookups += 1
+        raise FileNotFoundError("active MusicXML unavailable")
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", fail_lookup)
+    with caplog.at_level(logging.INFO):
+        job = run(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert lookups == 1
+    assert job["status"] == "failed" and job["errorMessage"] == PREPROCESS_PLANNING_ERROR_MESSAGE
+    assert llm.roles().count(LlmRole.PREPROCESS_CHOOSER) == 0 and executed == []
+    assert "planner_v2_evidence_unavailable reason=active_musicxml_unavailable" in caplog.text
 
 
 def test_thought_summary_is_dropped_only_from_json_objects():
@@ -470,6 +592,92 @@ def test_v2_repair_rests_a_silent_bar_and_the_next_attempt_passes(client, monkey
     assert LlmRole.PREPROCESS not in llm.roles()
     assert notices == []
     assert backend_message("preprocess.v2_repairing") in published
+
+
+def test_v2_chooser_uses_active_musicxml_for_first_and_repair_requests(client, monkeypatch, tmp_path):
+    score = _silent_bar_score(tmp_path)
+    active = Path(score["source_musicxml_path"])
+    missing = tmp_path / "other-worker.xml"
+    score["source_musicxml_path"] = str(missing)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+
+    def fail_once(arguments):
+        plan = arguments["request"]["plan"]
+        return _ready(arguments) if _section_at(plan, 0, 2)["mode"] == "rest" else _failing(
+            0, top.source_voice_part_id, 2,
+        )
+
+    llm = FakeLlm(chooser_reply=_rest_when_repairing)
+    orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm,
+                                       tool_result=fail_once)
+    calls = []
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+
+    async def ensure_active_musicxml(session_id, user_id):
+        calls.append((session_id, user_id))
+        return active if len(calls) == 1 else await original_ensure(session_id, user_id)
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", ensure_active_musicxml)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert len(executed) == 2 and len(calls) >= 1
+    assert score["source_musicxml_path"] == str(missing)
+    chooser_payloads = [json.loads(call["bundle"].dynamic_prompt_text) for call in llm.calls
+                        if call["role"] == LlmRole.PREPROCESS_CHOOSER]
+    assert len(chooser_payloads) >= 2
+    assert all("score_xml" in payload for payload in chooser_payloads)
+    repair = next(payload for payload in chooser_payloads
+                  if any(slot.get("findings") for slot in payload["slots"]))
+    assert 'number="2"' in repair["score_xml"]
+    entry = next(slot for slot in repair["slots"] if slot.get("findings"))
+    assert entry["previous"] and entry["findings"] and entry["neighbours"]
+
+
+@pytest.mark.parametrize("unavailable", ["unreadable_path", "duplicate_measure_number", "too_large"])
+def test_v2_repair_stops_without_another_chooser_call_when_evidence_disappears(
+    client, monkeypatch, tmp_path, caplog, unavailable,
+):
+    score = _silent_bar_score(tmp_path)
+    source = Path(score["source_musicxml_path"])
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    top = build_sheet(score, context).lanes[0]
+    llm = FakeLlm()
+    settings_holder = {}
+
+    def fail_and_change_evidence(arguments):
+        if unavailable == "unreadable_path":
+            source.unlink()
+        elif unavailable == "duplicate_measure_number":
+            source.write_text(source.read_text(encoding="utf-8").replace(
+                '<measure number="2">', '<measure number="1">', 1,
+            ), encoding="utf-8")
+        else:
+            orchestrator = settings_holder["orchestrator"]
+            monkeypatch.setattr(orchestrator, "_settings", replace(
+                orchestrator._settings, preprocess_chooser_evidence_max_chars=1,
+            ))
+        return _failing(0, top.source_voice_part_id, 2)
+
+    orchestrator, executed, run = _job(
+        client, monkeypatch, planner="v2", llm=llm, tool_result=fail_and_change_evidence,
+    )
+    settings_holder["orchestrator"] = orchestrator
+    original_ensure = orchestrator._sessions.ensure_active_musicxml
+    lookups = 0
+
+    async def active_for_planning(session_id, user_id):
+        nonlocal lookups
+        lookups += 1
+        return source if lookups == 1 else await original_ensure(session_id, user_id)
+
+    monkeypatch.setattr(orchestrator._sessions, "ensure_active_musicxml", active_for_planning)
+    _, stops = _record_stops(orchestrator, monkeypatch)
+    with caplog.at_level(logging.INFO):
+        job = run(score, context)
+    assert executed and stops and stops[0][0] == "repair_planning_failed"
+    assert llm.roles().count(LlmRole.PREPROCESS_CHOOSER) == 1
+    assert f"planner_v2_evidence_unavailable reason={unavailable}" in caplog.text
 
 
 def _lint_failed(top, measure):
