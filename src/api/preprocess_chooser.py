@@ -192,28 +192,25 @@ def _request_evidence(
     lane = lanes[slots[0].lane_ids[0]]
     part = score["parts"][lane.part_index]
     raw_part_id = str(part.get("raw_part_id") or part.get("part_id") or "")
-    try:
-        score_xml = trim_musicxml(score, [raw_part_id], _evidence_bars(score, slots))
-        evidence = {"score_xml": score_xml}
-        reading = [slot for slot in slots if slot.kind == "lyric_reading"]
-        if reading:
-            derived = _derived_part_indices(score)
-            other_ids = list(dict.fromkeys(
-                str(other.get("raw_part_id") or other.get("part_id"))
-                for index, other in enumerate(score.get("parts") or [])
-                if index not in derived and index != lane.part_index
-                and str(other.get("raw_part_id") or other.get("part_id")) != raw_part_id
-            ))
-            if other_ids:
-                evidence["score_xml_other_parts"] = trim_musicxml(
-                    score, other_ids, _evidence_bars(score, reading)
-                )
-        size = sum(len(xml) for xml in evidence.values())
-        if size > limit:
-            return {}, 0, "too_large"
-        return evidence, size, None
-    except EvidenceUnavailable as exc:
-        return {}, 0, exc.reason
+    score_xml = trim_musicxml(score, [raw_part_id], _evidence_bars(score, slots))
+    if len(score_xml) > limit:
+        raise EvidenceUnavailable("too_large")
+    evidence = {"score_xml": score_xml}
+    reading = [slot for slot in slots if slot.kind == "lyric_reading"]
+    if reading:
+        derived = _derived_part_indices(score)
+        other_ids = list(dict.fromkeys(
+            str(other.get("raw_part_id") or other.get("part_id"))
+            for index, other in enumerate(score.get("parts") or [])
+            if index not in derived and index != lane.part_index
+            and str(other.get("raw_part_id") or other.get("part_id")) != raw_part_id
+        ))
+        if other_ids:
+            other_xml = trim_musicxml(score, other_ids, _evidence_bars(score, reading))
+            if len(score_xml) + len(other_xml) > limit:
+                return evidence, len(score_xml), "other_parts_too_large"
+            evidence["score_xml_other_parts"] = other_xml
+    return evidence, sum(len(xml) for xml in evidence.values()), None
 
 
 def _lane_ids_in(value: Any, known: set[str], found: set[str]) -> None:
