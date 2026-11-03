@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from tests.test_preprocess_sheet import SATB, _two_staff_score
+from tests.test_preprocess_assembler import _shared_line_score
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/replay/prove_sheet_construction.py"
@@ -188,6 +189,8 @@ def test_action_required_is_lint_clean_but_not_runs_clean_and_no_messages(tmp_pa
     assert row["executor_action"] == "section_lyric_quality_failed"
     assert row["executor_codes"] == ["missing_word_lyric", "weak_alignment"]
     assert row["unsung_chord_notes"] is None and row["unsung_chord_bars"] is None
+    assert isinstance(row["lyric_words_lost"], int)
+    assert isinstance(row["staff_line_bars"], int)
     summary = (out / "summary.md").read_text(encoding="utf-8")
     assert "Runs clean: 0 / 1" in summary and "Lint-clean: 1 / 1" in summary
     assert "| section_lyric_quality_failed | 1 |" in summary
@@ -203,6 +206,28 @@ def test_action_required_is_lint_clean_but_not_runs_clean_and_no_messages(tmp_pa
         "PRIVATE_EXECUTOR_MESSAGE_SENTINEL" not in file.read_text(encoding="utf-8")
         for file in out.rglob("*") if file.is_file()
     )
+
+
+def test_planned_lyric_columns_on_action_required_shared_line(tmp_path, monkeypatch):
+    score = _shared_line_score(tmp_path)
+    xml = (tmp_path / "synthetic.xml").read_text(encoding="utf-8")
+    xml = xml.replace('<type>half</type></note><backup>',
+                      '<type>half</type><notations><slur type="start" number="1"/>'
+                      '</notations></note><backup>')
+    corpus = tmp_path / "corpus"
+    _job(corpus, "shared", xml.encode(), score["parts"][0]["part_id"])
+    monkeypatch.setattr(proof, "preprocess_voice_parts",
+                        lambda _score, *, request: {"status": "action_required", "action": "synthetic_stop"})
+    out = tmp_path / "report"
+    row = proof.prove(corpus, out)[0]
+    assert row["executor_status"] == "action_required"
+    assert row["lyric_words_lost"] == 0
+    assert row["staff_line_bars"] == 2
+    assert row["ambiguous_bars"] == 0
+    assert row["borrowed_bars_with_slur"] == 1
+    summary = (out / "summary.md").read_text(encoding="utf-8")
+    assert "| borrowed_bars_with_slur | 1 |" in summary
+    assert "first" not in summary and "second" not in summary
 
 
 def test_complete_split_reports_unsung_chord_notes(tmp_path, monkeypatch):

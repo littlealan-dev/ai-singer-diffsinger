@@ -11,9 +11,90 @@ import pytest
 from src.api import parse_score
 from src.api import preprocess_assembler as assembler
 from src.api.preprocess_sheet import build_sheet
-from src.api.voice_parts import parse_voice_part_plan, preprocess_voice_parts
+from src.api.voice_parts import _propagate_lyrics, parse_voice_part_plan, preprocess_voice_parts
 from src.mcp.tools import _PREPROCESS_PLAN_REQUEST_SCHEMA
-from tests.test_preprocess_sheet import SATB, _chord_score, _silence_voice_in_bar, _two_staff_score
+from tests.test_preprocess_sheet import SATB, _chord_score, _parse_inline, _silence_voice_in_bar, _two_staff_score
+
+
+def _shared_line_score(tmp_path):
+    xml = '''<score-partwise version="3.1"><part-list><score-part id="P1">
+<part-name>Choir</part-name></score-part></part-list><part id="P1"><measure number="1">
+<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+<clef><sign>G</sign><line>2</line></clef></attributes>
+<note><pitch><step>G</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice>
+<type>half</type><lyric><text>first</text></lyric></note>
+<note><pitch><step>A</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice>
+<type>half</type></note><backup><duration>4</duration></backup>
+<note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><voice>2</voice>
+<type>half</type></note>
+<note><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><voice>2</voice>
+<type>half</type><lyric><text>second</text></lyric></note>
+</measure></part></score-partwise>'''
+    return _parse_inline(tmp_path, xml)
+
+
+def test_shared_staff_line_plan_executes_without_quality_failure(tmp_path):
+    score = _shared_line_score(tmp_path)
+    sheet = _sheet(score, score["parts"][0]["part_id"])
+    assert not any(slot.kind == "lyric_reading" for slot in sheet.slots)
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    assert all(section["lyric_strategy"] == "staff_line"
+               for target in plan["targets"] for section in target["sections"])
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    assert not result.get("section_quality_issues")
+
+
+def test_ambiguous_reading_choice_applies_only_to_ambiguous_bar(tmp_path):
+    score = _shared_line_score(tmp_path)
+    part = score["parts"][0]
+    shared = deepcopy(part["notes"])
+    for note in shared:
+        note["measure_number"] = 2
+        note["offset_beats"] += 4
+    part["notes"] = [note for note in part["notes"]
+                     if not (note.get("voice") == "2" and note["offset_beats"] == 0)]
+    for note in part["notes"]:
+        if note.get("voice") == "2":
+            note["offset_beats"] = 1.0
+    part["notes"].extend(shared)
+    sheet = _sheet(score, part["part_id"])
+    slot = next(slot for slot in sheet.slots if slot.kind == "lyric_reading")
+    assert slot.evidence == {"ambiguous_bars": {"1": ["independent_rhythm"]}}
+    assert [option.option_id for option in slot.options] == ["own_words_only", "share_line"]
+    choices = assembler.first_option_choices(sheet)
+    plan = assembler.assemble_plan(sheet, choices, score=score)
+    own = next(target for target in plan["targets"]
+               if target["source"]["voice_part_id"] == "voice part 1")
+    assert assembler.expand(own["sections"])[1]["lyric_strategy"] == "strict_onset"
+    assert assembler.expand(own["sections"])[2]["lyric_strategy"] == "staff_line"
+    choices[slot.slot_id] = "share_line"
+    plan = assembler.assemble_plan(sheet, choices, score=score)
+    own = next(target for target in plan["targets"]
+               if target["source"]["voice_part_id"] == "voice part 1")
+    assert all(action["lyric_strategy"] == "staff_line"
+               for action in assembler.expand(own["sections"]).values())
+
+
+def test_staff_line_earlier_word_hold_tie_and_range():
+    source = [{"staff": "1", "measure_number": 1, "offset_beats": 0.0,
+               "duration_beats": 1.0, "pitch_midi": 60, "lyric": "first"},
+              {"staff": "1", "measure_number": 2, "offset_beats": 2.0,
+               "duration_beats": 1.0, "pitch_midi": 62, "lyric": "second"}]
+    targets = [{"staff": "1", "measure_number": 1, "offset_beats": 0.0,
+                "duration_beats": 1.0, "pitch_midi": 65},
+               {"staff": "1", "measure_number": 2, "offset_beats": 1.0,
+                "duration_beats": 1.0, "pitch_midi": 67},
+               {"staff": "1", "measure_number": 2, "offset_beats": 2.0,
+                "duration_beats": 1.0, "pitch_midi": 69, "tie_type": "stop"}]
+    copied, _ = _propagate_lyrics(
+        target_notes=targets, source_notes=source, strategy="staff_line", policy="replace_all",
+        verse_number=None, copy_all_verses=False, measure_range=(2, 2),
+    )
+    assert copied[0].get("lyric") is None
+    assert [note.get("lyric") for note in copied[1:]] == ["+", "+"]
+    assert all(note.get("lyric_is_extended") for note in copied[1:])
+    assert all(note.get("syllabic") is None for note in copied[1:])
 
 
 def _assert_schema(value, schema):
