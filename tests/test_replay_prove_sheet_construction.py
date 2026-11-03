@@ -269,6 +269,11 @@ def test_slur_metric_uses_raw_part_and_staff_after_split_part(tmp_path):
     metrics = proof.planned_lyric_metrics(score, sheet, choices, plan, xml.encode())
     assert metrics["borrowed_bars_with_slur"] == 1
 
+    wrong_staff_xml = xml.replace('<type>half</type><notations><slur',
+                                  '<type>half</type><staff>2</staff><notations><slur', 1)
+    assert proof.planned_lyric_metrics(score, sheet, choices, plan,
+                                      wrong_staff_xml.encode())["borrowed_bars_with_slur"] == 0
+
     xml_with_suffix = xml.replace('</measure></part>',
                                   '</measure><measure number="12a"/></part>', 1)
     assert proof.planned_lyric_metrics(score, sheet, choices, plan,
