@@ -50,6 +50,76 @@ def _parse_inline(tmp_path, xml: str):
     return parse_score(path, verse_number=1)
 
 
+def _reading_score(*notes):
+    """Small parsed-score-shaped fixture with two voices on one staff."""
+    return {"parts": [{"part_id": "P1", "notes": list(notes)}]}
+
+
+def _reading_note(voice, beat, lyric=None, *, syllabic=None, tie_type=None):
+    note = {"voice": str(voice), "staff": "1", "measure_number": 1,
+            "offset_beats": float(beat), "duration_beats": 1.0, "pitch_midi": 70 - int(voice),
+            "is_rest": False, "lyric": lyric}
+    if syllabic is not None:
+        note["syllabic"] = syllabic
+    if tie_type is not None:
+        note["tie_type"] = tie_type
+    return note
+
+
+def test_lyric_bar_cases_shared_missing_independent_and_conflicting():
+    make = _reading_note
+    scenarios = [
+        ([make(1, 0, "one"), make(1, 2), make(2, 0), make(2, 2, "two")],
+         "shared", ()),
+        ([make(1, 0), make(1, 2), make(2, 1, "one"), make(2, 3, "two")],
+         "no_word_for_lane", ()),
+        ([make(1, 0, "one"), make(1, 2), make(2, 1, "two")],
+         "ambiguous", ("independent_rhythm",)),
+        ([make(1, 0, "one"), make(2, 0, "other")], "single", ()),
+    ]
+    for notes, expected, reasons in scenarios:
+        score = _reading_score(*notes)
+        lines = sheet_module.staff_lyric_lines(score)
+        case = sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[1]
+        assert (case.case, case.reasons) == (expected, reasons)
+
+
+def test_lyric_bar_cases_broken_split_word_and_tied_hold():
+    make = _reading_note
+    score = _reading_score(make(1, 0, "start", syllabic="begin"), make(1, 2),
+                           make(2, 0), make(2, 2, "other", syllabic="begin"))
+    lines = sheet_module.staff_lyric_lines(score)
+    case = sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[1]
+    assert case.case == "ambiguous" and case.reasons == ("broken_split_word",)
+
+    tied = make(1, 2, tie_type="stop")
+    score = _reading_score(make(1, 0, "first"), tied, make(2, 0), make(2, 2, "second"))
+    lines = sheet_module.staff_lyric_lines(score)
+    assert sheet_module.read_lane_lyrics(lines[(0, "1")], [tied]) == ["+"]
+    assert sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[1].case == "shared"
+
+    tied["measure_number"] = 2
+    tied["offset_beats"] = 4.0
+    next_word = make(2, 4, "second")
+    next_word["measure_number"] = 2
+    score = _reading_score(make(1, 0, "first"), tied, next_word)
+    lines = sheet_module.staff_lyric_lines(score)
+    assert sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)[2].case == "no_word_for_lane"
+
+
+def test_tied_note_with_own_word_is_a_new_lyric_note():
+    make = _reading_note
+    tied_word = make(1, 2, "own", tie_type="stop")
+    tied_blank = make(1, 3, tie_type="continue")
+    score = _reading_score(make(1, 0, "first"), tied_word, tied_blank,
+                           make(2, 0), make(2, 3, "other"))
+    lines = sheet_module.staff_lyric_lines(score)
+    line = lines[(0, "1")]
+    assert sheet_module.read_lane_lyrics(line, [tied_word, tied_blank]) == ["own", "+"]
+    cases = sheet_module.lyric_bar_cases(score, lines, 0, "1", "voice part 1", None)
+    assert cases[1].case == "shared"
+
+
 def _two_staff_score(tmp_path):
     # One MusicXML part, four simultaneous voices over two staff scopes.
     notes = []

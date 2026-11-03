@@ -36,6 +36,7 @@ VALID_PROPAGATION_STRATEGIES = {
     "strict_onset",
     "overlap_best_match",
     "syllable_flow",
+    "staff_line",
 }
 VALID_PROPAGATION_POLICIES = {
     "fill_missing_only",
@@ -2031,7 +2032,8 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             )
                         )
                 if (
-                    isinstance(lyric_source_part, int)
+                    section.get("lyric_strategy") != "staff_line"
+                    and isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
                     and lyric_source_voice_part_id
                 ):
@@ -2137,7 +2139,8 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             )
                         )
                 if (
-                    isinstance(lyric_source_part, int)
+                    section.get("lyric_strategy") != "staff_line"
+                    and isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
                     and lyric_source_voice_part_id
                 ):
@@ -3298,11 +3301,28 @@ def _execute_timeline_sections(
                         section_start_measure=start_measure,
                         section_end_measure=end_measure,
                     )
-                override_source_notes = _resolve_source_notes(
-                    source_score,
-                    source_part_index=int(lyric_source["part_index"]),
-                    source_voice_part_id=str(lyric_source["voice_part_id"]),
-                )
+                if section.get("lyric_strategy") == "staff_line":
+                    source_part_index = int(lyric_source["part_index"])
+                    source_parts = source_score.get("parts") or []
+                    source_part = (source_parts[source_part_index]
+                                   if 0 <= source_part_index < len(source_parts) else None)
+                    source_meta = (_find_voice_part_by_id(
+                        _analyze_part_voice_parts(source_part, source_part_index)["voice_parts"],
+                        str(lyric_source["voice_part_id"]),
+                    ) if source_part is not None else None)
+                    staves = {_staff_scope_key(note) for note in working_notes
+                              if _is_countable_sung_note(note)}
+                    override_source_notes = (
+                        [note for note in source_part.get("notes") or []
+                         if _is_countable_sung_note(note) and _staff_scope_key(note) in staves]
+                        if source_meta is not None else None
+                    )
+                else:
+                    override_source_notes = _resolve_source_notes(
+                        source_score,
+                        source_part_index=int(lyric_source["part_index"]),
+                        source_voice_part_id=str(lyric_source["voice_part_id"]),
+                    )
                 if override_source_notes is None:
                     return _action_required(
                         "invalid_section_source",
@@ -3384,6 +3404,7 @@ def _execute_timeline_sections(
         lyric_source = section.get("lyric_source")
         if (
             mode == "derive"
+            and section.get("lyric_strategy") != "staff_line"
             and copied_note_count > 0
             and isinstance(lyric_source, dict)
             and isinstance(lyric_source.get("part_index"), int)
@@ -4833,7 +4854,11 @@ def _propagate_lyrics(
         verse_number=verse_number,
         copy_all_verses=copy_all_verses,
     )
-    if measure_range is not None:
+    if strategy == "staff_line":
+        source_timeline = [item for item in source_timeline
+                           if _lyric_kind(item["note"]) == "word"
+                           and not _is_generated_solfege_lyric(item["note"])]
+    if measure_range is not None and strategy != "staff_line":
         source_timeline = [
             item
             for item in source_timeline
@@ -4843,6 +4868,11 @@ def _propagate_lyrics(
     source_by_offset: Dict[float, List[Dict[str, Any]]] = {}
     for item in source_timeline:
         source_by_offset.setdefault(item["start"], []).append(item)
+    staff_words: Dict[str, Dict[float, Dict[str, Any]]] = {}
+    if strategy == "staff_line":
+        for item in source_timeline:
+            staff_words.setdefault(_staff_scope_key(item["note"]), {}).setdefault(item["start"], item)
+    first_word_offset = {staff: min(words) for staff, words in staff_words.items()}
 
     syllable_tokens = source_timeline
     syllable_index = 0
@@ -4872,6 +4902,28 @@ def _propagate_lyrics(
             key = round(float(copied.get("offset_beats") or 0.0), 6)
             candidates = source_by_offset.get(key, [])
             source_item = candidates[0] if candidates else None
+        elif effective_strategy == "staff_line":
+            key = round(float(copied.get("offset_beats") or 0.0), 6)
+            staff = _staff_scope_key(copied)
+            words = staff_words.get(staff, {})
+            earlier = staff in first_word_offset and first_word_offset[staff] < key
+            tied = str(copied.get("tie_type") or "").strip() in {"stop", "continue"}
+            if tied and _lyric_kind(copied) == "word" and not _is_generated_solfege_lyric(copied):
+                source_item = next((item for item in source_by_offset.get(key, [])
+                                    if _staff_scope_key(item["note"]) == staff
+                                    and _voice_key(item["note"].get("voice")) ==
+                                    _voice_key(copied.get("voice"))), None)
+            elif not tied:
+                source_item = words.get(key)
+            if source_item is None and earlier:
+                copied.pop("lyric", None)
+                copied.pop("syllabic", None)
+                copied.pop("lyric_is_extended", None)
+                copied.pop("lyric_name", None)
+                copied["lyric"] = "+"
+                copied["syllabic"] = None
+                copied["lyric_is_extended"] = True
+                target_note_matched_count += 1
         elif effective_strategy == "overlap_best_match":
             source_item = _choose_overlap_best_match(copied, source_timeline)
         elif effective_strategy == "syllable_flow":
@@ -4887,8 +4939,13 @@ def _propagate_lyrics(
             target_note_matched_count += 1
         out.append(copied)
 
+    diagnostic_timeline = (
+        [item for item in source_timeline
+         if _note_in_measure_range(item["note"], measure_range)]
+        if strategy == "staff_line" and measure_range is not None else source_timeline
+    )
     dropped_source_lyrics: List[Dict[str, Any]] = []
-    for item in source_timeline:
+    for item in diagnostic_timeline:
         source_index = int(item.get("source_index", -1))
         if source_index in matched_source_indices:
             continue
@@ -4907,7 +4964,7 @@ def _propagate_lyrics(
 
     diagnostics = {
         "strategy": effective_strategy,
-        "source_lyric_candidates_count": len(source_timeline),
+        "source_lyric_candidates_count": len(diagnostic_timeline),
         "target_note_count_in_range": target_note_count_in_range,
         "target_note_attempted_count": target_note_attempted_count,
         "target_note_matched_count": target_note_matched_count,

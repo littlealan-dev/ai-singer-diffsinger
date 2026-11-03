@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from src.api.preprocess_sheet import (
     Lane, Option, Segment, Sheet, StaffLyricLine, line_voice_for_staff, melody_line_staffs,
-    note_staffs_by_measure, staff_lyric_lines,
+    note_staffs_by_measure, staff_lyric_lines, lyric_bar_cases,
 )
 
 
@@ -168,7 +168,7 @@ def _action_for_measure(
     assigned_group_size: int | None = None
     melody_ref: tuple[int, str] | None = None
     for kind, option in _options_for_measure(sheet, selected, lane, measure):
-        if kind in {"split_shared_note_policy", "lyric_line"}:
+        if kind in {"split_shared_note_policy", "lyric_line", "lyric_reading"}:
             continue
         for key, value in option.fields.items():
             if key == "melody_source_by_lane":
@@ -211,7 +211,10 @@ def _action_for_measure(
         # Lyric rule: the carrier is filled in per measure once the whole lane is known.
         fields.pop("lyric_source", None)
         fields.pop("lyric_strategy", None)
-        reading = (staffs, _line_voice(sheet, selected, lane, measure), melody_ref)
+        reading_choice = next((option.fields["lyric_reading"] for kind, option in
+                               _options_for_measure(sheet, selected, lane, measure)
+                               if kind == "lyric_reading"), "own_words_only")
+        reading = (staffs, _line_voice(sheet, selected, lane, measure), melody_ref, reading_choice)
     elif not isinstance(fields.get("lyric_source"), dict):
         raise AssemblyError(f"Derive needs a lyric source for {lane.lane_id}")
     else:
@@ -246,7 +249,7 @@ def _action_for_measure(
 
 def _carriers(
     score: dict, lines: dict[tuple[int, str], StaffLyricLine], readings: dict[int, tuple],
-) -> dict[int, dict[str, str]]:
+) -> dict[int, tuple[dict[str, str], str]]:
     """Encode the read words as the voice they are typed on, measure by measure.
 
     Several carriers: the melody-source voice if it carries any, else the most
@@ -260,7 +263,7 @@ def _carriers(
                 voice_part_id for voice_part_id, _ in entries
             )
     carriers: dict[int, tuple[int, str]] = {}
-    for measure, (staffs, line_voice, melody_ref) in sorted(readings.items()):
+    for measure, (staffs, line_voice, melody_ref, _) in sorted(readings.items()):
         counts: dict[tuple[int, str], int] = {}
         for staff in sorted(staffs):
             only = line_voice_for_staff(lines[staff], staff[0], line_voice)
@@ -272,7 +275,7 @@ def _carriers(
                 counts, key=lambda key: (-counts[key], key[1], key[0])
             )
     if not carriers and readings:
-        staffs, line_voice, _ = readings[min(readings)]
+        staffs, line_voice, _, _ = readings[min(readings)]
         staff = min(staffs)
         only = line_voice_for_staff(lines[staff], staff[0], line_voice)
         counts = {}
@@ -282,11 +285,25 @@ def _carriers(
                     counts[voice_part_id] = counts.get(voice_part_id, 0) + 1
         carriers[min(readings)] = (staff[0], min(counts, key=lambda key: (-counts[key], key)))
     previous = carriers[min(carriers)] if carriers else None
-    refs: dict[int, dict[str, str]] = {}
+    refs: dict[int, tuple[dict[str, str], str]] = {}
+    case_cache: dict[tuple[int, str, str, str | None], dict] = {}
     for measure in sorted(readings):
         previous = carriers.get(measure, previous)
         part_index, voice_part_id = previous
-        refs[measure] = {"part_id": str(score["parts"][part_index]["part_id"]), "voice_part_id": voice_part_id}
+        staffs, line_voice, melody_ref, reading_choice = readings[measure]
+        strategy = "strict_onset"
+        if line_voice is None and len(staffs) == 1:
+            staff = next(iter(staffs))
+            only = line_voice_for_staff(lines[staff], staff[0], line_voice)
+            case_key = (melody_ref[0], staff[1], melody_ref[1], only)
+            if case_key not in case_cache:
+                case_cache[case_key] = lyric_bar_cases(score, lines, *case_key)
+            case = case_cache[case_key].get(measure)
+            if case is not None and (case.case in {"no_word_for_lane", "shared"}
+                                     or case.case == "ambiguous" and reading_choice == "share_line"):
+                strategy = "staff_line"
+        refs[measure] = ({"part_id": str(score["parts"][part_index]["part_id"]),
+                          "voice_part_id": voice_part_id}, strategy)
     return refs
 
 
@@ -347,8 +364,8 @@ def assemble_plan(
                 )
                 if reading is not None:
                     readings[measure] = reading
-        for measure, carrier in _carriers(score, lines, readings).items():
-            per_measure[measure].update(lyric_source=carrier, lyric_strategy="strict_onset")
+        for measure, (carrier, strategy) in _carriers(score, lines, readings).items():
+            per_measure[measure].update(lyric_source=carrier, lyric_strategy=strategy)
         if not per_measure:
             raise AssemblyError(f"No measures for {lane.lane_id}")
         measure_numbers = sorted(per_measure)

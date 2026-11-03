@@ -71,7 +71,7 @@ class SheetSkeleton:
 
 
 SLOT_KINDS = (
-    "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line",
+    "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line", "lyric_reading",
     "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "freeform",
 )
 
@@ -108,6 +108,12 @@ class StaffLyricLine:
 
     words: dict[tuple[int, float], list[tuple[str, str]]]
     multiple: bool
+
+
+@dataclass(frozen=True)
+class LyricBarCase:
+    case: str
+    reasons: tuple[str, ...] = ()
 
 
 def _beat(note: dict) -> tuple[int, float]:
@@ -179,13 +185,99 @@ def read_lane_lyrics(
     readings: list[str | None] = []
     for note in notes:
         beat = _beat(note)
-        if beat in words:
+        if str(note.get("tie_type") or "").strip() in {"stop", "continue"}:
+            own_word = _word_text(note)
+            readings.append(own_word if own_word is not None else
+                            ("+" if first is not None and first < beat else None))
+        elif beat in words:
             readings.append(words[beat])
         elif first is not None and first < beat:
             readings.append("+")
         else:
             readings.append(None)
     return readings
+
+
+def lyric_bar_cases(
+    score: dict, lines: dict[tuple[int, str], StaffLyricLine], part_index: int,
+    staff: str, lane_voice_part_id: str, line_voice: str | None,
+) -> dict[int, LyricBarCase]:
+    """Classify bars in one lane's staff lyric reading."""
+    part = score["parts"][part_index]
+    voices = {vp["voice_part_id"]: str(vp["source_voice_id"]) for vp in
+              _analyze_part_voice_parts(part, part_index)["voice_parts"]}
+    voice = voices.get(lane_voice_part_id)
+    if voice is None or (part_index, staff) not in lines:
+        return {}
+    line = lines[(part_index, staff)]
+    notes = sorted((note for note in part.get("notes") or []
+                    if _is_countable_sung_note(note)
+                    and _voice_key(note.get("voice")) == voice
+                    and _staff_scope_key(note) == staff), key=_beat)
+    all_notes = [note for note in part.get("notes") or []
+                 if _is_countable_sung_note(note) and _staff_scope_key(note) == staff]
+    notes_by_bar: dict[int, list[dict]] = {}
+    for note in notes:
+        notes_by_bar.setdefault(_beat(note)[0], []).append(note)
+    readings = read_lane_lyrics(line, notes, line_voice)
+    word_notes = []
+    seen_word_beats: set[tuple[int, float]] = set()
+    for note, reading in zip(notes, readings):
+        if reading in {None, "+"} or _beat(note) in seen_word_beats:
+            continue
+        seen_word_beats.add(_beat(note))
+        source = next((item for item in all_notes if _beat(item) == _beat(note)
+                       and _word_text(item) == reading
+                       and (line_voice is None or _voice_key(item.get("voice")) == voices.get(line_voice))),
+                      None)
+        word_notes.append((note, source or note))
+    broken_bars: set[int] = set()
+    for (previous, previous_source), (following, following_source) in zip(word_notes, word_notes[1:]):
+        prev_syllabic = str(previous_source.get("syllabic") or "").lower()
+        next_syllabic = str(following_source.get("syllabic") or "").lower()
+        if not (prev_syllabic or next_syllabic):
+            continue
+        if (prev_syllabic in {"begin", "middle"}) != (next_syllabic in {"middle", "end"}):
+            borrowed = any(
+                not any(vp == lane_voice_part_id for vp, _ in line.words.get(_beat(note), []))
+                for note in (previous, following)
+            )
+            if borrowed:
+                broken_bars.add(_beat(following)[0])
+    cases: dict[int, LyricBarCase] = {}
+    for bar, lane_notes in notes_by_bar.items():
+        words = {beat: [(vp, text) for vp, text in entries
+                        if line_voice is None or vp == line_voice]
+                 for beat, entries in line.words.items() if beat[0] == bar}
+        words = {beat: entries for beat, entries in words.items() if entries}
+        if not words:
+            continue
+        new_beats = {_beat(note) for note in lane_notes
+                     if str(note.get("tie_type") or "").strip() not in {"stop", "continue"}
+                     or _word_text(note) is not None}
+        if not new_beats.intersection(words):
+            cases[bar] = LyricBarCase("no_word_for_lane")
+            continue
+        carriers = {vp for entries in words.values() for vp, _ in entries}
+        if len(carriers) == 1 or any(len({text.casefold() for _, text in entries}) > 1
+                                     for entries in words.values()):
+            cases[bar] = LyricBarCase("single")
+            continue
+        reasons: list[str] = []
+        exclusive_carriers = {
+            voice_part_id for voice_part_id in carriers
+            if any(any(vp == voice_part_id for vp, _ in entries)
+                   and not any(_beat(note) == beat
+                               and _voice_key(note.get("voice")) != voices.get(voice_part_id)
+                               for note in all_notes)
+                   for beat, entries in words.items())
+        }
+        if len(exclusive_carriers) >= 2:
+            reasons.append("independent_rhythm")
+        if bar in broken_bars:
+            reasons.append("broken_split_word")
+        cases[bar] = LyricBarCase("ambiguous" if reasons else "shared", tuple(reasons))
+    return cases
 
 
 def note_staffs_by_measure(score: dict) -> dict[tuple[int, str], dict[int, set[tuple[int, str]]]]:
@@ -981,6 +1073,7 @@ def build_sheet(
                        for source in eligible_lyrics}
     lines = staff_lyric_lines(score)
     staff_index = note_staffs_by_measure(score)
+    case_cache: dict[tuple[int, str, str, str | None], dict[int, LyricBarCase]] = {}
     for segment in sheet.segments:
         lanes = [lane for lane in sheet.lanes
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
@@ -1055,6 +1148,7 @@ def build_sheet(
             lyric_needed = not all(staffs and staffs <= lines.keys() for staffs in staffs_by_ref)
             if not lyric_needed:
                 # Lyric rule: code reads the page; the LLM only picks a line when a staff has two.
+                line_options: tuple[Option, ...] = ()
                 multiple = sorted({staff for staffs in staffs_by_ref for staff in staffs
                                    if lines[staff].multiple})
                 if multiple:
@@ -1080,6 +1174,31 @@ def build_sheet(
             else:
                 default_melody = {"part_index": lane.part_index,
                                   "voice_part_id": lane.source_voice_part_id}
+            if not lyric_needed:
+                default_line = None
+                if line_options:
+                    line_ref = line_options[0].fields["lyric_line_voice"]
+                    default_line = (line_ref["part_index"], line_ref["voice_part_id"])
+                ambiguous: dict[str, list[str]] = {}
+                for staff in sorted(staffs_by_ref[0]):
+                    if staff[0] != default_melody["part_index"]:
+                        continue
+                    only = line_voice_for_staff(lines[staff], staff[0], default_line)
+                    case_key = (staff[0], staff[1], default_melody["voice_part_id"], only)
+                    if case_key not in case_cache:
+                        case_cache[case_key] = lyric_bar_cases(score, lines, *case_key)
+                    cases = case_cache[case_key]
+                    for bar, case in cases.items():
+                        if (segment.start_measure <= bar <= segment.end_measure
+                                and case.case == "ambiguous"):
+                            ambiguous[str(bar)] = list(case.reasons)
+                if ambiguous:
+                    segment_slots.append(_choice_slot(
+                        (lane.lane_id,), segment, "lyric_reading", tuple(
+                            Option(value, value, {"lyric_reading": value}, {}, ())
+                            for value in ("own_words_only", "share_line")
+                        ), evidence={"ambiguous_bars": ambiguous},
+                    ))
             if lyric_needed:
                 used_when = {"used_when": "melody from a staff without a lyric line"}
                 target_sung_note_count = _target_sung_note_count_for_section(

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from typing import Any
+from xml.etree import ElementTree as ET
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -25,7 +26,10 @@ from src.api.preprocess_assembler import (
 from src.api.preprocess_sheet import (
     build_sheet, line_voice_for_staff, read_lane_lyrics, staff_lyric_lines,
 )
-from src.api.voice_parts import _analyze_part_voice_parts, _lyric_kind, _staff_scope_key, _voice_key
+from src.api.voice_parts import (
+    _analyze_part_voice_parts, _choose_notes_ranked, _is_countable_sung_note, _is_generated_solfege_lyric,
+    _lyric_kind, _staff_scope_key, _voice_key,
+)
 from src.api.voice_part_lint_rules import LINT_RULE_SPECS, POSTFLIGHT_VALIDATION_SPECS
 
 
@@ -33,6 +37,7 @@ JOB_COLUMNS = (
     "job_id", "status", "lint_clean", "runs_clean", "executor_status",
     "executor_action", "executor_codes", "unsung_chord_notes", "lyric_notes_checked",
     "lyric_reading_mismatches", "lyric_mismatch_bars", "no_previous_syllable",
+    "lyric_words_lost", "staff_line_bars", "ambiguous_bars", "borrowed_bars_with_slur",
     "p0", "p1", "p2", "lanes", "segments", "slots", "freeform", "issues",
 )
 
@@ -258,6 +263,104 @@ def lyric_reading_check(score: dict, sheet: Any, choices: dict, plan: dict, resu
     }
 
 
+def planned_lyric_metrics(score: dict, sheet: Any, choices: dict, plan: dict, xml: bytes) -> dict:
+    """Count plan-visible lyric risks without depending on executor success."""
+    lines = staff_lyric_lines(score)
+    line_voices = chosen_line_voices(sheet, choices)
+    part_by_id = {str(part.get("part_id")): index for index, part in enumerate(score["parts"])}
+    voices = {
+        index: {vp["voice_part_id"]: str(vp["source_voice_id"]) for vp in
+                _analyze_part_voice_parts(part, index)["voice_parts"]}
+        for index, part in enumerate(score["parts"])
+    }
+    slur_bars: set[tuple[str, str, str, int]] = set()
+    root = ET.fromstring(xml)
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+    for part_node in (child for child in root if local(child.tag) == "part"):
+        raw_part_id = str(part_node.get("id") or "")
+        for measure in (child for child in part_node if local(child.tag) == "measure"):
+            try:
+                bar = int(measure.get("number") or 0)
+            except ValueError:
+                continue
+            for note in (child for child in measure if local(child.tag) == "note"):
+                if not any(local(node.tag) == "slur" for node in note.iter()):
+                    continue
+                voice = next((node.text for node in note if local(node.tag) == "voice"), None)
+                staff = next((node.text for node in note if local(node.tag) == "staff"), None)
+                slur_bars.add((raw_part_id, str(staff or "1").strip(), _voice_key(voice), bar))
+    words_lost = 0
+    staff_line_bars: set[tuple[str, int]] = set()
+    borrowed_slur_bars: set[tuple[str, int]] = set()
+    ambiguous_bars = {(lane_id, int(bar)) for slot in sheet.slots
+                      if slot.kind == "lyric_reading" for lane_id in slot.lane_ids
+                      for bar in slot.evidence.get("ambiguous_bars", {})}
+    for lane, target in zip(sheet.lanes, plan.get("targets") or []):
+        for section in target.get("sections") or []:
+            if section.get("mode") != "derive":
+                continue
+            melody = section.get("melody_source") or {}
+            melody_index = part_by_id.get(str(melody.get("part_id")))
+            if melody_index is None:
+                continue
+            melody_voice = voices[melody_index].get(melody.get("voice_part_id"))
+            melody_raw_part_id = str(score["parts"][melody_index].get("raw_part_id")
+                                     or score["parts"][melody_index].get("part_id") or "")
+            source = section.get("lyric_source") or {}
+            source_index = part_by_id.get(str(source.get("part_id")))
+            source_voice = voices[source_index].get(source.get("voice_part_id")) if source_index is not None else None
+            strict_beats = {
+                round(float(note.get("offset_beats") or 0), 6)
+                for note in score["parts"][source_index].get("notes") or []
+                if _is_countable_sung_note(note) and _voice_key(note.get("voice")) == source_voice
+                and _lyric_kind(note) == "word" and not _is_generated_solfege_lyric(note)
+            } if source_index is not None else set()
+            strategy = section.get("lyric_strategy")
+            melody_notes = [note for note in score["parts"][melody_index].get("notes") or []
+                            if _is_countable_sung_note(note)
+                            and _voice_key(note.get("voice")) == melody_voice
+                            and section["start_measure"] <= int(note.get("measure_number") or 0)
+                            <= section["end_measure"]]
+            if section.get("decision_type") == "SPLIT_CHORDS_SELECT_NOTES" and section.get("method") == "ranked":
+                grouped: dict[tuple[int, float], list[dict]] = {}
+                for note in melody_notes:
+                    grouped.setdefault((int(note["measure_number"]),
+                                        round(float(note.get("offset_beats") or 0), 6)), []).append(note)
+                melody_notes = _choose_notes_ranked(
+                    grouped, rank_index=int(section.get("rank_index") or 0),
+                    rank_fallback=str(section.get("rank_fallback") or "greedy"),
+                )
+            notes_by_bar: dict[int, list[dict]] = {}
+            for note in melody_notes:
+                notes_by_bar.setdefault(int(note.get("measure_number") or 0), []).append(note)
+            for bar in range(section["start_measure"], section["end_measure"] + 1):
+                if strategy == "staff_line":
+                    staff_line_bars.add((lane.lane_id, bar))
+                for note in notes_by_bar.get(bar, []):
+                    beat = (bar, round(float(note.get("offset_beats") or 0), 6))
+                    staff = (melody_index, _staff_scope_key(note))
+                    line = lines.get(staff)
+                    if line is None:
+                        continue
+                    only = line_voice_for_staff(line, melody_index,
+                                                line_voices.get(lane.lane_id, {}).get(bar))
+                    entries = [(vp, word) for vp, word in line.words.get(beat, [])
+                               if only is None or vp == only]
+                    if not entries:
+                        continue
+                    if strategy == "staff_line":
+                        if (all(vp != melody.get("voice_part_id") for vp, _ in entries)
+                                and (melody_raw_part_id, _staff_scope_key(note),
+                                     _voice_key(melody_voice), bar) in slur_bars):
+                            borrowed_slur_bars.add((lane.lane_id, bar))
+                    elif beat[1] not in strict_beats:
+                        words_lost += 1
+    return {"lyric_words_lost": words_lost, "staff_line_bars": len(staff_line_bars),
+            "ambiguous_bars": len(ambiguous_bars),
+            "borrowed_bars_with_slur": len(borrowed_slur_bars)}
+
+
 def _exception_text(exc: Exception) -> str:
     message = str(exc).splitlines()[0][:200]
     if "<" in message or ">" in message:
@@ -276,6 +379,8 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
         "unsung_chord_notes": None, "unsung_chord_bars": None,
         "lyric_notes_checked": None, "lyric_reading_mismatches": None,
         "lyric_mismatch_bars": None, "no_previous_syllable": None, "wall_time_ms": 0,
+        "lyric_words_lost": None, "staff_line_bars": None, "ambiguous_bars": None,
+        "borrowed_bars_with_slur": None,
     }
     sheet = None
     plan = None
@@ -288,7 +393,8 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
         # output so the replay corpus remains read-only.
         with tempfile.TemporaryDirectory(prefix="sheet-proof-") as temporary:
             xml_copy = Path(temporary) / "input.xml"
-            xml_copy.write_bytes((corpus / job_id / "input.xml").read_bytes())
+            xml_bytes = (corpus / job_id / "input.xml").read_bytes()
+            xml_copy.write_bytes(xml_bytes)
             score = parse_score(xml_copy, verse_number=_verse_number(context))
             sheet = build_sheet(score, context)
             row["issues"] = list(sheet.issues)
@@ -309,6 +415,7 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
             else:
                 choices = first_option_choices(sheet)
                 plan = assemble_plan(sheet, choices, score=score)
+                row.update(planned_lyric_metrics(score, sheet, choices, plan, xml_bytes))
                 result = preprocess_voice_parts(copy.deepcopy(score), request={"plan": plan})
                 row["executor_status"] = result.get("status")
                 row["executor_action"] = result.get("action")
@@ -407,6 +514,9 @@ def _summary(rows: list[dict]) -> str:
         f"{', '.join(map(str, row['lyric_mismatch_bars']))} |"
         for row in rows if row["lyric_reading_mismatches"]
     )
+    lines.extend(["", "## Planned lyric reading", "", "| Metric | Count |", "| --- | ---: |"])
+    for metric in ("lyric_words_lost", "staff_line_bars", "ambiguous_bars", "borrowed_bars_with_slur"):
+        lines.append(f"| {metric} | {sum(row[metric] or 0 for row in rows)} |")
     lines.extend(["", "## Stopped: score has no lyrics", "", "| Job |", "| --- |"])
     lines.extend(f"| {row['job_id']} |" for row in rows if row["status"] == "needs_lyrics")
     lines.extend(["", "## Jobs not runs-clean", "", "| Job | First failing rule or status |", "| --- | --- |"])

@@ -13,7 +13,8 @@ import sys
 
 import pytest
 
-from tests.test_preprocess_sheet import SATB, _two_staff_score
+from tests.test_preprocess_sheet import SATB, _parse_inline, _two_staff_score
+from tests.test_preprocess_assembler import _shared_line_score, _sheet
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/replay/prove_sheet_construction.py"
@@ -188,6 +189,8 @@ def test_action_required_is_lint_clean_but_not_runs_clean_and_no_messages(tmp_pa
     assert row["executor_action"] == "section_lyric_quality_failed"
     assert row["executor_codes"] == ["missing_word_lyric", "weak_alignment"]
     assert row["unsung_chord_notes"] is None and row["unsung_chord_bars"] is None
+    assert isinstance(row["lyric_words_lost"], int)
+    assert isinstance(row["staff_line_bars"], int)
     summary = (out / "summary.md").read_text(encoding="utf-8")
     assert "Runs clean: 0 / 1" in summary and "Lint-clean: 1 / 1" in summary
     assert "| section_lyric_quality_failed | 1 |" in summary
@@ -203,6 +206,78 @@ def test_action_required_is_lint_clean_but_not_runs_clean_and_no_messages(tmp_pa
         "PRIVATE_EXECUTOR_MESSAGE_SENTINEL" not in file.read_text(encoding="utf-8")
         for file in out.rglob("*") if file.is_file()
     )
+
+
+def test_planned_lyric_columns_on_action_required_shared_line(tmp_path, monkeypatch):
+    score = _shared_line_score(tmp_path)
+    xml = (tmp_path / "synthetic.xml").read_text(encoding="utf-8")
+    xml = xml.replace('<type>half</type></note><backup>',
+                      '<type>half</type><notations><slur type="start" number="1"/>'
+                      '</notations></note><backup>')
+    corpus = tmp_path / "corpus"
+    _job(corpus, "shared", xml.encode(), score["parts"][0]["part_id"])
+    monkeypatch.setattr(proof, "preprocess_voice_parts",
+                        lambda _score, *, request: {"status": "action_required", "action": "synthetic_stop"})
+    out = tmp_path / "report"
+    row = proof.prove(corpus, out)[0]
+    assert row["executor_status"] == "action_required"
+    assert row["lyric_words_lost"] == 0
+    assert row["staff_line_bars"] == 2
+    assert row["ambiguous_bars"] == 0
+    assert row["borrowed_bars_with_slur"] == 1
+    summary = (out / "summary.md").read_text(encoding="utf-8")
+    assert "| borrowed_bars_with_slur | 1 |" in summary
+    assert "first" not in summary and "second" not in summary
+
+    assemble = proof.assemble_plan
+    def strict_plan(sheet, choices, *, score):
+        plan = assemble(sheet, choices, score=score)
+        target = next(target for target in plan["targets"]
+                      if target["source"]["voice_part_id"] == "voice part 2")
+        target["sections"][0]["lyric_strategy"] = "strict_onset"
+        target["sections"][0]["lyric_source"]["voice_part_id"] = "voice part 2"
+        return plan
+    monkeypatch.setattr(proof, "assemble_plan", strict_plan)
+    lost = proof.prove(corpus, tmp_path / "strict_report")[0]
+    assert lost["executor_status"] == "action_required"
+    assert lost["lyric_words_lost"] == 1
+
+
+def test_slur_metric_uses_raw_part_and_staff_after_split_part(tmp_path):
+    score = _shared_line_score(tmp_path)
+    xml = (tmp_path / "synthetic.xml").read_text(encoding="utf-8")
+    xml = xml.replace('<type>half</type></note><backup>',
+                      '<type>half</type><notations><slur type="start"/>'
+                      '</notations></note><backup>')
+    xml = xml.replace('<part-list>', '<part-list><score-part id="P0">'
+                      '<part-name>Earlier</part-name></score-part>', 1)
+    earlier = '''<part id="P0"><measure number="1"><attributes><divisions>1</divisions>
+<staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time>
+<clef number="1"><sign>G</sign><line>2</line></clef>
+<clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration>
+<voice>1</voice><staff>1</staff><type>whole</type></note><backup><duration>4</duration></backup>
+<note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration>
+<voice>2</voice><staff>2</staff><type>whole</type></note></measure></part>'''
+    xml = xml.replace('<part id="P1">', earlier + '<part id="P1">', 1)
+    score = _parse_inline(tmp_path, xml)
+    assert len(score["parts"]) == 3
+    target = score["parts"][-1]
+    sheet = _sheet(score, target["part_id"])
+    choices = proof.first_option_choices(sheet)
+    plan = proof.assemble_plan(sheet, choices, score=score)
+    metrics = proof.planned_lyric_metrics(score, sheet, choices, plan, xml.encode())
+    assert metrics["borrowed_bars_with_slur"] == 1
+
+    wrong_staff_xml = xml.replace('<type>half</type><notations><slur',
+                                  '<type>half</type><staff>2</staff><notations><slur', 1)
+    assert proof.planned_lyric_metrics(score, sheet, choices, plan,
+                                      wrong_staff_xml.encode())["borrowed_bars_with_slur"] == 0
+
+    xml_with_suffix = xml.replace('</measure></part>',
+                                  '</measure><measure number="12a"/></part>', 1)
+    assert proof.planned_lyric_metrics(score, sheet, choices, plan,
+                                      xml_with_suffix.encode()) == metrics
 
 
 def test_complete_split_reports_unsung_chord_notes(tmp_path, monkeypatch):
