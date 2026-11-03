@@ -27,7 +27,7 @@ from src.api.preprocess_sheet import (
     build_sheet, line_voice_for_staff, read_lane_lyrics, staff_lyric_lines,
 )
 from src.api.voice_parts import (
-    _analyze_part_voice_parts, _is_countable_sung_note, _is_generated_solfege_lyric,
+    _analyze_part_voice_parts, _choose_notes_ranked, _is_countable_sung_note, _is_generated_solfege_lyric,
     _lyric_kind, _staff_scope_key, _voice_key,
 )
 from src.api.voice_part_lint_rules import LINT_RULE_SPECS, POSTFLIGHT_VALIDATION_SPECS
@@ -310,13 +310,27 @@ def planned_lyric_metrics(score: dict, sheet: Any, choices: dict, plan: dict, xm
                 and _lyric_kind(note) == "word" and not _is_generated_solfege_lyric(note)
             } if source_index is not None else set()
             strategy = section.get("lyric_strategy")
+            melody_notes = [note for note in score["parts"][melody_index].get("notes") or []
+                            if _is_countable_sung_note(note)
+                            and _voice_key(note.get("voice")) == melody_voice
+                            and section["start_measure"] <= int(note.get("measure_number") or 0)
+                            <= section["end_measure"]]
+            if section.get("decision_type") == "SPLIT_CHORDS_SELECT_NOTES" and section.get("method") == "ranked":
+                grouped: dict[tuple[int, float], list[dict]] = {}
+                for note in melody_notes:
+                    grouped.setdefault((int(note["measure_number"]),
+                                        round(float(note.get("offset_beats") or 0), 6)), []).append(note)
+                melody_notes = _choose_notes_ranked(
+                    grouped, rank_index=int(section.get("rank_index") or 0),
+                    rank_fallback=str(section.get("rank_fallback") or "greedy"),
+                )
+            notes_by_bar: dict[int, list[dict]] = {}
+            for note in melody_notes:
+                notes_by_bar.setdefault(int(note.get("measure_number") or 0), []).append(note)
             for bar in range(section["start_measure"], section["end_measure"] + 1):
                 if strategy == "staff_line":
                     staff_line_bars.add((lane.lane_id, bar))
-                for note in score["parts"][melody_index].get("notes") or []:
-                    if (not _is_countable_sung_note(note) or _voice_key(note.get("voice")) != melody_voice
-                            or int(note.get("measure_number") or 0) != bar):
-                        continue
+                for note in notes_by_bar.get(bar, []):
                     beat = (bar, round(float(note.get("offset_beats") or 0), 6))
                     staff = (melody_index, _staff_scope_key(note))
                     line = lines.get(staff)

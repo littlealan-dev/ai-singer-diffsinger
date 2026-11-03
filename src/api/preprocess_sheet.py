@@ -219,9 +219,11 @@ def lyric_bar_cases(
         notes_by_bar.setdefault(_beat(note)[0], []).append(note)
     readings = read_lane_lyrics(line, notes, line_voice)
     word_notes = []
+    seen_word_beats: set[tuple[int, float]] = set()
     for note, reading in zip(notes, readings):
-        if reading in {None, "+"}:
+        if reading in {None, "+"} or _beat(note) in seen_word_beats:
             continue
+        seen_word_beats.add(_beat(note))
         source = next((item for item in all_notes if _beat(item) == _beat(note)
                        and _word_text(item) == reading
                        and (line_voice is None or _voice_key(item.get("voice")) == voices.get(line_voice))),

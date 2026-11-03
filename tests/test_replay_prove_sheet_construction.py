@@ -229,6 +229,19 @@ def test_planned_lyric_columns_on_action_required_shared_line(tmp_path, monkeypa
     assert "| borrowed_bars_with_slur | 1 |" in summary
     assert "first" not in summary and "second" not in summary
 
+    assemble = proof.assemble_plan
+    def strict_plan(sheet, choices, *, score):
+        plan = assemble(sheet, choices, score=score)
+        target = next(target for target in plan["targets"]
+                      if target["source"]["voice_part_id"] == "voice part 2")
+        target["sections"][0]["lyric_strategy"] = "strict_onset"
+        target["sections"][0]["lyric_source"]["voice_part_id"] = "voice part 2"
+        return plan
+    monkeypatch.setattr(proof, "assemble_plan", strict_plan)
+    lost = proof.prove(corpus, tmp_path / "strict_report")[0]
+    assert lost["executor_status"] == "action_required"
+    assert lost["lyric_words_lost"] == 1
+
 
 def test_complete_split_reports_unsung_chord_notes(tmp_path, monkeypatch):
     corpus = tmp_path / "corpus"

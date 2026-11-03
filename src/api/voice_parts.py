@@ -4872,6 +4872,7 @@ def _propagate_lyrics(
     if strategy == "staff_line":
         for item in source_timeline:
             staff_words.setdefault(_staff_scope_key(item["note"]), {}).setdefault(item["start"], item)
+    first_word_offset = {staff: min(words) for staff, words in staff_words.items()}
 
     syllable_tokens = source_timeline
     syllable_index = 0
@@ -4903,21 +4904,21 @@ def _propagate_lyrics(
             source_item = candidates[0] if candidates else None
         elif effective_strategy == "staff_line":
             key = round(float(copied.get("offset_beats") or 0.0), 6)
-            words = staff_words.get(_staff_scope_key(copied), {})
-            earlier = any(offset < key for offset in words)
+            staff = _staff_scope_key(copied)
+            words = staff_words.get(staff, {})
+            earlier = staff in first_word_offset and first_word_offset[staff] < key
             tied = str(copied.get("tie_type") or "").strip() in {"stop", "continue"}
             if not tied:
                 source_item = words.get(key)
-            if source_item is None:
+            if source_item is None and earlier:
                 copied.pop("lyric", None)
                 copied.pop("syllabic", None)
                 copied.pop("lyric_is_extended", None)
                 copied.pop("lyric_name", None)
-                if earlier:
-                    copied["lyric"] = "+"
-                    copied["syllabic"] = None
-                    copied["lyric_is_extended"] = True
-                    target_note_matched_count += 1
+                copied["lyric"] = "+"
+                copied["syllabic"] = None
+                copied["lyric_is_extended"] = True
+                target_note_matched_count += 1
         elif effective_strategy == "overlap_best_match":
             source_item = _choose_overlap_best_match(copied, source_timeline)
         elif effective_strategy == "syllable_flow":

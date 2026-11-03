@@ -10,7 +10,7 @@ import pytest
 
 from src.api import parse_score
 from src.api import preprocess_assembler as assembler
-from src.api.preprocess_sheet import build_sheet
+from src.api.preprocess_sheet import build_sheet, lyric_bar_cases, staff_lyric_lines
 from src.api.voice_parts import _propagate_lyrics, parse_voice_part_plan, preprocess_voice_parts
 from src.mcp.tools import _PREPROCESS_PLAN_REQUEST_SCHEMA
 from tests.test_preprocess_sheet import SATB, _chord_score, _parse_inline, _silence_voice_in_bar, _two_staff_score
@@ -35,6 +35,8 @@ def _shared_line_score(tmp_path):
 
 def test_shared_staff_line_plan_executes_without_quality_failure(tmp_path):
     score = _shared_line_score(tmp_path)
+    strategy_schema = _PREPROCESS_PLAN_REQUEST_SCHEMA["properties"]["targets"]["items"]["properties"]["sections"]["items"]["properties"]["lyric_strategy"]
+    assert "staff_line" not in strategy_schema["enum"]
     sheet = _sheet(score, score["parts"][0]["part_id"])
     assert not any(slot.kind == "lyric_reading" for slot in sheet.slots)
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
@@ -43,6 +45,19 @@ def test_shared_staff_line_plan_executes_without_quality_failure(tmp_path):
     result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
     assert result["status"] == "ready"
     assert not result.get("section_quality_issues")
+
+
+def test_different_words_on_same_beat_offer_line_not_reading(tmp_path):
+    score = _shared_line_score(tmp_path)
+    for note in score["parts"][0]["notes"]:
+        if note.get("voice") == "2" and note["offset_beats"] == 0:
+            note["lyric"] = "other"
+    sheet = _sheet(score, score["parts"][0]["part_id"])
+    assert any(slot.kind == "lyric_line" for slot in sheet.slots)
+    assert not any(slot.kind == "lyric_reading" for slot in sheet.slots)
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    assert all(section["lyric_strategy"] == "strict_onset"
+               for target in plan["targets"] for section in target["sections"])
 
 
 def test_ambiguous_reading_choice_applies_only_to_ambiguous_bar(tmp_path):
@@ -105,9 +120,12 @@ def test_tied_lane_bar_uses_staff_line_and_keeps_hold(tmp_path):
     xml = xml.replace('</measure></part>', '''</measure><measure number="2">
 <note><pitch><step>A</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice>
 <type>whole</type><tie type="stop"/></note><backup><duration>4</duration></backup>
-<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>2</voice>
-<type>whole</type><lyric><text>third</text></lyric></note></measure></part>''')
+<note><rest/><duration>2</duration><voice>2</voice><type>half</type></note>
+<note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><voice>2</voice>
+<type>half</type><lyric><text>third</text></lyric></note></measure></part>''')
     score = _parse_inline(tmp_path, xml)
+    cases = lyric_bar_cases(score, staff_lyric_lines(score), 0, "1", "voice part 1", None)
+    assert cases[2].case == "no_word_for_lane"
     sheet = _sheet(score, score["parts"][0]["part_id"])
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     lane = next(target for target in plan["targets"]
