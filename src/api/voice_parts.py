@@ -2883,6 +2883,24 @@ class LaneCounts:
     most: int
 
 
+def part_lane_counts(
+    score: Dict[str, Any], *, part_index: int
+) -> Dict[str, LaneCounts]:
+    """Return lane bounds for each staff with countable sung notes in a part."""
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return {}
+    scopes = {
+        _staff_scope_key(note)
+        for note in (parts[part_index].get("notes") or [])
+        if _is_countable_sung_note(note)
+    }
+    return {
+        scope: sheet_lane_counts(score, part_index=part_index, staff_scope=scope)
+        for scope in sorted(scopes)
+    }
+
+
 def sheet_lane_counts(
     score: Dict[str, Any], *, part_index: int, staff_scope: str
 ) -> LaneCounts:
