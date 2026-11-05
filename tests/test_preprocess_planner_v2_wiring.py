@@ -31,7 +31,7 @@ from src.backend.orchestrator import (
 from tests.test_backend_api import (  # noqa: F401 - pytest fixture
     _create_session, _preprocess_plan_response, _upload_score, client,
 )
-from tests.test_preprocess_chooser import _two_staff_part
+from tests.test_preprocess_chooser import _chord_beside_a_line, _two_staff_part
 from tests.test_preprocess_sheet import (
     SATB, _chord_score, _note, _rest, _single_staff_score, _too_many_chord_claims,
 )
@@ -252,6 +252,55 @@ def test_v2_job_reports_staff_lane_bounds_and_planned_count(client, monkeypatch,
         "partId": score["parts"][0]["part_id"], "staff": "1",
         "peak": 2, "most": 3, "chosen": 2,
     }]
+
+
+def test_v2_job_reports_separate_lane_count_and_charges_chooser_once(client, monkeypatch, tmp_path):
+    score = _two_lane_three_most_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+
+    def separate_layout(schema, dynamic_text):
+        slots = json.loads(dynamic_text.split("\n")[0])["slots"]
+        return json.dumps({slot["key"]: (
+            "separate" if slot["kind"] == "lane_layout"
+            else schema["properties"][slot["key"]]["enum"][0]
+        ) for slot in slots})
+
+    llm = FakeLlm(chooser_reply=separate_layout)
+    _, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    budget, token = _with_budget(0)
+    try:
+        job = run(score, context)
+    finally:
+        orchestrator_module._llm_turn_budget.reset(token)
+    assert job["status"] == "completed", job
+    assert job["laneCounts"][0]["chosen"] == 3
+    assert len(executed[0]["request"]["plan"]["targets"]) == 3
+    chooser_calls = llm.roles().count(LlmRole.PREPROCESS_CHOOSER)
+    assert budget.calls == 1 + len(llm.calls) - chooser_calls
+
+
+def test_v2_second_pass_still_charges_one_chooser_turn(client, monkeypatch, tmp_path):
+    score = _chord_beside_a_line(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+
+    def separate_layout(schema, dynamic_text):
+        slots = json.loads(dynamic_text.split("\n")[0])["slots"]
+        return json.dumps({slot["key"]: (
+            "separate" if slot["kind"] == "lane_layout"
+            else schema["properties"][slot["key"]]["enum"][0]
+        ) for slot in slots})
+
+    llm = FakeLlm(chooser_reply=separate_layout)
+    _, _, run = _job(client, monkeypatch, planner="v2", llm=llm)
+    budget, token = _with_budget(0)
+    try:
+        job = run(score, context)
+    finally:
+        orchestrator_module._llm_turn_budget.reset(token)
+    assert job["status"] == "completed", job
+    chooser_calls = llm.roles().count(LlmRole.PREPROCESS_CHOOSER)
+    assert chooser_calls > 1
+    assert budget.calls == 1 + len(llm.calls) - chooser_calls
 
 
 def test_v2_job_uses_the_latest_sheet_after_a_repair(client, monkeypatch, tmp_path):

@@ -10,6 +10,7 @@ Input
 - An option's flags are warnings from the app's checks. Choose a flagged option only when the musical evidence clearly favours it.
 
 What each kind decides
+- lane_layout (shared | separate): this staff's voice tags could mean separate groups of singers, or one group written in two voices. separate: each voice is its own group, with its own lanes, and a chord divides only inside that voice; its notes never pass to another voice. shared: the voices share the lanes, so a note written in one voice can be sung in a lane of another. Read the part name, the evidence and score_xml. Choose separate when the voices sing as separate groups through the song, for example soprano and alto with their own lines. A second voice that appears in only a few bars usually means one group, so choose shared.
 - mode (derive | rest): whether a lane sings in these bars while its own voice is silent. derive copies another voice (unison or doubling); rest keeps it silent. Rest when the whole staff is silent (an instrumental bar) or nothing shows this lane joining in. Derive when the evidence shows the voices sing together here (a "unis.", "a 2" or "tutti" direction, or voices merging into one line).
 - melody_source: which voice a silent lane copies when it derives. Prefer a voice on the same staff, and the voice this lane usually doubles.
 - voice_assignment: which lane sings which note of the chords in this segment. The first option is pitch order (highest note to highest lane); choose another only when the evidence shows the voices cross.

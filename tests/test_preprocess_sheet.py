@@ -811,9 +811,9 @@ def test_chord_claims_exceed_available_lanes(tmp_path):
     score = _too_many_chord_claims(tmp_path)
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
     assert len(sheet.lanes) == 2
-    assert len(sheet.slots) == 1
-    assert sheet.slots[0].kind == "freeform"
-    assert sheet.slots[0].evidence["reason"] == "chord_claims_exceed_lanes"
+    freeform, = [slot for slot in sheet.slots if slot.kind == "freeform"]
+    assert freeform.evidence["reason"] == "chord_claims_exceed_lanes"
+    assert [slot.kind for slot in sheet.slots if slot.kind != "freeform"] == ["lane_layout"]
 
 
 def test_first_option_never_simple_copies_a_chord_source(tmp_path):
