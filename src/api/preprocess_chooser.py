@@ -607,17 +607,22 @@ async def choose_repair(
     selected = {**{slot_id: option.option_id for slot_id, option in sheet.fixed.items()},
                 **(pinned or {}), **choices}
     earlier = _selection_lookup(selected)
+    layout_pins = {slot_id: value for slot_id, value in selected.items()
+                   if slot_id.endswith("|lane_layout") and value == "separate"}
 
     def failing_here(slot: Slot) -> bool:
+        if slot.kind == "lane_layout":
+            return False
         return any(_overlaps(slot.start_measure, slot.end_measure, failing.get(lane_id, []))
                    for lane_id in slot.lane_ids)
 
-    draft = build_sheet(score, planning_context, cuts=cuts)
-    pins = {slot.slot_id: earlier(slot.slot_id) for slot in _menus(draft).values()
+    draft = build_sheet(score, planning_context, pinned=layout_pins, cuts=cuts)
+    pins = {**layout_pins, **{slot.slot_id: earlier(slot.slot_id)
+            for slot in _menus(draft).values()
             if slot.kind in PINNABLE_KINDS and not failing_here(slot)
             and _still_valid(slot, earlier(slot.slot_id))
-            and earlier(slot.slot_id) != slot.options[0].option_id}
-    new_sheet = build_sheet(score, planning_context, pinned=pins, cuts=cuts) if pins else draft
+            and earlier(slot.slot_id) != slot.options[0].option_id}}
+    new_sheet = build_sheet(score, planning_context, pinned=pins, cuts=cuts) if pins != layout_pins else draft
     carried: dict[str, Any] = {}
     ask: list[Slot] = []
     extras: dict[str, dict] = {}

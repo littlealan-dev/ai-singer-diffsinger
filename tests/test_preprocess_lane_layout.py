@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
+import json
 
+from src.api import preprocess_chooser as chooser
 from src.api.preprocess_assembler import assemble_plan, first_option_choices
 from src.api.preprocess_sheet import build_sheet
+from src.api.score import parse_score
 from src.api.voice_parts import preprocess_voice_parts
+from tests.test_preprocess_chooser import _chord_beside_a_line
 from tests.test_preprocess_sheet import _single_staff_score
 
 
@@ -86,6 +91,10 @@ def test_separate_layout_assigns_each_voice_only_to_its_own_lanes(tmp_path):
         [(2, 76)],
         [(1, 67), (3, 69)],
     ]
+    reparsed = parse_score(result['modified_musicxml_path'], verse_number=1)
+    assert len(reparsed['parts']) == len(score['parts']) + 3
+    assert [sum(not note.get('is_rest') for note in part['notes'])
+            for part in reparsed['parts'][-3:]] == [3, 1, 2]
 
 
 def _turn_taking_chords(tmp_path, *, voices, chord_size):
@@ -160,3 +169,71 @@ def test_default_chord_uses_highest_separate_lanes(tmp_path):
         actual.append([(note['measure_number'], note['pitch_midi'])
                        for note in result['score']['parts'][index]['notes'] if not note.get('is_rest')])
     assert actual == [[(1, 76), (2, 79)], [(1, 72), (2, 76)], [(3, 67)]]
+
+
+def _answer(request, *, separate=False):
+    return json.dumps({
+        key: ('separate' if separate and request.key_to_slot[key].endswith('|lane_layout')
+              else prop['enum'][0])
+        for key, prop in request.response_schema['properties'].items()
+    })
+
+
+def test_separate_answer_rebuilds_in_second_pass(tmp_path):
+    score = _score(tmp_path)
+    requests = []
+
+    async def call(request):
+        requests.append(request)
+        return _answer(request, separate=True)
+
+    sheet, choices, stats = asyncio.run(chooser.choose(score, _context(score), call=call))
+    assert len(sheet.lanes) == 3
+    assert stats.second_pass_slots == 0
+    assert len(requests) == 1
+    assert not any(slot_id.endswith('|lane_layout') for request in requests[1:]
+                   for slot_id in request.key_to_slot.values())
+    plan = assemble_plan(sheet, choices, score=score)
+    assert preprocess_voice_parts(deepcopy(score), request={'plan': plan})['status'] == 'ready'
+
+
+def test_separate_reasks_only_changed_slots_and_keeps_turn_budget(tmp_path):
+    score = _chord_beside_a_line(tmp_path)
+    requests = []
+
+    async def call(request):
+        requests.append(request)
+        return _answer(request, separate=True)
+
+    sheet, _, stats = asyncio.run(chooser.choose(score, _context(score), call=call))
+    assert len(sheet.lanes) == 5
+    assert len(requests) == 2
+    assert stats.requests == 2 and stats.second_pass_slots == len(requests[1].key_to_slot)
+    assert not any(slot_id.endswith('|lane_layout') for slot_id in requests[1].key_to_slot.values())
+
+
+def test_repair_keeps_separate_layout_and_lane_ids(tmp_path):
+    score = _score(tmp_path)
+
+    async def call(request):
+        return _answer(request, separate=True)
+
+    sheet, choices, _ = asyncio.run(chooser.choose(score, _context(score), call=call))
+    failing_lane = sheet.lanes[1].lane_id
+    repair_requests = []
+
+    async def repair_call(request):
+        repair_requests.append(request)
+        return _answer(request)
+
+    repaired, repaired_choices, _ = asyncio.run(chooser.choose_repair(
+        score, _context(score), sheet=sheet, choices=choices,
+        failing={failing_lane: [(2, 2)]}, findings_by_lane={}, pinned=None,
+        call=repair_call,
+    ))
+    assert len(repaired.lanes) == 3
+    assert [lane.lane_id for lane in repaired.lanes] == [lane.lane_id for lane in sheet.lanes]
+    assert not any(slot_id.endswith('|lane_layout') for request in repair_requests
+                   for slot_id in request.key_to_slot.values())
+    plan = assemble_plan(repaired, repaired_choices, score=score)
+    assert preprocess_voice_parts(deepcopy(score), request={'plan': plan})['status'] == 'ready'
