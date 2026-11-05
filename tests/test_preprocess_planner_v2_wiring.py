@@ -11,6 +11,7 @@ import sys
 import threading
 import urllib.request
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -340,7 +341,9 @@ def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to
     assert len(executed) == 1
 
 
-@pytest.mark.parametrize("unavailable", ["too_large", "unreadable_path", "duplicate_measure_number"])
+@pytest.mark.parametrize("unavailable", [
+    "too_large", "unreadable_path", "duplicate_measure_number", "missing_measure",
+])
 def test_v2_job_fails_without_chooser_when_evidence_is_unavailable(
     client, monkeypatch, tmp_path, caplog, unavailable,
 ):
@@ -357,6 +360,12 @@ def test_v2_job_fails_without_chooser_when_evidence_is_unavailable(
         source.write_text(source.read_text(encoding="utf-8").replace(
             '<measure number="2">', '<measure number="1">', 1,
         ), encoding="utf-8")
+    elif unavailable == "missing_measure":
+        source = Path(score["source_musicxml_path"])
+        root = ET.fromstring(source.read_text(encoding="utf-8"))
+        part = next(item for item in root if item.tag == "part")
+        part.remove(next(item for item in part if item.get("number") == "2"))
+        source.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
     source = (tmp_path / "missing.xml" if unavailable == "unreadable_path"
               else Path(score["source_musicxml_path"]))
 
