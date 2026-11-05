@@ -531,11 +531,14 @@ def _lane_segment_options(sheet, lane, segment, kind):
 
 
 def test_native_lyricless_voice_uses_eligible_voice_on_same_staff(tmp_path):
+    # Bar 2 prints voice 1's rest: a bar written only in voice 2 is a shared line.
     score = _single_staff_score(tmp_path, [
         _note("G", voice="1", lyric="word")
         + '<backup><duration>4</duration></backup>'
         + _note("E", voice="2", lyric=None),
-        _note("C", voice="2", lyric=None),
+        _rest(voice="1", duration=4)
+        + '<backup><duration>4</duration></backup>'
+        + _note("C", voice="2", lyric=None),
     ])
     original = deepcopy(score)
     context = {"target": {"part_id": score["parts"][0]["part_id"]}}
