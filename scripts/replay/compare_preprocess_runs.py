@@ -341,6 +341,9 @@ def compare_runs(baseline_dir: Path, candidate_dir: Path, out_dir: Path) -> Path
 # With no parts, the score decides (Alan, 2026-11-05): no lyrics means there was
 # nothing to split, so the run is fine; lyrics mean it should have split, so it
 # is not good, and a candidate run that completed that way is flagged.
+# Output checks (Alan, 2026-11-05): a candidate run whose derived bars run longer
+# than their time signature, or whose lanes come out identical, blocks; the same
+# in a v1 run is listed for review.
 GATE_JOB_COLUMNS = (
     "job_id", "v1_good", "candidate_good", "result", "reasons",
     "v1_statuses", "candidate_statuses", "tiebreak_status",
@@ -376,6 +379,80 @@ def _score_has_lyrics(corpus_dir: Path, job_id: str) -> bool:
     return any((lyric.findtext("text") or "").strip() for lyric in root.iter("lyric"))
 
 
+def _identical_lanes(job: dict[str, Any]) -> list[str]:
+    first_with: dict[tuple[Any, ...], Any] = {}
+    problems: list[str] = []
+    for lane in job.get("lanes") or []:
+        notes = tuple(
+            (note.get("measure"), note.get("offset_beats"), note.get("duration_beats"),
+             note.get("pitch_midi"))
+            for note in lane.get("notes") or []
+        )
+        if not notes:
+            continue
+        if notes in first_with:
+            problems.append(f"lanes {first_with[notes]} and {lane.get('lane_id')} are identical")
+        else:
+            first_with[notes] = lane.get("lane_id")
+    return problems
+
+
+def _overfull_derived_bars(score_path: Path) -> list[str]:
+    """Derived parts whose bars hold more beats than their time signature."""
+    def local(element: ElementTree.Element) -> str:
+        return element.tag.rsplit("}", 1)[-1]
+
+    def number(element: ElementTree.Element, name: str, default: int) -> int:
+        child = next((item for item in element if local(item) == name), None)
+        return int((child.text or "").strip() or default) if child is not None else default
+
+    problems: list[str] = []
+    for part in ElementTree.parse(score_path).getroot():
+        if local(part) != "part" or not str(part.get("id") or "").startswith("P_DERIVED"):
+            continue
+        divisions, bar_beats, overfull = 1, 4.0, []
+        for measure in (item for item in part if local(item) == "measure"):
+            cursor = end = 0
+            for child in measure:
+                name = local(child)
+                if name == "attributes":
+                    divisions = number(child, "divisions", divisions)
+                    time = next((item for item in child if local(item) == "time"), None)
+                    if time is not None and any(local(item) == "beats" for item in time):
+                        bar_beats = number(time, "beats", 4) * 4 / number(time, "beat-type", 4)
+                elif name == "note":
+                    if any(local(item) in {"chord", "grace"} for item in child):
+                        continue
+                    cursor += number(child, "duration", 0)
+                elif name == "forward":
+                    cursor += number(child, "duration", 0)
+                elif name == "backup":
+                    cursor -= number(child, "duration", 0)
+                end = max(end, cursor)
+            if end / divisions > bar_beats + 1e-6:
+                overfull.append(measure.get("number"))
+        if overfull:
+            count = f"{len(overfull)} bar{'s' if len(overfull) != 1 else ''}"
+            problems.append(
+                f"derived part {part.get('id')}: {count} longer than the time signature "
+                f"(first: bar {overfull[0]})"
+            )
+    return problems
+
+
+def _output_problems(run_dir: Path, job: dict[str, Any] | None) -> list[str]:
+    if not job:
+        return []
+    problems = _identical_lanes(job)
+    score_file = job.get("score_file")
+    if score_file:
+        try:
+            problems.extend(_overfull_derived_bars(run_dir / score_file))
+        except (OSError, ValueError, ElementTree.ParseError) as exc:
+            problems.append(f"output score unreadable ({type(exc).__name__})")
+    return problems
+
+
 def _keys(job: dict[str, Any], severity: str) -> set[tuple[Any, Any, Any]]:
     return {
         _finding_key(finding)
@@ -390,6 +467,8 @@ def gate_job(
     candidate_runs: list[dict[str, Any]],
     tiebreak: dict[str, Any] | None = None,
     score_has_lyrics: bool | None = None,
+    v1_problems: list[list[str]] | None = None,
+    candidate_problems: list[list[str]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Apply the per-job gate to two v1 runs and two candidate runs of one job.
 
@@ -415,6 +494,10 @@ def gate_job(
         for index, run in enumerate(v1_runs, start=1):
             if _no_parts(run):
                 review.append(review_row(f"v1 run {index} completed with no parts on a score with lyrics"))
+    for index, problems in enumerate(candidate_problems or [], start=1):
+        reasons.extend(f"candidate run {index}: {problem}" for problem in problems)
+    for index, problems in enumerate(v1_problems or [], start=1):
+        review.extend(review_row(f"v1 run {index}: {problem}") for problem in problems)
     v1_p0 = set().union(*(_keys(run, "P0") for run in v1_runs))
     for key in sorted(set().union(*(_keys(run, "P0") for run in candidate_runs)) - v1_p0, key=str):
         reasons.append(f"new P0 {key[0]} on {key[2]}")
@@ -543,10 +626,11 @@ def evaluate_gate(
                 no_parts.append(f"{job_id}: {', '.join(names)} (score has {kind})")
         v1_runs = [job for job, _ in runs[:2]]
         candidate_runs = [job for job, _ in runs[2:]]
+        problems = [_output_problems(run_dir, job) for run_dir, (job, _) in zip(all_dirs, runs)]
         tiebreak, tiebreak_error = _read_job(tiebreak_dir / "jobs" / f"{job_id}.json")
         row, job_review = gate_job(
             job_id, v1_runs, candidate_runs, tiebreak if tiebreak_error is None else None,
-            score_has_lyrics,
+            score_has_lyrics, problems[:2], problems[2:],
         )
         rows.append(row)
         review.extend(job_review)

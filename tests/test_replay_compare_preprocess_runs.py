@@ -462,3 +462,73 @@ def test_main_two_run_gate_requires_corpus():
     with pytest.raises(SystemExit):
         compare._parse_args(args)
     assert compare._parse_args([*args, "--corpus", "x"]).corpus == Path("x")
+
+
+def _lane(lane_id, pitches):
+    return {"lane_id": lane_id, "notes": [_note(pitch, offset=float(index))
+                                          for index, pitch in enumerate(pitches)]}
+
+
+def test_identical_lanes_are_reported_once_per_repeat():
+    job = _job(lanes=[_lane("upper", [64, 65]), _lane("lower", [64, 65]),
+                      _lane("third", [60, 62]), _lane("empty", [])])
+    assert compare._identical_lanes(job) == ["lanes upper and lower are identical"]
+
+
+def _derived_score(path, measures):
+    body = "".join(f"<measure number='{number}'>{content}</measure>"
+                   for number, content in enumerate(measures, start=1))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "<score-partwise><part id='P1'><measure number='1'><note><duration>99</duration></note>"
+        f"</measure></part><part id='P_DERIVED_X'>{body}</part></score-partwise>"
+    )
+
+
+def _rest(duration):
+    return f"<note><rest/><duration>{duration}</duration></note>"
+
+
+def test_overfull_derived_bars_follow_divisions_and_time_changes(tmp_path):
+    attributes = ("<attributes><divisions>2</divisions>"
+                  "<time><beats>2</beats><beat-type>4</beat-type></time></attributes>")
+    _derived_score(tmp_path / "score.xml", [
+        attributes + _rest(4),                                   # 2 beats in 2/4: fine
+        _rest(6),                                                # 3 beats in 2/4: over
+        "<attributes><divisions>4</divisions></attributes>" + _rest(8),  # 2 beats: fine
+        _rest(4) + "<note><chord/><duration>8</duration></note>" + _rest(4),  # chord skipped
+        _rest(8) + "<backup><duration>8</duration></backup>" + _rest(8),      # two voices
+        _rest(4) + "<forward><duration>8</duration></forward>",               # 3 beats: over
+    ])
+    assert compare._overfull_derived_bars(tmp_path / "score.xml") == [
+        "derived part P_DERIVED_X: 2 bars longer than the time signature (first: bar 2)"
+    ]
+
+
+def test_gate_output_problems_block_a_candidate_and_are_review_for_v1():
+    row, review = compare.gate_job(
+        "job-x", [_job(), _job()], [_job(), _job()],
+        v1_problems=[["lanes a and b are identical"], []],
+        candidate_problems=[[], ["derived part P_DERIVED_X: 3 bars longer than the time "
+                                 "signature (first: bar 41)"]],
+    )
+    assert row["result"] == "block"
+    assert row["reasons"] == ("candidate run 2: derived part P_DERIVED_X: 3 bars longer than "
+                              "the time signature (first: bar 41)")
+    assert [item["reason"] for item in review] == ["v1 run 1: lanes a and b are identical"]
+
+
+def test_evaluate_gate_reads_each_runs_output_score(tmp_path):
+    corpus = tmp_path / "corpus"
+    _write_score(corpus, "job-x", "la")
+    clean = _job(lanes=[_lane("upper", [64]), _lane("lower", [60])])
+    flagged = _job(lanes=[_lane("upper", [64]), _lane("lower", [60])], score_file="scores/job-x.xml")
+    runs = [_write_run(tmp_path, name, {"job-x": job}) for name, job in
+            (("v1a", clean), ("v1b", clean), ("c1", clean), ("c2", flagged))]
+    _derived_score(runs[3] / "scores" / "job-x.xml", [_rest(5)])
+    summary = compare.evaluate_gate(
+        runs[:2], runs[2:], tmp_path / "report", corpus_dir=corpus
+    ).read_text(encoding="utf-8")
+    assert "Result: blocked: investigate" in summary
+    assert ("candidate run 2: derived part P_DERIVED_X: 1 bar longer than the time "
+            "signature (first: bar 1)") in summary
