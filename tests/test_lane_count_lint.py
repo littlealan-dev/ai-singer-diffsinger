@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.api import parse_score
+from src.api import voice_parts
 from src.api.voice_part_lint_rules import render_lint_rules_for_prompt
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
@@ -69,6 +70,30 @@ def _score(measures: tuple[tuple[tuple[str | None, tuple[str, ...]], ...], ...])
         if note["measure_number"] in default_measures and not note["is_rest"]:
             note["voice"] = None
     return score
+
+
+@pytest.mark.parametrize("with_words", [False, True])
+def test_part_lane_counts_groups_countable_notes_by_staff_without_lyrics(with_words):
+    def note(staff, voice, measure, offset, *, lyric=None):
+        return {"staff": staff, "voice": voice, "measure_number": measure,
+                "offset_beats": offset, "duration_beats": 1, "lyric": lyric,
+                "is_rest": False}
+
+    score = {"parts": [{"notes": [
+        note("1", "1", 1, 0, lyric="la" if with_words else None),
+        note("1", "1", 1, 0),
+        note("1", "2", 2, 0),
+        note("2", "3", 1, 0),
+        {**note("2", "3", 2, 0), "is_rest": True},
+        {**note("2", "3", 2, 1), "duration_beats": 0},
+    ]}]}
+    assert voice_parts.part_lane_counts(score, part_index=0) == {
+        "1": voice_parts.LaneCounts(peak=2, real_voices=2, most=3),
+        "2": voice_parts.LaneCounts(peak=1, real_voices=1, most=1),
+    }
+    assert voice_parts.part_lane_counts({"parts": [{"notes": [
+        {**note("1", "1", 1, 0), "is_rest": True},
+    ]}]}, part_index=0) == {}
 
 
 def _lint(score: dict, lanes: tuple[str, ...], *, chord_source: str | None = None) -> dict:

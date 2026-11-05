@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 import json
 from xml.etree import ElementTree as ET
 
@@ -14,7 +15,7 @@ from src.api import preprocess_assembler as assembler
 from src.api import preprocess_chooser as chooser
 from src.api.preprocess_evidence import EvidenceUnavailable
 from src.api.preprocess_sheet import Lane, MeasureSignature, Option, Sheet, Slot, build_sheet
-from tests.test_preprocess_evidence import _xml
+from tests.test_preprocess_evidence import _gap_score, _xml
 from tests.test_preprocess_sheet import (
     SATB, SHARED_LINE, _chord_score, _four_note_chord_with_native_lanes, _no_word_two_part_score,
     _note, _parse_inline, _rest, _silence_voice_in_bar, _single_staff_score, _too_many_chord_claims,
@@ -631,11 +632,6 @@ def test_non_default_voice_assignment_asks_only_the_changed_slots(tmp_path):
 
 def test_first_options_everywhere_means_no_second_pass_and_the_same_plan(tmp_path):
     for name, score, context in _fixtures(tmp_path):
-        if name == "no_word_two_part":
-            # The donor part has only bar 3, while the sheet asks for its neighbours.
-            with pytest.raises(EvidenceUnavailable, match="missing_measure"):
-                asyncio.run(chooser.choose(score, context, call=_first_option_call))
-            continue
         sheet, choices, stats = asyncio.run(chooser.choose(score, context, call=_first_option_call))
         expected_sheet = build_sheet(score, context)
         assert sheet == expected_sheet, name
@@ -644,3 +640,22 @@ def test_first_options_everywhere_means_no_second_pass_and_the_same_plan(tmp_pat
         assert assembler.assemble_plan(sheet, choices, score=score) == assembler.assemble_plan(
             expected_sheet, assembler.first_option_choices(expected_sheet), score=score,
         ), name
+
+
+def test_gap_evidence_sent_to_chooser_contains_only_found_neighbour_bars(tmp_path):
+    score = _gap_score(tmp_path)
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    slot = Slot(
+        slot_id="synthetic-gap", kind="mode", lane_ids=(sheet.lanes[0].lane_id,),
+        start_measure=3, end_measure=3,
+        options=(Option("derive", "derive", {}, {}, ()),), evidence={},
+    )
+    request_context = chooser.build_request_context(score, context, sheet)
+    for start, end, expected in ((3, 3, [2, 3]), (3, 5, [2, 3, 5, 6])):
+        question = replace(slot, start_measure=start, end_measure=end)
+        request = chooser._request(sheet, request_context, [question])
+        xml = json.loads(request.dynamic_text)["score_xml"]
+        assert [int(measure.get("number")) for measure in ET.fromstring(xml).iter()
+                if measure.tag == "measure"] == expected
+        assert asyncio.run(_first_option_call(request))

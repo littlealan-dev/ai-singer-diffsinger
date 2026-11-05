@@ -126,7 +126,13 @@ def trim_musicxml(score: dict, raw_part_ids: list[str], measures: set[int]) -> s
                 if not keep:
                     child.remove(measure)
                 previous_kept = keep
-            if not measures.issubset(found_measures):
+            missing = measures - found_measures
+            if not measures.intersection(found_measures) or any(
+                note.get("measure_number") in missing
+                for part in (score.get("parts") or [])
+                if (part.get("raw_part_id") or part.get("part_id")) == raw_id
+                for note in (part.get("notes") or [])
+            ):
                 raise EvidenceUnavailable("missing_measure")
     if found_parts != wanted_parts:
         raise EvidenceUnavailable("missing_part")

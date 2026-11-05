@@ -53,6 +53,54 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _gap_score(tmp_path):
+    """A synthetic part whose printed measure numbers skip four."""
+    root = ET.fromstring(_xml())
+    part = next(item for item in root if item.tag == "part" and item.get("id") == "P1")
+    template = next(item for item in part if item.get("number") == "3")
+    for number in (5, 6):
+        measure = deepcopy(template)
+        measure.set("number", str(number))
+        part.append(measure)
+    path = tmp_path / "gap.xml"
+    path.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
+    return parse_score(path, verse_number=1)
+
+
+def _measure_numbers(xml):
+    return [int(item.get("number")) for item in ET.fromstring(xml).iter()
+            if _local(item.tag) == "measure"]
+
+
+def test_trim_skips_unparsed_measure_number_gaps_but_keeps_found_bars(tmp_path):
+    score = _gap_score(tmp_path)
+    assert _measure_numbers(trim_musicxml(score, ["P1"], {2, 3, 4})) == [2, 3]
+    assert _measure_numbers(trim_musicxml(score, ["P1"], {2, 3, 4, 5, 6})) == [2, 3, 5, 6]
+
+
+@pytest.mark.parametrize("part_id", ["P1", "P2"])
+def test_trim_still_requires_a_missing_measure_with_parsed_notes_or_rests(tmp_path, part_id):
+    source = tmp_path / "real-bar.xml"
+    source.write_text(_xml(), encoding="utf-8")
+    score = parse_score(source, verse_number=1)
+    root = ET.fromstring(_xml())
+    part = next(item for item in root if item.tag == "part" and item.get("id") == part_id)
+    part.remove(next(item for item in part if item.get("number") == "2"))
+    source.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
+    with pytest.raises(EvidenceUnavailable, match="missing_measure"):
+        trim_musicxml(score, [part_id], {1, 2, 3})
+
+
+@pytest.mark.parametrize("number", ["2a", "X1"])
+def test_trim_still_rejects_unreadable_measure_numbers(tmp_path, number):
+    source = tmp_path / "odd-bar.xml"
+    source.write_text(_xml().replace('<measure number="2">',
+                                     f'<measure number="{number}">', 1), encoding="utf-8")
+    score = {"source_musicxml_path": str(source), "parts": []}
+    with pytest.raises(EvidenceUnavailable, match="unreadable_measure_number"):
+        trim_musicxml(score, ["P1"], {3})
+
+
 def test_trim_keeps_music_and_carries_attributes(tmp_path):
     source = tmp_path / "source.xml"
     source.write_text(_xml(), encoding="utf-8")
