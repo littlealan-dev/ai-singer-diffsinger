@@ -32,7 +32,9 @@ from tests.test_backend_api import (  # noqa: F401 - pytest fixture
     _create_session, _preprocess_plan_response, _upload_score, client,
 )
 from tests.test_preprocess_chooser import _two_staff_part
-from tests.test_preprocess_sheet import SATB, _chord_score, _too_many_chord_claims
+from tests.test_preprocess_sheet import (
+    SATB, _chord_score, _note, _rest, _single_staff_score, _too_many_chord_claims,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DONE_MESSAGE = json.dumps({"tool_calls": [], "final_message": "Done.", "include_score": True})
@@ -85,6 +87,16 @@ class FakeLlm:
 
 def _ready(arguments):
     return {"status": "ready", "score": arguments.get("score", {}), "part_index": 0}
+
+
+def _two_lane_three_most_score(tmp_path):
+    first = (_note("C", voice="1", lyric="one")
+             + _note("E", voice="1", chord=True, lyric=None)
+             + '<backup><duration>4</duration></backup>' + _rest(voice="2", duration=4))
+    second = (_rest(voice="1", duration=4)
+              + '<backup><duration>4</duration></backup>'
+              + _note("G", voice="2", lyric="two"))
+    return _single_staff_score(tmp_path, [first, second])
 
 
 def _job(client, monkeypatch, *, planner, llm, tool_result=_ready):
@@ -226,6 +238,38 @@ def test_v1_job_plans_with_the_preprocess_role_and_never_imports_the_chooser(cli
     assert LlmRole.PREPROCESS_CHOOSER not in llm.roles()
     assert llm.roles().count(LlmRole.PREPROCESS) == 1
     assert len(executed) == 1
+    assert "laneCounts" not in job
+
+
+def test_v2_job_reports_staff_lane_bounds_and_planned_count(client, monkeypatch, tmp_path):
+    score = _two_lane_three_most_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    assert len(build_sheet(score, context).lanes) == 2
+    _, _, run = _job(client, monkeypatch, planner="v2", llm=FakeLlm())
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert job["laneCounts"] == [{
+        "partId": score["parts"][0]["part_id"], "staff": "1",
+        "peak": 2, "most": 3, "chosen": 2,
+    }]
+
+
+def test_v2_job_uses_the_latest_sheet_after_a_repair(client, monkeypatch, tmp_path):
+    score = _two_lane_three_most_score(tmp_path)
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    orchestrator, _, run = _job(client, monkeypatch, planner="v2", llm=FakeLlm())
+
+    async def repaired_workflow(*args, planner_v2=None, **kwargs):
+        assert planner_v2 is not None
+        assert len(planner_v2.sheet.lanes) == 2
+        extra = replace(planner_v2.sheet.lanes[0], lane_id="repaired-lane")
+        planner_v2.sheet.lanes.append(extra)
+        return {"message": "Done."}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_tool_workflow", repaired_workflow)
+    job = run(score, context)
+    assert job["status"] == "completed", job
+    assert job["laneCounts"][0]["chosen"] == 3
 
 
 def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_plan(client, monkeypatch):
@@ -238,6 +282,10 @@ def test_v2_job_asks_only_the_chooser_in_parallel_and_executes_the_assembled_pla
     orchestrator, executed, run = _job(client, monkeypatch, planner="v2", llm=llm)
     job = run(score, context)
     assert job["status"] == "completed", job
+    assert job["laneCounts"] == [
+        {"partId": "P1-Combined", "staff": staff, "peak": 2, "most": 2, "chosen": 2}
+        for staff in ("1", "2")
+    ]
     chooser_calls = [call for call in llm.calls if call["role"] == LlmRole.PREPROCESS_CHOOSER]
     assert len(chooser_calls) == len(requests)
     assert LlmRole.PREPROCESS not in llm.roles()

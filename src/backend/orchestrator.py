@@ -2563,6 +2563,26 @@ class Orchestrator:
                 )
             else:
                 warning_message = response.get("warning")
+                lane_counts = None
+                if planner_v2 is not None:
+                    from src.api.voice_parts import sheet_lane_counts
+
+                    planned_by_staff: Dict[tuple[int, str], int] = {}
+                    for lane in planner_v2.sheet.lanes:
+                        key = (lane.part_index, lane.scope_key)
+                        planned_by_staff[key] = planned_by_staff.get(key, 0) + 1
+                    lane_counts = []
+                    for (part_index, scope), chosen in sorted(planned_by_staff.items()):
+                        counts = sheet_lane_counts(
+                            planner_v2.score, part_index=part_index, staff_scope=scope,
+                        )
+                        lane_counts.append({
+                            "partId": planner_v2.score["parts"][part_index]["part_id"],
+                            "staff": scope,
+                            "peak": counts.peak,
+                            "most": counts.most,
+                            "chosen": chosen,
+                        })
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
@@ -2576,6 +2596,7 @@ class Orchestrator:
                     details=response.get("details"),
                     warningMessage=warning_message,
                     completedAt=datetime.now(timezone.utc),
+                    **({"laneCounts": lane_counts} if lane_counts is not None else {}),
                 )
         except asyncio.CancelledError:
             # Shutdown cancels this task. CancelledError is not an Exception,
