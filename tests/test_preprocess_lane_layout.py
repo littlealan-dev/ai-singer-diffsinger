@@ -14,7 +14,9 @@ def _note(step, octave, voice, *, chord=False, lyric=None):
     return (
         '<note>' + ('<chord/>' if chord else '')
         + f'<pitch><step>{step}</step><octave>{octave}</octave></pitch>'
-        + f'<duration>4</duration><voice>{voice}</voice><type>whole</type>'
+        + '<duration>4</duration>'
+        + (f'<voice>{voice}</voice>' if voice is not None else '')
+        + '<type>whole</type>'
         + (f'<lyric><text>{lyric}</text></lyric>' if lyric else '') + '</note>'
     )
 
@@ -135,3 +137,26 @@ def test_two_and_three_chord_voices_build_without_freeform(tmp_path):
                       parts[target['appended_part_ref']['part_index']]['notes'])
                   for target in result['targets']]
         assert counts == [1] * lane_count
+
+
+def test_default_chord_uses_highest_separate_lanes(tmp_path):
+    score = _single_staff_score(tmp_path, [
+        _note('C', 5, None, lyric='first') + _note('E', 5, None, chord=True),
+        _note('E', 5, '1', lyric='second') + _note('G', 5, '1', chord=True)
+        + '<backup><duration>4</duration></backup>' + _hidden_rest('2'),
+        _hidden_rest('1') + '<backup><duration>4</duration></backup>'
+        + _note('G', 4, '2', lyric='third'),
+    ])
+    shared = build_sheet(score, _context(score))
+    layout, = [slot for slot in shared.slots if slot.kind == 'lane_layout']
+    separate = build_sheet(score, _context(score), pinned={layout.slot_id: 'separate'})
+    assert len(separate.lanes) == 3
+    plan = assemble_plan(separate, first_option_choices(separate), score=score)
+    result = preprocess_voice_parts(deepcopy(score), request={'plan': plan})
+    assert result['status'] == 'ready', [finding.get('rule') for finding in result.get('lint_findings', [])]
+    actual = []
+    for target in result['targets']:
+        index = target['appended_part_ref']['part_index']
+        actual.append([(note['measure_number'], note['pitch_midi'])
+                       for note in result['score']['parts'][index]['notes'] if not note.get('is_rest')])
+    assert actual == [[(1, 76), (2, 79)], [(1, 72), (2, 76)], [(3, 67)]]
