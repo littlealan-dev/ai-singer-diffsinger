@@ -97,21 +97,22 @@ def test_separate_layout_assigns_each_voice_only_to_its_own_lanes(tmp_path):
             for part in reparsed['parts'][-3:]] == [3, 1, 2]
 
 
-def _turn_taking_chords(tmp_path, *, voices, chord_size):
+def _turn_taking_chords(tmp_path, *, voices, chord_size, bars_per_voice=1):
     notes = []
     pitches = [('C', 5), ('E', 5), ('G', 5)]
     for active in range(1, voices + 1):
-        bars = []
-        for voice in range(1, voices + 1):
-            if bars:
-                bars.append('<backup><duration>4</duration></backup>')
-            if voice == active:
-                bars.extend(_note(step, octave, str(voice), chord=rank > 0,
-                                  lyric='word' if rank == 0 else None)
-                            for rank, (step, octave) in enumerate(pitches[:chord_size]))
-            else:
-                bars.append(_hidden_rest(str(voice)))
-        notes.append(''.join(bars))
+        for _ in range(bars_per_voice):
+            bars = []
+            for voice in range(1, voices + 1):
+                if bars:
+                    bars.append('<backup><duration>4</duration></backup>')
+                if voice == active:
+                    bars.extend(_note(step, octave, str(voice), chord=rank > 0,
+                                      lyric='word' if rank == 0 else None)
+                                for rank, (step, octave) in enumerate(pitches[:chord_size]))
+                else:
+                    bars.append(_hidden_rest(str(voice)))
+            notes.append(''.join(bars))
     return _single_staff_score(tmp_path, notes)
 
 
@@ -131,7 +132,7 @@ def test_two_and_three_chord_voices_build_without_freeform(tmp_path):
     for voices, size, lane_count in [(2, 2, 4), (3, 3, 9)]:
         case = tmp_path / f'voices-{voices}'
         case.mkdir()
-        score = _turn_taking_chords(case, voices=voices, chord_size=size)
+        score = _turn_taking_chords(case, voices=voices, chord_size=size, bars_per_voice=2)
         shared = build_sheet(score, _context(score))
         layout, = [slot for slot in shared.slots if slot.kind == 'lane_layout']
         separate = build_sheet(score, _context(score), pinned={layout.slot_id: 'separate'})
@@ -145,7 +146,7 @@ def test_two_and_three_chord_voices_build_without_freeform(tmp_path):
         counts = [sum(not note.get('is_rest') for note in
                       parts[target['appended_part_ref']['part_index']]['notes'])
                   for target in result['targets']]
-        assert counts == [1] * lane_count
+        assert counts == [2] * lane_count
 
 
 def test_default_chord_uses_highest_separate_lanes(tmp_path):
