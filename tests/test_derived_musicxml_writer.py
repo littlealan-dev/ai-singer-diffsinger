@@ -173,6 +173,23 @@ def test_underfull_middle_bar_does_not_shift_following_notes():
     assert lane[-1]["offset_beats"] == 7.0
 
 
+def test_whole_rest_shorter_than_its_bar_does_not_shift_later_bars():
+    # A whole rest written with three beats in 4/4. The parser stretches it to
+    # the full bar, so the derived bar must too, or later bars start a beat early.
+    short_whole_rest = "<note><rest/><duration>12</duration><type>whole</type></note>"
+    xml = _score_xml([
+        _measure(1, short_whole_rest),
+        _measure(2, _note("C", 4) + _note("D", 4) + _note("E", 4) + _note("F", 4)),
+        _measure(3, _note("G", 4) + _rest(12)),
+    ])
+    lane, reparsed, written = _materialize(xml)
+    _assert_round_trip(lane, reparsed)
+    assert lane[0]["offset_beats"] == 4.0
+    for measure in written.findall("measure")[1:]:
+        assert sum(int(note.findtext("duration")) for note in measure.findall("note")) == 16
+    assert _rest_beats(written.findall("measure")[1]) == []
+
+
 def test_no_reference_does_not_write_missing_bars_as_leading_rests():
     part = ET.Element("part", {"id": "P_DERIVED_TEST"})
     _append_transformed_measures(

@@ -6197,7 +6197,25 @@ def _derived_lane_tie_types(
 def _reference_measure_length_beats(
     measure: ET.Element, q: Any, divisions: int, nominal_beats: float
 ) -> float:
-    """Use the source bar's written length, including an unmarked pickup."""
+    """Use the source bar's length as the parser reads it.
+
+    That is its written length, including an unmarked pickup, except that a
+    bar holding only one rest typed whole (or marked as a measure rest) lasts
+    its full time signature: music21 stretches that rest, so the notes in later
+    bars sit where the stretched bar ends.
+    """
+    notes = measure.findall(q("note"))
+    if len(notes) == 1 and notes[0].find(q("rest")) is not None:
+        rest = notes[0]
+        rest_type = (rest.findtext(q("type")) or "").strip()
+        marked = rest.find(q("rest")).get("measure") == "yes" and rest_type in {"", "whole", "breve"}
+        plain_whole = (
+            rest_type in {"whole", "breve"}
+            and rest.find(q("dot")) is None
+            and rest.find(q("time-modification")) is None
+        )
+        if marked or plain_whole:
+            return nominal_beats
     cursor = 0
     end = 0
     for child in measure:
