@@ -84,3 +84,54 @@ def test_separate_layout_assigns_each_voice_only_to_its_own_lanes(tmp_path):
         [(2, 76)],
         [(1, 67), (3, 69)],
     ]
+
+
+def _turn_taking_chords(tmp_path, *, voices, chord_size):
+    notes = []
+    pitches = [('C', 5), ('E', 5), ('G', 5)]
+    for active in range(1, voices + 1):
+        bars = []
+        for voice in range(1, voices + 1):
+            if bars:
+                bars.append('<backup><duration>4</duration></backup>')
+            if voice == active:
+                bars.extend(_note(step, octave, str(voice), chord=rank > 0,
+                                  lyric='word' if rank == 0 else None)
+                            for rank, (step, octave) in enumerate(pitches[:chord_size]))
+            else:
+                bars.append(_hidden_rest(str(voice)))
+        notes.append(''.join(bars))
+    return _single_staff_score(tmp_path, notes)
+
+
+def test_taking_turns_and_single_chord_voice_need_no_layout_question(tmp_path):
+    turns = _turn_taking_chords(tmp_path, voices=2, chord_size=1)
+    turn_sheet = build_sheet(turns, _context(turns))
+    assert len(turn_sheet.lanes) == 2
+    assert not any(slot.kind == 'lane_layout' for slot in turn_sheet.slots)
+
+    single = _turn_taking_chords(tmp_path, voices=1, chord_size=2)
+    single_sheet = build_sheet(single, _context(single))
+    assert len(single_sheet.lanes) == 2
+    assert not any(slot.kind == 'lane_layout' for slot in single_sheet.slots)
+
+
+def test_two_and_three_chord_voices_build_without_freeform(tmp_path):
+    for voices, size, lane_count in [(2, 2, 4), (3, 3, 9)]:
+        case = tmp_path / f'voices-{voices}'
+        case.mkdir()
+        score = _turn_taking_chords(case, voices=voices, chord_size=size)
+        shared = build_sheet(score, _context(score))
+        layout, = [slot for slot in shared.slots if slot.kind == 'lane_layout']
+        separate = build_sheet(score, _context(score), pinned={layout.slot_id: 'separate'})
+        assert len(separate.lanes) == lane_count
+        assert not any(slot.kind == 'freeform' for slot in separate.slots)
+        plan = assemble_plan(separate, first_option_choices(separate), score=score)
+        assert len(plan['targets']) == lane_count
+        result = preprocess_voice_parts(deepcopy(score), request={'plan': plan})
+        assert result['status'] == 'ready', [finding.get('rule') for finding in result.get('lint_findings', [])]
+        parts = result['score']['parts']
+        counts = [sum(not note.get('is_rest') for note in
+                      parts[target['appended_part_ref']['part_index']]['notes'])
+                  for target in result['targets']]
+        assert counts == [1] * lane_count
