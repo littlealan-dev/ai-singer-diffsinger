@@ -1025,3 +1025,26 @@ def test_app_controls_name_only_controls_that_exist_in_the_ui() -> None:
     assert 'accept=".musicxml,.xml,.mxl"' in ui_source
     assert "BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60" in ui_source
     assert 'BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav"' in ui_source
+
+
+def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="preprocess",
+    )
+    assert "Source voices that take turns may stay in separate lanes" in prompt
+    assert "at most that count or, if larger, the sum of each real source voice's own maximum simultaneous note count" in prompt
+    for obsolete in (
+        "to equal that scope's maximum simultaneous note count",
+        "must equal that scope's maximum simultaneous note count",
+        "exactly as many visible executor-owned derived lanes",
+    ):
+        assert obsolete not in prompt
