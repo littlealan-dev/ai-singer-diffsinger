@@ -352,3 +352,113 @@ def test_evaluate_gate_reports_missing_results_not_pass(tmp_path):
 def test_main_requires_one_or_two_of_each_run(tmp_path):
     with pytest.raises(SystemExit):
         compare._parse_args(["--baseline", "a", "--candidate", "b", "--candidate", "c", "--out", "o"])
+
+
+_PARTS = [{"lane_id": "a", "notes": []}]
+
+
+def _parts_job(**overrides):
+    return _job(lanes=_PARTS, **overrides)
+
+
+def _stopped_job():
+    return _job(status="failed", quality_class=None, error=compare.NO_LYRICS_STOP)
+
+
+def test_no_lyrics_stop_matches_the_message_catalog():
+    from src.backend.message_catalog import backend_message
+
+    assert compare.NO_LYRICS_STOP == backend_message("preprocess.score_needs_lyrics")
+
+
+def test_gate_no_parts_on_a_score_with_no_lyrics_is_good_on_both_sides():
+    row, review = compare.gate_job("job-x", [_job(), _job()], [_stopped_job(), _stopped_job()],
+                                   score_has_lyrics=False)
+    assert (row["v1_good"], row["candidate_good"], row["result"]) == (2, 2, "pass")
+    assert review == []
+
+
+def test_gate_other_failure_on_a_score_with_no_lyrics_is_not_good():
+    timed_out = _job(status="failed", error="Couldn't finish preparing the selected singing line.")
+    row, _ = compare.gate_job("job-x", [_job(), _job()], [timed_out, timed_out],
+                              score_has_lyrics=False)
+    assert (row["candidate_good"], row["result"]) == (0, "block")
+
+
+def test_gate_candidate_with_no_parts_on_a_score_with_lyrics_is_flagged():
+    row, _ = compare.gate_job("job-x", [_job(status="failed"), _job(status="failed")],
+                              [_parts_job(), _job()], score_has_lyrics=True)
+    assert (row["v1_good"], row["candidate_good"], row["result"]) == (0, 1, "block")
+    assert row["reasons"] == "candidate run 2 completed with no parts on a score with lyrics"
+
+
+def test_gate_v1_with_no_parts_on_a_score_with_lyrics_is_review_only():
+    row, review = compare.gate_job("job-x", [_parts_job(), _job()], [_parts_job(), _parts_job()],
+                                   score_has_lyrics=True)
+    assert (row["v1_good"], row["candidate_good"], row["result"]) == (1, 2, "review")
+    assert [item["reason"] for item in review] == [
+        "v1 run 2 completed with no parts on a score with lyrics"
+    ]
+
+
+def test_gate_failed_run_on_a_score_with_lyrics_adds_no_flag():
+    failed = _job(status="failed")
+    row, _ = compare.gate_job("job-x", [failed, failed], [failed, failed], score_has_lyrics=True)
+    assert (row["result"], row["reasons"]) == ("pass", "")
+
+
+def test_gate_tiebreak_with_no_parts_on_a_score_with_lyrics_is_not_good():
+    row, _ = compare.gate_job("job-x", [_parts_job(), _parts_job()],
+                              [_parts_job(), _job(status="failed")], _job(), score_has_lyrics=True)
+    assert (row["result"], row["tiebreak_status"]) == ("block", "not good")
+
+
+def _write_score(corpus, job_id, lyric_text):
+    lyric = f"<lyric><text>{lyric_text}</text></lyric>" if lyric_text is not None else ""
+    (corpus / job_id).mkdir(parents=True)
+    (corpus / job_id / "input.xml").write_text(
+        f"<score-partwise><part id='P1'><measure number='1'><note>{lyric}</note></measure></part>"
+        "</score-partwise>"
+    )
+
+
+@pytest.mark.parametrize(("lyric_text", "expected"), [("la", True), ("  ", False), (None, False)])
+def test_score_has_lyrics_reads_the_original_file(tmp_path, lyric_text, expected):
+    _write_score(tmp_path, "job-x", lyric_text)
+    assert compare._score_has_lyrics(tmp_path, "job-x") is expected
+
+
+def test_evaluate_gate_with_corpus_applies_the_rule_and_lists_no_parts(tmp_path):
+    corpus = tmp_path / "corpus"
+    _write_score(corpus, "no-lyrics", None)
+    _write_score(corpus, "has-lyrics", "la")
+    v1 = {"no-lyrics": _job(), "has-lyrics": _parts_job()}
+    candidate_1 = {"no-lyrics": _stopped_job(), "has-lyrics": _parts_job()}
+    candidate_2 = {"no-lyrics": _stopped_job(), "has-lyrics": _job()}
+    runs = [_write_run(tmp_path, name, jobs) for name, jobs in
+            (("v1a", v1), ("v1b", v1), ("c1", candidate_1), ("c2", candidate_2))]
+    summary = compare.evaluate_gate(
+        runs[:2], runs[2:], tmp_path / "report", corpus_dir=corpus
+    ).read_text(encoding="utf-8")
+    assert "Result: blocked: investigate" in summary
+    assert "- has-lyrics: candidate run 2 completed with no parts on a score with lyrics" in summary
+    assert "- no-lyrics: v1a, v1b (score has no lyrics)" in summary
+    assert "- has-lyrics: c2 (score has lyrics)" in summary
+    assert "Good runs: v1 4/4, candidate 3/4" in summary
+
+
+def test_evaluate_gate_reports_a_score_missing_from_the_corpus(tmp_path):
+    runs = [_write_run(tmp_path, name, {"job-x": _parts_job()}) for name in ("v1a", "v1b", "c1", "c2")]
+    (tmp_path / "corpus").mkdir()
+    summary = compare.evaluate_gate(
+        runs[:2], runs[2:], tmp_path / "report", corpus_dir=tmp_path / "corpus"
+    ).read_text(encoding="utf-8")
+    assert "Result: incomplete: missing results" in summary
+    assert "- job-x: score unreadable in corpus (FileNotFoundError)" in summary
+
+
+def test_main_two_run_gate_requires_corpus():
+    args = ["--baseline", "a", "--baseline", "b", "--candidate", "c", "--candidate", "d", "--out", "o"]
+    with pytest.raises(SystemExit):
+        compare._parse_args(args)
+    assert compare._parse_args([*args, "--corpus", "x"]).corpus == Path("x")

@@ -16,6 +16,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 JOBS_COLUMNS = (
     "job_id", "baseline_status", "candidate_status", "baseline_quality_class",
@@ -337,6 +338,9 @@ def compare_runs(baseline_dir: Path, candidate_dir: Path, out_dir: Path) -> Path
 # Two-run ship gate (Alan, 2026-10-23). A run of a job is "good" when it
 # completed with no P0 or P1 finding. v1 and the candidate each run every job
 # twice; a block means "stop and investigate", not a verdict on the candidate.
+# With no parts, the score decides (Alan, 2026-11-05): no lyrics means there was
+# nothing to split, so the run is fine; lyrics mean it should have split, so it
+# is not good, and a candidate run that completed that way is flagged.
 GATE_JOB_COLUMNS = (
     "job_id", "v1_good", "candidate_good", "result", "reasons",
     "v1_statuses", "candidate_statuses", "tiebreak_status",
@@ -346,12 +350,30 @@ REVIEW_COLUMNS = ("job_id", "reason", "rule", "severity", "target", "runs")
 SET_GOOD_RUN_MARGIN = 1
 RUNNER_PYTHON = "/Users/alanchan/antigravity/ai-singer-diffsinger/.venv310/bin/python"
 REPLAY_ENV = "/Users/alanchan/antigravity/sightsinger-agents/replay.env"
+# preprocess.score_needs_lyrics in src/backend/messages/en.properties.
+NO_LYRICS_STOP = "This score has no lyrics, so I can't split its parts yet. Please add lyrics to the score and try again."
 
 
-def _is_good(job: dict[str, Any]) -> bool:
-    return job.get("status") == "completed" and not any(
+def _is_good(job: dict[str, Any], score_has_lyrics: bool | None = None) -> bool:
+    """score_has_lyrics is None when the score wasn't checked: then parts don't matter."""
+    clean = job.get("status") == "completed" and not any(
         finding.get("severity") in {"P0", "P1"} for finding in job.get("findings") or []
     )
+    if score_has_lyrics is None or job.get("lanes"):
+        return clean
+    if score_has_lyrics:
+        return False
+    return clean or job.get("error") == NO_LYRICS_STOP
+
+
+def _no_parts(job: dict[str, Any]) -> bool:
+    return job.get("status") == "completed" and not job.get("lanes")
+
+
+def _score_has_lyrics(corpus_dir: Path, job_id: str) -> bool:
+    """Read the original file: a parsed score only holds the verse it selected."""
+    root = ElementTree.parse(corpus_dir / job_id / "input.xml").getroot()
+    return any((lyric.findtext("text") or "").strip() for lyric in root.iter("lyric"))
 
 
 def _keys(job: dict[str, Any], severity: str) -> set[tuple[Any, Any, Any]]:
@@ -367,14 +389,15 @@ def gate_job(
     v1_runs: list[dict[str, Any]],
     candidate_runs: list[dict[str, Any]],
     tiebreak: dict[str, Any] | None = None,
+    score_has_lyrics: bool | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Apply the per-job gate to two v1 runs and two candidate runs of one job.
 
     result is "block", "needs_tiebreak", "review" or "pass"; review rows list
     what a person should look at even when nothing blocks.
     """
-    v1_good = sum(_is_good(run) for run in v1_runs)
-    candidate_good = sum(_is_good(run) for run in candidate_runs)
+    v1_good = sum(_is_good(run, score_has_lyrics) for run in v1_runs)
+    candidate_good = sum(_is_good(run, score_has_lyrics) for run in candidate_runs)
     reasons: list[str] = []
     review: list[dict[str, Any]] = []
 
@@ -385,6 +408,13 @@ def gate_job(
 
     if v1_good == 2 and candidate_good == 0:
         reasons.append("good in 2/2 v1 runs but 0/2 candidate runs")
+    if score_has_lyrics:
+        for index, run in enumerate(candidate_runs, start=1):
+            if _no_parts(run):
+                reasons.append(f"candidate run {index} completed with no parts on a score with lyrics")
+        for index, run in enumerate(v1_runs, start=1):
+            if _no_parts(run):
+                review.append(review_row(f"v1 run {index} completed with no parts on a score with lyrics"))
     v1_p0 = set().union(*(_keys(run, "P0") for run in v1_runs))
     for key in sorted(set().union(*(_keys(run, "P0") for run in candidate_runs)) - v1_p0, key=str):
         reasons.append(f"new P0 {key[0]} on {key[2]}")
@@ -417,7 +447,7 @@ def gate_job(
         if tiebreak is None:
             result = "needs_tiebreak"
             tiebreak_status = "missing"
-        elif _is_good(tiebreak):
+        elif _is_good(tiebreak, score_has_lyrics):
             result = "review"
             tiebreak_status = "good"
             review.append(review_row("passed only on the tie-break run (2/3 good)"))
@@ -470,6 +500,7 @@ def evaluate_gate(
     candidate_dirs: list[Path],
     out_dir: Path,
     tiebreak_dir: Path | None = None,
+    corpus_dir: Path | None = None,
 ) -> Path:
     """Report the two-run gate for two v1 runs against two candidate runs."""
     baseline_dirs = [Path(path) for path in baseline_dirs]
@@ -487,6 +518,7 @@ def evaluate_gate(
     incomplete: list[str] = []
     v1_good_total = candidate_good_total = 0
     candidate_drops = noise_drops = 0
+    no_parts: list[str] = []
     for job_id in job_ids:
         runs = [_read_job(run_dir / "jobs" / f"{job_id}.json") for run_dir in all_dirs]
         if any(error for _, error in runs):
@@ -496,18 +528,33 @@ def evaluate_gate(
                 )
             )
             continue
+        score_has_lyrics = None
+        if corpus_dir is not None:
+            try:
+                score_has_lyrics = _score_has_lyrics(Path(corpus_dir), job_id)
+            except (OSError, ElementTree.ParseError) as exc:
+                incomplete.append(f"{job_id}: score unreadable in corpus ({type(exc).__name__})")
+                continue
+            names = [
+                run_dir.name for run_dir, (job, _) in zip(all_dirs, runs) if _no_parts(job)
+            ]
+            if names:
+                kind = "lyrics" if score_has_lyrics else "no lyrics"
+                no_parts.append(f"{job_id}: {', '.join(names)} (score has {kind})")
         v1_runs = [job for job, _ in runs[:2]]
         candidate_runs = [job for job, _ in runs[2:]]
         tiebreak, tiebreak_error = _read_job(tiebreak_dir / "jobs" / f"{job_id}.json")
         row, job_review = gate_job(
-            job_id, v1_runs, candidate_runs, tiebreak if tiebreak_error is None else None
+            job_id, v1_runs, candidate_runs, tiebreak if tiebreak_error is None else None,
+            score_has_lyrics,
         )
         rows.append(row)
         review.extend(job_review)
         v1_good_total += row["v1_good"]
         candidate_good_total += row["candidate_good"]
         candidate_drops += row["v1_good"] == 2 and row["candidate_good"] == 1
-        noise_drops += _is_good(v1_runs[0]) and not _is_good(v1_runs[1])
+        noise_drops += (_is_good(v1_runs[0], score_has_lyrics)
+                        and not _is_good(v1_runs[1], score_has_lyrics))
 
     set_reasons = []
     # v1 itself varies by about one good run between its two runs, so only a
@@ -568,6 +615,10 @@ def evaluate_gate(
     )
     if not review:
         lines.append("- None")
+    lines.extend(["", "## Completed with no parts"])
+    lines.extend(f"- {item}" for item in no_parts)
+    if not no_parts:
+        lines.append("- None")
     lines.extend(["", "## Missing results"])
     lines.extend(f"- {item}" for item in incomplete)
     if not incomplete:
@@ -601,19 +652,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="A candidate run directory; give two for the two-run gate.")
     parser.add_argument("--tiebreak", type=Path,
                         help="Third candidate run for tie-break jobs (default: <first candidate>-tiebreak).")
+    parser.add_argument("--corpus", type=Path,
+                        help="Corpus directory; the two-run gate reads each job's input.xml from it.")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if (len(args.baseline), len(args.candidate)) not in {(1, 1), (2, 2)}:
         parser.error("give one --baseline and one --candidate, or two of each")
     if args.tiebreak and len(args.candidate) != 2:
         parser.error("--tiebreak needs two --candidate runs")
+    if len(args.candidate) == 2 and args.corpus is None:
+        parser.error("the two-run gate needs --corpus")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if len(args.baseline) == 2:
-        print(evaluate_gate(args.baseline, args.candidate, args.out, args.tiebreak))
+        print(evaluate_gate(args.baseline, args.candidate, args.out, args.tiebreak, args.corpus))
     else:
         print(compare_runs(args.baseline[0], args.candidate[0], args.out))
     return 0
