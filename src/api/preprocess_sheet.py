@@ -1037,6 +1037,45 @@ def _voice_assignment_options(
     return tuple(options), evidence, None
 
 
+def _separate_voice_assignment(
+    score: dict, segment: Segment, lanes: list[Lane], candidates: list[dict],
+) -> tuple[Option, ...]:
+    """Give each sounding voice only its own lanes, in pitch order."""
+    native = dict(segment.signature.lanes)
+    local = {(source["part_index"], source["voice_part_id"]): source
+             for source in candidates if source["part_index"] == segment.part_index
+             and segment.scope_key in source["scopes"]}
+    default_id = _voice_part_ids(score["parts"][segment.part_index], segment.part_index).get("_default")
+    default = local.get((segment.part_index, default_id)) if default_id else None
+    default_peak = 0
+    if default is not None:
+        by_onset: dict[tuple[int, float], int] = {}
+        for note in default["notes"]:
+            if _staff_scope_key(note) != segment.scope_key:
+                continue
+            key = _beat(note)
+            by_onset[key] = by_onset.get(key, 0) + 1
+        default_peak = max(by_onset.values(), default=0)
+    mapping: dict[str, dict] = {}
+    ranks: dict[str, int] = {}
+    source_ordinals: dict[str, int] = {}
+    for lane in lanes:
+        source = local.get((segment.part_index, lane.source_voice_part_id))
+        chosen = source if native[lane.lane_id] else (default if lane.default_rank < default_peak else None)
+        if chosen is None:
+            continue
+        mapping[lane.lane_id] = {
+            "part_id": chosen["part_id"], "part_index": chosen["part_index"],
+            "voice_part_id": chosen["voice_part_id"],
+        }
+        source_id = chosen["voice_part_id"]
+        ranks[lane.lane_id] = source_ordinals.get(source_id, 0)
+        source_ordinals[source_id] = ranks[lane.lane_id] + 1
+    return (Option("va:0", "Voice assignment 1", {
+        "melody_source_by_lane": mapping, "rank_index_by_lane": ranks,
+    }, {"lane_height_midi": {lane.lane_id: None for lane in lanes}}, ()),)
+
+
 PINNABLE_KINDS = ("lane_layout", "mode", "melody_source", "voice_assignment")
 
 
@@ -1160,12 +1199,17 @@ def build_sheet(
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
         if not lanes:
             continue
+        separate = layouts.get((segment.part_index, segment.scope_key)) == "separate"
         candidates = _source_candidates(score, segment, derived_indices)
         segment_slots: list[Slot] = []
         freeform_reason: str | None = None
-        assignment, assignment_evidence, freeform_reason = _voice_assignment_options(
-            score, segment, lanes, candidates
-        )
+        if separate:
+            assignment = _separate_voice_assignment(score, segment, lanes, candidates)
+            assignment_evidence = {}
+        else:
+            assignment, assignment_evidence, freeform_reason = _voice_assignment_options(
+                score, segment, lanes, candidates
+            )
         if freeform_reason is not None:
             sheet.slots.append(_freeform_slot(segment, lanes, freeform_reason))
             continue
@@ -1186,6 +1230,8 @@ def build_sheet(
         for lane in lanes:
             native = dict(segment.signature.lanes)[lane.lane_id]
             target_notes = _target_notes(score, lane, segment)
+            assigned_ref = (assignment[0].fields["melody_source_by_lane"].get(lane.lane_id)
+                            if separate else None)
             if assignment is None:
                 melody = _melody_options(lane, candidates)
                 own = tuple(option for option in melody if option.fields["melody_source"] == {
@@ -1195,8 +1241,10 @@ def build_sheet(
                     # The score states these notes are this voice's: the lane sings them.
                     melody = own
                 melody = pin(_slot_id((lane.lane_id,), segment, "melody_source"), melody)
+            elif assigned_ref is None and separate:
+                melody = ()
             else:
-                source_ref = assignment[0].fields["melody_source_by_lane"][lane.lane_id]
+                source_ref = assigned_ref if separate else assignment[0].fields["melody_source_by_lane"][lane.lane_id]
                 chosen_source = next(source for source in candidates
                                      if source["part_index"] == source_ref["part_index"]
                                      and source["voice_part_id"] == source_ref["voice_part_id"])
@@ -1204,13 +1252,14 @@ def build_sheet(
             if native and not melody:
                 freeform_reason = "singing_lane_without_melody"
                 break
-            may_take_chord = assignment is not None and any(
+            may_take_chord = not separate and assignment is not None and any(
                 option.fields["melody_source_by_lane"][lane.lane_id]["voice_part_id"]
                 in assignment_evidence["need"] for option in assignment
             )
-            mode_ids = ("derive",) if native or may_take_chord else (
+            mode_ids = (("derive",) if assigned_ref is not None else ("rest",)) if separate else (
+                ("derive",) if native or may_take_chord else (
                 ("derive", "rest") if melody else ("rest",)
-            )
+            ))
             segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", pin(
                 _slot_id((lane.lane_id,), segment, "mode"), tuple(
                     Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
@@ -1361,6 +1410,13 @@ def build_sheet(
                         }, ()) for value in strategies
                     ), evidence=used_when))
             needs_fallback = False
+            if separate:
+                group_size = sum(ref == assigned_ref for ref in assignment[0].fields["melody_source_by_lane"].values())
+                if group_size > 1:
+                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", (
+                        Option("skip", "skip", {"rank_fallback": "skip"}, {}, ()),
+                    )))
+                continue
             if assignment is not None:
                 for option in assignment:
                     mapping = option.fields["melody_source_by_lane"]
@@ -1392,7 +1448,7 @@ def build_sheet(
                     Option(value, value, {"rank_fallback": value}, {}, ())
                     for value in ("greedy", "skip")
                 )))
-        if freeform_reason is None and assignment is None and segment.signature.density > 1:
+        if not separate and freeform_reason is None and assignment is None and segment.signature.density > 1:
             by_source: dict[str, list[Lane]] = {}
             for lane in lanes:
                 by_source.setdefault(lane.source_voice_part_id, []).append(lane)
@@ -1418,6 +1474,17 @@ def build_sheet(
                 _put_slot(sheet, slot)
 
     for lane in sheet.lanes:
+        if layouts.get((lane.part_index, lane.scope_key)) == "separate":
+            lane_segments = [segment for segment in sheet.segments
+                             if segment.part_index == lane.part_index and segment.scope_key == lane.scope_key]
+            span = Segment(lane.part_index, lane.scope_key,
+                           lane_segments[0].start_measure, lane_segments[-1].end_measure,
+                           lane_segments[0].signature)
+            _put_slot(sheet, _choice_slot((lane.lane_id,), span, "split_shared_note_policy", (
+                Option("assign_primary_only", "assign_primary_only",
+                       {"split_shared_note_policy": "assign_primary_only"}, {}, ()),
+            )))
+            continue
         if not _shared_notes_in_scope(score, lane):
             continue
         lane_segments = [segment for segment in sheet.segments

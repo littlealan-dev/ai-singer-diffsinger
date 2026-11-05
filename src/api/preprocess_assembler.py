@@ -167,6 +167,7 @@ def _action_for_measure(
     fields: dict = {}
     assigned_group_size: int | None = None
     melody_ref: tuple[int, str] | None = None
+    missing_assignment = False
     for kind, option in _options_for_measure(sheet, selected, lane, measure):
         if kind in {"split_shared_note_policy", "lyric_line", "lyric_reading"}:
             continue
@@ -174,7 +175,8 @@ def _action_for_measure(
             if key == "melody_source_by_lane":
                 source = value.get(lane.lane_id)
                 if not isinstance(source, dict):
-                    raise AssemblyError(f"Missing voice assignment for {lane.lane_id}")
+                    missing_assignment = True
+                    continue
                 part_id, voice_part_id = source.get("part_id"), source.get("voice_part_id")
                 if not isinstance(part_id, str) or not part_id or not isinstance(voice_part_id, str) or not voice_part_id:
                     raise AssemblyError(f"Invalid voice assignment for {lane.lane_id}")
@@ -198,6 +200,8 @@ def _action_for_measure(
     mode = fields.get("mode")
     if mode == "rest":
         return {"mode": "rest", "decision_type": "INSERT_RESTS"}, None
+    if missing_assignment:
+        raise AssemblyError(f"Missing voice assignment for {lane.lane_id}")
     if mode != "derive":
         raise AssemblyError(f"Missing mode for {lane.lane_id} measure {measure}")
     melody = fields.get("melody_source")

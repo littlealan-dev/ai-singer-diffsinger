@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
+from src.api.preprocess_assembler import assemble_plan, first_option_choices
 from src.api.preprocess_sheet import build_sheet
+from src.api.voice_parts import preprocess_voice_parts
 from tests.test_preprocess_sheet import _single_staff_score
 
 
@@ -54,3 +58,29 @@ def test_lane_layout_slot_evidence_and_separate_skeleton(tmp_path):
     assert [lane.source_voice_part_id for lane in separate.lanes].count('voice part 1') == 2
     assert [lane.source_voice_part_id for lane in separate.lanes].count('voice part 2') == 1
     assert separate.fixed[slot.slot_id].option_id == 'separate'
+
+
+def test_separate_layout_assigns_each_voice_only_to_its_own_lanes(tmp_path):
+    score = _score(tmp_path)
+    context = _context(score)
+    shared = build_sheet(score, context)
+    layout, = [slot for slot in shared.slots if slot.kind == 'lane_layout']
+    separate = build_sheet(score, context, pinned={layout.slot_id: 'separate'})
+    assert not any(slot.kind == 'freeform' for slot in separate.slots)
+    choices = first_option_choices(separate)
+    plan = assemble_plan(separate, choices, score=score)
+    assert len(plan['targets']) == 3
+    assert all(target['split_coverage'] == 'complete' for target in plan['targets'])
+    result = preprocess_voice_parts(deepcopy(score), request={'plan': plan})
+    assert result['status'] == 'ready', result.get('section_quality_issues') or result.get('targets')
+    parts = result['score']['parts']
+    actual = []
+    for target in result['targets']:
+        index = target['appended_part_ref']['part_index']
+        actual.append([(note['measure_number'], note['pitch_midi'])
+                       for note in parts[index]['notes'] if not note.get('is_rest')])
+    assert actual == [
+        [(1, 72), (2, 79), (3, 77)],
+        [(2, 76)],
+        [(1, 67), (3, 69)],
+    ]
