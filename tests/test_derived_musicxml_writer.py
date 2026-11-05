@@ -14,13 +14,21 @@ from src.api.voice_parts import (
 )
 
 
-def _note(pitch: str, duration: int, *, lyric: str | None = None, tie: str | None = None) -> str:
+def _note(
+    pitch: str,
+    duration: int,
+    *,
+    lyric: str | None = None,
+    tie: str | None = None,
+    kind: str = "quarter",
+    dots: int = 0,
+) -> str:
     lyric_xml = f"<lyric><text>{lyric}</text></lyric>" if lyric else ""
     tie_xml = f'<tie type="{tie}"/>' if tie else ""
     tied_xml = f'<notations><tied type="{tie}"/></notations>' if tie else ""
     return (
         f"<note><pitch><step>{pitch}</step><octave>4</octave></pitch>"
-        f"<duration>{duration}</duration><type>quarter</type>{tie_xml}"
+        f"<duration>{duration}</duration><type>{kind}</type>{'<dot/>' * dots}{tie_xml}"
         f"{tied_xml}{lyric_xml}</note>"
     )
 
@@ -29,20 +37,27 @@ def _rest(duration: int) -> str:
     return f"<note><rest/><duration>{duration}</duration><type>quarter</type></note>"
 
 
-def _score_xml(measures: list[str]) -> str:
+def _score_xml(measures: list[str], second_part: list[str] | None = None) -> str:
+    second_entry = (
+        '<score-part id="P2"><part-name>Solista</part-name></score-part>'
+        if second_part else ""
+    )
+    second_xml = f'<part id="P2">{"".join(second_part)}</part>' if second_part else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<score-partwise version="3.1"><part-list><score-part id="P1">'
-        '<part-name>Solo</part-name></score-part></part-list>'
-        f'<part id="P1">{"".join(measures)}</part></score-partwise>'
+        f'<part-name>Solo</part-name></score-part>{second_entry}</part-list>'
+        f'<part id="P1">{"".join(measures)}</part>{second_xml}</score-partwise>'
     )
 
 
-def _measure(number: int, body: str, *, beats: int = 4, implicit: bool = False) -> str:
+def _measure(
+    number: int, body: str, *, beats: int = 4, implicit: bool = False, divisions: int = 4
+) -> str:
     implicit_attr = ' implicit="yes"' if implicit else ""
     return (
         f'<measure number="{number}"{implicit_attr}>'
-        f'<attributes><divisions>4</divisions><time><beats>{beats}</beats>'
+        f'<attributes><divisions>{divisions}</divisions><time><beats>{beats}</beats>'
         '<beat-type>4</beat-type></time></attributes>'
         f"{body}</measure>"
     )
@@ -58,14 +73,15 @@ def _note_signature(note: dict) -> tuple:
     )
 
 
-def _materialize(xml: str, *, keep_pitches: set[float] | None = None):
+def _materialize(xml: str, *, keep_pitches: set[float] | None = None, lane_part: int = 0):
+    """Lay the sung notes of one source part over part P1 as a derived lane."""
     with TemporaryDirectory() as temp_dir:
         source_path = Path(temp_dir) / "source.xml"
         source_path.write_text(xml, encoding="utf-8")
         source = parse_score(source_path)
         lane = [
             note
-            for note in source["parts"][0]["notes"]
+            for note in source["parts"][lane_part]["notes"]
             if not note["is_rest"]
             and (keep_pitches is None or note["pitch_midi"] in keep_pitches)
         ]
@@ -188,6 +204,61 @@ def test_whole_rest_shorter_than_its_bar_does_not_shift_later_bars():
     for measure in written.findall("measure")[1:]:
         assert sum(int(note.findtext("duration")) for note in measure.findall("note")) == 16
     assert _rest_beats(written.findall("measure")[1]) == []
+
+
+def _bar_durations(written: ET.Element) -> list[int]:
+    return [
+        sum(int(note.findtext("duration")) for note in measure.findall("note"))
+        for measure in written.findall("measure")
+    ]
+
+
+def test_lane_with_finer_notes_than_its_part_keeps_their_lengths():
+    # The lane takes P2's eighths and dotted quarters over P1, which is written
+    # in whole beats (divisions 1). Counted in P1's divisions, they would round
+    # to quarters and halves and push every later bar late.
+    solo = [
+        _measure(1, _note("C", 1) + _note("D", 1) + _note("E", 2, kind="half"), divisions=1),
+        _measure(2, _note("F", 4, kind="whole"), divisions=1),
+    ]
+    solista = [
+        _measure(
+            1,
+            _note("C", 1, kind="eighth") + _note("D", 1, kind="eighth")
+            + _note("E", 3, dots=1) + _note("F", 1, kind="eighth") + _note("G", 2),
+            divisions=2,
+        ),
+        _measure(
+            2,
+            _note("A", 3, dots=1) + _note("B", 1, kind="eighth") + _note("C", 4, kind="half"),
+            divisions=2,
+        ),
+    ]
+    lane, reparsed, written = _materialize(_score_xml(solo, solista), lane_part=1)
+    _assert_round_trip(lane, reparsed)
+    assert [node.text for node in written.iter("divisions")] == ["2"]
+    assert _bar_durations(written) == [8, 8]
+
+
+def test_divisions_change_in_the_part_does_not_rescale_the_lane():
+    # P1 switches from divisions 1 to 4 in bar 2. The lane writes its divisions
+    # once, in bar 1, so bar 2's sixteenths and the bars after keep their lengths.
+    bar_two = (
+        '<measure number="2"><attributes><divisions>4</divisions></attributes>'
+        + _note("F", 1, kind="16th") + _note("G", 1, kind="16th")
+        + _note("A", 2, kind="eighth") + _rest(4) + _note("B", 8, kind="half")
+        + "</measure>"
+    )
+    xml = _score_xml([
+        _measure(1, _note("C", 1) + _note("D", 1) + _note("E", 2, kind="half"), divisions=1),
+        bar_two,
+        '<measure number="3">' + _note("C", 4) + _rest(12) + "</measure>",
+    ])
+    lane, reparsed, written = _materialize(xml)
+    _assert_round_trip(lane, reparsed)
+    assert [node.text for node in written.iter("divisions")] == ["4"]
+    assert written.findall("measure")[1].find("attributes") is None
+    assert _bar_durations(written) == [16, 16, 16]
 
 
 def test_no_reference_does_not_write_missing_bars_as_leading_rests():

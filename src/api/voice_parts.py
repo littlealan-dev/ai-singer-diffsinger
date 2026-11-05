@@ -6,11 +6,13 @@ import os
 import re
 import json
 import hashlib
+import math
 import tempfile
 import threading
 import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
@@ -6232,6 +6234,48 @@ def _reference_measure_length_beats(
     return written_beats if written_beats > 0 else nominal_beats
 
 
+def _reference_bar_lengths(
+    reference_measures: Sequence[ET.Element], q: Any, divisions: int
+) -> List[float]:
+    """Return each source bar's length in beats, counted in the source's own divisions."""
+    current_time = {"beats": 4, "beat_type": 4}
+    current_divisions = divisions
+    lengths: List[float] = []
+    for measure in reference_measures:
+        attributes = measure.find(q("attributes"))
+        _update_time_signature(attributes, q, current_time)
+        if attributes is not None:
+            source_divisions = attributes.findtext(q("divisions"))
+            if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
+                current_divisions = int(source_divisions)
+        nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
+        lengths.append(
+            _reference_measure_length_beats(measure, q, current_divisions, nominal_beats)
+        )
+    return lengths
+
+
+def _derived_lane_divisions(
+    reference_divisions: int,
+    transformed_notes: Sequence[Dict[str, Any]],
+    bar_lengths: Sequence[float],
+) -> int:
+    """Return the fewest divisions per quarter that count every lane length exactly.
+
+    A lane can hold notes from a part written in finer divisions than the part
+    it is laid over, so the reference part's divisions are only the floor.
+    """
+    values = list(bar_lengths)
+    for note in transformed_notes:
+        values.append(float(note.get("offset_beats") or 0.0))
+        values.append(float(note.get("duration_beats") or 1.0))
+    divisions = reference_divisions
+    for value in values:
+        # music21 keeps offsets as fractions up to this denominator.
+        divisions = math.lcm(divisions, Fraction(value).limit_denominator(65535).denominator)
+    return divisions
+
+
 def _append_gap_rests(
     measure_node: ET.Element, *, gap_beats: float, divisions: int, q: Any
 ) -> None:
@@ -6294,9 +6338,9 @@ def _append_transformed_measures(
             ET.Element(q("measure"), {"number": str(num)})
             for num in sorted(by_measure)
         ]
+    bar_lengths = _reference_bar_lengths(reference_measures, q, divisions)
+    divisions = _derived_lane_divisions(divisions, transformed_notes, bar_lengths)
 
-    current_time = {"beats": 4, "beat_type": 4}
-    current_divisions = divisions
     bar_start = 0.0
     for idx, ref_measure in enumerate(ordered_measures):
         measure_number = ref_measure.attrib.get("number") or str(idx + 1)
@@ -6307,23 +6351,24 @@ def _append_transformed_measures(
         measure_node = ET.SubElement(part_node, q("measure"), measure_attributes)
 
         ref_attributes = ref_measure.find(q("attributes"))
-        if ref_attributes is not None:
-            measure_node.append(_single_staff_attributes_copy(ref_attributes, q, source_staff))
-        elif idx == 0:
-            attributes = ET.SubElement(measure_node, q("attributes"))
-            ET.SubElement(attributes, q("divisions")).text = str(divisions)
-
-        _update_time_signature(ref_attributes, q, current_time)
-        if ref_attributes is not None:
-            source_divisions = ref_attributes.findtext(q("divisions"))
-            if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
-                current_divisions = int(source_divisions)
-        nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
-        written_length = (
-            _reference_measure_length_beats(ref_measure, q, current_divisions, nominal_beats)
-            if reference_measures else nominal_beats
+        attributes = (
+            _single_staff_attributes_copy(ref_attributes, q, source_staff)
+            if ref_attributes is not None
+            else ET.Element(q("attributes"))
         )
-        bar_length = written_length
+        # Every lane duration is counted in the lane's own divisions, written
+        # once in its first bar. A source change of divisions would rescale them.
+        for divisions_node in attributes.findall(q("divisions")):
+            attributes.remove(divisions_node)
+        if idx == 0:
+            divisions_node = ET.Element(q("divisions"))
+            divisions_node.text = str(divisions)
+            attributes.insert(0, divisions_node)
+        if len(attributes):
+            measure_node.append(attributes)
+
+        # Without a source part, every bar holds lane notes, which set its length below.
+        bar_length = bar_lengths[idx] if reference_measures else 4.0
         bar_end = bar_start + bar_length
         notes = sorted(
             by_measure.get(measure_int, []),
