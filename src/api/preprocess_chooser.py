@@ -604,7 +604,9 @@ async def choose_repair(
         lane = lanes[lane_id]
         for start, end in spans:
             cuts.setdefault((lane.part_index, lane.scope_key), set()).update({start, end + 1})
-    selected = {**{slot_id: option.option_id for slot_id, option in sheet.fixed.items()},
+    selected = {**{slot.slot_id: slot.options[0].option_id for slot in sheet.slots
+                    if slot.kind == "lane_layout"},
+                **{slot_id: option.option_id for slot_id, option in sheet.fixed.items()},
                 **(pinned or {}), **choices}
     earlier = _selection_lookup(selected)
     layout_pins = {slot_id: value for slot_id, value in selected.items()
