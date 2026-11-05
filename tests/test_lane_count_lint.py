@@ -130,17 +130,17 @@ THREE_VOICES = (
 
 
 @pytest.mark.parametrize(
-    ("measures", "lanes", "density", "real_voices", "expected_rules", "chord_source"),
+    ("measures", "lanes", "density", "most", "expected_rules", "chord_source"),
     [
         pytest.param(TURN_TAKING, ("1", "2"), 1, 2, set(), None, id="turn-taking-two-lanes"),
-        pytest.param(TURN_TAKING, ("1",), 1, 2, {"same_part_target_completeness", "complete_split_scope_lane_count_mismatch"}, None, id="turn-taking-one-lane"),
+        pytest.param(TURN_TAKING, ("1",), 1, 2, {"same_part_target_completeness"}, None, id="turn-taking-one-lane"),
         pytest.param(TURN_TAKING, ("1", "2", "1"), 1, 2, {"complete_split_scope_lane_count_mismatch"}, None, id="turn-taking-three-lanes"),
-        pytest.param(CHORD, ("1", "1", "1"), 3, 1, set(), None, id="chord-three-lanes"),
-        pytest.param(CHORD, ("1", "1", "1", "1"), 3, 1, {"complete_split_scope_lane_count_mismatch"}, None, id="chord-four-lanes"),
+        pytest.param(CHORD, ("1", "1", "1"), 3, 3, set(), None, id="chord-three-lanes"),
+        pytest.param(CHORD, ("1", "1", "1", "1"), 3, 3, {"complete_split_scope_lane_count_mismatch"}, None, id="chord-four-lanes"),
         pytest.param(SOPRANO_ALTO, ("1", "2"), 2, 2, set(), None, id="soprano-alto-two-lanes"),
         pytest.param(SOPRANO_ALTO, ("1", "2", "1"), 2, 2, {"complete_split_scope_lane_count_mismatch"}, None, id="soprano-alto-three-lanes"),
-        pytest.param(TWO_VOICES_CHORD, ("1", "1", "2"), 3, 2, set(), "1", id="two-voices-chord-three-lanes"),
-        pytest.param(TWO_VOICES_CHORD, ("1", "2"), 3, 2, {"complete_split_scope_lane_count_mismatch"}, "1", id="two-voices-chord-two-lanes"),
+        pytest.param(TWO_VOICES_CHORD, ("1", "1", "2"), 3, 4, set(), "1", id="two-voices-chord-three-lanes"),
+        pytest.param(TWO_VOICES_CHORD, ("1", "2"), 3, 4, {"complete_split_scope_lane_count_mismatch"}, "1", id="two-voices-chord-two-lanes"),
         pytest.param(THREE_VOICES, ("1", "2", "3"), 2, 3, set(), None, id="three-voices-three-lanes"),
     ],
 )
@@ -148,7 +148,7 @@ def test_lane_count_for_staff(
     measures: tuple,
     lanes: tuple[str, ...],
     density: int,
-    real_voices: int,
+    most: int,
     expected_rules: set[str],
     chord_source: str | None,
 ) -> None:
@@ -165,12 +165,12 @@ def test_lane_count_for_staff(
     if mismatch:
         attributes = mismatch["failing_attributes"]
         assert attributes["maximum_simultaneous_note_count"] == density
-        assert attributes["real_voice_part_count"] == real_voices
-        assert attributes["expected_lane_count"] == max(density, real_voices)
+        assert attributes["minimum_lane_count"] == density
+        assert attributes["maximum_lane_count"] == most
         assert attributes["visible_derived_lane_count"] == len(lanes)
 
 
-def test_prompt_describes_expected_lane_count() -> None:
+def test_prompt_describes_lane_count_range() -> None:
     rendered = render_lint_rules_for_prompt()
     assert "complete_split_scope_lane_count_mismatch" in rendered
-    assert "max(maximum simultaneous note count, real non-_default voice parts" in rendered
+    assert "the sum of each real source voice's own maximum simultaneous note count" in rendered

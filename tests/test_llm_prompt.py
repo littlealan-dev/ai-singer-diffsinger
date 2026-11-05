@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
@@ -1117,3 +1118,77 @@ def test_preprocess_role_leaves_out_synthesis_only_context() -> None:
     for section in ("Score summary (if available):", "Voice-part planning signals (if available):"):
         assert section in preprocess
     assert preprocess.endswith("End Dynamic Context.")
+
+
+def test_prompt_points_users_to_app_controls_instead_of_refusing() -> None:
+    prompt = _role_prompt("default")
+
+    for text in (
+        "App controls outside the chat:",
+        "Do not say it cannot be done, and do not claim you did it.",
+        "Name only the controls listed here.",
+        "`.musicxml`, `.xml` or compressed `.mxl`",
+        "Mute, Solo and a volume slider",
+        '"Download mix (real-time)"',
+        "as one WAV file",
+        "up to 5 minutes long",
+        "render each part as its own take, then download the mix",
+    ):
+        assert text in prompt
+    assert prompt.count("App controls outside the chat:") == 1
+
+
+def test_app_controls_are_in_the_cached_static_prompt() -> None:
+    bundle = build_prompt_bundle([], score_available=True)
+
+    assert "App controls outside the chat:" in bundle.static_prompt_text
+    assert "App controls outside the chat:" not in bundle.dynamic_prompt_text
+
+
+def test_app_controls_name_only_controls_that_exist_in_the_ui() -> None:
+    prompt = _role_prompt("default")
+    ui_source = (
+        Path(__file__).resolve().parents[1] / "ui" / "src" / "MainApp.tsx"
+    ).read_text()
+
+    for label in (
+        "Add a score",
+        "Upload MusicXML…",
+        "Tracks & Stems",
+        "Download mix (real-time)",
+        "Download score",
+        "Print score",
+        "Page view",
+        "Horizontal view",
+        "With Repeats",
+        "Instrumental Level",
+    ):
+        assert label in prompt
+        assert label in ui_source
+
+    assert 'accept=".musicxml,.xml,.mxl"' in ui_source
+    assert "BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60" in ui_source
+    assert 'BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav"' in ui_source
+
+
+def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="preprocess",
+    )
+    assert "Source voices that take turns may stay in separate lanes" in prompt
+    assert "at most that count or, if larger, the sum of each real source voice's own maximum simultaneous note count" in prompt
+    for obsolete in (
+        "to equal that scope's maximum simultaneous note count",
+        "must equal that scope's maximum simultaneous note count",
+        "exactly as many visible executor-owned derived lanes",
+    ):
+        assert obsolete not in prompt

@@ -73,7 +73,7 @@ function multiTrackMidi(programs: number[]): Buffer {
   return Buffer.concat([header, ...tracks]);
 }
 
-async function mockBackend(page: Page) {
+async function mockBackend(page: Page, performanceMidi: unknown = PERFORMANCE_MIDI, midiPrograms = [0, 0, 24]) {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   const completed = {
     status: "done",
@@ -86,7 +86,7 @@ async function mockBackend(page: Page) {
     audio_track: { key: "id:Voice", label: "Voice", part_id: "Voice", verse_number: "1" },
     expand_repeats: true,
     actual_duration_seconds: 1,
-    performance_midi: PERFORMANCE_MIDI,
+    performance_midi: performanceMidi,
     performance_midi_published: true,
   };
   // The fallback synth is enough here; the 148 MB SoundFont would only slow the test.
@@ -121,7 +121,7 @@ async function mockBackend(page: Page) {
     if (route_.endsWith("/score")) return route.fulfill({ contentType: "application/xml", body: xml });
     if (route_.endsWith("/synthesis-estimate")) return route.fulfill({ status: 503, json: {} });
     if (route_.endsWith("/instrumental-midi")) {
-      return route.fulfill({ contentType: "audio/midi", body: multiTrackMidi([0, 0, 24]) });
+      return route.fulfill({ contentType: "audio/midi", body: multiTrackMidi(midiPrograms) });
     }
     if (route_.endsWith("/audio")) return route.fulfill({ contentType: "audio/wav", body: silentWav(1) });
     if (route_.endsWith("/chat")) {
@@ -150,13 +150,21 @@ async function mockBackend(page: Page) {
  * track order, so its tracks are matched to the provider's by ID. (The
  * provider's own `trackStates` is not used: it keeps only the last of several
  * mixer edits made in one render, while the engine receives them all.)
+ * `midiProgram` is the sound the engine plays, which changes only once the
+ * provider has rebuilt its engine for a new sound.
  */
 async function playerTrackStates(page: Page) {
   return page.evaluate(() => {
     const node = document.querySelector(".score-player-seek-time");
     if (!node) return null;
     const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$"));
-    type EngineTrack = { id: string; muted: boolean; soloed: boolean; volume: number };
+    type EngineTrack = {
+      id: string;
+      muted: boolean;
+      soloed: boolean;
+      volume: number;
+      clips: Array<{ midiProgram?: number }>;
+    };
     type Engine = { getState: () => { tracks: EngineTrack[] } };
     type ContextValue = { tracks?: Array<{ id: string }>; playoutRef?: { current: Engine | null } };
     type Fiber = { return: Fiber | null; memoizedProps?: { value?: ContextValue } };
@@ -167,7 +175,9 @@ async function playerTrackStates(page: Page) {
         const engineTracks = value.playoutRef.current?.getState().tracks ?? [];
         return value.tracks.map(({ id }) => {
           const track = engineTracks.find((engineTrack) => engineTrack.id === id);
-          return track ? { muted: track.muted, soloed: track.soloed, volume: track.volume } : null;
+          if (!track) return null;
+          const midiProgram = track.clips.find((clip) => clip.midiProgram !== undefined)?.midiProgram;
+          return { muted: track.muted, soloed: track.soloed, volume: track.volume, midiProgram };
         });
       }
       fiber = fiber.return;
@@ -229,6 +239,15 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
   const pianoMute = page.getByTestId("score-inst-track-P2").locator(".score-track-mute-btn");
   await pianoMute.click();
   await expect.poll(() => mutedStates(page)).toEqual([true, true, false]);
+  await pianoSound.click();
+  await page.getByRole("menuitem", { name: "Piano", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Bright Acoustic Piano" }).click();
+  await expect(pianoSound.locator(".score-track-instrument-label")).toHaveText("Bright Acoustic Piano");
+  await expect(pianoMute).toHaveAttribute("aria-pressed", "true");
+  // The new sound rebuilds the engine; the piano's staves stay muted in it.
+  await expect.poll(() => midiTrackStates(page).then((states) => states?.map((state) => state?.midiProgram)))
+    .toEqual([1, 1, expect.any(Number)]);
+  await expect.poll(() => mutedStates(page)).toEqual([true, true, false]);
   await pianoMute.click();
 
   // The guitar row controls the third MIDI track, not the piano's second staff.
@@ -241,4 +260,53 @@ test("a part on two staves has one row that controls both of its MIDI tracks", a
     .toEqual([0.5, 0.5, expect.any(Number)]);
 
   expect(consoleMessages.filter((text) => text.includes("same key"))).toEqual([]);
+});
+
+test("a drum part without sounds stays muted until the user chooses a kit", async ({ page }) => {
+  test.setTimeout(120_000);
+  const performanceMidi = {
+    ...PERFORMANCE_MIDI,
+    instrumental_parts: [
+      part(1, "P2", "P2", "Piano", 0),
+      {
+        ...part(2, "P3", "P3", "Drum Set", 0),
+        midi_program: null,
+        program_source: "user_assignable",
+        percussion: true,
+      },
+    ],
+  };
+  await mockBackend(page, performanceMidi, [0, 0]);
+  await signInAsE2EUser(page, "score-player-unassigned-drum");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
+
+  const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
+  await page.getByTestId("score-upload-input").setInputFiles({ name: "score.xml", mimeType: "application/xml", buffer: xml });
+  await expect(page.getByTestId("score-preview-surface").locator("svg").first()).toBeVisible();
+  await page.getByTestId("chat-input").fill("sing Voice");
+  await page.getByTestId("send-message").click();
+
+  const drum = page.getByTestId("score-inst-track-P3");
+  await expect(instrumentRows(page)).toHaveCount(2);
+  const picker = drum.locator(".score-track-instrument-trigger");
+  const mute = drum.locator(".score-track-mute-btn");
+  const solo = drum.locator(".score-track-solo-btn");
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Choose a kit");
+  await expect(mute).toHaveAttribute("aria-pressed", "true");
+  await expect(mute).toBeDisabled();
+  await expect(solo).toBeDisabled();
+  await expect(mute).toHaveAttribute("title", "Choose a kit to hear this part");
+  await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(true);
+
+  await picker.click();
+  await page.getByRole("menuitem", { name: "FluidR3 Drum Kits" }).click();
+  await page.getByRole("menuitemradio", { name: "Jazz Kit" }).click();
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Jazz Kit");
+  await expect(mute).toHaveAttribute("aria-pressed", "false");
+  await expect(mute).toBeEnabled();
+  await expect(solo).toBeEnabled();
+  await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(false);
 });

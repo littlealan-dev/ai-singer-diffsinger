@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unicodedata
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
@@ -2369,27 +2370,19 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             part_index=part_index,
             staff_scope=staff_scope,
         )
-        maximum = max(density_by_measure.values(), default=0)
-        voice_parts = _analyze_part_voice_parts(
-            score["parts"][part_index], part_index
-        )["voice_parts"]
-        real_voice_part_count = sum(
-            1
-            for voice_part in voice_parts
-            if voice_part["source_voice_id"] != "_default"
-            and staff_scope in _source_voice_staff_scopes(
-                score,
-                part_index=part_index,
-                source_voice_part_id=voice_part["voice_part_id"],
-            )
+        lane_counts = sheet_lane_counts(
+            score,
+            part_index=part_index,
+            staff_scope=staff_scope,
         )
-        expected = max(maximum, real_voice_part_count)
-        if expected <= 0 or len(lane_ids) == expected:
+        minimum = lane_counts.peak
+        maximum = lane_counts.most
+        if minimum <= 0 or minimum <= len(lane_ids) <= maximum:
             continue
         peak_measures = [
             measure
             for measure, count in density_by_measure.items()
-            if count == maximum
+            if count == minimum
         ]
         findings.append(
             _lint_finding(
@@ -2399,9 +2392,9 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 missing_ranges=_collapse_measure_ranges(sorted(peak_measures)),
                 failing_attributes={
                     "staff_scope": staff_scope,
-                    "maximum_simultaneous_note_count": maximum,
-                    "real_voice_part_count": real_voice_part_count,
-                    "expected_lane_count": expected,
+                    "maximum_simultaneous_note_count": minimum,
+                    "minimum_lane_count": minimum,
+                    "maximum_lane_count": maximum,
                     "visible_derived_lane_count": len(lane_ids),
                     "visible_derived_lane_ids": sorted(lane_ids),
                 },
@@ -2881,6 +2874,49 @@ def _source_voice_staff_scopes(
         if _is_countable_sung_note(note)
         and _voice_key(note.get("voice")) == source_voice
     }
+
+
+@dataclass(frozen=True)
+class LaneCounts:
+    peak: int
+    real_voices: int
+    most: int
+
+
+def sheet_lane_counts(
+    score: Dict[str, Any], *, part_index: int, staff_scope: str
+) -> LaneCounts:
+    """Return the allowed complete-split lane bounds for one staff scope."""
+    density_by_measure = _staff_scope_measure_max_simultaneous_notes(
+        score, part_index=part_index, staff_scope=staff_scope
+    )
+    peak = max(density_by_measure.values(), default=0)
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return LaneCounts(peak=peak, real_voices=0, most=peak)
+
+    by_voice_onset: Dict[tuple[str, int, float], int] = {}
+    for note in (parts[part_index].get("notes") or []):
+        if not _is_countable_sung_note(note) or _staff_scope_key(note) != staff_scope:
+            continue
+        measure = int(note.get("measure_number") or 0)
+        if measure <= 0:
+            continue
+        voice = _voice_key(note.get("voice"))
+        if voice == "_default":
+            continue
+        onset = round(float(note.get("offset_beats") or 0.0), 6)
+        key = (voice, measure, onset)
+        by_voice_onset[key] = by_voice_onset.get(key, 0) + 1
+
+    voice_peaks: Dict[str, int] = {}
+    for (voice, _measure, _onset), count in by_voice_onset.items():
+        voice_peaks[voice] = max(voice_peaks.get(voice, 0), count)
+    return LaneCounts(
+        peak=peak,
+        real_voices=len(voice_peaks),
+        most=max(peak, sum(voice_peaks.values())),
+    )
 
 
 def _staff_scope_measure_max_simultaneous_notes(
