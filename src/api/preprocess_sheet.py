@@ -8,7 +8,7 @@ from itertools import combinations, permutations, product
 from math import factorial
 from statistics import median
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 from src.api.voice_parts import (
     _analyze_part_voice_parts,
@@ -119,6 +119,14 @@ class LyricBarCase:
 
 def _beat(note: dict) -> tuple[int, float]:
     return int(note.get("measure_number") or 0), round(float(note.get("offset_beats") or 0.0), 6)
+
+
+def _peak_onset_size(notes: Iterable[dict]) -> int:
+    counts: dict[tuple[int, float], int] = {}
+    for note in notes:
+        beat = _beat(note)
+        counts[beat] = counts.get(beat, 0) + 1
+    return max(counts.values(), default=0)
 
 
 def _word_text(note: dict) -> str | None:
@@ -561,11 +569,7 @@ def build_sheet_skeleton(
             for voice, notes in by_voice.items():
                 if voice == "_default":
                     continue
-                by_onset: dict[tuple[int, float], int] = {}
-                for note in notes:
-                    key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                    by_onset[key] = by_onset.get(key, 0) + 1
-                voice_peaks[voice] = max(by_onset.values(), default=0)
+                voice_peaks[voice] = _peak_onset_size(notes)
             sources = [vp["voice_part_id"] for vp in lane_parts
                        for _ in range(voice_peaks.get(str(vp["source_voice_id"]), 0))]
         else:
@@ -1046,15 +1050,9 @@ def _separate_voice_assignment(
              and segment.scope_key in source["scopes"]}
     default_id = _voice_part_ids(score["parts"][segment.part_index], segment.part_index).get("_default")
     default = local.get((segment.part_index, default_id)) if default_id else None
-    default_peak = 0
-    if default is not None:
-        by_onset: dict[tuple[int, float], int] = {}
-        for note in default["notes"]:
-            if _staff_scope_key(note) != segment.scope_key:
-                continue
-            key = _beat(note)
-            by_onset[key] = by_onset.get(key, 0) + 1
-        default_peak = max(by_onset.values(), default=0)
+    default_peak = _peak_onset_size(
+        note for note in default["notes"] if _staff_scope_key(note) == segment.scope_key
+    ) if default is not None else 0
     mapping: dict[str, dict] = {}
     ranks: dict[str, int] = {}
     source_ordinals: dict[str, int] = {}
@@ -1090,14 +1088,10 @@ def _lane_layout_evidence(score: dict, part_index: int, scope: str, peak: int,
                 by_voice.setdefault(voice, []).append(note)
     voices: dict[str, dict[str, int]] = {}
     for voice, notes in sorted(by_voice.items()):
-        by_onset: dict[tuple[int, float], int] = {}
-        for note in notes:
-            key = _beat(note)
-            by_onset[key] = by_onset.get(key, 0) + 1
         voices[ids[voice]] = {
             "notes": len(notes),
             "bars": len({int(note["measure_number"]) for note in notes}),
-            "own_peak": max(by_onset.values()),
+            "own_peak": _peak_onset_size(notes),
             "notes_with_words": sum(_word_text(note) is not None for note in notes),
         }
     return {"part_name": str(part.get("part_name") or ""), "staff_peak": peak,
