@@ -1041,7 +1041,6 @@ def _separate_voice_assignment(
     score: dict, segment: Segment, lanes: list[Lane], candidates: list[dict],
 ) -> tuple[Option, ...]:
     """Give each sounding voice only its own lanes, in pitch order."""
-    native = dict(segment.signature.lanes)
     local = {(source["part_index"], source["voice_part_id"]): source
              for source in candidates if source["part_index"] == segment.part_index
              and segment.scope_key in source["scopes"]}
@@ -1061,7 +1060,7 @@ def _separate_voice_assignment(
     source_ordinals: dict[str, int] = {}
     for lane in lanes:
         source = local.get((segment.part_index, lane.source_voice_part_id))
-        chosen = source if native[lane.lane_id] else (default if lane.default_rank < default_peak else None)
+        chosen = source if source is not None else (default if lane.default_rank < default_peak else None)
         if chosen is None:
             continue
         mapping[lane.lane_id] = {
@@ -1411,11 +1410,9 @@ def build_sheet(
                     ), evidence=used_when))
             needs_fallback = False
             if separate:
-                group_size = sum(ref == assigned_ref for ref in assignment[0].fields["melody_source_by_lane"].values())
-                if group_size > 1:
-                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", (
-                        Option("skip", "skip", {"rank_fallback": "skip"}, {}, ()),
-                    )))
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", (
+                    Option("skip", "skip", {"rank_fallback": "skip"}, {}, ()),
+                )))
                 continue
             if assignment is not None:
                 for option in assignment:
