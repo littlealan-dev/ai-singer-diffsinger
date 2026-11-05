@@ -474,7 +474,17 @@ async def _second_pass(
     evidence_max_chars: int,
 ) -> tuple[Sheet, dict[str, Any], int, int, int]:
     """Rebuild with the non-default structure choices pinned and re-ask the slots that changed."""
-    pins = {**pinned, **_structure_pins(sheet, choices)}
+    lane_staff = {lane.lane_id: (lane.part_index, lane.scope_key) for lane in sheet.lanes}
+    newly_separate = {lane_staff[lane_id]
+                      for slot in sheet.slots if slot.kind == "lane_layout"
+                      and choices.get(slot.slot_id) == "separate"
+                      for lane_id in slot.lane_ids}
+    menus = _menus(sheet)
+    structure = _structure_pins(sheet, choices)
+    pins = {**pinned, **{slot_id: value for slot_id, value in structure.items()
+                       if menus[slot_id].kind == "lane_layout"
+                       or not any(lane_staff.get(lane_id) in newly_separate
+                                  for lane_id in menus[slot_id].lane_ids)}}
     if pins == pinned:
         return sheet, choices, 0, 0, 0
     previous = {slot.slot_id: slot for slot in sheet.slots}

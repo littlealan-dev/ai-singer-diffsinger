@@ -197,6 +197,66 @@ def test_separate_answer_rebuilds_in_second_pass(tmp_path):
     assert preprocess_voice_parts(deepcopy(score), request={'plan': plan})['status'] == 'ready'
 
 
+def test_separate_discards_shared_voice_assignment_from_same_reply(tmp_path):
+    score = _score(tmp_path)
+    requests = []
+
+    async def call(request):
+        requests.append(request)
+        answer = json.loads(_answer(request, separate=True))
+        for key, slot_id in request.key_to_slot.items():
+            if slot_id.endswith('|voice_assignment'):
+                answer[key] = request.response_schema['properties'][key]['enum'][-1]
+        return json.dumps(answer)
+
+    sheet, choices, _ = asyncio.run(chooser.choose(score, _context(score), call=call))
+    assert any(slot_id.endswith('|voice_assignment') for slot_id in requests[0].key_to_slot.values())
+    assert len(sheet.lanes) == 3
+    plan = assemble_plan(sheet, choices, score=score)
+    result = preprocess_voice_parts(deepcopy(score), request={'plan': plan})
+    assert result['status'] == 'ready'
+    assert [sum(not note.get('is_rest') for note in
+                result['score']['parts'][target['appended_part_ref']['part_index']]['notes'])
+            for target in result['targets']] == [3, 1, 2]
+
+
+def test_separate_keeps_other_staff_structure_answer(tmp_path):
+    upper_path = tmp_path / 'upper'
+    lower_path = tmp_path / 'lower'
+    upper_path.mkdir()
+    lower_path.mkdir()
+    score = _score(upper_path)
+    lower = _score(lower_path)
+    score['parts'][0]['part_id'] = 'P1-Combined'
+    score['parts'][0]['notes'] = [
+        {**note, 'staff': '1'} for note in score['parts'][0]['notes']
+    ] + [
+        {**note, 'staff': '2', 'voice': str(int(note['voice']) + 2)}
+        for note in lower['parts'][0]['notes']
+    ]
+    context = _context(score)
+    initial = build_sheet(score, context)
+    other = [slot for slot in initial.slots
+             if slot.kind == 'voice_assignment' and '|2|' in slot.slot_id]
+    assert other, [(slot.kind, slot.slot_id) for slot in initial.slots]
+    other_assignment, = other
+    assert len(other_assignment.options) > 1
+
+    async def call(request):
+        answer = json.loads(_answer(request))
+        for key, slot_id in request.key_to_slot.items():
+            if slot_id.endswith('|lane_layout') and '|1|' in slot_id:
+                answer[key] = 'separate'
+            if slot_id == other_assignment.slot_id:
+                answer[key] = other_assignment.options[-1].option_id
+        return json.dumps(answer)
+
+    sheet, _, _ = asyncio.run(chooser.choose(score, context, call=call))
+    assert len([lane for lane in sheet.lanes if lane.scope_key == '1']) == 3
+    assert len([lane for lane in sheet.lanes if lane.scope_key == '2']) == 2
+    assert sheet.fixed[other_assignment.slot_id].option_id == other_assignment.options[-1].option_id
+
+
 def test_separate_reasks_only_changed_slots_and_keeps_turn_budget(tmp_path):
     score = _chord_beside_a_line(tmp_path)
     requests = []
