@@ -30,6 +30,7 @@ from src.api.voice_parts import (
     _staff_scope_measure_max_simultaneous_notes,
     _target_sung_note_count_for_section,
     _voice_key,
+    sheet_lane_counts,
 )
 
 
@@ -71,7 +72,7 @@ class SheetSkeleton:
 
 
 SLOT_KINDS = (
-    "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line", "lyric_reading",
+    "lane_layout", "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line", "lyric_reading",
     "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "freeform",
 )
 
@@ -492,6 +493,7 @@ def _eligible_lyric_sources(score: dict) -> list[dict]:
 def build_sheet_skeleton(
     score: dict, planning_context: dict | None, *,
     cuts: dict[tuple[int, str], set[int]] | None = None,
+    lane_layouts: dict[tuple[int, str], str] | None = None,
 ) -> SheetSkeleton:
     """Build scope lanes and exact signature runs without changing the score.
 
@@ -554,8 +556,21 @@ def build_sheet_skeleton(
                 -lane_parts.index(vp),
             ),
         )
-        sources = [vp["voice_part_id"] for vp in lane_parts]
-        sources.extend([chordal["voice_part_id"]] * (max_density - len(sources)))
+        if (lane_layouts or {}).get((part_index, scope)) == "separate":
+            voice_peaks: dict[str, int] = {}
+            for voice, notes in by_voice.items():
+                if voice == "_default":
+                    continue
+                by_onset: dict[tuple[int, float], int] = {}
+                for note in notes:
+                    key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                    by_onset[key] = by_onset.get(key, 0) + 1
+                voice_peaks[voice] = max(by_onset.values(), default=0)
+            sources = [vp["voice_part_id"] for vp in lane_parts
+                       for _ in range(voice_peaks.get(str(vp["source_voice_id"]), 0))]
+        else:
+            sources = [vp["voice_part_id"] for vp in lane_parts]
+            sources.extend([chordal["voice_part_id"]] * (max_density - len(sources)))
         source_ordinal: dict[str, int] = {}
         scope_lanes: list[Lane] = []
         for rank, source in enumerate(sources):
@@ -1022,7 +1037,33 @@ def _voice_assignment_options(
     return tuple(options), evidence, None
 
 
-PINNABLE_KINDS = ("mode", "melody_source", "voice_assignment")
+PINNABLE_KINDS = ("lane_layout", "mode", "melody_source", "voice_assignment")
+
+
+def _lane_layout_evidence(score: dict, part_index: int, scope: str, peak: int,
+                          shared: int, most: int) -> dict:
+    part = score["parts"][part_index]
+    ids = _voice_part_ids(part, part_index)
+    by_voice: dict[str, list[dict]] = {}
+    for note in part.get("notes") or []:
+        if _is_countable_sung_note(note) and _staff_scope_key(note) == scope:
+            voice = _voice_key(note.get("voice"))
+            if voice != "_default":
+                by_voice.setdefault(voice, []).append(note)
+    voices: dict[str, dict[str, int]] = {}
+    for voice, notes in sorted(by_voice.items()):
+        by_onset: dict[tuple[int, float], int] = {}
+        for note in notes:
+            key = _beat(note)
+            by_onset[key] = by_onset.get(key, 0) + 1
+        voices[ids[voice]] = {
+            "notes": len(notes),
+            "bars": len({int(note["measure_number"]) for note in notes}),
+            "own_peak": max(by_onset.values()),
+            "notes_with_words": sum(_word_text(note) is not None for note in notes),
+        }
+    return {"part_name": str(part.get("part_name") or ""), "staff_peak": peak,
+            "lanes_if_shared": shared, "lanes_if_separate": most, "voices": voices}
 
 
 def build_sheet(
@@ -1038,7 +1079,7 @@ def build_sheet(
     melody source for coverage and onset evidence, and with no word-lyric donor
     its fallback lyric options mirror its melody options.
 
-    ``pinned`` maps mode / melody_source / voice_assignment slot ids to a chosen
+    ``pinned`` maps lane_layout / mode / melody_source / voice_assignment slot ids to a chosen
     option: that slot keeps only the pinned option (so it becomes fixed), and the
     slots that depend on it are built from it instead of from the first option.
     ``cuts`` adds segment starts (see ``build_sheet_skeleton``).
@@ -1055,7 +1096,34 @@ def build_sheet(
         used_pins.add(slot_id)
         return chosen
 
-    skeleton = build_sheet_skeleton(score, planning_context, cuts=cuts)
+    shared_skeleton = build_sheet_skeleton(score, planning_context, cuts=cuts)
+    layouts: dict[tuple[int, str], str] = {}
+    layout_options: dict[tuple[int, str], tuple[Option, ...]] = {}
+    layout_evidence: dict[tuple[int, str], dict] = {}
+    for part_index, scope in sorted({(lane.part_index, lane.scope_key)
+                                     for lane in shared_skeleton.lanes}):
+        counts = sheet_lane_counts(score, part_index=part_index, staff_scope=scope)
+        shared = max(counts.peak, counts.real_voices)
+        if counts.most <= shared:
+            continue
+        segments = [segment for segment in shared_skeleton.segments
+                    if (segment.part_index, segment.scope_key) == (part_index, scope)]
+        span = Segment(part_index, scope, segments[0].start_measure,
+                       segments[-1].end_measure, segments[0].signature)
+        part_id = str(score["parts"][part_index]["part_id"])
+        options = pin(_slot_id((), span, "lane_layout", joint_id=f"{part_id}|{scope}"), (
+            Option("shared", "shared", {}, {}, ()),
+            Option("separate", "separate", {}, {}, ()),
+        ))
+        key = (part_index, scope)
+        layout_options[key] = options
+        layout_evidence[key] = _lane_layout_evidence(
+            score, part_index, scope, counts.peak, shared, counts.most
+        )
+        if options[0].option_id == "separate":
+            layouts[key] = "separate"
+    skeleton = (build_sheet_skeleton(score, planning_context, cuts=cuts, lane_layouts=layouts)
+                if layouts else shared_skeleton)
     sheet = Sheet(
         target_part_index=skeleton.target_part_index,
         verse_number=skeleton.verse_number,
@@ -1067,6 +1135,19 @@ def build_sheet(
         if pins:
             raise ValueError(f"Unknown pinned slot ids: {sorted(pins)}")
         return sheet
+    for key, options in layout_options.items():
+        part_index, scope = key
+        segments = [segment for segment in sheet.segments
+                    if (segment.part_index, segment.scope_key) == key]
+        span = Segment(part_index, scope, segments[0].start_measure,
+                       segments[-1].end_measure, segments[0].signature)
+        lanes = [lane.lane_id for lane in sheet.lanes
+                 if (lane.part_index, lane.scope_key) == key]
+        _put_slot(sheet, _choice_slot(
+            tuple(lanes), span, "lane_layout", options,
+            joint_id=f"{score['parts'][part_index]['part_id']}|{scope}",
+            evidence=layout_evidence[key],
+        ))
     derived_indices = _derived_part_indices(score)
     eligible_lyrics = _eligible_lyric_sources(score)
     eligible_by_ref = {(source["part_index"], source["voice_part_id"])
