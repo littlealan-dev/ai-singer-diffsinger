@@ -104,7 +104,7 @@ _SYNTHESIS_STREAM_POLL_SECONDS = 1.2
 # Stored audio is read from Cloud Storage this many bytes at a time.
 _STORAGE_AUDIO_CHUNK_BYTES = 1024 * 1024
 _SYNTHESIS_STREAM_HEARTBEAT_SECONDS = 15.0
-_TERMINAL_PROGRESS_STATUSES = {"done", "error", "action_required"}
+_TERMINAL_PROGRESS_STATUSES = {"done", "error", "stopped", "action_required"}
 _SYNTHESIS_STATUS_UNCONFIRMED_MESSAGE = (
     "We couldn’t confirm the final job status. Checking for updates…"
 )
@@ -791,6 +791,11 @@ def create_app() -> FastAPI:
         user_id, user_email = await _get_user_context_or_401(request)
         await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
+        if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
+            return JSONResponse(
+                status_code=409,
+                content={"code": "work_running", "message": backend_message("upload.work_running")},
+            )
 
         original_name = Path(file.filename or "").name
         suffix = Path(original_name).suffix.lower()
@@ -1039,6 +1044,62 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"synthesis_credit_estimate": estimate.to_dict()}
+
+    @app.post("/sessions/{session_id}/stop")
+    async def stop_session_work(session_id: str, request: Request) -> Dict[str, Any]:
+        """Stop active work owned by this song before each job's stop point."""
+        sessions: SessionStore = request.app.state.sessions
+        job_store: JobStore = request.app.state.job_store
+        user_id = await _get_user_id_or_401(request)
+        try:
+            state = await sessions.get_session(session_id, user_id)
+        except (KeyError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail="Session not found.") from exc
+        history = state.history
+        latest_user_id = next(
+            (
+                str(entry.get("id") or "")
+                for entry in reversed(history)
+                if isinstance(entry, dict) and entry.get("role") == "user"
+            ),
+            "",
+        )
+        await sessions.set_metadata(session_id, "stopTurnId", latest_user_id)
+
+        jobs = []
+        for job_id, job in await asyncio.to_thread(
+            job_store.list_active_jobs, user_id=user_id, session_id=session_id
+        ):
+            kind = str(job.get("jobKind") or "")
+            refunded = 0
+            if kind == "preprocess":
+                result = "not_stoppable"
+            else:
+                result = await asyncio.to_thread(job_store.stop_job, job_id)
+                if result == "stopped":
+                    refunded = await _release_stopped_reservation(
+                        settings=request.app.state.settings,
+                        user_id=user_id,
+                        job_id=job_id,
+                    )
+                    history_key = (
+                        "job.stop_mix_history" if kind == "export_mix"
+                        else "job.stop_take_history"
+                    )
+                    await sessions.append_history(
+                        session_id,
+                        "assistant",
+                        backend_message(history_key, credits=refunded),
+                    )
+            jobs.append(
+                {"jobId": job_id, "jobKind": kind, "result": result, "refundedCredits": refunded}
+            )
+        results = {job["result"] for job in jobs}
+        overall = next(
+            (value for value in ("stopped", "too_late", "not_stoppable") if value in results),
+            "nothing_running",
+        )
+        return {"result": overall, "jobs": jobs}
 
     @app.post("/sessions/{session_id}/chat")
     async def chat(session_id: str, request: Request, payload: ChatRequest) -> Any:
@@ -2028,6 +2089,48 @@ async def _export_mix_job_duration_seconds(
     return await asyncio.to_thread(get_audio_duration_seconds, source_path)
 
 
+async def _release_stopped_reservation(*, settings: Settings, user_id: str, job_id: str) -> int:
+    """Refund a stopped job without changing its terminal stop fields."""
+    from src.backend.credits import mark_reservation_reconciliation_required, release_credits
+
+    reserved = 0
+    try:
+        reservation = await asyncio.to_thread(
+            lambda: get_firestore_client().collection("credit_reservations").document(job_id).get()
+        )
+        data = (reservation.to_dict() or {}) if reservation.exists else {}
+        reserved = int(data.get("estimatedCredits") or 0)
+        release = await retry_credit_op(
+            release_credits,
+            user_id,
+            job_id,
+            max_attempts=settings.credit_retry_max_attempts,
+            base_delay=settings.credit_retry_base_delay_seconds,
+        )
+    except Exception:
+        log.exception("stopped_job_credit_release_failed job_id=%s", job_id)
+        await asyncio.to_thread(
+            mark_reservation_reconciliation_required,
+            user_id,
+            job_id,
+            last_error="stopped_job_release_failed",
+            last_error_message="Stopped job credit release raised an error",
+        )
+        return 0
+    if release.status in {"released", "already_released"}:
+        return reserved
+    if release.status == "reservation_missing":
+        return 0
+    await asyncio.to_thread(
+        mark_reservation_reconciliation_required,
+        user_id,
+        job_id,
+        last_error="stopped_job_release_failed",
+        last_error_message=f"Stopped job credit release returned {release.status}",
+    )
+    return 0
+
+
 async def _release_export_mix_reservation(
     *,
     settings: Settings,
@@ -2110,14 +2213,20 @@ async def _run_export_mix_job(
             job_id,
             len(tracks),
         )
-        await asyncio.to_thread(
-            job_store.update_job,
+        if not await asyncio.to_thread(
+            job_store.update_job_progress,
             job_id,
             status="running",
             step="export_mix",
+            message="Preparing the mix...",
             progress=0.02,
-            jobKind="export_mix",
-        )
+        ):
+            current = await asyncio.to_thread(job_store.get_job, job_id)
+            if current and current.get("status") == "cancelled":
+                await _release_stopped_reservation(
+                    settings=settings, user_id=user_id, job_id=job_id
+                )
+            return
         work_dir.mkdir(parents=True, exist_ok=True)
         sources: list[MixTrackSource] = []
         for index, track in enumerate(tracks):
@@ -2151,8 +2260,11 @@ async def _run_export_mix_job(
                 )
             )
             await asyncio.to_thread(
-                job_store.update_job,
+                job_store.update_job_progress,
                 job_id,
+                status="running",
+                step="export_mix",
+                message="Preparing the mix...",
                 progress=0.05 + 0.1 * ((index + 1) / len(tracks)),
             )
             log.info(
@@ -2174,7 +2286,13 @@ async def _run_export_mix_job(
             if percent < last_reported_percent + 5 and progress_value < 0.9:
                 return
             last_reported_percent = percent
-            job_store.update_job(job_id, progress=round(progress_value, 3))
+            job_store.update_job_progress(
+                job_id,
+                status="running",
+                step="export_mix",
+                message="Preparing the mix...",
+                progress=round(progress_value, 3),
+            )
 
         mix_metadata = await asyncio.to_thread(
             render_mix_to_wav,
@@ -2182,6 +2300,12 @@ async def _run_export_mix_job(
             output_path,
             progress_callback=_report_render_progress,
         )
+        if not await asyncio.to_thread(job_store.pass_stop_point, job_id):
+            output_path.unlink(missing_ok=True)
+            await _release_stopped_reservation(
+                settings=settings, user_id=user_id, job_id=job_id
+            )
+            return
         if output_storage_path:
             await asyncio.to_thread(
                 upload_file,
@@ -2214,6 +2338,9 @@ async def _run_export_mix_job(
             max_attempts=settings.credit_retry_max_attempts,
             base_delay=settings.credit_retry_base_delay_seconds,
         )
+        if settle_result.status == "cancelled":
+            output_path.unlink(missing_ok=True)
+            return
         if settle_result.status not in {
             "completed_and_settled",
             "already_completed_and_settled",
@@ -2238,6 +2365,12 @@ async def _run_export_mix_job(
             mix_metadata.get("duration_seconds"),
         )
     except Exception as exc:
+        current = await asyncio.to_thread(job_store.get_job, job_id)
+        if current and current.get("status") == "cancelled":
+            await _release_stopped_reservation(
+                settings=settings, user_id=user_id, job_id=job_id
+            )
+            return
         log.exception(
             "mix_export_job_failed session_id=%s user_id=%s job_id=%s",
             session_id,

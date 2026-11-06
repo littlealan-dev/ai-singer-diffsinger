@@ -305,6 +305,7 @@ class SettleCreditsResult:
 @dataclass(frozen=True)
 class CompleteJobAndSettleCreditsResult:
     status: Literal[
+        "cancelled",
         "completed_and_settled",
         "already_completed_and_settled",
         "reservation_missing",
@@ -1104,6 +1105,11 @@ def settle_credits_and_complete_job(
 
     @firestore.transactional
     def _transactional_complete_and_settle(transaction):
+        job_snapshot = job_ref.get(transaction=transaction)
+        if job_snapshot.exists and (job_snapshot.to_dict() or {}).get("status") == "cancelled":
+            return CompleteJobAndSettleCreditsResult(
+                status="cancelled", actual_credits=0, overdrafted=False
+            )
         res_snapshot = res_ref.get(transaction=transaction)
         if not res_snapshot.exists:
             logger.error("Complete-and-settle failed: reservation %s not found", job_id)
@@ -1411,6 +1417,11 @@ def settle_export_mix_credits_and_complete_job(
 
     @firestore.transactional
     def _transactional_complete_and_settle_export_mix(transaction):
+        job_snapshot = job_ref.get(transaction=transaction)
+        if job_snapshot.exists and (job_snapshot.to_dict() or {}).get("status") == "cancelled":
+            return CompleteJobAndSettleCreditsResult(
+                status="cancelled", actual_credits=0, overdrafted=False
+            )
         res_snapshot = res_ref.get(transaction=transaction)
         if not res_snapshot.exists:
             logger.error("Export-mix complete-and-settle failed: reservation %s not found", job_id)

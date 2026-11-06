@@ -7,7 +7,7 @@ import time
 import yaml
 import numpy as np
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.acoustic.model import LinguisticModel, DurationModel, PitchModel, VarianceModel, AcousticModel
 from src.api.diffsinger_linguistic_inputs import (
@@ -1074,6 +1074,7 @@ def synthesize_audio(
     vocoder_path: Optional[Union[str, Path]] = None,
     speaker_name: Optional[str] = None,
     device: str = "cpu",
+    before_vocoder: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Generate audio by running mel synthesis and vocoding.
@@ -1144,6 +1145,8 @@ def synthesize_audio(
         speaker_name=speaker_name,
         device=device,
     )
+    if before_vocoder is not None and not before_vocoder():
+        return {"status": "stopped", "stage": "vocoder"}
     logger.info(
         "vocoder_stage_start %s",
         summarize_payload(

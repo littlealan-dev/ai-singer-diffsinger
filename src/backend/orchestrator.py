@@ -105,6 +105,18 @@ class _LlmTurnBudget:
     reference: str
     started_at: float
     calls: int = 0
+    stop_session_id: Optional[str] = None
+    stop_user_id: Optional[str] = None
+    stop_turn_id: Optional[str] = None
+    stop_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+class ChatTurnStopped(RuntimeError):
+    """The latest user turn was stopped while chat work was in flight."""
+
+
+class SynthesisStopped(Exception):
+    """The take was stopped before its publication point."""
 
 
 class LlmTurnLimitReached(RuntimeError):
@@ -435,6 +447,31 @@ class Orchestrator:
         expand_repeats: bool = False,
         score_player_takes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        try:
+            return await self._handle_chat_impl(
+                session_id, message, user_id=user_id, user_email=user_email,
+                selection=selection, selected_voicebank_id=selected_voicebank_id,
+                selected_language=selected_language, expand_repeats=expand_repeats,
+                score_player_takes=score_player_takes,
+            )
+        except ChatTurnStopped:
+            stopped_message = backend_message("chat.stopped")
+            await self._sessions.append_history(session_id, "assistant", stopped_message)
+            return {"type": "chat_text", "message": stopped_message, "stopped": True}
+
+    async def _handle_chat_impl(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        user_id: str,
+        user_email: str,
+        selection: Optional[Dict[str, Any]] = None,
+        selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
+        expand_repeats: bool = False,
+        score_player_takes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
         if chat_lock.locked():
@@ -482,7 +519,11 @@ class Orchestrator:
                 user_id=user_id,
             )
             _llm_turn_budget.set(
-                _LlmTurnBudget(reference=str(turn_id)[:8], started_at=time.monotonic())
+                _LlmTurnBudget(
+                    reference=str(turn_id)[:8], started_at=time.monotonic(),
+                    stop_session_id=session_id, stop_user_id=user_id,
+                    stop_turn_id=str(turn_id), stop_loop=asyncio.get_running_loop(),
+                )
             )
             # Log the UI-side selections that silently rewrite synthesis arguments,
             # so a trace never has to infer them from the model's behaviour.
@@ -526,7 +567,7 @@ class Orchestrator:
             if current_score is None:
                 # Require a score before any synthesis steps.
                 response_message = "Please upload a MusicXML file first."
-                await self._sessions.append_history(session_id, "assistant", response_message)
+                await self._append_chat_reply(session_id, response_message)
                 return {"type": "chat_text", "message": response_message}
 
             llm_response, llm_error = await self._decide_with_llm(
@@ -542,7 +583,7 @@ class Orchestrator:
             )
             if llm_error:
                 response_message = llm_error
-                await self._sessions.append_history(session_id, "assistant", response_message)
+                await self._append_chat_reply(session_id, response_message)
                 return {"type": "chat_error", "message": response_message}
             if llm_response is not None:
                 if forced_language:
@@ -618,7 +659,7 @@ class Orchestrator:
                         )
                     elif followup_error:
                         response_message = followup_error
-                    await self._sessions.append_history(session_id, "assistant", response_message)
+                    await self._append_chat_reply(session_id, response_message)
                     # A reply to a tool error never carries the part picker.
                     return {"type": "chat_text", "message": response_message, "suppress_selector": True}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
@@ -643,9 +684,7 @@ class Orchestrator:
                         response_message = str(
                             action_required.get("message") or response_message
                         )
-                        await self._sessions.append_history(
-                            session_id, "assistant", response_message
-                        )
+                        await self._append_chat_reply(session_id, response_message)
                         return {
                             "type": "chat_text",
                             "message": response_message,
@@ -656,7 +695,7 @@ class Orchestrator:
                             llm_response.tool_calls,
                             user_message=message,
                         )
-                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        await self._append_chat_reply(session_id, response_message)
                         return await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
@@ -681,7 +720,7 @@ class Orchestrator:
                         explicit_verse_number=explicit_verse_number,
                     )
                     if not requires_verse_selection:
-                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        await self._append_chat_reply(session_id, response_message)
                         return await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
@@ -715,9 +754,7 @@ class Orchestrator:
                     workflow_user_message=message,
                     originating_turn_id=turn_id,
                 )
-                await self._sessions.append_history(
-                    session_id, "assistant", str(response.get("message", ""))
-                )
+                await self._append_chat_reply(session_id, str(response.get("message", "")))
                 return response
 
             if include_score:
@@ -729,8 +766,12 @@ class Orchestrator:
             else:
                 response = {"type": "chat_text", "message": response_message}
 
-            await self._sessions.append_history(session_id, "assistant", response_message)
+            await self._append_chat_reply(session_id, response_message)
             return response
+
+    async def _append_chat_reply(self, session_id: str, message: str) -> None:
+        await self._check_chat_turn_stopped()
+        await self._sessions.append_history(session_id, "assistant", message)
 
     async def _get_chat_lock(self, session_id: str) -> asyncio.Lock:
         """Return the per-session chat lock, creating it lazily."""
@@ -740,6 +781,35 @@ class Orchestrator:
                 lock = asyncio.Lock()
                 self._chat_locks[session_id] = lock
             return lock
+
+    async def _check_chat_turn_stopped(self) -> None:
+        budget = _llm_turn_budget.get()
+        if budget is None or not budget.stop_turn_id:
+            return
+        try:
+            snapshot = await self._sessions.get_snapshot(
+                budget.stop_session_id, budget.stop_user_id
+            )
+            if (snapshot.get("files") or {}).get("stopTurnId") == budget.stop_turn_id:
+                raise ChatTurnStopped
+        except ChatTurnStopped:
+            raise
+        except Exception:
+            self._logger.exception("chat_stop_marker_read_failed")
+
+    def _check_chat_turn_stopped_from_thread(self) -> None:
+        budget = _llm_turn_budget.get()
+        if budget is None or not budget.stop_turn_id or budget.stop_loop is None:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._check_chat_turn_stopped(), budget.stop_loop
+            )
+            future.result(timeout=10)
+        except ChatTurnStopped:
+            raise
+        except Exception:
+            self._logger.exception("chat_stop_marker_read_failed")
 
     async def _synthesize(
         self,
@@ -801,6 +871,8 @@ class Orchestrator:
                 summarize_payload(synth_result),
             )
             raise SynthesisActionRequired(synth_result)
+        if str(synth_result.get("status") or "").strip() == "stopped":
+            raise SynthesisStopped
         if "waveform" not in synth_result or "sample_rate" not in synth_result:
             self._logger.warning(
                 "synthesize_non_audio_result session=%s result=%s",
@@ -1574,6 +1646,7 @@ class Orchestrator:
             return
         route = self._synthesis_dispatcher.route
         lease_seconds = route.lease_seconds
+        user_stop_observed = asyncio.Event()
 
         async def release_for_retry() -> bool:
             """Hand the job back unless this was its last attempt.
@@ -1582,6 +1655,8 @@ class Orchestrator:
             another worker already holds it, so the job is not this run's to
             close.
             """
+            if user_stop_observed.is_set() or await self._is_user_stopped_job(job_id):
+                return False
             if attempt >= route.max_dispatch_attempts:
                 return False
             released = await asyncio.to_thread(
@@ -1601,6 +1676,9 @@ class Orchestrator:
         try:
             score = await self._load_dispatched_synthesis_score(spec)
         except Exception:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             # Possibly transient (Cloud Storage): hand the job back now, so the
             # dispatcher's retry need not wait out this lease.
             self._logger.exception("synthesis_dispatched_score_unavailable job=%s", job_id)
@@ -1614,7 +1692,8 @@ class Orchestrator:
 
         heartbeat = asyncio.create_task(
             self._renew_job_lease_until_cancelled(
-                "synthesis", job_id, worker_id=worker_id, lease_seconds=lease_seconds
+                "synthesis", job_id, worker_id=worker_id, lease_seconds=lease_seconds,
+                user_stop_observed=user_stop_observed,
             ),
             name=f"synthesis-lease-{job_id}",
         )
@@ -1658,7 +1737,8 @@ class Orchestrator:
         return score if isinstance(score, dict) else None
 
     async def _renew_job_lease_until_cancelled(
-        self, kind: str, job_id: str, *, worker_id: str, lease_seconds: float
+        self, kind: str, job_id: str, *, worker_id: str, lease_seconds: float,
+        user_stop_observed: Optional[asyncio.Event] = None,
     ) -> None:
         """Keep a dispatched job's lease while its worker runs it."""
         while True:
@@ -1676,10 +1756,47 @@ class Orchestrator:
                 )
                 continue
             if not still_ours:
+                if user_stop_observed is not None:
+                    try:
+                        if await self._is_user_stopped_job(job_id):
+                            user_stop_observed.set()
+                    except Exception:
+                        self._logger.exception("synthesis_stop_lease_read_failed job=%s", job_id)
                 self._logger.warning(
                     "%s_lease_lost job=%s worker=%s", kind, job_id, worker_id
                 )
                 return
+
+    async def _is_user_stopped_job(self, job_id: str) -> bool:
+        try:
+            job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        except Exception:
+            self._logger.exception("synthesis_stop_read_failed job=%s", job_id)
+            return False
+        return bool(job and job.get("status") == "cancelled" and job.get("cancelledBy") == "user")
+
+    async def _release_user_stopped_job(self, user_id: str, job_id: str) -> None:
+        """Release billing after Stop while preserving the job's stopped fields."""
+        from src.backend.credits import release_credits
+
+        if self._is_e2e_credit_bypass_enabled():
+            return
+        try:
+            result = await retry_credit_op(
+                release_credits, user_id, job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
+            release_status = result.status
+        except Exception:
+            self._logger.exception("stopped_synthesis_release_failed job=%s", job_id)
+            release_status = "exception"
+        if not self._release_result_allows_terminal_status(release_status):
+            await self._mark_reservation_reconciliation_required(
+                user_id=user_id, job_id=job_id,
+                reservation_error="release_failed_after_user_stop",
+                reservation_error_message=f"Stopped job release returned {release_status}",
+            )
 
     async def fail_exhausted_preprocess_job(self, job_id: str) -> None:
         """Fail a job that was interrupted on every attempt it was allowed."""
@@ -2062,15 +2179,17 @@ class Orchestrator:
                     job_input_storage_path,
                     self._settings.project_root,
                 )
-            await asyncio.to_thread(self._job_store.update_job, job_id, status="running")
-            await asyncio.to_thread(
-                self._job_store.update_job,
+            if not await asyncio.to_thread(
+                self._job_store.update_job_progress,
                 job_id,
                 status="running",
                 step="prepare",
                 message="Warming up the voice...",
                 progress=0.05,
-            )
+            ):
+                if await self._is_user_stopped_job(job_id):
+                    await self._release_user_stopped_job(user_id, job_id)
+                return
             # Instrumental MIDI is a billable component only when this job
             # reserved one. A score with no eligible non-vocal tracks reserves
             # vocal only, so MIDI preparation problems must never stop it from
@@ -2105,6 +2224,9 @@ class Orchestrator:
                 and isinstance(score_summary.get("performance_midi"), dict)
                 else None
             )
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             response = await self._synthesize(
                 session_id,
                 score,
@@ -2195,6 +2317,8 @@ class Orchestrator:
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
             self._settle_fault_injection_remaining.pop(job_id, None)
+            if settle_result.status == "cancelled":
+                return
             if settle_result.status in {
                 "completed_and_settled",
                 "already_completed_and_settled",
@@ -2251,6 +2375,9 @@ class Orchestrator:
             )
             return
         except asyncio.CancelledError:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                raise
             if on_interrupt is not None and await on_interrupt():
                 raise
             if self._is_e2e_credit_bypass_enabled():
@@ -2295,6 +2422,9 @@ class Orchestrator:
             )
             raise
         except SynthesisActionRequired as exc:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             if self._is_e2e_credit_bypass_enabled():
                 user_message = await self._render_synthesis_action_required_message(
                     session_id,
@@ -2351,6 +2481,9 @@ class Orchestrator:
                     exc.message,
                 )
         except Exception as exc:
+            if isinstance(exc, SynthesisStopped) or await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             # Shutdown stops this instance's MCP workers before it cancels
             # running jobs, so a take interrupted mid-render fails here rather
             # than being cancelled: hand it back for another attempt too.
@@ -2456,6 +2589,13 @@ class Orchestrator:
         on_interrupt runs when the job is cancelled; returning True means it put
         the job back for another attempt, so the job is not marked failed.
         """
+        inherited_budget = _llm_turn_budget.get()
+        if inherited_budget is not None and inherited_budget.stop_turn_id:
+            _llm_turn_budget.set(replace(
+                inherited_budget,
+                stop_session_id=None, stop_user_id=None,
+                stop_turn_id=None, stop_loop=None,
+            ))
         async def publish_attempt_messages(
             attempt_messages: List[Dict[str, Any]],
         ) -> None:
@@ -6260,6 +6400,7 @@ class Orchestrator:
         """
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
+        self._check_chat_turn_stopped_from_thread()
         budget = _llm_turn_budget.get()
         if budget is not None:
             if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
@@ -6273,16 +6414,19 @@ class Orchestrator:
                     backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
                 )
             budget.calls += 1
-        if response_schema is not None:
-            return self._llm_client.generate(
-                prompt_bundle, history, role=role, response_schema=response_schema
-            )
         try:
-            return self._llm_client.generate(prompt_bundle, history, role=role)
-        except TypeError as exc:
-            if "role" not in str(exc):
-                raise
-            return self._llm_client.generate(prompt_bundle, history)
+            if response_schema is not None:
+                return self._llm_client.generate(
+                    prompt_bundle, history, role=role, response_schema=response_schema
+                )
+            try:
+                return self._llm_client.generate(prompt_bundle, history, role=role)
+            except TypeError as exc:
+                if "role" not in str(exc):
+                    raise
+                return self._llm_client.generate(prompt_bundle, history)
+        finally:
+            self._check_chat_turn_stopped_from_thread()
 
     def _tool_payload_has_error(self, payload: str) -> bool:
         """Return True if the tool payload JSON includes an error object."""
@@ -6386,6 +6530,8 @@ class Orchestrator:
         except ValueError as exc:
             self._logger.warning("llm_planning_context_failed error=%s", exc)
             return None, str(exc)
+        except ChatTurnStopped:
+            raise
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -6586,6 +6732,8 @@ class Orchestrator:
                     LlmRole.DEFAULT,
                     response_schema,
                 )
+            except ChatTurnStopped:
+                raise
             except RuntimeError as exc:
                 self._logger.warning("llm_message_only_failed error=%s", exc)
                 return None, self._format_llm_error(exc)
@@ -6870,6 +7018,8 @@ class Orchestrator:
         except ValueError as exc:
             self._logger.warning("llm_followup_context_failed error=%s", exc)
             return None, str(exc)
+        except ChatTurnStopped:
+            raise
         except RuntimeError as exc:
             self._logger.warning("llm_followup_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -7841,6 +7991,7 @@ class Orchestrator:
                 explicit_verse_number=selected_explicit_verse_number,
             )
         for call in tool_calls:
+            await self._check_chat_turn_stopped()
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
                 session_id,
