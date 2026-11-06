@@ -6410,19 +6410,19 @@ class Orchestrator:
                     backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
                 )
             budget.calls += 1
-        if response_schema is not None:
-            result = self._llm_client.generate(
-                prompt_bundle, history, role=role, response_schema=response_schema
-            )
-        else:
+        try:
+            if response_schema is not None:
+                return self._llm_client.generate(
+                    prompt_bundle, history, role=role, response_schema=response_schema
+                )
             try:
-                result = self._llm_client.generate(prompt_bundle, history, role=role)
+                return self._llm_client.generate(prompt_bundle, history, role=role)
             except TypeError as exc:
                 if "role" not in str(exc):
                     raise
-                result = self._llm_client.generate(prompt_bundle, history)
-        self._check_chat_turn_stopped_from_thread()
-        return result
+                return self._llm_client.generate(prompt_bundle, history)
+        finally:
+            self._check_chat_turn_stopped_from_thread()
 
     def _tool_payload_has_error(self, payload: str) -> bool:
         """Return True if the tool payload JSON includes an error object."""

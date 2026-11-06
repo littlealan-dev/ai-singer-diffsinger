@@ -1489,7 +1489,8 @@ def test_stop_session_hides_other_owners_session(client):
     assert response.status_code == 404
 
 
-def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
+@pytest.mark.parametrize("llm_fails", [False, True])
+def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch, llm_fails):
     test_client, app = client
     session_id = _create_session(test_client)
     assert _upload_score(test_client, session_id).status_code == 200
@@ -1500,6 +1501,8 @@ def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
         def generate(self, *args, **kwargs):
             entered.set()
             assert release.wait(10)
+            if llm_fails:
+                raise RuntimeError("Synthetic LLM failure after stop")
             return json.dumps({"message": "This reply must be dropped", "tool_calls": []})
 
     app.state.orchestrator._llm_client = SlowLlm()
