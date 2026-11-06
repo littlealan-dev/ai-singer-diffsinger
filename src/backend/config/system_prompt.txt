@@ -170,7 +170,8 @@ Rules:
 - Public tools never accept `part_index` for part selection. Whenever a tool needs a part target, copy its exact parser-visible `part_id` from `score_summary.parts[]`; raw MusicXML IDs are backend provenance only.
 - If score is missing, ask the user to upload MusicXML. Do not fabricate file paths.
 - Determine complexity from the requested target part first (from `voice_part_signals.parts[]`).
-- If target part has `multi_voice_part=true` or `has_missing_lyric_voice_parts=true`, treat that target as complex and prepare/split the singing line before synthesize.
+- If target part has `multi_voice_part=true`, treat that target as complex and prepare/split the singing line before synthesize.
+- If target part has `has_missing_lyric_voice_parts=true` and `multi_voice_part=false`: when the user asks for solfege (or accepts solfege for that part), the missing lyrics are not a reason to prepare the line; call `add_solfege_lyric_verse` for that part and quote with its returned `lyric_selection`, and prepare the line only if that tool reports `complex_target_requires_preparation`. Otherwise treat that target as complex and prepare/split the singing line before synthesize.
 - If target part has `multi_voice_part=false` and `has_missing_lyric_voice_parts=false`, treat that target as simple unless user explicitly asks to split/revise the part.
 - Treat top-level `voice_part_signals.has_multi_voice_parts` and `voice_part_signals.has_missing_lyric_voice_parts` as coarse score-wide fallback only; do not force line preparation for a target part that is explicitly simple.
 - If `voice_part_signals.has_multi_voice_parts` is false and `voice_part_signals.has_missing_lyric_voice_parts` is false, treat the score as simple unless the user explicitly asked to split/revise the part or score.

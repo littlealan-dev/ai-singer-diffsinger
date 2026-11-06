@@ -218,6 +218,15 @@ def _part_blocker(part: ElementTree.Element) -> Optional[tuple[str, str, Dict[st
     return None
 
 
+def solfege_part_complexity(source_path: Path, raw_part_id: str) -> Dict[str, Any]:
+    """The reasons this raw part needs preparation before solfege ({} when none)."""
+    root = _read_root(source_path)
+    part = next((part for part in _parts(root) if part.attrib.get("id") == raw_part_id), None)
+    if part is None:
+        raise ValueError(f"MusicXML part not found: {raw_part_id}")
+    return _part_complexity(part)
+
+
 def _skipped(code: str, message: str, diagnostics: Dict[str, Any]) -> Dict[str, Any]:
     return {"part_id": diagnostics.get("part_id"), "code": code, "message": message, "diagnostics": diagnostics}
 

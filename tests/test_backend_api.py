@@ -2392,6 +2392,140 @@ class _ScriptedLlm:
         )
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "part_id", "message", "rerouted"),
+    [
+        ("all_zero_measure_numbers.musicxml", "Instrument1", "sing Instrument1 with solfege", True),
+        ("all_zero_measure_numbers.musicxml", "Instrument1", "sing Instrument1", False),
+        ("split/satb_two_bars.xml", "P1-Staff2", "sing P1-Staff2 with solfege", False),
+    ],
+)
+def test_first_response_solfege_handoff_routes_only_simple_part(
+    client, caplog, fixture_name, part_id, message, rerouted
+):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    fixture = PROJECT_ROOT / "tests" / "fixtures" / fixture_name
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.xml", fixture.read_bytes(), "application/xml")},
+    )
+    assert upload.status_code == 200
+    app.state.orchestrator._llm_client = _ScriptedLlm([
+        _preprocess_workflow_response(part_id=part_id),
+        json.dumps({"tool_calls": [], "final_message": "Done.", "include_score": False}),
+    ])
+    started = []
+
+    async def fake_start_preprocess_job(*args, **kwargs):
+        started.append(args)
+        return {"type": "chat_progress", "message": "Preparing.", "progress_url": "/jobs/test"}
+
+    app.state.orchestrator._start_preprocess_job = fake_start_preprocess_job
+    calls = []
+    real_call_tool = app.state.router.call_tool
+
+    def record_tool(name, arguments):
+        calls.append((name, arguments))
+        return real_call_tool(name, arguments)
+
+    app.state.router.call_tool = record_tool
+    with caplog.at_level(logging.INFO):
+        response = test_client.post(f"/sessions/{session_id}/chat", json={"message": message})
+
+    assert response.status_code == 200
+    reroute_logs = [
+        record.message for record in caplog.records
+        if "preprocess_handoff_rerouted_to_solfege" in record.message
+    ]
+    if rerouted:
+        assert started == []
+        assert response.json()["type"] != "chat_progress"
+        assert [arguments["parts"] for name, arguments in calls if name == "add_solfege_lyric_verse"] == [[part_id]]
+        snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+        part = next(part for part in snapshot["score_summary"]["parts"] if part["part_id"] == part_id)
+        assert any(selection["is_generated_solfege"] for selection in part["lyric_selections"])
+        assert len(reroute_logs) == 1
+        assert f"part_id={part_id}" in reroute_logs[0]
+    else:
+        assert len(started) == 1
+        assert response.json()["type"] == "chat_progress"
+        assert not any(name == "add_solfege_lyric_verse" for name, _ in calls)
+        assert reroute_logs == []
+
+
+def test_followup_solfege_handoff_executes_verse_tool_for_simple_part(client, caplog):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    fixture = PROJECT_ROOT / "tests/fixtures/all_zero_measure_numbers.musicxml"
+    upload = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.xml", fixture.read_bytes(), "application/xml")},
+    )
+    assert upload.status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = snapshot["current_score"]["score"]
+    orchestrator = app.state.orchestrator
+    executed = []
+    started = []
+    followup_count = 0
+
+    async def fake_execute_tool_calls(_session_id, working_score, calls, **kwargs):
+        executed.extend(calls)
+        return ToolExecutionResult(
+            score=working_score,
+            audio_response={"type": "chat_text", "message": ""},
+            followup_prompt=json.dumps({"status": "action_required"}),
+        )
+
+    async def fake_decide_followup(*args, **kwargs):
+        nonlocal followup_count
+        followup_count += 1
+        if followup_count == 1:
+            return LlmResponse(
+                tool_calls=[ToolCall(
+                    name="start_preprocess_voice_part_workflow",
+                    arguments={"request": {"part_id": "Instrument1", "reason": "Prepare this line."}},
+                )],
+                final_message="Preparing.",
+                include_score=False,
+            ), None
+        return LlmResponse(tool_calls=[], final_message="Done.", include_score=False), None
+
+    async def fake_start_preprocess_job(*args, **kwargs):
+        started.append(args)
+        return {"type": "chat_progress", "progress_url": "/jobs/test"}
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup
+    orchestrator._decide_message_only_followup_with_llm = fake_decide_followup
+    orchestrator._start_preprocess_job = fake_start_preprocess_job
+
+    with caplog.at_level(logging.INFO):
+        response = asyncio.run(orchestrator._run_llm_tool_workflow(
+            session_id,
+            snapshot,
+            score,
+            [ToolCall(name="add_solfege_lyric_verse", arguments={"parts": ["Instrument1"]})],
+            initial_response_message="Adding solfege.",
+            initial_include_score=False,
+            initial_thought_block=None,
+            initial_thought_summary=None,
+            user_id="test-user",
+            user_email="",
+            workflow_user_message="sing Instrument1 with solfege",
+        ))
+
+    assert started == []
+    assert response["type"] != "chat_progress"
+    assert len(executed) >= 2
+    assert executed[1].name == "add_solfege_lyric_verse"
+    assert executed[1].arguments["parts"] == ["Instrument1"]
+    assert sum("preprocess_handoff_rerouted_to_solfege" in record.message for record in caplog.records) == 1
+
+
 def test_singing_in_solfege_gives_the_llm_the_solfege_verses_stored_signals(client, monkeypatch):
     """Solfege is one more verse: the chat LLM gets its stored signals, with no extra parse."""
     import src.backend.orchestrator as orchestrator_module

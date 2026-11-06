@@ -11,8 +11,15 @@ from src.musicxml.solfege import (
     add_solfege_lyric_verses as transform_add_solfege_lyric_verses,
     modify_generated_solfege_verses,
     regenerate_generated_solfege_verses,
+    solfege_part_complexity,
 )
 from src.musicxml.part_reference import resolve_part_reference
+
+
+def solfege_target_needs_preparation(source_musicxml_path: str | Path, part_id: str) -> bool:
+    """Whether the parser-visible part needs a clean line before solfege."""
+    reference = resolve_part_reference(part_id=part_id, source_path=source_musicxml_path)
+    return bool(solfege_part_complexity(Path(source_musicxml_path), reference.raw_part_id))
 
 
 def add_solfege_lyric_verse(

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from xml.etree import ElementTree
 
+import pytest
+
 from src.api.score import parse_score
 from src.musicxml.solfege import (
     GENERATED_LYRIC_NAME,
@@ -10,6 +12,27 @@ from src.musicxml.solfege import (
     add_solfege_lyric_verse,
     modify_generated_solfege_verses,
 )
+
+
+def test_solfege_complexity_uses_raw_part_and_public_part_ids(tmp_path: Path) -> None:
+    from src.api.solfege import solfege_target_needs_preparation
+    from src.musicxml.solfege import solfege_part_complexity
+
+    simple = Path(__file__).parent / "fixtures" / "all_zero_measure_numbers.musicxml"
+    complex_score = Path(__file__).parent / "fixtures" / "split" / "satb_two_bars.xml"
+
+    assert solfege_part_complexity(simple, "P1") == {}
+    assert "voices" in solfege_part_complexity(complex_score, "P1")
+    with pytest.raises(ValueError):
+        solfege_part_complexity(simple, "unknown")
+
+    assert solfege_target_needs_preparation(simple, "Instrument1") is False
+    assert solfege_target_needs_preparation(complex_score, "P1-Staff2") is True
+    with pytest.raises(ValueError):
+        solfege_target_needs_preparation(simple, "unknown")
+
+    result = add_solfege_lyric_verse(complex_score, tmp_path / "satb.xml", part_id="P1")
+    assert result["code"] == "complex_target_requires_preparation"
 
 
 def _score_xml(*, fifths: int = 1) -> str:
