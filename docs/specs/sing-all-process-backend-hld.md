@@ -281,14 +281,14 @@ after the split: refund the lanes not used
 
 **Depends on planner v2 work:**
 
-| Issue | Gives Sing All | State (2026-11-05) |
+| Issue | Gives Sing All | State (2026-11-06) |
 |---|---|---|
 | SIG-172 | `sheet_lane_counts`, the range in the validator | On `feature/preprocess-planner-v2`, not main |
 | SIG-173 | `part_lane_counts`, the job's `laneCounts` | On `feature/preprocess-planner-v2` (cdbf0d7), not main |
-| SIG-174 | The LLM question and the `separate` layout | Todo, not built |
-| Slot from the skeleton (to be filed) | The lane key on split parts matches the quote's | Spec drafted 2026-11-06, with the Part Splitting session |
+| SIG-174 | The LLM question and the `separate` layout | On `feature/preprocess-planner-v2` (8127f8a, PR #52), not main |
+| Slot from the skeleton (to be filed) | The lane key on split parts matches the quote's | Spec `preprocess-v2-lane-slot-spec.md`, reviewed by the Part Splitting session 2026-11-06; not filed |
 
-All four have to land before step 3 (§16). SIG-174 is needed even though the names won't change: the quote's rows above `shared` get their notes from the `separate` layout, for the recommended voice. Until it lands, `chosen` is always `shared`, so it can never reach `most`. Alan schedules these. The "well under a second" above is a target to measure on real scores.
+All four have to land before step 3 (§16). SIG-174 is needed even though the names won't change: the quote's rows above `shared` get their notes from the `separate` layout, for the recommended voice. Alan schedules these. The "well under a second" above is a target to measure on real scores.
 
 **When the split doesn't match the estimate:**
 
