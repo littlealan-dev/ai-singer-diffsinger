@@ -105,6 +105,18 @@ class _LlmTurnBudget:
     reference: str
     started_at: float
     calls: int = 0
+    stop_session_id: Optional[str] = None
+    stop_user_id: Optional[str] = None
+    stop_turn_id: Optional[str] = None
+    stop_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+class ChatTurnStopped(Exception):
+    """The latest user turn was stopped while chat work was in flight."""
+
+
+class SynthesisStopped(Exception):
+    """The take was stopped before its publication point."""
 
 
 class LlmTurnLimitReached(RuntimeError):
@@ -435,6 +447,31 @@ class Orchestrator:
         expand_repeats: bool = False,
         score_player_takes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        try:
+            return await self._handle_chat_impl(
+                session_id, message, user_id=user_id, user_email=user_email,
+                selection=selection, selected_voicebank_id=selected_voicebank_id,
+                selected_language=selected_language, expand_repeats=expand_repeats,
+                score_player_takes=score_player_takes,
+            )
+        except ChatTurnStopped:
+            stopped_message = backend_message("chat.stopped")
+            await self._sessions.append_history(session_id, "assistant", stopped_message)
+            return {"type": "chat_text", "message": stopped_message, "stopped": True}
+
+    async def _handle_chat_impl(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        user_id: str,
+        user_email: str,
+        selection: Optional[Dict[str, Any]] = None,
+        selected_voicebank_id: Optional[str] = None,
+        selected_language: Optional[str] = None,
+        expand_repeats: bool = False,
+        score_player_takes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Handle a chat message and return a response payload."""
         chat_lock = await self._get_chat_lock(session_id)
         if chat_lock.locked():
@@ -482,7 +519,11 @@ class Orchestrator:
                 user_id=user_id,
             )
             _llm_turn_budget.set(
-                _LlmTurnBudget(reference=str(turn_id)[:8], started_at=time.monotonic())
+                _LlmTurnBudget(
+                    reference=str(turn_id)[:8], started_at=time.monotonic(),
+                    stop_session_id=session_id, stop_user_id=user_id,
+                    stop_turn_id=str(turn_id), stop_loop=asyncio.get_running_loop(),
+                )
             )
             # Log the UI-side selections that silently rewrite synthesis arguments,
             # so a trace never has to infer them from the model's behaviour.
@@ -740,6 +781,35 @@ class Orchestrator:
                 lock = asyncio.Lock()
                 self._chat_locks[session_id] = lock
             return lock
+
+    async def _check_chat_turn_stopped(self) -> None:
+        budget = _llm_turn_budget.get()
+        if budget is None or not budget.stop_turn_id:
+            return
+        try:
+            snapshot = await self._sessions.get_snapshot(
+                budget.stop_session_id, budget.stop_user_id
+            )
+            if (snapshot.get("files") or {}).get("stopTurnId") == budget.stop_turn_id:
+                raise ChatTurnStopped
+        except ChatTurnStopped:
+            raise
+        except Exception:
+            self._logger.exception("chat_stop_marker_read_failed")
+
+    def _check_chat_turn_stopped_from_thread(self) -> None:
+        budget = _llm_turn_budget.get()
+        if budget is None or not budget.stop_turn_id or budget.stop_loop is None:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._check_chat_turn_stopped(), budget.stop_loop
+            )
+            future.result(timeout=10)
+        except ChatTurnStopped:
+            raise
+        except Exception:
+            self._logger.exception("chat_stop_marker_read_failed")
 
     async def _synthesize(
         self,
@@ -6260,6 +6330,7 @@ class Orchestrator:
         """
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
+        self._check_chat_turn_stopped_from_thread()
         budget = _llm_turn_budget.get()
         if budget is not None:
             if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
@@ -6274,15 +6345,18 @@ class Orchestrator:
                 )
             budget.calls += 1
         if response_schema is not None:
-            return self._llm_client.generate(
+            result = self._llm_client.generate(
                 prompt_bundle, history, role=role, response_schema=response_schema
             )
-        try:
-            return self._llm_client.generate(prompt_bundle, history, role=role)
-        except TypeError as exc:
-            if "role" not in str(exc):
-                raise
-            return self._llm_client.generate(prompt_bundle, history)
+        else:
+            try:
+                result = self._llm_client.generate(prompt_bundle, history, role=role)
+            except TypeError as exc:
+                if "role" not in str(exc):
+                    raise
+                result = self._llm_client.generate(prompt_bundle, history)
+        self._check_chat_turn_stopped_from_thread()
+        return result
 
     def _tool_payload_has_error(self, payload: str) -> bool:
         """Return True if the tool payload JSON includes an error object."""
@@ -6386,6 +6460,8 @@ class Orchestrator:
         except ValueError as exc:
             self._logger.warning("llm_planning_context_failed error=%s", exc)
             return None, str(exc)
+        except ChatTurnStopped:
+            raise
         except RuntimeError as exc:
             self._logger.warning("llm_call_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -6586,6 +6662,8 @@ class Orchestrator:
                     LlmRole.DEFAULT,
                     response_schema,
                 )
+            except ChatTurnStopped:
+                raise
             except RuntimeError as exc:
                 self._logger.warning("llm_message_only_failed error=%s", exc)
                 return None, self._format_llm_error(exc)
@@ -6870,6 +6948,8 @@ class Orchestrator:
         except ValueError as exc:
             self._logger.warning("llm_followup_context_failed error=%s", exc)
             return None, str(exc)
+        except ChatTurnStopped:
+            raise
         except RuntimeError as exc:
             self._logger.warning("llm_followup_failed error=%s", exc)
             return None, self._format_llm_error(exc)
@@ -7841,6 +7921,7 @@ class Orchestrator:
                 explicit_verse_number=selected_explicit_verse_number,
             )
         for call in tool_calls:
+            await self._check_chat_turn_stopped()
             self._logger.debug(
                 "mcp_call_args session=%s tool=%s arguments=%s",
                 session_id,

@@ -1407,6 +1407,46 @@ def test_stop_session_hides_other_owners_session(client):
     assert response.status_code == 404
 
 
+def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowLlm:
+        def generate(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(10)
+            return json.dumps({"message": "This reply must be dropped", "tool_calls": []})
+
+    app.state.orchestrator._llm_client = SlowLlm()
+    monkeypatch.setattr(app.state.job_store, "list_active_jobs", lambda **_: [])
+    output = {}
+
+    def send_chat():
+        output["response"] = test_client.post(
+            f"/sessions/{session_id}/chat", json={"message": "hello"}
+        )
+
+    chat_thread = threading.Thread(target=send_chat)
+    chat_thread.start()
+    try:
+        assert entered.wait(10)
+        stop = test_client.post(f"/sessions/{session_id}/stop")
+        assert stop.status_code == 200
+        assert stop.json()["result"] == "nothing_running"
+    finally:
+        release.set()
+        chat_thread.join(timeout=10)
+    assert not chat_thread.is_alive()
+    response = output["response"]
+    assert response.status_code == 200
+    assert response.json() == {"type": "chat_text", "message": "Stopped.", "stopped": True}
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["history"][-1]["content"] == "Stopped."
+
+
 def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
     test_client, app = client
     session_id = _create_session(test_client)
