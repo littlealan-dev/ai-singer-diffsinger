@@ -792,9 +792,9 @@ def create_app() -> FastAPI:
         await _require_active_credits(user_id, user_email)
         await _get_session_or_404(sessions, session_id, user_id)
         if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
-            raise HTTPException(
+            return JSONResponse(
                 status_code=409,
-                detail={"code": "work_running", "message": backend_message("upload.work_running")},
+                content={"code": "work_running", "message": backend_message("upload.work_running")},
             )
 
         original_name = Path(file.filename or "").name
@@ -1052,10 +1052,10 @@ def create_app() -> FastAPI:
         job_store: JobStore = request.app.state.job_store
         user_id = await _get_user_id_or_401(request)
         try:
-            snapshot = await sessions.get_snapshot(session_id, user_id)
+            state = await sessions.get_session(session_id, user_id)
         except (KeyError, PermissionError) as exc:
             raise HTTPException(status_code=404, detail="Session not found.") from exc
-        history = snapshot.get("history") or []
+        history = state.history
         latest_user_id = next(
             (
                 str(entry.get("id") or "")

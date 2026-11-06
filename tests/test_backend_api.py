@@ -1386,7 +1386,9 @@ def test_upload_refuses_active_session_work_before_parsing(client, monkeypatch):
         files={"file": ("score.xml", b"not MusicXML", "application/xml")},
     )
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "work_running"
+    assert response.json() == {
+        "code": "work_running", "message": backend_message("upload.work_running")
+    }
 
 
 def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypatch):
@@ -1446,6 +1448,36 @@ def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator
         assert refunded == 7
         assert releases == [("test-user", job_id)]
         assert reservation_ref.get().to_dict()["status"] == "released"
+    finally:
+        reservation_ref.delete()
+
+
+def test_stopped_job_release_failure_marks_reconciliation(client, firestore_emulator, monkeypatch):
+    from google.cloud import firestore
+    from src.backend.main import _release_stopped_reservation
+
+    _test_client, app = client
+    job_id = f"synthetic-stopped-{uuid.uuid4().hex}"
+    db = firestore.Client(project="demo-project")
+    monkeypatch.setattr("src.backend.main.get_firestore_client", lambda: db)
+    reservation_ref = db.collection("credit_reservations").document(job_id)
+    reservation_ref.set({"estimatedCredits": 7, "status": "reserved", "userId": "test-user"})
+    marked = []
+    object.__setattr__(app.state.settings, "credit_retry_max_attempts", 1)
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda *a, **k: ReleaseCreditsResult(status="infra_error"),
+    )
+    monkeypatch.setattr(
+        "src.backend.credits.mark_reservation_reconciliation_required",
+        lambda *a, **k: marked.append((a, k)) or True,
+    )
+    try:
+        refunded = asyncio.run(_release_stopped_reservation(
+            settings=app.state.settings, user_id="test-user", job_id=job_id,
+        ))
+        assert refunded == 0
+        assert marked and marked[0][0] == ("test-user", job_id)
     finally:
         reservation_ref.delete()
 
@@ -2048,7 +2080,7 @@ def test_upload_refuses_running_job_before_invalid_extension_without_resetting_s
         files={"file": ("notes.txt", b"not musicxml", "text/plain")},
     )
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "work_running"
+    assert response.json()["code"] == "work_running"
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"] == original_history
