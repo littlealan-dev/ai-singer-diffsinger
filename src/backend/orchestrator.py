@@ -1768,7 +1768,11 @@ class Orchestrator:
                 return
 
     async def _is_user_stopped_job(self, job_id: str) -> bool:
-        job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        try:
+            job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        except Exception:
+            self._logger.exception("synthesis_stop_read_failed job=%s", job_id)
+            return False
         return bool(job and job.get("status") == "cancelled" and job.get("cancelledBy") == "user")
 
     async def _release_user_stopped_job(self, user_id: str, job_id: str) -> None:

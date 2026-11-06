@@ -1594,6 +1594,7 @@ def test_stopped_mcp_take_keeps_cancelled_job_and_does_not_retry(client, monkeyp
         job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
     )
     calls = []
+    released = []
 
     async def no_midi(*args, **kwargs):
         return None, None
@@ -1613,6 +1614,12 @@ def test_stopped_mcp_take_keeps_cancelled_job_and_does_not_retry(client, monkeyp
     monkeypatch.setattr(
         app.state.orchestrator, "_ensure_instrumental_midi_artifacts", no_midi
     )
+    monkeypatch.setattr(
+        "src.backend.credits.release_credits",
+        lambda user_id, released_job_id, **kwargs:
+        released.append((user_id, released_job_id, kwargs))
+        or ReleaseCreditsResult(status="released"),
+    )
     app.state.router.call_tool = call_tool
     asyncio.run(app.state.orchestrator._run_synthesis_job(
         session_id, {"parts": []}, {"voicebank": "Dummy"}, job_id, "test-user",
@@ -1623,6 +1630,49 @@ def test_stopped_mcp_take_keeps_cancelled_job_and_does_not_retry(client, monkeyp
     assert job["status"] == "cancelled"
     assert job["message"] == "Stopped."
     assert calls == []
+    assert released == [("test-user", job_id, {})]
+
+
+def test_take_stop_read_error_keeps_render_and_failure_finalization(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "synthetic-stop-read-error"
+    store = app.state.job_store
+    store.create_job(job_id=job_id, user_id="test-user", session_id=session_id, status="queued")
+    real_get_job = store.get_job
+    render_calls = []
+    releases = []
+
+    async def no_midi(*args, **kwargs):
+        return None, None
+
+    async def render(*args, **kwargs):
+        render_calls.append(job_id)
+        raise RuntimeError("Synthetic render failure")
+
+    def unreadable_job(_job_id):
+        raise RuntimeError("Synthetic stop-check read failure")
+
+    def release_credits(user_id, released_job_id, **kwargs):
+        releases.append((user_id, released_job_id))
+        store.update_job(released_job_id, **kwargs["terminal_job_fields"])
+        return ReleaseCreditsResult(status="released")
+
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(orchestrator, "_ensure_instrumental_midi_artifacts", no_midi)
+    monkeypatch.setattr(orchestrator, "_synthesize", render)
+    monkeypatch.setattr(orchestrator._job_store, "get_job", unreadable_job)
+    monkeypatch.setattr("src.backend.credits.release_credits", release_credits)
+
+    asyncio.run(orchestrator._run_synthesis_job(
+        session_id, {"parts": []}, {"voicebank": "Dummy"}, job_id, "test-user",
+        input_path=None, storage_input_path=None, job_input_storage_path=None,
+        output_storage_path=None,
+    ))
+
+    assert render_calls == [job_id]
+    assert releases == [("test-user", job_id)]
+    assert real_get_job(job_id)["status"] == "failed"
 
 
 def test_stopped_queued_take_never_calls_synthesis(client):
@@ -13680,6 +13730,39 @@ def test_an_interrupted_dispatched_synthesis_job_keeps_its_reservation_while_att
         (user_id, job_id, kwargs), = released_credits
         assert (user_id, job_id) == ("u1", "j1")
         assert kwargs["terminal_job_fields"]["status"] == "cancelled"
+
+
+def test_user_stopped_take_is_not_retried_when_shutdown_cancels_worker(client, monkeypatch):
+    _, app = client
+    orchestrator, rendering, released_credits, job = _blocking_synthesis_job(
+        app, monkeypatch, max_attempts=3
+    )
+    retries = []
+    monkeypatch.setattr(
+        orchestrator._job_store,
+        "release_job_for_retry",
+        lambda job_id, *, worker_id, message: retries.append(job_id) or True,
+    )
+
+    async def scenario():
+        run = asyncio.create_task(
+            orchestrator.run_dispatched_synthesis_job("j1", job, attempt=1, worker_id="w1")
+        )
+        await rendering.wait()
+        orchestrator._job_store.update_job(
+            "j1", status="cancelled", cancelledBy="user", step="cancelled",
+            message=backend_message("job.stopped"), progress=1.0,
+        )
+        assert await orchestrator.shutdown_tasks(time.monotonic() + 2.0)
+        assert isinstance((await asyncio.gather(run, return_exceptions=True))[0], asyncio.CancelledError)
+
+    asyncio.run(scenario())
+
+    assert retries == []
+    assert released_credits == [("u1", "j1", {})]
+    stopped_job = app.state.job_store.get_job("j1")
+    assert stopped_job["status"] == "cancelled"
+    assert stopped_job["message"] == backend_message("job.stopped")
 
 
 @pytest.mark.parametrize("status, expect_release", [("running", True), ("completed", False)])
