@@ -6,6 +6,15 @@ from pathlib import Path
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
 
+def test_static_prompt_routes_simple_lyricless_solfege_to_verse_tool() -> None:
+    prompt = (Path(__file__).parents[1] / "src/backend/config/system_prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "- If target part has `multi_voice_part=true`, treat that target as complex and prepare/split the singing line before synthesize." in prompt
+    assert "- If target part has `has_missing_lyric_voice_parts=true` and `multi_voice_part=false`: when the user asks for solfege (or accepts solfege for that part), the missing lyrics are not a reason to prepare the line; call `add_solfege_lyric_verse` for that part and quote with its returned `lyric_selection`, and prepare the line only if that tool reports `complex_target_requires_preparation`. Otherwise treat that target as complex and prepare/split the singing line before synthesize." in prompt
+    assert "- If target part has `multi_voice_part=true` or `has_missing_lyric_voice_parts=true`, treat that target as complex and prepare/split the singing line before synthesize." not in prompt
+
+
 def _sample_voice_part_signals() -> dict:
     return {
         "analysis_version": "v2",

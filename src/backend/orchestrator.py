@@ -72,6 +72,7 @@ from src.backend.storage_client import (
     upload_file_if_absent,
 )
 from src.api.audio import save_audio
+from src.api.solfege import solfege_target_needs_preparation
 from src.api.voice_parts import (
     build_preprocessing_required_action,
     finalize_review_materialization,
@@ -621,6 +622,7 @@ class Orchestrator:
                     await self._sessions.append_history(session_id, "assistant", response_message)
                     # A reply to a tool error never carries the part picker.
                     return {"type": "chat_text", "message": response_message, "suppress_selector": True}
+                llm_response = replace(llm_response, tool_calls=await self._reroute_simple_solfege_handoff(session_id, user_id, llm_response.tool_calls, user_message=message))
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -3330,6 +3332,7 @@ class Orchestrator:
                 followup_response.tool_calls,
             ) or thought_block_for_response
 
+            followup_response = replace(followup_response, tool_calls=await self._reroute_simple_solfege_handoff(session_id, user_id, followup_response.tool_calls, user_message=workflow_user_message or "", require_solfege_lyrics=require_solfege_lyrics))
             if self._should_start_preprocess_workflow(followup_response.tool_calls):
                 if progress_callback is not None:
                     raise RuntimeError(
@@ -5202,6 +5205,49 @@ class Orchestrator:
     def _should_start_preprocess_workflow(self, tool_calls: List[ToolCall]) -> bool:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
+
+    async def _reroute_simple_solfege_handoff(
+        self,
+        session_id: str,
+        user_id: str,
+        tool_calls: List[ToolCall],
+        *,
+        user_message: str,
+        require_solfege_lyrics: bool = False,
+    ) -> List[ToolCall]:
+        if len(tool_calls) != 1 or tool_calls[0].name != TOOL_START_PREPROCESS_WORKFLOW:
+            return tool_calls
+        args = tool_calls[0].arguments
+        request = args["request"] if isinstance(args.get("request"), dict) else args
+        solfege = (
+            request.get("require_solfege_lyrics") is True
+            or require_solfege_lyrics
+            or self._message_requests_sung_solfege(user_message)
+        )
+        part_id = str(request.get("part_id") or "").strip()
+        if not solfege or not part_id:
+            return tool_calls
+        try:
+            source = await self._sessions.ensure_active_musicxml(session_id, user_id)
+            needs_preparation = await asyncio.to_thread(
+                solfege_target_needs_preparation, source, part_id
+            )
+        except (KeyError, FileNotFoundError, ValueError):
+            return tool_calls
+        if needs_preparation:
+            return tool_calls
+        self._logger.info(
+            "preprocess_handoff_rerouted_to_solfege session=%s part_id=%s",
+            session_id,
+            part_id,
+        )
+        return [ToolCall(
+            name=TOOL_ADD_SOLFEGE_VERSE,
+            arguments={
+                "parts": [part_id],
+                "reason": "The part is one clean line; solfege needs no preparation.",
+            },
+        )]
 
     def _build_preprocess_workflow_planning_context(
         self,
