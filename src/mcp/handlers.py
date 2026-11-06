@@ -235,6 +235,8 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
     progress_path = params.get("progress_path")
     progress_job_id = params.get("progress_job_id")
     progress_callback = None
+    stop_check = None
+    pass_stop_point = None
     if progress_path:
         # File-based progress updates.
         resolved_progress = resolve_project_path(progress_path)
@@ -255,6 +257,27 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         # Firestore-backed progress updates.
         initialize_firebase_app()
         job_store = JobStore()
+
+        def stop_check(stage: str) -> bool:
+            try:
+                job = job_store.get_job(progress_job_id)
+                return bool(job and job.get("status") == "cancelled")
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "synthesis_stop_check_failed stage=%s job_id=%s", stage, progress_job_id
+                )
+                return False
+
+        def pass_stop_point() -> bool:
+            try:
+                if job_store.get_job(progress_job_id) is None:
+                    return True
+                return job_store.pass_stop_point(progress_job_id)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "synthesis_stop_point_failed job_id=%s", progress_job_id
+                )
+                return True
 
         def progress_callback(step: str, message: str, progress: float) -> None:
             job_store.update_job_progress(
@@ -289,6 +312,8 @@ def handle_synthesize(params: Dict[str, Any], device: str) -> Dict[str, Any]:
         expand_repeats=expand_repeats,
         device=device,
         progress_callback=progress_callback,
+        stop_check=stop_check,
+        pass_stop_point=pass_stop_point,
     )
     waveform = result.get("waveform")
     if hasattr(waveform, "tolist"):

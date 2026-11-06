@@ -871,6 +871,8 @@ class Orchestrator:
                 summarize_payload(synth_result),
             )
             raise SynthesisActionRequired(synth_result)
+        if str(synth_result.get("status") or "").strip() == "stopped":
+            raise SynthesisStopped
         if "waveform" not in synth_result or "sample_rate" not in synth_result:
             self._logger.warning(
                 "synthesize_non_audio_result session=%s result=%s",
@@ -1652,6 +1654,8 @@ class Orchestrator:
             another worker already holds it, so the job is not this run's to
             close.
             """
+            if await self._is_user_stopped_job(job_id):
+                return True
             if attempt >= route.max_dispatch_attempts:
                 return False
             released = await asyncio.to_thread(
@@ -1750,6 +1754,33 @@ class Orchestrator:
                     "%s_lease_lost job=%s worker=%s", kind, job_id, worker_id
                 )
                 return
+
+    async def _is_user_stopped_job(self, job_id: str) -> bool:
+        job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        return bool(job and job.get("status") == "cancelled" and job.get("cancelledBy") == "user")
+
+    async def _release_user_stopped_job(self, user_id: str, job_id: str) -> None:
+        """Release billing after Stop while preserving the job's stopped fields."""
+        from src.backend.credits import release_credits
+
+        if self._is_e2e_credit_bypass_enabled():
+            return
+        try:
+            result = await retry_credit_op(
+                release_credits, user_id, job_id,
+                max_attempts=self._settings.credit_retry_max_attempts,
+                base_delay=self._settings.credit_retry_base_delay_seconds,
+            )
+            release_status = result.status
+        except Exception:
+            self._logger.exception("stopped_synthesis_release_failed job=%s", job_id)
+            release_status = "exception"
+        if not self._release_result_allows_terminal_status(release_status):
+            await self._mark_reservation_reconciliation_required(
+                user_id=user_id, job_id=job_id,
+                reservation_error="release_failed_after_user_stop",
+                reservation_error_message=f"Stopped job release returned {release_status}",
+            )
 
     async def fail_exhausted_preprocess_job(self, job_id: str) -> None:
         """Fail a job that was interrupted on every attempt it was allowed."""
@@ -2132,15 +2163,17 @@ class Orchestrator:
                     job_input_storage_path,
                     self._settings.project_root,
                 )
-            await asyncio.to_thread(self._job_store.update_job, job_id, status="running")
-            await asyncio.to_thread(
-                self._job_store.update_job,
+            if not await asyncio.to_thread(
+                self._job_store.update_job_progress,
                 job_id,
                 status="running",
                 step="prepare",
                 message="Warming up the voice...",
                 progress=0.05,
-            )
+            ):
+                if await self._is_user_stopped_job(job_id):
+                    await self._release_user_stopped_job(user_id, job_id)
+                return
             # Instrumental MIDI is a billable component only when this job
             # reserved one. A score with no eligible non-vocal tracks reserves
             # vocal only, so MIDI preparation problems must never stop it from
@@ -2175,6 +2208,9 @@ class Orchestrator:
                 and isinstance(score_summary.get("performance_midi"), dict)
                 else None
             )
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             response = await self._synthesize(
                 session_id,
                 score,
@@ -2265,6 +2301,9 @@ class Orchestrator:
                 base_delay=self._settings.credit_retry_base_delay_seconds,
             )
             self._settle_fault_injection_remaining.pop(job_id, None)
+            if settle_result.status == "cancelled":
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             if settle_result.status in {
                 "completed_and_settled",
                 "already_completed_and_settled",
@@ -2321,6 +2360,9 @@ class Orchestrator:
             )
             return
         except asyncio.CancelledError:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                raise
             if on_interrupt is not None and await on_interrupt():
                 raise
             if self._is_e2e_credit_bypass_enabled():
@@ -2365,6 +2407,9 @@ class Orchestrator:
             )
             raise
         except SynthesisActionRequired as exc:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             if self._is_e2e_credit_bypass_enabled():
                 user_message = await self._render_synthesis_action_required_message(
                     session_id,
@@ -2421,6 +2466,9 @@ class Orchestrator:
                     exc.message,
                 )
         except Exception as exc:
+            if isinstance(exc, SynthesisStopped) or await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             # Shutdown stops this instance's MCP workers before it cancels
             # running jobs, so a take interrupted mid-render fails here rather
             # than being cancelled: hand it back for another attempt too.

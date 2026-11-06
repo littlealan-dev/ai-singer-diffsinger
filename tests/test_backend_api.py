@@ -732,6 +732,13 @@ def _prepare_app(monkeypatch, overrides=None):
         payload.update(fields)
         payload["updatedAt"] = datetime.now(timezone.utc).isoformat()
 
+    def _fake_update_job_progress(self, job_id: str, **fields) -> bool:
+        payload = fake_jobs.get(job_id)
+        if payload is None or payload.get("status") not in {"queued", "running"}:
+            return False
+        _fake_update_job(self, job_id, **fields)
+        return True
+
     def _fake_get_latest_job_by_session(self, *, user_id: str, session_id: str):
         matches = [
             (job_id, payload)
@@ -752,6 +759,9 @@ def _prepare_app(monkeypatch, overrides=None):
 
     monkeypatch.setattr("src.backend.job_store.JobStore.create_job", _fake_create_job)
     monkeypatch.setattr("src.backend.job_store.JobStore.update_job", _fake_update_job)
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.update_job_progress", _fake_update_job_progress
+    )
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
@@ -1445,6 +1455,65 @@ def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
     assert response.json() == {"type": "chat_text", "message": "Stopped.", "stopped": True}
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"][-1]["content"] == "Stopped."
+
+
+def test_stopped_mcp_take_keeps_cancelled_job_and_does_not_retry(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stopped-take"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+    calls = []
+
+    async def no_midi(*args, **kwargs):
+        return None, None
+
+    def call_tool(name, arguments):
+        assert name == "synthesize"
+        app.state.job_store.update_job(
+            job_id, status="cancelled", cancelledBy="user", step="cancelled",
+            message="Stopped.", progress=1.0,
+        )
+        return {"status": "stopped"}
+
+    async def on_interrupt():
+        calls.append("retry")
+        return True
+
+    monkeypatch.setattr(
+        app.state.orchestrator, "_ensure_instrumental_midi_artifacts", no_midi
+    )
+    app.state.router.call_tool = call_tool
+    asyncio.run(app.state.orchestrator._run_synthesis_job(
+        session_id, {"parts": []}, {"voicebank": "Dummy"}, job_id, "test-user",
+        input_path=None, storage_input_path=None, job_input_storage_path=None,
+        output_storage_path=None, on_interrupt=on_interrupt,
+    ))
+    job = app.state.job_store.get_job(job_id)
+    assert job["status"] == "cancelled"
+    assert job["message"] == "Stopped."
+    assert calls == []
+
+
+def test_stopped_queued_take_never_calls_synthesis(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "stopped-queued-take"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+    app.state.job_store.update_job(
+        job_id, status="cancelled", cancelledBy="user", step="cancelled",
+        message="Stopped.", progress=1.0,
+    )
+    app.state.router.call_tool = lambda *args, **kwargs: pytest.fail("MCP must not run")
+    asyncio.run(app.state.orchestrator._run_synthesis_job(
+        session_id, {"parts": []}, {"voicebank": "Dummy"}, job_id, "test-user",
+        input_path=None, storage_input_path=None, job_input_storage_path=None,
+        output_storage_path=None,
+    ))
+    assert app.state.job_store.get_job(job_id)["status"] == "cancelled"
 
 
 def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):

@@ -1910,6 +1910,8 @@ def synthesize(
     expand_repeats: bool = False,
     device: str = "cpu",
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
+    stop_check: Optional[Callable[[str], bool]] = None,
+    pass_stop_point: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Run the full synthesis pipeline (steps 2-6) in one call.
@@ -2084,6 +2086,8 @@ def synthesize(
             }
         ),
     )
+    if stop_check is not None and stop_check("align"):
+        return {"status": "stopped"}
     try:
         alignment = align_phonemes_to_notes(
             working_score,
@@ -2134,6 +2138,8 @@ def synthesize(
         ),
     )
     use_timing_v2 = _env_flag_enabled("SYLLABLE_TIMING_V2")
+    if stop_check is not None and stop_check("durations"):
+        return {"status": "stopped"}
     dur_result = predict_durations(
         phoneme_ids=initial_stage_tokens.dur_ids,
         word_boundaries=duration_model_boundaries,
@@ -2214,6 +2220,8 @@ def synthesize(
             }
         ),
     )
+    if stop_check is not None and stop_check("pitch"):
+        return {"status": "stopped"}
     pitch_result = predict_pitch(
         phoneme_ids=stage_tokens.pitch_ids,
         durations=durations,
@@ -2276,6 +2284,8 @@ def synthesize(
             }
         ),
     )
+    if stop_check is not None and stop_check("variance"):
+        return {"status": "stopped"}
     var_result = predict_variance(
         phoneme_ids=stage_tokens.variance_ids,
         durations=durations,
@@ -2329,6 +2339,8 @@ def synthesize(
             }
         ),
     )
+    if stop_check is not None and stop_check("mel"):
+        return {"status": "stopped"}
     audio_result = synthesize_audio(
         phoneme_ids=stage_tokens.root_ids,
         durations=durations,
@@ -2343,7 +2355,10 @@ def synthesize(
         language_ids=language_ids,
         speaker_name=speaker_name,
         device=device,
+        before_vocoder=pass_stop_point,
     )
+    if audio_result.get("status") == "stopped":
+        return audio_result
     _log_step("synthesize", start)
 
     leading_silence_frames = int(alignment.get("leading_silence_frames", 0) or 0)
