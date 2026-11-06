@@ -168,8 +168,9 @@ def _action_for_measure(
     assigned_group_size: int | None = None
     melody_ref: tuple[int, str] | None = None
     missing_assignment = False
-    for kind, option in _options_for_measure(sheet, selected, lane, measure):
-        if kind in {"split_shared_note_policy", "lyric_line", "lyric_reading"}:
+    covered = _options_for_measure(sheet, selected, lane, measure)
+    for kind, option in covered:
+        if kind in {"split_shared_note_policy", "unison_default", "one_line", "lyric_line", "lyric_reading"}:
             continue
         for key, value in option.fields.items():
             if key == "melody_source_by_lane":
@@ -197,6 +198,10 @@ def _action_for_measure(
                 raise AssemblyError(f"Conflicting {key} choices for {lane.lane_id}")
             fields[key] = deepcopy(value)
 
+    if "mode" not in fields and any(kind == "one_line" for kind, _ in covered):
+        # The staff writes one line here and no bar answer overrides: the lane's unison default decides.
+        default = next((option for kind, option in covered if kind == "unison_default"), None)
+        fields["mode"] = "rest" if default is not None and default.option_id == "top_lane_only" else "derive"
     mode = fields.get("mode")
     if mode == "rest":
         return {"mode": "rest", "decision_type": "INSERT_RESTS"}, None
@@ -397,7 +402,8 @@ def assemble_plan(
         policies = {
             option.fields["split_shared_note_policy"]
             for kind, option in _options_for_measure(sheet, selected, lane, measure_numbers[0])
-            if kind == "split_shared_note_policy"
+            if kind in {"split_shared_note_policy", "unison_default"}
+            and "split_shared_note_policy" in option.fields
         }
         if len(policies) > 1:
             raise AssemblyError(f"Conflicting shared-note policies for {lane.lane_id}")

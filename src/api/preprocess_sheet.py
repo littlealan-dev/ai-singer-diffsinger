@@ -73,7 +73,8 @@ class SheetSkeleton:
 
 SLOT_KINDS = (
     "lane_layout", "mode", "melody_source", "lyric_source", "lyric_strategy", "lyric_line", "lyric_reading",
-    "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "freeform",
+    "rank_fallback", "rank_assignment", "voice_assignment", "split_shared_note_policy", "unison",
+    "unison_default", "one_line", "freeform",
 )
 
 
@@ -1230,6 +1231,35 @@ def _separate_voice_assignment(
 PINNABLE_KINDS = ("lane_layout", "mode", "melody_source", "voice_assignment")
 
 
+def _unison_default_slot(score: dict, sheet: Sheet, lane: Lane, one_line: list[Segment]) -> Slot:
+    """Asked once for a lower lane: does it sing the staff's one line and unisons with the top lane?
+
+    every_lane writes what the lane would get without the question, so a first-option plan is
+    unchanged; top_lane_only gives unisons in divided bars to the top lane as well.
+    """
+    staff = [segment for segment in sheet.segments
+             if segment.part_index == lane.part_index and segment.scope_key == lane.scope_key]
+    span = Segment(lane.part_index, lane.scope_key, staff[0].start_measure, staff[-1].end_measure,
+                   staff[0].signature)
+    freeform = any(slot.kind == "freeform" and lane.lane_id in slot.lane_ids for slot in sheet.slots)
+    every = ({"split_shared_note_policy": "duplicate_to_all"}
+             if not freeform and _shared_notes_in_scope(score, lane) else {})
+    top = {} if freeform else {"split_shared_note_policy": "assign_primary_only"}
+
+    def bars(segments: list[Segment]) -> int:
+        return sum(segment.end_measure - segment.start_measure + 1 for segment in segments)
+
+    return _choice_slot((lane.lane_id,), span, "unison_default", (
+        Option("every_lane", "every_lane", every, {}, ()),
+        Option("top_lane_only", "top_lane_only", top, {}, ()),
+    ), evidence={
+        "one_line_bars": bars(one_line),
+        "divided_bars": bars([segment for segment in staff if any(native for _, native in segment.signature.lanes)]),
+        "direction_bars": sorted(measure for segment in one_line if segment.signature.annotation is not None
+                                 for measure in range(segment.start_measure, segment.end_measure + 1)),
+    })
+
+
 def _lane_layout_evidence(score: dict, part_index: int, scope: str, peak: int,
                           shared: int, most: int) -> dict:
     part = score["parts"][part_index]
@@ -1351,6 +1381,7 @@ def build_sheet(
     lines = staff_lyric_lines(score)
     staff_index = note_staffs_by_measure(score)
     case_cache: dict[tuple[int, str, str, str | None], dict[int, LyricBarCase]] = {}
+    one_line_segments: dict[str, list[Segment]] = {}
     for segment in sheet.segments:
         lanes = [lane for lane in sheet.lanes
                  if lane.part_index == segment.part_index and lane.scope_key == segment.scope_key]
@@ -1358,7 +1389,10 @@ def build_sheet(
             continue
         separate = layouts.get((segment.part_index, segment.scope_key)) == "separate"
         candidates = _source_candidates(score, segment, derived_indices)
+        staff_line_id = _voice_part_ids(score["parts"][segment.part_index], segment.part_index).get("_default")
+        top_rank = min(lane.default_rank for lane in lanes)
         segment_slots: list[Slot] = []
+        segment_one_line: list[str] = []
         freeform_reason: str | None = None
         if separate:
             assignment = _separate_voice_assignment(score, segment, lanes, candidates)
@@ -1395,6 +1429,14 @@ def build_sheet(
             target_notes = _target_notes(score, lane, segment)
             assigned_ref = (assignment[0].fields["melody_source_by_lane"].get(lane.lane_id)
                             if separate else None)
+            staff_line = {"part_index": lane.part_index, "voice_part_id": staff_line_id}
+            # A one-line bar: the staff writes single notes outside any voice, for every lane.
+            one_line = (
+                assignment is None and not native and segment.signature.density == 1
+                and staff_line_id is not None and staff_line_id != lane.source_voice_part_id
+                and any(source["part_index"] == lane.part_index and source["voice_part_id"] == staff_line_id
+                        and lane.scope_key in source["scopes"] for source in candidates)
+            )
             if assignment is None:
                 melody = _melody_options(lane, candidates)
                 own = tuple(option for option in melody if option.fields["melody_source"] == {
@@ -1403,6 +1445,10 @@ def build_sheet(
                 if native and own:
                     # The score states these notes are this voice's: the lane sings them.
                     melody = own
+                elif one_line and not reopened((lane.lane_id,), segment):
+                    # A lane sings from its own staff when the staff writes one line.
+                    melody = tuple(option for option in melody
+                                   if option.fields["melody_source"] == staff_line)
                 melody = pin(_slot_id((lane.lane_id,), segment, "melody_source"), melody)
             elif assigned_ref is None and separate:
                 melody = ()
@@ -1423,12 +1469,28 @@ def build_sheet(
                 ("derive",) if native or may_take_chord else (
                 ("derive", "rest") if melody else ("rest",)
             ))
-            segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", pin(
-                _slot_id((lane.lane_id,), segment, "mode"), tuple(
-                    Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
-                    for mode in mode_ids
-                ),
-            )))
+            if one_line:
+                # The top lane sings the staff's one line; a lower lane follows its unison answers.
+                mode_ids = ("derive",) if lane.default_rank == top_rank else ()
+            if mode_ids:
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", pin(
+                    _slot_id((lane.lane_id,), segment, "mode"), tuple(
+                        Option(mode, mode, {"mode": mode}, {"has_native_notes": native}, ())
+                        for mode in mode_ids
+                    ),
+                )))
+            if one_line and lane.default_rank != top_rank:
+                if segment.signature.annotation is not None:
+                    # A direction here ("Solo", "Tutti") may override the lane's unison default.
+                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "unison", (
+                        Option("every_lane", "every_lane", {"mode": "derive"}, {}, ()),
+                        Option("top_lane_only", "top_lane_only", {"mode": "rest"}, {}, ()),
+                    ), evidence={"one_line_bars": list(range(segment.start_measure, segment.end_measure + 1))}))
+                else:
+                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "one_line", (
+                        Option("lane_default", "lane_default", {}, {}, ()),
+                    )))
+                segment_one_line.append(lane.lane_id)
             if not melody:
                 continue
             if assignment is None:
@@ -1677,6 +1739,8 @@ def build_sheet(
         else:
             for slot in segment_slots:
                 _put_slot(sheet, slot)
+            for lane_id in segment_one_line:
+                one_line_segments.setdefault(lane_id, []).append(segment)
 
     for lane in sheet.lanes:
         if layouts.get((lane.part_index, lane.scope_key)) == "separate":
@@ -1689,6 +1753,9 @@ def build_sheet(
                 Option("assign_primary_only", "assign_primary_only",
                        {"split_shared_note_policy": "assign_primary_only"}, {}, ()),
             )))
+            continue
+        if lane.lane_id in one_line_segments:
+            _put_slot(sheet, _unison_default_slot(score, sheet, lane, one_line_segments[lane.lane_id]))
             continue
         if not _shared_notes_in_scope(score, lane):
             continue
