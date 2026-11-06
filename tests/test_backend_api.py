@@ -1353,6 +1353,60 @@ def test_upload_musicxml_parses_and_saves(client):
     assert not list(score_path.parent.glob("*.mid"))
 
 
+def test_upload_refuses_active_session_work_before_parsing(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    monkeypatch.setattr(
+        app.state.job_store,
+        "list_active_jobs",
+        lambda *, user_id, session_id: [("running-job", {"status": "running"})],
+    )
+    response = test_client.post(
+        f"/sessions/{session_id}/upload",
+        files={"file": ("score.xml", b"not MusicXML", "application/xml")},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "work_running"
+
+
+def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    asyncio.run(app.state.sessions.append_history(session_id, "user", "first"))
+    latest = asyncio.run(app.state.sessions.append_history(session_id, "user", "second"))
+    jobs = [
+        ("take", {"jobKind": "synthesis", "status": "running"}),
+        ("mix", {"jobKind": "export_mix", "status": "queued"}),
+        ("prep", {"jobKind": "preprocess", "status": "running"}),
+    ]
+    monkeypatch.setattr(app.state.job_store, "list_active_jobs", lambda **_: jobs)
+    monkeypatch.setattr(
+        app.state.job_store, "stop_job", lambda job_id: "too_late" if job_id == "mix" else "stopped"
+    )
+    monkeypatch.setattr("src.backend.main._release_stopped_reservation", lambda **_: asyncio.sleep(0, result=7))
+
+    response = test_client.post(f"/sessions/{session_id}/stop")
+    assert response.status_code == 200
+    assert response.json() == {
+        "result": "stopped",
+        "jobs": [
+            {"jobId": "take", "jobKind": "synthesis", "result": "stopped", "refundedCredits": 7},
+            {"jobId": "mix", "jobKind": "export_mix", "result": "too_late", "refundedCredits": 0},
+            {"jobId": "prep", "jobKind": "preprocess", "result": "not_stoppable", "refundedCredits": 0},
+        ],
+    }
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert snapshot["files"]["stopTurnId"] == latest["id"]
+    assert snapshot["history"][-1]["role"] == "assistant"
+    assert "7 credits" in snapshot["history"][-1]["content"]
+
+
+def test_stop_session_hides_other_owners_session(client):
+    test_client, _app = client
+    response = test_client.post("/sessions/other-users-session/stop")
+    assert response.status_code == 404
+
+
 def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
     test_client, app = client
     session_id = _create_session(test_client)
