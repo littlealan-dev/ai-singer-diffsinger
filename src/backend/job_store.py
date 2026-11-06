@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from firebase_admin import firestore
 
 from src.backend.firebase_app import get_firestore_client
+from src.backend.message_catalog import backend_message
 
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,74 @@ class JobStore:
             logger.exception("job_progress_update_failed job_id=%s", job_id)
             raise
 
+    def stop_job(self, job_id: str) -> str:
+        """Atomically stop an active job before its publication point."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _stop(transaction) -> str:
+            snapshot = job_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            if data.get("status") not in _MUTABLE_PROGRESS_STATUSES or data.get("pastStopPoint"):
+                return "too_late"
+            transaction.set(
+                job_ref,
+                {
+                    "status": "cancelled",
+                    "cancelledBy": "user",
+                    "step": "cancelled",
+                    "message": backend_message("job.stopped"),
+                    "progress": 1.0,
+                    "stoppedAt": firestore.SERVER_TIMESTAMP,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return "stopped"
+
+        return _stop(transaction)
+
+    def pass_stop_point(self, job_id: str) -> bool:
+        """Atomically commit to finishing, or observe that Stop won."""
+        self._ensure_client()
+        assert self._client is not None
+        job_ref = self._client.collection(self.collection).document(job_id)
+        transaction = self._client.transaction()
+
+        @firestore.transactional
+        def _pass(transaction) -> bool:
+            snapshot = job_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            if not snapshot.exists or data.get("status") == "cancelled":
+                return False
+            transaction.set(
+                job_ref,
+                {"pastStopPoint": True, "updatedAt": firestore.SERVER_TIMESTAMP},
+                merge=True,
+            )
+            return True
+
+        return _pass(transaction)
+
+    def list_active_jobs(self, *, user_id: str, session_id: str) -> list[Tuple[str, Dict[str, Any]]]:
+        """Return queued and running jobs owned by one session."""
+        self._ensure_client()
+        assert self._client is not None
+        docs = (
+            self._client.collection(self.collection)
+            .where("userId", "==", user_id)
+            .where("sessionId", "==", session_id)
+            .stream()
+        )
+        return [
+            (doc.id, data)
+            for doc in docs
+            if (data := doc.to_dict() or {}).get("status") in _MUTABLE_PROGRESS_STATUSES
+        ]
+
     def claim_dispatched_job(
         self,
         job_id: str,
@@ -268,6 +337,7 @@ class JobStore:
                     "message": message,
                     "leaseOwner": firestore.DELETE_FIELD,
                     "leaseExpiresAt": firestore.DELETE_FIELD,
+                    "pastStopPoint": firestore.DELETE_FIELD,
                     "updatedAt": firestore.SERVER_TIMESTAMP,
                 },
                 merge=True,
@@ -376,6 +446,8 @@ def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         status = "done"
     elif raw_status in {"failed", "cancelled", "credit_reconciliation_required"}:
         status = "error"
+    if raw_status == "cancelled" and data.get("cancelledBy") == "user":
+        status = "stopped"
     billing = data.get("billing") if isinstance(data.get("billing"), dict) else {}
     payload: Dict[str, Any] = {
         "status": status,

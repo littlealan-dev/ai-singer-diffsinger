@@ -1,0 +1,82 @@
+"""Transactional stop boundaries for synthetic jobs."""
+
+from datetime import datetime
+
+import pytest
+
+from src.backend.firebase_app import get_firestore_client
+from src.backend.job_store import JobStore, build_progress_payload
+
+
+@pytest.fixture
+def store(firestore_emulator, monkeypatch):
+    monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:8080")
+    monkeypatch.setenv("GCLOUD_PROJECT", "demo-project")
+    db = get_firestore_client()
+    for doc in db.collection("stop_test_jobs").list_documents():
+        doc.delete()
+    store = JobStore(collection="stop_test_jobs")
+    store._client = db
+    yield store
+    for doc in db.collection("stop_test_jobs").list_documents():
+        doc.delete()
+
+
+def _job(store, name, status="running", **extra):
+    store._client.collection(store.collection).document(name).set(
+        {"userId": "synthetic-owner", "sessionId": "synthetic-song", "status": status, **extra}
+    )
+
+
+@pytest.mark.parametrize("initial", ["queued", "running"])
+def test_stop_active_job_sets_user_stopped_fields(store, initial):
+    _job(store, "synthetic-take", initial)
+    assert store.stop_job("synthetic-take") == "stopped"
+    data = store.get_job("synthetic-take")
+    assert data["status"] == "cancelled"
+    assert data["cancelledBy"] == "user"
+    assert data["step"] == "cancelled"
+    assert data["progress"] == 1.0
+    assert isinstance(data["stoppedAt"], datetime)
+    assert build_progress_payload("synthetic-take", data)["status"] == "stopped"
+    assert store.stop_job("synthetic-take") == "too_late"
+
+
+@pytest.mark.parametrize("initial", ["completed", "failed", "cancelled"])
+def test_stop_finished_job_does_not_write(store, initial):
+    _job(store, "synthetic-take", initial)
+    before = store.get_job("synthetic-take")
+    assert store.stop_job("synthetic-take") == "too_late"
+    assert store.get_job("synthetic-take") == before
+
+
+@pytest.mark.parametrize("stop_first", [True, False])
+def test_stop_and_completion_point_have_one_winner(store, stop_first):
+    _job(store, "synthetic-take")
+    if stop_first:
+        assert store.stop_job("synthetic-take") == "stopped"
+        assert store.pass_stop_point("synthetic-take") is False
+        assert store.get_job("synthetic-take")["status"] == "cancelled"
+    else:
+        assert store.pass_stop_point("synthetic-take") is True
+        assert store.stop_job("synthetic-take") == "too_late"
+        assert store.get_job("synthetic-take")["status"] == "running"
+        assert store.get_job("synthetic-take")["pastStopPoint"] is True
+
+
+def test_active_jobs_are_scoped_and_retry_clears_stop_point(store):
+    _job(store, "synthetic-queued", "queued")
+    _job(store, "synthetic-running", "running", leaseOwner="worker", pastStopPoint=True)
+    _job(store, "synthetic-finished", "completed")
+    store._client.collection(store.collection).document("other-song").set(
+        {"userId": "synthetic-owner", "sessionId": "other-song", "status": "running"}
+    )
+    assert {name for name, _ in store.list_active_jobs(user_id="synthetic-owner", session_id="synthetic-song")} == {
+        "synthetic-queued", "synthetic-running"
+    }
+    assert store.release_job_for_retry("synthetic-running", worker_id="worker", message="retry")
+    assert "pastStopPoint" not in store.get_job("synthetic-running")
+
+
+def test_shutdown_cancel_still_reports_error():
+    assert build_progress_payload("synthetic-take", {"status": "cancelled"})["status"] == "error"
