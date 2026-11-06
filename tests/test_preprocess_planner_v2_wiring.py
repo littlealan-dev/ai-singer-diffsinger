@@ -435,6 +435,12 @@ def test_v2_chooser_accepts_a_reply_the_gemini_client_added_a_thought_summary_to
     assert len(chooser_requests) == 1
     assert "retries=0" in caplog.text
     assert "planner_v2_evidence_chars count=" in caplog.text
+    reply_logs = [
+        record.getMessage() for record in caplog.records
+        if "planner_v2_chooser_reply" in record.getMessage()
+    ]
+    assert reply_logs == [f"planner_v2_chooser_reply slots={len(chooser_requests[0]['properties'])} "
+                          f"reply={_first_enum(chooser_requests[0])}"]
     assert len(executed) == 1
 
 

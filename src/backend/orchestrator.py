@@ -6563,7 +6563,12 @@ class Orchestrator:
             request.response_schema,
             count_against_turn_budget=False,
         )
-        return _without_thought_summary(reply)
+        reply = _without_thought_summary(reply)
+        # The Gemini client logs the request; log the chosen options beside it.
+        self._logger.info(
+            "planner_v2_chooser_reply slots=%s reply=%s", len(request.key_to_slot), reply
+        )
+        return reply
 
     def _preprocess_planning_context_for_attempt(
         self,
