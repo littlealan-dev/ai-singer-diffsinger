@@ -1646,6 +1646,7 @@ class Orchestrator:
             return
         route = self._synthesis_dispatcher.route
         lease_seconds = route.lease_seconds
+        user_stop_observed = asyncio.Event()
 
         async def release_for_retry() -> bool:
             """Hand the job back unless this was its last attempt.
@@ -1654,7 +1655,7 @@ class Orchestrator:
             another worker already holds it, so the job is not this run's to
             close.
             """
-            if await self._is_user_stopped_job(job_id):
+            if user_stop_observed.is_set() or await self._is_user_stopped_job(job_id):
                 return False
             if attempt >= route.max_dispatch_attempts:
                 return False
@@ -1691,7 +1692,8 @@ class Orchestrator:
 
         heartbeat = asyncio.create_task(
             self._renew_job_lease_until_cancelled(
-                "synthesis", job_id, worker_id=worker_id, lease_seconds=lease_seconds
+                "synthesis", job_id, worker_id=worker_id, lease_seconds=lease_seconds,
+                user_stop_observed=user_stop_observed,
             ),
             name=f"synthesis-lease-{job_id}",
         )
@@ -1735,7 +1737,8 @@ class Orchestrator:
         return score if isinstance(score, dict) else None
 
     async def _renew_job_lease_until_cancelled(
-        self, kind: str, job_id: str, *, worker_id: str, lease_seconds: float
+        self, kind: str, job_id: str, *, worker_id: str, lease_seconds: float,
+        user_stop_observed: Optional[asyncio.Event] = None,
     ) -> None:
         """Keep a dispatched job's lease while its worker runs it."""
         while True:
@@ -1753,6 +1756,12 @@ class Orchestrator:
                 )
                 continue
             if not still_ours:
+                if user_stop_observed is not None:
+                    try:
+                        if await self._is_user_stopped_job(job_id):
+                            user_stop_observed.set()
+                    except Exception:
+                        self._logger.exception("synthesis_stop_lease_read_failed job=%s", job_id)
                 self._logger.warning(
                     "%s_lease_lost job=%s worker=%s", kind, job_id, worker_id
                 )

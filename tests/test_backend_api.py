@@ -1451,8 +1451,9 @@ def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator
 
 
 def test_stop_session_hides_other_owners_session(client):
-    test_client, _app = client
-    response = test_client.post("/sessions/other-users-session/stop")
+    test_client, app = client
+    other = asyncio.run(app.state.sessions.create_session("other-user"))
+    response = test_client.post(f"/sessions/{other.id}/stop")
     assert response.status_code == 404
 
 
@@ -1497,6 +1498,8 @@ def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
 
 
 def test_old_stop_marker_does_not_stop_next_chat_turn(client):
+    import src.backend.orchestrator as orchestrator_module
+
     test_client, app = client
     session_id = _create_session(test_client)
     assert _upload_score(test_client, session_id).status_code == 200
@@ -1505,6 +1508,8 @@ def test_old_stop_marker_does_not_stop_next_chat_turn(client):
 
     class FakeLlm:
         def generate(self, *args, **kwargs):
+            budget = orchestrator_module._llm_turn_budget.get()
+            assert budget.stop_turn_id and budget.stop_turn_id != prior["id"]
             return json.dumps({
                 "tool_calls": [], "final_message": "Current reply.", "include_score": False,
             })
@@ -1603,6 +1608,27 @@ def test_stopped_queued_take_never_calls_synthesis(client):
         output_storage_path=None,
     ))
     assert app.state.job_store.get_job(job_id)["status"] == "cancelled"
+
+
+def test_synthesis_lease_heartbeat_records_user_stop_without_cancelling_worker(client, monkeypatch):
+    _test_client, app = client
+    job_id = "heartbeat-stop"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id="synthetic-song", status="running"
+    )
+    app.state.job_store.update_job(job_id, status="cancelled", cancelledBy="user")
+    monkeypatch.setattr(app.state.job_store, "renew_job_lease", lambda *a, **k: False)
+
+    async def scenario():
+        observed = asyncio.Event()
+        await app.state.orchestrator._renew_job_lease_until_cancelled(
+            "synthesis", job_id, worker_id="synthetic-worker", lease_seconds=0.01,
+            user_stop_observed=observed,
+        )
+        assert observed.is_set()
+        assert not asyncio.current_task().cancelled()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("stop_wins", [True, False])
@@ -1819,7 +1845,7 @@ def test_upload_resets_previous_score_specific_state(client):
         job_id="old-job",
         user_id="test-user",
         session_id=session_id,
-        status="running",
+        status="completed",
     )
 
     second_upload = _upload_score(test_client, session_id, filename="replacement.xml")
@@ -1999,7 +2025,7 @@ def test_chat_llm_context_uses_persisted_user_message_as_turn_id(client):
     assert llm_client.contexts == [(session_id, user_entry["id"])]
 
 
-def test_upload_rejects_invalid_extension_without_resetting_session(client):
+def test_upload_refuses_running_job_before_invalid_extension_without_resetting_session(client):
     test_client, app = client
     session_id = _create_session(test_client)
 
@@ -2021,8 +2047,8 @@ def test_upload_rejects_invalid_extension_without_resetting_session(client):
         f"/sessions/{session_id}/upload",
         files={"file": ("notes.txt", b"not musicxml", "text/plain")},
     )
-    assert response.status_code == 400
-    assert response.json()["detail"].startswith("SightSinger can't read .txt files.")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "work_running"
 
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"] == original_history
