@@ -1437,12 +1437,22 @@ def build_sheet(
                 and any(source["part_index"] == lane.part_index and source["voice_part_id"] == staff_line_id
                         and lane.scope_key in source["scopes"] for source in candidates)
             )
+            # The same music written in the voice this lane splits: single notes, none at its rank.
+            split_ranks = [other.default_rank for other in lanes
+                           if other.source_voice_part_id == lane.source_voice_part_id]
+            split_line = (
+                not one_line and assignment is None and not native and segment.signature.density == 1
+                and len(split_ranks) > 1 and lane.default_rank != min(split_ranks)
+                and any(source["part_index"] == lane.part_index
+                        and source["voice_part_id"] == lane.source_voice_part_id
+                        and lane.scope_key in source["scopes"] for source in candidates)
+            )
             if assignment is None:
                 melody = _melody_options(lane, candidates)
                 own = tuple(option for option in melody if option.fields["melody_source"] == {
                     "part_index": lane.part_index, "voice_part_id": lane.source_voice_part_id,
                 })
-                if native and own:
+                if (native or split_line and not reopened((lane.lane_id,), segment)) and own:
                     # The score states these notes are this voice's: the lane sings them.
                     melody = own
                 elif one_line and not reopened((lane.lane_id,), segment):
@@ -1472,6 +1482,10 @@ def build_sheet(
             if one_line:
                 # The top lane sings the staff's one line; a lower lane follows its unison answers.
                 mode_ids = ("derive",) if lane.default_rank == top_rank else ()
+            elif split_line:
+                # The lane splits its own voice by rank; its unison answers decide the single notes.
+                mode_ids = ("derive",)
+                segment_one_line.append(lane.lane_id)
             if mode_ids:
                 segment_slots.append(_choice_slot((lane.lane_id,), segment, "mode", pin(
                     _slot_id((lane.lane_id,), segment, "mode"), tuple(
@@ -1707,7 +1721,7 @@ def build_sheet(
                     siblings = sorted((other for other in lanes
                                        if other.source_voice_part_id == lane.source_voice_part_id),
                                       key=lambda other: other.default_rank)
-                    if len(siblings) > 1 and siblings[0] is not lane and segment.signature.density > 1:
+                    if len(siblings) > 1 and siblings[0] is not lane and (segment.signature.density > 1 or split_line):
                         beats = _single_note_beats(score, segment, lane, default_melody, target_notes)
                 if beats:
                     segment_slots.append(_choice_slot((lane.lane_id,), segment, "unison", (

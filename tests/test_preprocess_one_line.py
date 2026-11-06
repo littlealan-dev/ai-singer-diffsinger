@@ -137,3 +137,59 @@ def test_a_repair_reopens_the_line_choice_in_failing_bars(tmp_path):
 
     assert line_question(_sheet(score)) == []  # code takes the staff's own line
     assert line_question(_sheet(score, reopen={lower.lane_id: [(2, 2)]})) == [2]
+
+
+def _split_score(tmp_path):
+    # One voice throughout: chords in bars 1 and 3, single notes in bars 2, 4 ("Solo") and 5.
+    return _single_staff_score(tmp_path, [
+        _chord("G", "C", 4),
+        _note("E", voice="1"),
+        _chord("A", "F", 4),
+        _SOLO + _note("D", voice="1"),
+        _note("E", voice="1"),
+    ])
+
+
+def test_single_notes_in_the_split_voice_ask_the_lower_lane_once(tmp_path):
+    score = _split_score(tmp_path)
+    sheet = _sheet(score)
+    top, lower = _lanes(sheet)
+    assert top.source_voice_part_id == lower.source_voice_part_id  # both lanes split one voice
+    asked = [(slot.kind, slot.start_measure, slot.lane_ids) for slot in sheet.slots
+             if slot.kind in {"mode", "melody_source", "unison", "unison_default"}]
+    assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
+
+
+@pytest.mark.parametrize(("lane_answer", "bar_answer", "lower"), [
+    ("every_lane", "every_lane", {1: [72], 2: [76], 3: [77], 4: [74], 5: [76]}),
+    ("top_lane_only", "top_lane_only", {1: [72], 2: [], 3: [77], 4: [], 5: []}),
+    ("top_lane_only", "every_lane", {1: [72], 2: [], 3: [77], 4: [74], 5: []}),
+    ("every_lane", "top_lane_only", {1: [72], 2: [76], 3: [77], 4: [], 5: [76]}),
+])
+def test_in_the_split_voice_the_lane_answer_decides_through_the_lane_field(tmp_path, lane_answer, bar_answer, lower):
+    score = _split_score(tmp_path)
+    sheet = _sheet(score)
+    plan, (top_sung, lower_sung) = _sung(score, sheet, unison_default=lane_answer, unison=bar_answer)
+    assert top_sung == {1: [79], 2: [76], 3: [81], 4: [74], 5: [76]}
+    assert lower_sung == lower  # and the pre-run check passed (_sung asserts the status)
+    lower_target = plan["targets"][1]
+    # The lane sings its own voice by rank everywhere; resting over its own notes is refused.
+    assert {section["mode"] for section in lower_target["sections"]} == {"derive"}
+    assert lower_target.get("split_shared_note_policy") == (
+        "assign_primary_only" if lane_answer == "top_lane_only" else None)
+
+
+def test_split_voice_every_lane_writes_the_first_option_plan(tmp_path):
+    score = _split_score(tmp_path)
+    sheet = _sheet(score)
+    plan, _ = _sung(score, sheet, unison_default="every_lane", unison="every_lane")
+    assert plan == assemble_plan(sheet, first_option_choices(sheet), score=score)
+
+
+def test_a_bar_where_the_split_voice_is_silent_still_asks_whether_to_sing(tmp_path):
+    score = _with_second_part(tmp_path, [_chord("G", "C", 4), _rest(voice="1", duration=4), _note("E", voice="1")])
+    sheet = _sheet(score)
+    lower = _lanes(sheet)[1]
+    modes = {slot.start_measure: len(slot.options) for slot in sheet.slots
+             if slot.kind == "mode" and slot.lane_ids == (lower.lane_id,)}
+    assert modes == {2: 2}  # silent bar 2: sing or rest; single-note bar 3: not asked

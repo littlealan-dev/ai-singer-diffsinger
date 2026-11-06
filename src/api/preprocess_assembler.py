@@ -253,9 +253,20 @@ def _action_for_measure(
     else:
         fields["decision_type"] = "COPY_UNISON_SECTION"
         fields["method"] = "trivial"
+    bar = next((option for kind, option in covered if kind == "unison"), None)
     if fields["method"] != "ranked":
         # A unison answer only applies where the lane splits chords by rank.
         fields.pop("split_shared_note_policy", None)
+    elif bar is not None:
+        # The bar's unison answer overrides the lane's either way; write it only where they differ.
+        lane_policy = next((option.fields["split_shared_note_policy"] for kind, option in covered
+                            if kind in {"split_shared_note_policy", "unison_default"}
+                            and "split_shared_note_policy" in option.fields), "duplicate_to_all")
+        wanted = "assign_primary_only" if bar.option_id == "top_lane_only" else "duplicate_to_all"
+        if wanted == lane_policy:
+            fields.pop("split_shared_note_policy", None)
+        else:
+            fields["split_shared_note_policy"] = wanted
     return fields, reading
 
 

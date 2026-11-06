@@ -299,21 +299,22 @@ def test_read_lines_encode_as_carrier_replace_all_strict_onset():
 
 
 def test_rest_and_copy_unison_decision_rows(tmp_path):
-    score = _chord_score(tmp_path)
-    sheet = _sheet(score, score["parts"][0]["part_id"])
+    # The alto is silent in bar 2, so its lane there rests or copies another voice.
+    satb = _silence_voice_in_bar(parse_score(SATB, verse_number=1), 0, "2", 2)
+    sheet = _sheet(satb, "P1-Staff1")
     choices = assembler.first_option_choices(sheet)
     rest_slot = next(slot for slot in sheet.slots if slot.kind == "mode")
     choices[rest_slot.slot_id] = next(option.option_id for option in rest_slot.options
                                       if option.fields["mode"] == "rest")
-    plan = assembler.assemble_plan(sheet, choices, score=score)
-    rest_section = plan["targets"][1]["sections"][-1]
+    plan = assembler.assemble_plan(sheet, choices, score=satb)
+    lane_index = [lane.lane_id for lane in sheet.lanes].index(rest_slot.lane_ids[0])
+    rest_section = next(section for section in plan["targets"][lane_index]["sections"]
+                        if section["start_measure"] <= rest_slot.start_measure <= section["end_measure"])
     assert rest_section["decision_type"] == "INSERT_RESTS"
     assert rest_section["mode"] == "rest"
     assert {"method", "melody_source", "lyric_source"}.isdisjoint(rest_section)
-    assert parse_voice_part_plan(plan, score=score)["ok"]
+    assert parse_voice_part_plan(plan, score=satb)["ok"]
 
-    # The alto is silent in bar 2, so its lane there copies another voice.
-    satb = _silence_voice_in_bar(parse_score(SATB, verse_number=1), 0, "2", 2)
     sheet = _sheet(satb, "P1-Staff1")
     choices = assembler.first_option_choices(sheet)
     source_slot = next(slot for slot in sheet.slots
