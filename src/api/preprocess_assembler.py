@@ -248,6 +248,9 @@ def _action_for_measure(
     else:
         fields["decision_type"] = "COPY_UNISON_SECTION"
         fields["method"] = "trivial"
+    if fields["method"] != "ranked":
+        # A unison answer only applies where the lane splits chords by rank.
+        fields.pop("split_shared_note_policy", None)
     return fields, reading
 
 

@@ -1119,9 +1119,38 @@ def _falls_back(count: int, rank: int | None) -> bool:
     """Whether the executor uses rank_fallback at an onset of `count` notes.
 
     It does only where a chord has no note at this lane's rank. A lone note is a
-    unison every lane sings (duplicate_to_all), whatever the fallback says.
+    unison, decided by the lane's shared-note policy or a unison answer, never by the fallback.
     """
     return rank is not None and 2 <= count <= rank
+
+
+def _single_note_beats(
+    score: dict, segment: Segment, lane: Lane, source_ref: dict, source_notes: list[dict],
+) -> set[tuple[int, float]]:
+    """Beats where the voice this lane splits has a single note: a unison.
+
+    Where the lane's own voice writes a note or a rest, the executor keeps that
+    instead, so those beats are left out.
+    """
+    onsets: dict[tuple[int, float], list[dict]] = {}
+    for note in source_notes:
+        key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+        onsets.setdefault(key, []).append(note)
+    singles = [notes[0] for notes in onsets.values() if len(notes) == 1]
+    own: list[tuple[float, float]] = []
+    if singles and source_ref["part_index"] == lane.part_index \
+            and source_ref["voice_part_id"] != lane.source_voice_part_id:
+        part = score["parts"][lane.part_index]
+        voices = _source_voices(score, lane.part_index)
+        own = [_sounding(note) for rests in (False, True)
+               for note in _lane_own_notes(part, lane, voices, rests=rests)
+               if segment.start_measure <= int(note.get("measure_number") or 0) <= segment.end_measure]
+    beats: set[tuple[int, float]] = set()
+    for note in singles:
+        start, end = _sounding(note)
+        if not any(own_start < end - 1e-6 and start < own_end - 1e-6 for own_start, own_end in own):
+            beats.add((int(note["measure_number"]), start))
+    return beats
 
 
 def _greedy_when_clear(
@@ -1596,6 +1625,34 @@ def build_sheet(
                     Option(value, value, {"rank_fallback": value}, {}, ())
                     for value in (("greedy", "skip") if needs_fallback else ("greedy",))
                 )))
+            # Every lane sings a unison by default; a direction in these bars ("Solo", "1.")
+            # may say only the top lane does, so the LLM reads it. The top lane always sings.
+            if segment.signature.annotation is not None:
+                beats: set[tuple[int, float]] = set()
+                if assignment is not None:
+                    for option in assignment:
+                        if not option.fields["rank_index_by_lane"].get(lane.lane_id):
+                            continue
+                        source_ref = option.fields["melody_source_by_lane"][lane.lane_id]
+                        source = next(item for item in candidates
+                                      if item["part_index"] == source_ref["part_index"]
+                                      and item["voice_part_id"] == source_ref["voice_part_id"])
+                        beats |= _single_note_beats(
+                            score, segment, lane, source_ref,
+                            [note for note in source["notes"] if _staff_scope_key(note) == lane.scope_key],
+                        )
+                else:
+                    siblings = sorted((other for other in lanes
+                                       if other.source_voice_part_id == lane.source_voice_part_id),
+                                      key=lambda other: other.default_rank)
+                    if len(siblings) > 1 and siblings[0] is not lane and segment.signature.density > 1:
+                        beats = _single_note_beats(score, segment, lane, default_melody, target_notes)
+                if beats:
+                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "unison", (
+                        Option("every_lane", "every_lane", {}, {}, ()),
+                        Option("top_lane_only", "top_lane_only",
+                               {"split_shared_note_policy": "assign_primary_only"}, {}, ()),
+                    ), evidence={"single_note_bars": sorted({measure for measure, _ in beats})}))
         if not separate and freeform_reason is None and assignment is None and segment.signature.density > 1:
             by_source: dict[str, list[Lane]] = {}
             for lane in lanes:

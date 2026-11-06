@@ -574,14 +574,15 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ],
             (1, 1.0): [
                 {"pitch_midi": 55.0},
+                {"pitch_midi": 48.0},
             ],
         }
         picked = _choose_notes_ranked(
             grouped,
-            rank_index=1,
+            rank_index=2,
             rank_fallback="greedy",
         )
-        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60, 55])
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [52, 48])
 
     def test_ranked_chord_split_skips_when_rank_missing(self) -> None:
         grouped = {
@@ -592,14 +593,30 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ],
             (1, 1.0): [
                 {"pitch_midi": 55.0},
+                {"pitch_midi": 48.0},
             ],
         }
         picked = _choose_notes_ranked(
             grouped,
-            rank_index=1,
+            rank_index=2,
             rank_fallback="skip",
         )
-        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60])
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [52])
+
+    def test_ranked_chord_split_single_note_follows_shared_note_policy(self) -> None:
+        grouped = {(1, 0.0): [{"pitch_midi": 55.0}]}
+        for fallback in ("greedy", "skip"):
+            def pitches(rank_index: int, duplicate_singletons: bool) -> list[int]:
+                return [int(n["pitch_midi"]) for n in _choose_notes_ranked(
+                    grouped,
+                    rank_index=rank_index,
+                    rank_fallback=fallback,
+                    duplicate_singletons=duplicate_singletons,
+                )]
+            # A unison: every lane sings it, or only the top lane; the fallback never decides.
+            self.assertEqual(pitches(1, True), [55], fallback)
+            self.assertEqual(pitches(1, False), [], fallback)
+            self.assertEqual(pitches(0, False), [55], fallback)
 
     def test_preprocess_rejects_deprecated_public_method_b(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)

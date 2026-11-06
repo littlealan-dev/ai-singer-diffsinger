@@ -327,6 +327,53 @@ def test_assign_primary_only_omits_unison_onsets_from_secondary_lane() -> None:
     ] == [[72.0, 65.0, 70.0], [60.0, 58.0]]
 
 
+
+def _split_pitches(high: dict, low: dict) -> list[list[float]]:
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [high, low]})
+    assert result["status"] == "ready"
+    return [
+        [note["pitch_midi"] for note in part["notes"] if not note.get("is_rest")]
+        for part in result["score"]["parts"][1:]
+    ]
+
+
+def test_section_shared_note_policy_overrides_the_target_policy() -> None:
+    # Beat 2 is a unison (65). A section override decides who sings it, whatever the fallback.
+    high, low = _target(0), _target(1)
+    for section in (high["sections"][0], low["sections"][0]):
+        section["rank_fallback"] = "greedy"
+        section["split_shared_note_policy"] = "assign_primary_only"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 58.0]]
+
+    high, low = _target(0), _target(1)
+    for target in (high, low):
+        target["split_shared_note_policy"] = "assign_primary_only"
+        target["sections"][0]["split_shared_note_policy"] = "duplicate_to_all"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 65.0, 58.0]]
+
+
+def test_assign_primary_only_rests_lower_lanes_at_unisons_even_with_greedy() -> None:
+    high, low = _target(0), _target(1)
+    for target in (high, low):
+        target["split_shared_note_policy"] = "assign_primary_only"
+        target["sections"][0]["rank_fallback"] = "greedy"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 58.0]]
+
+
+def test_section_shared_note_policy_is_validated() -> None:
+    low = _target(1)
+    low["sections"][0]["split_shared_note_policy"] = "every_lane"
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [_target(0), low]})
+    assert result["action"] == "invalid_plan_enum", result
+
+    low = _target(1)
+    low["sections"][0].update({
+        "decision_type": "EXTRACT_FROM_VOICE", "method": "trivial",
+        "split_shared_note_policy": "assign_primary_only",
+    })
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [_target(0), low]})
+    assert result["action"] == "invalid_plan_payload", result
+
 def test_hidden_lane_cleanup_does_not_remove_another_parts_derived_lane() -> None:
     score = _same_voice_chord_score()
     score["parts"].append(

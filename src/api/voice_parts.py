@@ -3317,7 +3317,9 @@ def _execute_timeline_sections(
                         split_selector=str(section.get("split_selector") or "upper"),
                         rank_index=int(section.get("rank_index") or 0),
                         rank_fallback=str(section.get("rank_fallback") or "greedy"),
-                        split_shared_note_policy=split_shared_note_policy,
+                        split_shared_note_policy=str(
+                            section.get("split_shared_note_policy") or split_shared_note_policy
+                        ),
                         preserve_source_lyrics=_should_preserve_copied_melody_lyrics(
                             melody_source, section.get("lyric_source")
                         ),
@@ -3805,6 +3807,7 @@ def _split_chords_select_notes_into_target(
             split_selector=split_selector,
             rank_index=rank_index,
             rank_fallback=rank_fallback,
+            split_shared_note_policy=split_shared_note_policy,
             preserve_source_lyrics=preserve_source_lyrics,
         )
 
@@ -3893,6 +3896,7 @@ def _merge_source_timeline_events_into_native_target(
     split_selector: str,
     rank_index: int,
     rank_fallback: str,
+    split_shared_note_policy: str = "duplicate_to_all",
     preserve_source_lyrics: bool = False,
 ) -> int:
     protected = [
@@ -3931,6 +3935,7 @@ def _merge_source_timeline_events_into_native_target(
             rank_index=rank_index,
             rank_fallback=rank_fallback,
             previous_pitch=previous_pitch,
+            duplicate_singletons=split_shared_note_policy == "duplicate_to_all",
         )
         if selected is None:
             continue
@@ -3983,10 +3988,19 @@ def _choose_voice_timeline_event(
     rank_index: int,
     rank_fallback: str,
     previous_pitch: Optional[float],
+    duplicate_singletons: bool = True,
 ) -> Optional[Dict[str, Any]]:
     if not events:
         return None
     if len(events) == 1:
+        # A single note in a ranked split is a unison: every lane sings it, or only the top lane.
+        if (
+            not duplicate_singletons
+            and str(method or "").strip().lower() == "ranked"
+            and int(rank_index) > 0
+            and not events[0].get("is_rest")
+        ):
+            return None
         return dict(events[0])
     unknown_position_rest = next(
         (
@@ -4091,8 +4105,11 @@ def _choose_notes_ranked(
             key=lambda n: float(n.get("pitch_midi") or 0.0),
             reverse=True,
         )
-        if duplicate_singletons and len(ordered) == 1:
-            chosen.append(dict(ordered[0]))
+        if len(ordered) == 1:
+            # A single note is a unison: every lane sings it, or only the top lane.
+            # rank_fallback is for chords too thin to reach this lane, not for unisons.
+            if duplicate_singletons or rank == 0:
+                chosen.append(dict(ordered[0]))
             continue
         if rank < len(ordered):
             chosen.append(dict(ordered[rank]))
@@ -6989,6 +7006,23 @@ def _normalize_timeline_sections(
                 "invalid_plan_enum",
                 f"{section_name} rank_fallback is invalid: {rank_fallback}",
             )["error"]
+        # Who sings a single note in these bars; overrides the target's policy.
+        section_shared_note_policy = raw_section.get("split_shared_note_policy")
+        if section_shared_note_policy is not None:
+            section_shared_note_policy = str(section_shared_note_policy).strip()
+            if section_shared_note_policy not in VALID_SPLIT_SHARED_NOTE_POLICIES:
+                return [], _plan_error(
+                    "invalid_plan_enum",
+                    f"{section_name} split_shared_note_policy is invalid: {section_shared_note_policy}",
+                )["error"]
+            if decision_type != "SPLIT_CHORDS_SELECT_NOTES" or method != "ranked":
+                return [], _plan_error(
+                    "invalid_plan_payload",
+                    (
+                        f"{section_name} split_shared_note_policy applies only to "
+                        "SPLIT_CHORDS_SELECT_NOTES sections with method ranked."
+                    ),
+                )["error"]
 
         melody_raw = raw_section.get("melody_source")
         lyric_raw = raw_section.get("lyric_source")
@@ -7044,21 +7078,22 @@ def _normalize_timeline_sections(
                 "invalid_plan_enum",
                 f"{section_name} lyric_policy is invalid: {policy}",
             )["error"]
-        normalized.append(
-            {
-                "start_measure": int(start_measure),
-                "end_measure": int(end_measure),
-                "mode": mode,
-                "decision_type": decision_type,
-                "method": method,
-                "rank_index": rank_index,
-                "rank_fallback": rank_fallback,
-                "melody_source": melody_source,
-                "lyric_source": lyric_source,
-                "lyric_strategy": strategy,
-                "lyric_policy": policy,
-            }
-        )
+        normalized_section = {
+            "start_measure": int(start_measure),
+            "end_measure": int(end_measure),
+            "mode": mode,
+            "decision_type": decision_type,
+            "method": method,
+            "rank_index": rank_index,
+            "rank_fallback": rank_fallback,
+            "melody_source": melody_source,
+            "lyric_source": lyric_source,
+            "lyric_strategy": strategy,
+            "lyric_policy": policy,
+        }
+        if section_shared_note_policy is not None:
+            normalized_section["split_shared_note_policy"] = section_shared_note_policy
+        normalized.append(normalized_section)
         prev_end = end_measure
 
     if max_measure is not None and prev_end != max_measure:
