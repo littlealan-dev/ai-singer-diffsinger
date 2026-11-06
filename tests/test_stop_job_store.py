@@ -6,6 +6,10 @@ import pytest
 
 from src.backend.firebase_app import get_firestore_client
 from src.backend.job_store import JobStore, build_progress_payload
+from src.backend.credits import (
+    settle_credits_and_complete_job,
+    settle_export_mix_credits_and_complete_job,
+)
 
 
 @pytest.fixture
@@ -80,3 +84,24 @@ def test_active_jobs_are_scoped_and_retry_clears_stop_point(store):
 
 def test_shutdown_cancel_still_reports_error():
     assert build_progress_payload("synthetic-take", {"status": "cancelled"})["status"] == "error"
+
+
+@pytest.mark.parametrize("kind", ["synthesis", "export_mix"])
+def test_completion_safety_net_returns_cancelled_before_reservation_lookup(store, kind):
+    job_ref = store._client.collection("jobs").document("synthetic-stop-safety")
+    job_ref.set({"status": "cancelled", "cancelledBy": "user"})
+    try:
+        if kind == "synthesis":
+            result = settle_credits_and_complete_job(
+                "synthetic-owner", "synthetic-stop-safety", "synthetic-song", 10,
+                output_path="synthetic.wav", audio_url="/synthetic.wav",
+            )
+        else:
+            result = settle_export_mix_credits_and_complete_job(
+                "synthetic-owner", "synthetic-stop-safety", "synthetic-song", 10,
+                output_path="synthetic.wav", audio_url="/synthetic.wav",
+            )
+        assert result.status == "cancelled"
+        assert job_ref.get().to_dict() == {"status": "cancelled", "cancelledBy": "user"}
+    finally:
+        job_ref.delete()
