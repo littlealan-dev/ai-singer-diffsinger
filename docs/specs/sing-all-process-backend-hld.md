@@ -228,8 +228,9 @@ def estimate_sing_all_parts(score):
             if counts.most == 1:
                 parts.append(Estimated(part, staff, split=False))         # sung as it is
             else:
-                for rank in range(counts.most):          # top line first
+                for rank, lane in enumerate(separate_lanes(part, staff)):  # counts.most lanes, top line first
                     parts.append(Estimated(part, staff, split=True, rank=rank,
+                                           key=lane_key(lane),              # see "Lane key" below
                                            name=lane_name(part, staff, rank)))  # "Women" -> Soprano, Alto;
                                                                                   # else "Women · voice 1"
     for p in parts:
@@ -274,7 +275,7 @@ after the split: refund the lanes not used
 - the parts table lists `most` rows for that staff, and their takes and part-dominant mixes are reserved like any other;
 - the receipt shows the refund as "not needed".
 
-**Not enough credits:** the balance is checked against the "up to" total, so a user can be told they lack credits for a job they could afford (worst seen: a staff reserving 9 lanes that probably needs about 4). They get the usual message: top up, or leave some parts out. Leaving a part out just means it isn't sung, whatever the LLM later picks.
+**Not enough credits** (Alan, 2026-11-06): the balance is checked against the "up to" total, so a user can be told they lack credits for a job they could afford (worst seen: a staff reserving 9 lanes that probably needs about 4). They get the usual message: top up, or leave some parts out. Leaving a part out just means it isn't sung, whatever the LLM later picks.
 
 **One rule, one place: planner v2 is live for everyone before Sing All core** (Alan, 2026-11-03; its rollout is handled separately). The quote has to know the target lanes, and it must agree with what the split then produces. So the estimate is built on planner v2's sheet skeleton (`build_sheet_skeleton`) from the start, and Sing All's splits run on v2. There's no interim version on `analyze_score_voice_parts`.
 
@@ -285,33 +286,50 @@ after the split: refund the lanes not used
 | SIG-172 | `sheet_lane_counts`, the range in the validator | On `feature/preprocess-planner-v2`, not main |
 | SIG-173 | `part_lane_counts`, the job's `laneCounts` | On `feature/preprocess-planner-v2` (cdbf0d7), not main |
 | SIG-174 | The LLM question and the `separate` layout | Todo, not built |
+| Slot from the skeleton (to be filed) | The lane key on split parts matches the quote's | Spec drafted 2026-11-06, with the Part Splitting session |
 
-All three have to land before step 3 (§16). SIG-174 is needed even though the names won't change: the quote's rows above `shared` get their notes from the `separate` layout, for the recommended voice. Until it lands, `chosen` is always `shared`, so it can never reach `most`. Alan schedules these. The "well under a second" above is a target to measure on real scores.
+All four have to land before step 3 (§16). SIG-174 is needed even though the names won't change: the quote's rows above `shared` get their notes from the `separate` layout, for the recommended voice. Until it lands, `chosen` is always `shared`, so it can never reach `most`. Alan schedules these. The "well under a second" above is a target to measure on real scores.
 
 **When the split doesn't match the estimate:**
 
 | After the split | What happens |
 |---|---|
 | Same parts as estimated | Continue |
-| Fewer parts, because the LLM picked `shared` (`chosen` < `most`, parts made = `chosen`) | Continue, match lanes to rows (below), and refund the unmatched rows' items as "not needed" |
+| Fewer parts, because the LLM picked `shared` (`chosen` < `most`, parts made = `chosen`) | Continue, and refund the rows not used as "not needed" (below) |
 | Fewer parts, because a lane failed (parts made < `chosen`, or no `laneCounts` on the job) | `needs_decision` (§3): review the partial split, continue with the parts that worked |
 | More or different parts | Shouldn't happen, because the validator caps lanes at the quoted number. Kept as a safety rule: pause and re-quote. Never charge more than quoted without asking |
-| Parts named differently | No pause. Estimated parts map to real split parts by staff and rank (top to bottom), and the real names are shown from then on |
+| Parts named differently | No pause. Estimated parts map to real split parts by lane key (below), and the real names are shown from then on |
 
 A v2 job writes `laneCounts: [{partId, staff, peak, most, chosen}]` when it completes (SIG-173). `chosen` is the lanes planned, whether or not each one succeeded. v1 jobs don't write it, so they fall into the failed-lane row, which is the safe side.
 
-**Matching real lanes to quoted rows, when `shared` was picked.** Rank doesn't work, because the lane that goes away is usually in the middle:
+**Lane key** (Alan, 2026-11-06). Each quoted row and each split part carries the same key, so after the split we know exactly which rows were dropped:
 
 ```python
-# rows quoted (separate):  C5/G5/F5   rest/E5/rest   G4/rest/A4
-# real lanes (shared):     C5/G5/F5   G4/E5/A4
-# by rank, the low lane would get the middle row's voice; it belongs to the bottom row
-for lane in real_lanes(staff):                    # top line first
-    row = unmatched row with the closest average pitch
-    row.lane = lane
-    row.voice = row.voice if user_picked(row) else recommended_voice(range_of(lane))
-refund every row left unmatched                   # same staff, same length, so the same credits
+lane_key = (part_id, staff, source_voice_part_id, slot)   # e.g. "p2:staff1:V1:slot2" as one string
+# slot = the nth line of that voice, top first. Not the lane's position on the staff,
+# which shifts between layouts: voice 1's second line is slot 2 in both.
 ```
+
+| Layout | Voice 1 with two-note chords, plus voice 2 |
+|---|---|
+| separate (quoted, `most` = 3) | (V1, 1), (V1, 2), (V2, 1) |
+| shared (`shared` = 2) | (V1, 1), (V2, 1) |
+| dropped | (V1, 2), the middle row |
+
+The key is derived from the score, so the quote and the split get it independently, with nothing stored or passed between them. A split part carries it in its derived lane (`source.voice_part_id`, `slot`; the id is `dl:p{part}:source:{voice}:slot:{n}`).
+
+```python
+for derived in split_parts(staff):
+    row = rows_by_key[lane_key(derived)]
+    row.lane = derived                                    # a voice the user picked stays with its row
+    if not user_picked(row):
+        row.voice = recommended_voice(range_of(derived))  # the real part's notes, which can differ
+                                                          # a little from the separate layout's
+refund rows with no split part as "not needed"            # same staff, same length, same credits
+split part with no row  -> pause and re-quote             # the validator should make this impossible
+```
+
+**Depends on:** planner v2 setting each new lane's slot from its skeleton lane, rather than the split counting slots in the order the plan lists targets. That's a small v2 change, with a test that skeleton key == output part key. Until it lands, the match relies on the plan listing each voice's lanes in order, which holds today but isn't enforced.
 
 **A score with no lyrics** (from the Part Splitting improvement session, 2026-11-01). Under planner v2, a split of a score with no lyrics fails up front, with the catalog message `preprocess.score_needs_lyrics`. So the estimate also checks for lyrics:
 - **No lyrics and nothing to split:** quote as normal. The parts are sung in solfège, as already decided.
