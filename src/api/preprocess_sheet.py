@@ -909,18 +909,12 @@ def _voice_assignment_options(
         return (), evidence, "chord_claims_exceed_lanes"
 
     native = dict(segment.signature.lanes)
-    source_voice = {
-        vp["voice_part_id"]: str(vp["source_voice_id"])
-        for vp in _analyze_part_voice_parts(score["parts"][segment.part_index], segment.part_index)["voice_parts"]
-    }
+    source_voice = _source_voices(score, segment.part_index)
     whole_part = score["parts"][segment.part_index]
     heights: dict[str, float | None] = {}
     native_counts: dict[str, int] = {}
     for lane in lanes:
-        notes = [note for note in whole_part.get("notes") or []
-                 if _is_countable_sung_note(note)
-                 and _staff_scope_key(note) == lane.scope_key
-                 and _voice_key(note.get("voice")) == source_voice[lane.source_voice_part_id]]
+        notes = _lane_own_notes(whole_part, lane, source_voice)
         heights[lane.lane_id] = median(float(note["pitch_midi"]) for note in notes) if notes else None
         native_counts[lane.lane_id] = sum(
             segment.start_measure <= int(note["measure_number"]) <= segment.end_measure
@@ -1041,6 +1035,137 @@ def _voice_assignment_options(
     return tuple(options), evidence, None
 
 
+def _lane_own_notes(
+    part: dict, lane: Lane, source_voice: dict[str, str], *, rests: bool = False,
+) -> list[dict]:
+    """What the score writes in the lane's own voice on its staff: sung notes, or its rests."""
+    return [note for note in part.get("notes") or []
+            if (bool(note.get("is_rest")) if rests else _is_countable_sung_note(note))
+            and _staff_scope_key(note) == lane.scope_key
+            and _voice_key(note.get("voice")) == source_voice[lane.source_voice_part_id]]
+
+
+def _source_voices(score: dict, part_index: int) -> dict[str, str]:
+    return {vp["voice_part_id"]: str(vp["source_voice_id"])
+            for vp in _analyze_part_voice_parts(score["parts"][part_index], part_index)["voice_parts"]}
+
+
+def _sounding(note: dict) -> tuple[float, float]:
+    start = float(note.get("offset_beats") or 0.0)
+    return start, start + float(note.get("duration_beats") or 0.0)
+
+
+def _pitch_order_when_clear(
+    score: dict, segment: Segment, lanes: list[Lane], options: tuple[Option, ...],
+) -> Option | None:
+    """The pitch-order assignment when nothing in the score could favour another one.
+
+    The chooser keeps pitch order unless the voices cross, so code keeps it itself
+    when the options differ only in which rank each lane takes (same voices, same
+    flags), every lane has its own typical pitch and no two are equal, and the lanes'
+    own notes do not cross in these bars or the bar on either side.
+    """
+    if len(options) < 2:
+        return None
+    first = options[0]
+    if any(option.fields["melody_source_by_lane"] != first.fields["melody_source_by_lane"]
+           or option.flags != first.flags for option in options):
+        return None
+    heights = first.evidence.get("lane_height_midi") or {}
+    if any(heights.get(lane.lane_id) is None for lane in lanes) or \
+            len({heights[lane.lane_id] for lane in lanes}) < len(lanes):
+        return None
+    ordered = sorted(lanes, key=lambda lane: -heights[lane.lane_id])
+    groups: dict[tuple, list[str]] = {}
+    for lane in ordered:
+        source = first.fields["melody_source_by_lane"].get(lane.lane_id) or {}
+        groups.setdefault((source.get("part_index"), source.get("voice_part_id")), []).append(lane.lane_id)
+    expected = {lane_id: rank for group in groups.values() if len(group) > 1
+                for rank, lane_id in enumerate(group)}
+    chosen = next((option for option in options
+                   if option.fields["rank_index_by_lane"] == expected), None)
+    if chosen is None:
+        return None
+    part = score["parts"][segment.part_index]
+    source_voice = _source_voices(score, segment.part_index)
+    window = range(segment.start_measure - 1, segment.end_measure + 2)
+    own = [[(*_sounding(note), float(note["pitch_midi"]))
+            for note in _lane_own_notes(part, lane, source_voice)
+            if int(note.get("measure_number") or 0) in window] for lane in ordered]
+    for upper_index, upper in enumerate(own):
+        for lower in own[upper_index + 1:]:
+            if any(low_start < up_end and up_start < low_end and low_pitch > up_pitch
+                   for up_start, up_end, up_pitch in upper
+                   for low_start, low_end, low_pitch in lower):
+                return None
+    return chosen
+
+
+def _bar_lengths(part: dict) -> dict[int, float]:
+    """Each bar's length in beats, from where the part's notes and rests put it."""
+    starts: dict[int, float] = {}
+    ends: dict[int, float] = {}
+    for note in part.get("notes") or []:
+        measure = int(note.get("measure_number") or 0)
+        start, end = _sounding(note)
+        starts[measure] = min(starts.get(measure, start), start)
+        ends[measure] = max(ends.get(measure, end), end)
+    ordered = sorted(starts)
+    return {measure: (starts[following] if following is not None else ends[measure]) - starts[measure]
+            for measure, following in zip(ordered, [*ordered[1:], None])}
+
+
+def _falls_back(count: int, rank: int | None) -> bool:
+    """Whether the executor uses rank_fallback at an onset of `count` notes.
+
+    It does only where a chord has no note at this lane's rank. A lone note is a
+    unison every lane sings (duplicate_to_all), whatever the fallback says.
+    """
+    return rank is not None and 2 <= count <= rank
+
+
+def _greedy_when_clear(
+    score: dict, segment: Segment, lane: Lane, source_notes: list[dict], rank: int,
+) -> bool:
+    """Whether doubling a neighbouring note is the only reading where the chord thins.
+
+    The chord thins where the fallback is used (see _falls_back). On a shared staff
+    such a thinning is sung in unison unless the score says this lane stops: a
+    direction in these bars ("solo", "1."), a rest written in the lane's own voice,
+    or a thinning that lasts a whole bar, which may be a real drop-out.
+    """
+    onsets: dict[float, list[dict]] = {}
+    for note in source_notes:
+        onsets.setdefault(round(float(note.get("offset_beats") or 0.0), 6), []).append(note)
+    times = sorted(onsets)
+    thin = [time for time in times if _falls_back(len(onsets[time]), rank)]
+    if thin and segment.signature.annotation is not None:
+        return False
+    if not thin:
+        return True
+    part = score["parts"][segment.part_index]
+    rests = [_sounding(note) for note in _lane_own_notes(
+        part, lane, _source_voices(score, segment.part_index), rests=True)]
+    if any(start - 1e-6 <= time < end - 1e-6 for time in thin for start, end in rests):
+        return False
+    bar_lengths = _bar_lengths(part)
+    index = 0
+    while index < len(times):
+        if not _falls_back(len(onsets[times[index]]), rank):
+            index += 1
+            continue
+        run_start, first_note = times[index], onsets[times[index]][0]
+        run_notes: list[dict] = []
+        while index < len(times) and _falls_back(len(onsets[times[index]]), rank):
+            run_notes.extend(onsets[times[index]])
+            index += 1
+        run_end = times[index] if index < len(times) else max(_sounding(note)[1] for note in run_notes)
+        bar = bar_lengths.get(int(first_note.get("measure_number") or 0))
+        if bar is None or run_end - run_start >= bar - 1e-6:
+            return False
+    return True
+
+
 def _separate_voice_assignment(
     score: dict, segment: Segment, lanes: list[Lane], candidates: list[dict],
 ) -> tuple[Option, ...]:
@@ -1101,6 +1226,7 @@ def _lane_layout_evidence(score: dict, part_index: int, scope: str, peak: int,
 def build_sheet(
     score: dict, planning_context: dict | None, *, pinned: dict[str, str] | None = None,
     cuts: dict[tuple[int, str], set[int]] | None = None,
+    reopen: dict[str, list[tuple[int, int]]] | None = None,
 ) -> Sheet:
     """Enumerate deterministic defaults and legal choices for each segment.
 
@@ -1115,9 +1241,18 @@ def build_sheet(
     option: that slot keeps only the pinned option (so it becomes fixed), and the
     slots that depend on it are built from it instead of from the first option.
     ``cuts`` adds segment starts (see ``build_sheet_skeleton``).
+
+    Code answers a voice assignment or rank fallback itself when the score allows
+    only one reading (see ``_pitch_order_when_clear`` and ``_greedy_when_clear``).
+    ``reopen`` maps a lane id to bar spans where it does not: a repair re-asks
+    those bars because the checks failed with the earlier answer.
     """
     pins = dict(pinned or {})
     used_pins: set[str] = set()
+
+    def reopened(lane_ids: Iterable[str], segment: Segment) -> bool:
+        return any(start <= segment.end_measure and segment.start_measure <= end
+                   for lane_id in lane_ids for start, end in (reopen or {}).get(lane_id, []))
 
     def pin(slot_id: str, options: tuple[Option, ...]) -> tuple[Option, ...]:
         if slot_id not in pins:
@@ -1208,7 +1343,13 @@ def build_sheet(
             continue
         if assignment is not None:
             joint_id = f"{lanes[0].part_id}|{segment.scope_key}"
-            assignment = pin(_slot_id((), segment, "voice_assignment", joint_id=joint_id), assignment)
+            assignment_id = _slot_id((), segment, "voice_assignment", joint_id=joint_id)
+            if not separate and assignment_id not in pins and not reopened(
+                    (lane.lane_id for lane in lanes), segment):
+                clear = _pitch_order_when_clear(score, segment, lanes, assignment)
+                if clear is not None:
+                    assignment = (clear,)
+            assignment = pin(assignment_id, assignment)
             segment_slots.append(_choice_slot(
                 tuple(option_lane.lane_id for option_lane in sorted(
                     lanes, key=lambda option_lane: (
@@ -1403,6 +1544,7 @@ def build_sheet(
                         }, ()) for value in strategies
                     ), evidence=used_when))
             needs_fallback = False
+            fallback_by_code = False
             if separate:
                 segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", (
                     Option("skip", "skip", {"rank_fallback": "skip"}, {}, ()),
@@ -1412,7 +1554,7 @@ def build_sheet(
                 for option in assignment:
                     mapping = option.fields["melody_source_by_lane"]
                     source_ref = mapping[lane.lane_id]
-                    group_size = sum(ref == source_ref for ref in mapping.values())
+                    rank = option.fields["rank_index_by_lane"].get(lane.lane_id)
                     source = next(item for item in candidates
                                   if item["part_index"] == source_ref["part_index"]
                                   and item["voice_part_id"] == source_ref["voice_part_id"])
@@ -1422,9 +1564,22 @@ def build_sheet(
                             continue
                         key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
                         counts[key] = counts.get(key, 0) + 1
-                    if group_size > 1 and any(count < group_size for count in counts.values()):
+                    if any(_falls_back(count, rank) for count in counts.values()):
                         needs_fallback = True
                         break
+                if needs_fallback and len(assignment) == 1 and not reopened((lane.lane_id,), segment):
+                    mapping = assignment[0].fields["melody_source_by_lane"]
+                    rank = assignment[0].fields["rank_index_by_lane"].get(lane.lane_id)
+                    source_ref = mapping[lane.lane_id]
+                    source = next(item for item in candidates
+                                  if item["part_index"] == source_ref["part_index"]
+                                  and item["voice_part_id"] == source_ref["voice_part_id"])
+                    needs_fallback = rank is not None and not _greedy_when_clear(
+                        score, segment, lane,
+                        [note for note in source["notes"] if _staff_scope_key(note) == lane.scope_key],
+                        rank,
+                    )
+                    fallback_by_code = not needs_fallback
             else:
                 siblings = [other for other in lanes
                             if other.source_voice_part_id == lane.source_voice_part_id]
@@ -1433,11 +1588,13 @@ def build_sheet(
                     for note in target_notes:
                         key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
                         counts[key] = counts.get(key, 0) + 1
-                    needs_fallback = any(count < len(siblings) for count in counts.values())
-            if needs_fallback:
+                    # The rank_assignment answer may give this lane any rank among its siblings.
+                    needs_fallback = any(_falls_back(count, len(siblings) - 1) for count in counts.values())
+            if needs_fallback or fallback_by_code:
+                # Code's answer stays on the sheet as a fixed greedy, so a repair can show it.
                 segment_slots.append(_choice_slot((lane.lane_id,), segment, "rank_fallback", tuple(
                     Option(value, value, {"rank_fallback": value}, {}, ())
-                    for value in ("greedy", "skip")
+                    for value in (("greedy", "skip") if needs_fallback else ("greedy",))
                 )))
         if not separate and freeform_reason is None and assignment is None and segment.signature.density > 1:
             by_source: dict[str, list[Lane]] = {}

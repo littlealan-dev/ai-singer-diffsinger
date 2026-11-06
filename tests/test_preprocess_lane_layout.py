@@ -31,13 +31,15 @@ def _hidden_rest(voice):
 
 
 def _score(tmp_path):
+    # Voice 2 crosses above voice 1 in bar 3, so the chord in bar 2 still asks
+    # which lane sings which note: pitch order is not the only reading.
     return _single_staff_score(tmp_path, [
         _note('C', 5, '1', lyric='first') + '<backup><duration>4</duration></backup>'
         + _note('G', 4, '2'),
         _note('E', 5, '1', lyric='second') + _note('G', 5, '1', chord=True)
         + '<backup><duration>4</duration></backup>' + _hidden_rest('2'),
         _note('F', 5, '1', lyric='third') + '<backup><duration>4</duration></backup>'
-        + _note('A', 4, '2'),
+        + _note('A', 5, '2'),
     ])
 
 
@@ -89,7 +91,7 @@ def test_separate_layout_assigns_each_voice_only_to_its_own_lanes(tmp_path):
     assert actual == [
         [(1, 72), (2, 79), (3, 77)],
         [(2, 76)],
-        [(1, 67), (3, 69)],
+        [(1, 67), (3, 81)],
     ]
     reparsed = parse_score(result['modified_musicxml_path'], verse_number=1)
     assert len(reparsed['parts']) == len(score['parts']) + 3

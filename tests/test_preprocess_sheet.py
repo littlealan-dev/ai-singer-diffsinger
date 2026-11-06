@@ -702,7 +702,8 @@ def test_chord_voice_assignment_and_fixed_single_options(tmp_path):
         Lane("b", "P1", 0, "1", "voice part 2", 2, "append_new_derived_lane"),
     ]
     assert list(_rank_assignment_options([nonzero])[0].fields["rank_index_by_lane"].values()) == [0, 1]
-    assert any(slot.kind == "rank_fallback" for slot in sheet.slots)
+    # Bar 2's lone note is sung by both lanes, so no fallback is asked.
+    assert not any(slot.kind == "rank_fallback" for slot in sheet.slots)
     assert sheet.fixed
     assert all(not slot.options or len(slot.options) > 1 for slot in sheet.slots)
     # The one-staff line is read by code, so no lane gets a lyric menu.
@@ -712,11 +713,13 @@ def test_chord_voice_assignment_and_fixed_single_options(tmp_path):
 def test_unnumbered_chord_uses_pitch_order_not_voice_number(tmp_path):
     score = _unnumbered_chord_with_opposite_voice_heights(tmp_path)
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
-    assert slot.start_measure == slot.end_measure == 1
+    # Pitch order is the only reading here, so code answers it instead of asking.
+    assert not [slot for slot in sheet.slots if slot.kind == "voice_assignment"]
+    assignment_id, = [slot_id for slot_id in sheet.fixed if slot_id.endswith("|voice_assignment")]
+    assert assignment_id.endswith("|1-1|voice_assignment")
     assert not [slot for slot in sheet.slots if slot.kind == "melody_source"
                 and slot.start_measure == 1]
-    first = slot.options[0]
+    first = sheet.fixed[assignment_id]
     ranks = first.fields["rank_index_by_lane"]
     raw_voice = {vp["voice_part_id"]: vp["source_voice_id"]
                  for vp in _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]}
@@ -775,13 +778,23 @@ def test_leftover_silent_lane_joins_chord_with_distinct_rank_and_fallback(tmp_pa
     original = deepcopy(score)
     context = {"target": {"part_id": score["parts"][0]["part_id"]}}
     sheet = build_sheet(score, context)
-    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    # A repair of these bars sees every option.
+    menus = build_sheet(score, context, reopen={lane.lane_id: [(1, 2)] for lane in sheet.lanes})
+    slot = next(slot for slot in menus.slots if slot.kind == "voice_assignment")
     assert len(sheet.lanes) == 3 and len(slot.options) == 6
     assert slot.evidence["need"] == {"voice part 4": 2}
     assert len(set(source["voice_part_id"] for source in
                    slot.options[0].fields["melody_source_by_lane"].values())) == 1
     assert sorted(slot.options[0].fields["rank_index_by_lane"].values()) == [0, 1, 2]
-    assert sum(slot.kind == "rank_fallback" for slot in sheet.slots) == 3
+    assert sum(slot.kind == "rank_fallback" for slot in menus.slots) == 3
+    # The first build keeps pitch order itself, and asks the fallback only for the
+    # lane whose rank the two-note chord cannot fill.
+    assert not [slot for slot in sheet.slots if slot.kind == "voice_assignment"]
+    assignment = next(option for slot_id, option in sheet.fixed.items()
+                      if slot_id.endswith("|voice_assignment"))
+    assert assignment.option_id == slot.options[0].option_id
+    fallback, = [slot for slot in sheet.slots if slot.kind == "rank_fallback"]
+    assert assignment.fields["rank_index_by_lane"][fallback.lane_ids[0]] == 2
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     assert all(target["sections"][0]["rank_fallback"] == "greedy" for target in plan["targets"])
     result = preprocess_voice_parts(score, request={"plan": plan})
@@ -792,13 +805,89 @@ def test_leftover_silent_lane_joins_chord_with_distinct_rank_and_fallback(tmp_pa
     assert json.dumps(asdict(sheet), sort_keys=True)
 
 
+_BACKUP = '<backup><duration>4</duration></backup>'
+
+
+def _voices(high, low):
+    """A bar of voice 1 above voice 2: it gives the staff its two lanes and their heights."""
+    return _note(high, voice="1") + _BACKUP + _note(low, voice="2", lyric=None)
+
+
+def _three_voices(high, middle, low):
+    """A bar of voices 1 to 3, top down: it gives the staff three lanes and their heights."""
+    return (_note(high, voice="1") + _BACKUP + _note(middle, voice="2", lyric=None)
+            + _BACKUP + _note(low, voice="3", lyric=None))
+
+
+def _chord(top, low, duration=2):
+    return (_note(top, voice="1", duration=duration)
+            + _note(low, voice="1", chord=True, duration=duration, lyric=None))
+
+
+def _triad(top, middle, low, duration=2):
+    return _chord(top, middle, duration) + _note(low, voice="1", chord=True, duration=duration, lyric=None)
+
+
+def _thinning_score(tmp_path, first_bar, *later_bars):
+    """Bar 2 holds a chord, then one note for two beats; bar 3 a chord again."""
+    return _single_staff_score(tmp_path, [
+        first_bar, _chord("E", "C") + _note("D", voice="1", duration=2), *later_bars,
+    ])
+
+
+def _asked(sheet, kind):
+    return [(slot.start_measure, slot.end_measure, slot.lane_ids) for slot in sheet.slots
+            if slot.kind == kind]
+
+
+def test_voice_assignment_is_asked_only_when_the_voices_cross_beside_it(tmp_path):
+    def sheet_for(name, first_bar):
+        (tmp_path / name).mkdir()
+        score = _thinning_score(tmp_path / name, first_bar, _chord("E", "C", 4),
+                                _voices("B", "D"), _voices("A", "E"))
+        return build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+
+    clear = sheet_for("clear", _voices("G", "C"))
+    assert not _asked(clear, "voice_assignment")
+    assert [option.option_id for slot_id, option in clear.fixed.items()
+            if slot_id.endswith("|2-3|voice_assignment")] == ["va:0"]
+    # Voice 2 sings above voice 1 in the bar before the chords: they may cross there too.
+    crossed = sheet_for("crossed", _voices("C", "G"))
+    assert [(start, end) for start, end, _ in _asked(crossed, "voice_assignment")] == [(2, 3)]
+
+
+_SOLO = "<direction><direction-type><words>Solo</words></direction-type></direction>"
+
+
+@pytest.mark.parametrize(("bar_two", "bar_three", "asked"), [
+    (_triad("G", "E", "C") + _chord("E", "C"), _triad("G", "E", "C", 4), []),               # a brief thinning
+    (_SOLO + _triad("G", "E", "C") + _chord("E", "C"), _triad("G", "E", "C", 4), [(2, 2)]),  # a marking
+    (_triad("G", "E", "C") + _chord("E", "C") + _BACKUP + _rest(voice="3", duration=4),
+     _triad("G", "E", "C", 4), [(2, 2)]),                                                    # a written rest
+    (_triad("G", "E", "C") + _chord("E", "C"), _chord("F", "D") + _triad("G", "E", "C"), [(2, 3)]),  # a whole bar
+    (_SOLO + _triad("G", "E", "C") + _note("D", voice="1", duration=2),
+     _triad("G", "E", "C", 4), []),                                                          # a lone note
+])
+def test_rank_fallback_is_asked_only_when_the_score_may_stop_the_lane(tmp_path, bar_two, bar_three, asked):
+    score = _single_staff_score(tmp_path, [_three_voices("G", "D", "C"), bar_two, bar_three])
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    assert not _asked(sheet, "voice_assignment")
+    lowest = max(sheet.lanes, key=lambda lane: lane.default_rank)
+    # Only the third lane can find a chord without its note; every lane sings a lone note.
+    assert _asked(sheet, "rank_fallback") == [(start, end, (lowest.lane_id,)) for start, end in asked]
+
+
 def test_four_note_chord_moves_only_needed_native_lanes(tmp_path):
     score = _four_note_chord_with_native_lanes(tmp_path)
-    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
-    slot = next(slot for slot in sheet.slots if slot.kind == "voice_assignment")
+    context = {"target": {"part_id": score["parts"][0]["part_id"]}}
+    sheet = build_sheet(score, context)
+    menus = build_sheet(score, context, reopen={lane.lane_id: [(1, 1)] for lane in sheet.lanes})
+    slot = next(slot for slot in menus.slots if slot.kind == "voice_assignment")
     assert len(sheet.lanes) == 4
     assert len(slot.options) == 24
     assert all("P1 drops_native_notes" in option.flags for option in slot.options)
+    # Every option carries the same flag, so it tells them apart from nothing: code keeps pitch order.
+    assert not [slot for slot in sheet.slots if slot.kind == "voice_assignment"]
     raw_voice = {vp["voice_part_id"]: vp["source_voice_id"]
                  for vp in _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]}
     assert all(set(raw_voice[source["voice_part_id"]] for source in

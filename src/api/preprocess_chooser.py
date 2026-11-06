@@ -471,7 +471,7 @@ def _still_valid(slot: Slot, choice: Any) -> bool:
 async def _second_pass(
     score: dict, planning_context: dict | None, sheet: Sheet, choices: dict[str, Any], *,
     pinned: dict[str, str], cuts: dict | None, call: Call, max_slots_per_request: int,
-    evidence_max_chars: int,
+    evidence_max_chars: int, reopen: dict[str, list[tuple[int, int]]] | None = None,
 ) -> tuple[Sheet, dict[str, Any], int, int, int]:
     """Rebuild with the non-default structure choices pinned and re-ask the slots that changed."""
     lane_staff = {lane.lane_id: (lane.part_index, lane.scope_key) for lane in sheet.lanes}
@@ -488,7 +488,7 @@ async def _second_pass(
     if pins == pinned:
         return sheet, choices, 0, 0, 0
     previous = {slot.slot_id: slot for slot in sheet.slots}
-    rebuilt = build_sheet(score, planning_context, pinned=pins, cuts=cuts)
+    rebuilt = build_sheet(score, planning_context, pinned=pins, cuts=cuts, reopen=reopen)
     changed = [slot for slot in rebuilt.slots if (
         slot.slot_id not in previous
         or [option.option_id for option in slot.options]
@@ -628,13 +628,15 @@ async def choose_repair(
         return any(_overlaps(slot.start_measure, slot.end_measure, failing.get(lane_id, []))
                    for lane_id in slot.lane_ids)
 
-    draft = build_sheet(score, planning_context, pinned=layout_pins, cuts=cuts)
+    # The failing bars keep their full menus, even where code answered before.
+    draft = build_sheet(score, planning_context, pinned=layout_pins, cuts=cuts, reopen=failing)
     pins = {**layout_pins, **{slot.slot_id: earlier(slot.slot_id)
             for slot in _menus(draft).values()
             if slot.kind in PINNABLE_KINDS and not failing_here(slot)
             and _still_valid(slot, earlier(slot.slot_id))
             and earlier(slot.slot_id) != slot.options[0].option_id}}
-    new_sheet = build_sheet(score, planning_context, pinned=pins, cuts=cuts) if pins != layout_pins else draft
+    new_sheet = (build_sheet(score, planning_context, pinned=pins, cuts=cuts, reopen=failing)
+                 if pins != layout_pins else draft)
     carried: dict[str, Any] = {}
     ask: list[Slot] = []
     extras: dict[str, dict] = {}
@@ -681,7 +683,7 @@ async def choose_repair(
     final_sheet, final_choices, more_requests, more_retries, second_pass_slots = await _second_pass(
         score, planning_context, new_sheet, {**carried, **answers}, pinned=pins, cuts=cuts,
         call=call, max_slots_per_request=max_slots_per_request,
-        evidence_max_chars=evidence_max_chars,
+        evidence_max_chars=evidence_max_chars, reopen=failing,
     )
     return final_sheet, _final(final_sheet, final_choices), ChooserStats(
         requests=requests + more_requests, retries=retries + more_retries,

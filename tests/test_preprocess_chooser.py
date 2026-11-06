@@ -17,9 +17,11 @@ from src.api.preprocess_evidence import EvidenceUnavailable
 from src.api.preprocess_sheet import Lane, MeasureSignature, Option, Sheet, Slot, build_sheet
 from tests.test_preprocess_evidence import _gap_score, _xml
 from tests.test_preprocess_sheet import (
-    SATB, SHARED_LINE, _chord_score, _four_note_chord_with_native_lanes, _no_word_two_part_score,
-    _note, _parse_inline, _rest, _silence_voice_in_bar, _single_staff_score, _too_many_chord_claims,
-    _two_chord_voices_with_silent_lanes, _unnumbered_chord_with_opposite_voice_heights, lyric_line_xml,
+    SATB, SHARED_LINE, _chord, _chord_score, _four_note_chord_with_native_lanes,
+    _no_word_two_part_score, _note, _parse_inline, _rest, _silence_voice_in_bar,
+    _single_staff_score, _three_voices, _too_many_chord_claims, _triad,
+    _two_chord_voices_with_silent_lanes, _unnumbered_chord_with_opposite_voice_heights,
+    lyric_line_xml,
 )
 
 
@@ -578,6 +580,29 @@ def test_repair_inside_a_freeform_slot_clips_the_carried_sections(tmp_path):
     plan = chooser.assemble_chosen(new_sheet, new_choices, score=score)
     assert all(target["sections"] == [{"start_measure": 1, "end_measure": 8, "mode": "rest"}]
                for target in plan["targets"])
+
+
+def test_repair_reopens_what_code_answered_in_the_failing_bars(tmp_path):
+    score = _single_staff_score(tmp_path, [
+        _three_voices("G", "D", "C"), _triad("G", "E", "C") + _chord("E", "C"), _triad("G", "E", "C", 4),
+    ])
+    context = _context(score)
+    sheet = build_sheet(score, context)
+    assert not [slot for slot in sheet.slots if slot.kind in {"voice_assignment", "rank_fallback"}]
+    lower = max(sheet.lanes, key=lambda lane: lane.default_rank)
+    finding = chooser.SlotFinding("partial_lyric_coverage", "P1", "Words missing.", 2, 3)
+    asked = []
+    asyncio.run(chooser.choose_repair(
+        score, context, sheet=sheet, choices=_first_choices(sheet), failing={lower.lane_id: [(2, 3)]},
+        findings_by_lane={lower.lane_id: [finding]}, pinned=None, call=_rest_when_asked(asked),
+    ))
+    request, = asked
+    entries = {entry["kind"]: entry for entry in json.loads(request.dynamic_text)["slots"]}
+    # Pitch order failed the checks, so the repair may choose another assignment.
+    assert entries["voice_assignment"]["previous"] == "va:0"
+    flagged = next(option for option in entries["voice_assignment"]["options"] if option["id"] == "va:0")
+    assert flagged["flags"] == ["failed_last_attempt: partial_lyric_coverage"]
+    assert entries["rank_fallback"]["previous"] == "greedy"
 
 
 def test_repair_over_fixed_slots_asks_nothing(tmp_path):
