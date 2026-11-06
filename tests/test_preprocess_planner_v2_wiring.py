@@ -172,7 +172,7 @@ def test_chooser_role_defaults_follow_the_preprocess_model_and_can_be_overridden
     assert (chooser.model, chooser.thinking_level, chooser.timeout_seconds) == ("chooser-model", "low", 45.0)
 
 
-def test_chooser_batch_size_defaults_to_200_and_must_be_positive(monkeypatch):
+def test_chooser_batch_size_defaults_to_120_and_must_be_positive(monkeypatch):
     monkeypatch.delenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", raising=False)
     assert Settings.from_env().preprocess_chooser_max_slots_per_request == 120
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "50")
