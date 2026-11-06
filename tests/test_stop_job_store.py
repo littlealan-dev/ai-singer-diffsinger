@@ -3,8 +3,8 @@
 from datetime import datetime
 
 import pytest
+from google.cloud import firestore
 
-from src.backend.firebase_app import get_firestore_client
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.credits import (
     settle_credits_and_complete_job,
@@ -15,8 +15,9 @@ from src.backend.credits import (
 @pytest.fixture
 def store(firestore_emulator, monkeypatch):
     monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:8080")
-    monkeypatch.setenv("GCLOUD_PROJECT", "demo-project")
-    db = get_firestore_client()
+    db = firestore.Client(project="demo-project")
+    monkeypatch.setattr("src.backend.job_store.get_firestore_client", lambda: db)
+    monkeypatch.setattr("src.backend.credits.get_firestore_client", lambda: db)
     for doc in db.collection("stop_test_jobs").list_documents():
         doc.delete()
     store = JobStore(collection="stop_test_jobs")
@@ -44,6 +45,17 @@ def test_stop_active_job_sets_user_stopped_fields(store, initial):
     assert isinstance(data["stoppedAt"], datetime)
     assert build_progress_payload("synthetic-take", data)["status"] == "stopped"
     assert store.stop_job("synthetic-take") == "too_late"
+
+
+def test_stopped_queued_take_cannot_be_claimed(store):
+    _job(store, "synthetic-take", "queued")
+    assert store.stop_job("synthetic-take") == "stopped"
+    claim = store.claim_dispatched_job(
+        "synthetic-take", worker_id="synthetic-worker", lease_seconds=30,
+        max_attempts=3,
+    )
+    assert claim.outcome == "finished"
+    assert store.get_job("synthetic-take")["status"] == "cancelled"
 
 
 @pytest.mark.parametrize("initial", ["completed", "failed", "cancelled"])

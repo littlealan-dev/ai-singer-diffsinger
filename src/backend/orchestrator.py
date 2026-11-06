@@ -567,7 +567,7 @@ class Orchestrator:
             if current_score is None:
                 # Require a score before any synthesis steps.
                 response_message = "Please upload a MusicXML file first."
-                await self._sessions.append_history(session_id, "assistant", response_message)
+                await self._append_chat_reply(session_id, response_message)
                 return {"type": "chat_text", "message": response_message}
 
             llm_response, llm_error = await self._decide_with_llm(
@@ -583,7 +583,7 @@ class Orchestrator:
             )
             if llm_error:
                 response_message = llm_error
-                await self._sessions.append_history(session_id, "assistant", response_message)
+                await self._append_chat_reply(session_id, response_message)
                 return {"type": "chat_error", "message": response_message}
             if llm_response is not None:
                 if forced_language:
@@ -659,7 +659,7 @@ class Orchestrator:
                         )
                     elif followup_error:
                         response_message = followup_error
-                    await self._sessions.append_history(session_id, "assistant", response_message)
+                    await self._append_chat_reply(session_id, response_message)
                     # A reply to a tool error never carries the part picker.
                     return {"type": "chat_text", "message": response_message, "suppress_selector": True}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
@@ -684,9 +684,7 @@ class Orchestrator:
                         response_message = str(
                             action_required.get("message") or response_message
                         )
-                        await self._sessions.append_history(
-                            session_id, "assistant", response_message
-                        )
+                        await self._append_chat_reply(session_id, response_message)
                         return {
                             "type": "chat_text",
                             "message": response_message,
@@ -697,7 +695,7 @@ class Orchestrator:
                             llm_response.tool_calls,
                             user_message=message,
                         )
-                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        await self._append_chat_reply(session_id, response_message)
                         return await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
@@ -722,7 +720,7 @@ class Orchestrator:
                         explicit_verse_number=explicit_verse_number,
                     )
                     if not requires_verse_selection:
-                        await self._sessions.append_history(session_id, "assistant", response_message)
+                        await self._append_chat_reply(session_id, response_message)
                         return await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
@@ -756,9 +754,7 @@ class Orchestrator:
                     workflow_user_message=message,
                     originating_turn_id=turn_id,
                 )
-                await self._sessions.append_history(
-                    session_id, "assistant", str(response.get("message", ""))
-                )
+                await self._append_chat_reply(session_id, str(response.get("message", "")))
                 return response
 
             if include_score:
@@ -770,8 +766,12 @@ class Orchestrator:
             else:
                 response = {"type": "chat_text", "message": response_message}
 
-            await self._sessions.append_history(session_id, "assistant", response_message)
+            await self._append_chat_reply(session_id, response_message)
             return response
+
+    async def _append_chat_reply(self, session_id: str, message: str) -> None:
+        await self._check_chat_turn_stopped()
+        await self._sessions.append_history(session_id, "assistant", message)
 
     async def _get_chat_lock(self, session_id: str) -> asyncio.Lock:
         """Return the per-session chat lock, creating it lazily."""

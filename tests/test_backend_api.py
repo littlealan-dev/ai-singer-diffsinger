@@ -1411,6 +1411,35 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
     assert "7 credits" in snapshot["history"][-1]["content"]
 
 
+def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator, monkeypatch):
+    from google.cloud import firestore
+    from src.backend.main import _release_stopped_reservation
+
+    _test_client, app = client
+    job_id = f"synthetic-stopped-{uuid.uuid4().hex}"
+    db = firestore.Client(project="demo-project")
+    monkeypatch.setattr("src.backend.main.get_firestore_client", lambda: db)
+    reservation_ref = db.collection("credit_reservations").document(job_id)
+    reservation_ref.set({"estimatedCredits": 7, "status": "reserved", "userId": "test-user"})
+    releases = []
+
+    def release(user_id, released_job_id):
+        releases.append((user_id, released_job_id))
+        reservation_ref.set({"status": "released"}, merge=True)
+        return ReleaseCreditsResult(status="released")
+
+    monkeypatch.setattr("src.backend.credits.release_credits", release)
+    try:
+        refunded = asyncio.run(_release_stopped_reservation(
+            settings=app.state.settings, user_id="test-user", job_id=job_id,
+        ))
+        assert refunded == 7
+        assert releases == [("test-user", job_id)]
+        assert reservation_ref.get().to_dict()["status"] == "released"
+    finally:
+        reservation_ref.delete()
+
+
 def test_stop_session_hides_other_owners_session(client):
     test_client, _app = client
     response = test_client.post("/sessions/other-users-session/stop")
@@ -1455,6 +1484,56 @@ def test_stop_drops_in_flight_chat_llm_reply(client, monkeypatch):
     assert response.json() == {"type": "chat_text", "message": "Stopped.", "stopped": True}
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["history"][-1]["content"] == "Stopped."
+
+
+def test_old_stop_marker_does_not_stop_next_chat_turn(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    prior = asyncio.run(app.state.sessions.append_history(session_id, "user", "prior"))
+    asyncio.run(app.state.sessions.set_metadata(session_id, "stopTurnId", prior["id"]))
+
+    class FakeLlm:
+        def generate(self, *args, **kwargs):
+            return json.dumps({
+                "tool_calls": [], "final_message": "Current reply.", "include_score": False,
+            })
+
+    app.state.orchestrator._llm_client = FakeLlm()
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": "current"})
+    assert response.status_code == 200
+    assert response.json()["message"] == "Current reply."
+    assert response.json().get("stopped") is not True
+
+
+def test_chat_stop_marker_skips_next_tool_call(client):
+    import src.backend.orchestrator as orchestrator_module
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    app.state.router.call_tool = lambda *a, **k: pytest.fail("Stopped tool must not run")
+
+    async def scenario():
+        await app.state.sessions.set_metadata(session_id, "stopTurnId", "current-turn")
+        token = orchestrator_module._llm_turn_budget.set(
+            orchestrator_module._LlmTurnBudget(
+                reference="current", started_at=time.monotonic(),
+                stop_session_id=session_id, stop_user_id="test-user",
+                stop_turn_id="current-turn", stop_loop=asyncio.get_running_loop(),
+            )
+        )
+        try:
+            with pytest.raises(orchestrator_module.ChatTurnStopped):
+                await app.state.orchestrator._execute_tool_calls(
+                    session_id, {"parts": []},
+                    [ToolCall(name="reparse", arguments={})],
+                    user_id="test-user", score_summary=None,
+                    user_email="synthetic@example.invalid", explicit_verse_number=None,
+                )
+        finally:
+            orchestrator_module._llm_turn_budget.reset(token)
+
+    asyncio.run(scenario())
 
 
 def test_stopped_mcp_take_keeps_cancelled_job_and_does_not_retry(client, monkeypatch):

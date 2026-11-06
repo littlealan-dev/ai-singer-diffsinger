@@ -2221,6 +2221,11 @@ async def _run_export_mix_job(
             message="Preparing the mix...",
             progress=0.02,
         ):
+            current = await asyncio.to_thread(job_store.get_job, job_id)
+            if current and current.get("status") == "cancelled":
+                await _release_stopped_reservation(
+                    settings=settings, user_id=user_id, job_id=job_id
+                )
             return
         work_dir.mkdir(parents=True, exist_ok=True)
         sources: list[MixTrackSource] = []
