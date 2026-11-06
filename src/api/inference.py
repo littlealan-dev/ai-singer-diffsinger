@@ -1146,7 +1146,7 @@ def synthesize_audio(
         device=device,
     )
     if before_vocoder is not None and not before_vocoder():
-        return {"status": "stopped"}
+        return {"status": "stopped", "stage": "vocoder"}
     logger.info(
         "vocoder_stage_start %s",
         summarize_payload(

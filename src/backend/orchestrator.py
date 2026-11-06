@@ -111,7 +111,7 @@ class _LlmTurnBudget:
     stop_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
-class ChatTurnStopped(Exception):
+class ChatTurnStopped(RuntimeError):
     """The latest user turn was stopped while chat work was in flight."""
 
 
@@ -1655,7 +1655,7 @@ class Orchestrator:
             close.
             """
             if await self._is_user_stopped_job(job_id):
-                return True
+                return False
             if attempt >= route.max_dispatch_attempts:
                 return False
             released = await asyncio.to_thread(
@@ -1675,6 +1675,9 @@ class Orchestrator:
         try:
             score = await self._load_dispatched_synthesis_score(spec)
         except Exception:
+            if await self._is_user_stopped_job(job_id):
+                await self._release_user_stopped_job(user_id, job_id)
+                return
             # Possibly transient (Cloud Storage): hand the job back now, so the
             # dispatcher's retry need not wait out this lease.
             self._logger.exception("synthesis_dispatched_score_unavailable job=%s", job_id)
@@ -2302,7 +2305,6 @@ class Orchestrator:
             )
             self._settle_fault_injection_remaining.pop(job_id, None)
             if settle_result.status == "cancelled":
-                await self._release_user_stopped_job(user_id, job_id)
                 return
             if settle_result.status in {
                 "completed_and_settled",
@@ -2574,6 +2576,13 @@ class Orchestrator:
         on_interrupt runs when the job is cancelled; returning True means it put
         the job back for another attempt, so the job is not marked failed.
         """
+        inherited_budget = _llm_turn_budget.get()
+        if inherited_budget is not None and inherited_budget.stop_turn_id:
+            _llm_turn_budget.set(replace(
+                inherited_budget,
+                stop_session_id=None, stop_user_id=None,
+                stop_turn_id=None, stop_loop=None,
+            ))
         async def publish_attempt_messages(
             attempt_messages: List[Dict[str, Any]],
         ) -> None:

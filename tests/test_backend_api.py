@@ -1516,6 +1516,123 @@ def test_stopped_queued_take_never_calls_synthesis(client):
     assert app.state.job_store.get_job(job_id)["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("stop_wins", [True, False])
+def test_export_mix_stop_point_controls_upload_and_settlement(client, monkeypatch, tmp_path, stop_wins):
+    from src.backend.main import _run_export_mix_job
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "synthetic-export"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+    app.state.job_store.create_job(
+        job_id="synthetic-source", user_id="test-user", session_id=session_id,
+        status="completed",
+    )
+    object.__setattr__(app.state.settings, "backend_use_storage", True)
+    events = []
+
+    async def source_path(**kwargs):
+        return tmp_path / "source.wav"
+
+    def render(_sources, output_path, *, progress_callback):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"synthetic wav")
+        return {"duration_seconds": 1.0}
+
+    def pass_stop_point(_job_id):
+        if stop_wins:
+            app.state.job_store.update_job(
+                job_id, status="cancelled", cancelledBy="user", step="cancelled",
+                message="Stopped.", progress=1.0,
+            )
+            return False
+        events.append("passed")
+        return True
+
+    async def release(**kwargs):
+        events.append("released")
+        return 1
+
+    def settle(*args, **kwargs):
+        events.append("settled")
+        app.state.job_store.update_job(job_id, status="completed")
+        return SimpleNamespace(status="completed_and_settled")
+
+    monkeypatch.setattr("src.backend.main._resolve_export_mix_source_path", source_path)
+    monkeypatch.setattr("src.backend.main.render_mix_to_wav", render)
+    monkeypatch.setattr("src.backend.main.upload_file", lambda *a, **k: events.append("uploaded"))
+    monkeypatch.setattr("src.backend.main._release_stopped_reservation", release)
+    monkeypatch.setattr("src.backend.credits.settle_export_mix_credits_and_complete_job", settle)
+    monkeypatch.setattr(app.state.job_store, "pass_stop_point", pass_stop_point)
+    asyncio.run(_run_export_mix_job(
+        settings=app.state.settings, sessions=app.state.sessions,
+        job_store=app.state.job_store, session_id=session_id, user_id="test-user",
+        job_id=job_id,
+        tracks=[ExportMixTrackRequest(job_id="synthetic-source", part_id="P1")],
+        billable_duration_seconds=1.0,
+    ))
+    job = app.state.job_store.get_job(job_id)
+    if stop_wins:
+        assert job["status"] == "cancelled"
+        assert events == ["released"]
+    else:
+        assert job["status"] == "completed"
+        assert events == ["passed", "uploaded", "settled"]
+
+
+def test_inline_preprocess_does_not_inherit_chat_stop_marker(client, monkeypatch):
+    import src.backend.orchestrator as orchestrator_module
+
+    test_client, app = client
+    session_id = _create_session(test_client)
+    job_id = "synthetic-preprocess"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="queued"
+    )
+    calls = []
+
+    class FakeLlm:
+        def generate(self, *args, **kwargs):
+            calls.append("llm")
+            return "{}"
+
+    app.state.orchestrator._llm_client = FakeLlm()
+
+    async def workflow(*args, **kwargs):
+        await asyncio.to_thread(
+            app.state.orchestrator._call_llm_client_generate,
+            "synthetic prompt", [], LlmRole.DEFAULT,
+        )
+        return {"type": "chat_text", "message": "Split complete."}
+
+    monkeypatch.setattr(app.state.orchestrator, "_run_llm_tool_workflow", workflow)
+
+    async def scenario():
+        await app.state.sessions.set_metadata(session_id, "stopTurnId", "stopped-turn")
+        token = orchestrator_module._llm_turn_budget.set(
+            orchestrator_module._LlmTurnBudget(
+                reference="synthetic", started_at=time.monotonic(),
+                stop_session_id=session_id, stop_user_id="test-user",
+                stop_turn_id="stopped-turn", stop_loop=asyncio.get_running_loop(),
+            )
+        )
+        try:
+            await app.state.orchestrator._run_preprocess_job(
+                session_id, {"parts": []},
+                [ToolCall(name="reparse", arguments={})], job_id,
+                "test-user", "synthetic@example.invalid",
+                initial_message="Preparing...", initial_thought_summary="",
+            )
+        finally:
+            orchestrator_module._llm_turn_budget.reset(token)
+
+    asyncio.run(scenario())
+    assert calls == ["llm"]
+    assert app.state.job_store.get_job(job_id)["status"] == "completed"
+
+
 def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
     test_client, app = client
     session_id = _create_session(test_client)

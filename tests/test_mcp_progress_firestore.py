@@ -85,3 +85,31 @@ def test_synthesize_stop_callbacks_read_job_and_pass_stop_point(monkeypatch, tmp
     )
     assert result == {"status": "stopped"}
     assert passed == ["job-123", "job-123"]
+
+
+def test_synthesize_stop_read_error_carries_on(monkeypatch, tmp_path):
+    lyric_selection = {"id": "lyrics-1", "number": "1", "name": "Verse 1"}
+
+    class FakeJobStore:
+        def get_job(self, job_id):
+            raise OSError("transient read failure")
+
+    def fake_synthesize(_score, _voicebank, **kwargs):
+        assert kwargs["stop_check"]("align") is False
+        assert kwargs["pass_stop_point"]() is True
+        return {"waveform": [0.0], "sample_rate": 44100}
+
+    monkeypatch.setattr(handlers, "JobStore", FakeJobStore)
+    monkeypatch.setattr(handlers, "initialize_firebase_app", lambda: None)
+    monkeypatch.setattr(handlers, "synthesize", fake_synthesize)
+    monkeypatch.setattr(handlers, "resolve_voicebank_id", lambda _voicebank: tmp_path)
+    result = handlers.handle_synthesize(
+        {
+            "score": {"selected_lyric_selection": lyric_selection},
+            "lyric_selection": lyric_selection,
+            "voicebank": "Raine_Rena_2.01",
+            "progress_job_id": "job-123",
+        },
+        device="cpu",
+    )
+    assert result["sample_rate"] == 44100

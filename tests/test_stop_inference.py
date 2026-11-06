@@ -17,5 +17,5 @@ def test_stop_after_mel_skips_vocoder(monkeypatch):
         phoneme_ids=[1], durations=[1], f0=[440.0], voicebank="unused",
         before_vocoder=lambda: False,
     )
-    assert result == {"status": "stopped"}
+    assert result == {"status": "stopped", "stage": "vocoder"}
     assert calls == ["mel"]
