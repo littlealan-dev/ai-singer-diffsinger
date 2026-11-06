@@ -1617,7 +1617,7 @@ def test_synthesis_lease_heartbeat_records_user_stop_without_cancelling_worker(c
         job_id=job_id, user_id="test-user", session_id="synthetic-song", status="running"
     )
     app.state.job_store.update_job(job_id, status="cancelled", cancelledBy="user")
-    monkeypatch.setattr(app.state.job_store, "renew_job_lease", lambda *a, **k: False)
+    monkeypatch.setattr(app.state.orchestrator._job_store, "renew_job_lease", lambda *a, **k: False)
 
     async def scenario():
         observed = asyncio.Event()
