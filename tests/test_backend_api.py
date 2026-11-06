@@ -749,6 +749,15 @@ def _prepare_app(monkeypatch, overrides=None):
             return None
         return max(matches, key=lambda item: item[1].get("updatedAt", ""))
 
+    def _fake_list_active_jobs(self, *, user_id: str, session_id: str):
+        return [
+            (job_id, dict(payload))
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id
+            and payload.get("sessionId") == session_id
+            and payload.get("status") in {"queued", "running"}
+        ]
+
     def _fake_get_job_by_id(self, *, job_id: str, user_id: str, session_id: str):
         payload = fake_jobs.get(job_id)
         if not payload:
@@ -767,6 +776,7 @@ def _prepare_app(monkeypatch, overrides=None):
         _fake_get_latest_job_by_session,
     )
     monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
+    monkeypatch.setattr("src.backend.job_store.JobStore.list_active_jobs", _fake_list_active_jobs)
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_job",
         lambda self, job_id: dict(fake_jobs[job_id]) if job_id in fake_jobs else None,
