@@ -11,12 +11,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import statistics
+import sys
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 JOBS_COLUMNS = (
     "job_id", "baseline_status", "candidate_status", "baseline_quality_class",
@@ -440,6 +446,55 @@ def _overfull_derived_bars(score_path: Path) -> list[str]:
     return problems
 
 
+def _lanes_changed_on_read_back(score_path: Path, job: dict[str, Any]) -> list[str]:
+    """Lanes whose notes the written score gives back differently.
+
+    The app sings what it reads from this file. A note the writer timed wrongly
+    reads back moved or resized, even in a bar squeezed shorter than its time
+    signature, which the overfull check cannot see.
+    """
+    from src.api import parse_score  # music21 is slow to import; only this check needs it
+
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    by_name: dict[str, list[list[dict[str, Any]]]] = {}
+    for part in parse_score(score_path)["parts"]:
+        notes = [
+            {"measure": note.get("measure_number"), **{key: note.get(key) for key in (
+                "offset_beats", "pitch_midi", "duration_beats")}}
+            for note in part.get("notes") or [] if not note.get("is_rest")
+        ]
+        by_id[str(part.get("part_id"))] = notes
+        by_name.setdefault(str(part.get("part_name") or ""), []).append(notes)
+    problems: list[str] = []
+    for lane in job.get("lanes") or []:
+        lane_id = str(lane.get("lane_id"))
+        if "|" in lane_id:  # a source part the job changed: "part_id|part_name"
+            written = by_id.get(lane_id.split("|", 1)[0])
+        else:  # a derived part, by name; the replay numbers repeats " #2", " #3"
+            match = re.fullmatch(r"(.*) #(\d+)", lane_id)
+            name, index = (match[1], int(match[2]) - 1) if match else (lane_id, 0)
+            same_name = by_name.get(name) or []
+            written = same_name[index] if index < len(same_name) else None
+        if written is None:
+            problems.append(f"lane {lane_id}: not in the written score")
+            continue
+        unmatched = Counter(_note_signature(note) for note in written)
+        changed = []
+        for note in lane.get("notes") or []:
+            signature = _note_signature(note)
+            if unmatched[signature]:
+                unmatched[signature] -= 1
+            else:
+                changed.append(note)
+        if changed:
+            total = len(lane.get("notes") or [])
+            problems.append(
+                f"lane {lane_id}: {len(changed)} of {total} notes read back differently "
+                f"from the written score (first: bar {changed[0].get('measure')})"
+            )
+    return problems
+
+
 def _output_problems(run_dir: Path, job: dict[str, Any] | None) -> list[str]:
     if not job:
         return []
@@ -450,6 +505,11 @@ def _output_problems(run_dir: Path, job: dict[str, Any] | None) -> list[str]:
             problems.extend(_overfull_derived_bars(run_dir / score_file))
         except (OSError, ValueError, ElementTree.ParseError) as exc:
             problems.append(f"output score unreadable ({type(exc).__name__})")
+            return problems
+        try:
+            problems.extend(_lanes_changed_on_read_back(run_dir / score_file, job))
+        except Exception as exc:  # the app could not read its own output: that is the finding
+            problems.append(f"output score unreadable by the parser ({type(exc).__name__})")
     return problems
 
 

@@ -518,6 +518,64 @@ def test_gate_output_problems_block_a_candidate_and_are_review_for_v1():
     assert [item["reason"] for item in review] == ["v1 run 1: lanes a and b are identical"]
 
 
+def _named_score(path, parts):
+    """A score the app's parser reads: {part_id: (part_name, [measure bodies])}."""
+    entries = "".join(f"<score-part id='{part_id}'><part-name>{name}</part-name></score-part>"
+                      for part_id, (name, _) in parts.items())
+    bodies = "".join(
+        f"<part id='{part_id}'>" + "".join(f"<measure number='{number}'>{body}</measure>"
+                                            for number, body in enumerate(measures, start=1))
+        + "</part>"
+        for part_id, (_, measures) in parts.items()
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"<score-partwise version='3.1'><part-list>{entries}</part-list>"
+                    f"{bodies}</score-partwise>")
+
+
+def _pitched(step, duration):
+    return (f"<note><pitch><step>{step}</step><octave>4</octave></pitch>"
+            f"<duration>{duration}</duration><voice>1</voice><type>quarter</type></note>")
+
+
+def _sung(measure, offset, pitch, duration):
+    return {"measure": measure, "offset_beats": offset, "pitch_midi": pitch,
+            "duration_beats": duration, "lyric": None}
+
+
+def test_lanes_changed_on_read_back_compare_each_lane_with_the_written_notes(tmp_path):
+    attributes = ("<attributes><divisions>1</divisions>"
+                  "<time><beats>2</beats><beat-type>4</beat-type></time></attributes>")
+    _named_score(tmp_path / "score.xml", {
+        "P1": ("Choir", [attributes + _pitched("G", 2), _pitched("G", 2)]),
+        "P_DERIVED_A": ("Solo (Derived)",
+                        [attributes + _pitched("C", 1) + _pitched("D", 1), _pitched("E", 2)]),
+        "P_DERIVED_B": ("Solo (Derived)", [attributes + _pitched("C", 2), _pitched("E", 2)]),
+    })
+    job = _job(lanes=[
+        # A changed source part: "part_id|part_name", with the parser's part id.
+        {"lane_id": "Choir|Choir", "notes": [_sung(1, 0.0, 67, 2.0), _sung(2, 2.0, 67, 2.0)]},
+        {"lane_id": "Solo (Derived)",
+         "notes": [_sung(1, 0.0, 60, 1.0), _sung(1, 1.0, 62, 1.0), _sung(2, 2.0, 64, 2.0)]},
+        # The app holds two quarters in bar 1; the file wrote one half note.
+        {"lane_id": "Solo (Derived) #2",
+         "notes": [_sung(1, 0.0, 60, 1.0), _sung(1, 1.0, 60, 1.0), _sung(2, 2.0, 64, 2.0)]},
+        {"lane_id": "Alto (Derived)", "notes": [_sung(1, 0.0, 57, 2.0)]},
+    ])
+    assert compare._lanes_changed_on_read_back(tmp_path / "score.xml", job) == [
+        "lane Solo (Derived) #2: 2 of 3 notes read back differently from the written score "
+        "(first: bar 1)",
+        "lane Alto (Derived): not in the written score",
+    ]
+
+
+def test_output_problems_report_an_unreadable_score_once(tmp_path):
+    (tmp_path / "scores").mkdir()
+    (tmp_path / "scores" / "job-x.xml").write_text("not xml")
+    job = _job(lanes=[_lane("upper", [64])], score_file="scores/job-x.xml")
+    assert compare._output_problems(tmp_path, job) == ["output score unreadable (ParseError)"]
+
+
 def test_evaluate_gate_reads_each_runs_output_score(tmp_path):
     corpus = tmp_path / "corpus"
     _write_score(corpus, "job-x", "la")
