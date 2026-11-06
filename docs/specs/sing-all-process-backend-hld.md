@@ -21,7 +21,7 @@ Builds on:
 | Solfège fails | Lyrics also chosen: carry on with lyrics only, refund the solfège items, note it. Solfège only: pause, as above |
 | Synthesis fails | Load every take that worked; refund the rest item by item; offer "Retry failed parts" |
 | Stop | **App-wide** (Alan, 2026-11-03): a Stop button in the chat stops the running work, whichever kind: chat reply, split, solfège, take or Sing All. Replacing the score does the same stop, then uploads. **If it's too late, the stop or replace is discarded and the job completes as if it was never clicked** (Alan, 2026-11-03). Details in §7.1 |
-| Credits | Reserve the whole quote at "Sing it"; settle and refund item by item; show a receipt |
+| Credits | Reserve the whole quote at "Sing it", including lanes that may not be needed; settle and refund item by item; show a receipt |
 | Splitting is charged | **Starts at public launch** (Alan, 2026-11-03). Planner v2 is live first, so the rate is set from its real prod cost. Until launch, splits stay free everywhere, and the Sing All quote shows the split line as **included** (0 credits) for allowlisted testers. Once enabled, **every** split, including chat splits, is charged per successful output part: **1 credit per started 30 s** of written-order length. Length is the written order (no repeats); each part is rounded up like singing; the planner's own repair attempts are free; a split the user asks for again is charged again; failed or review-required parts are refunded. A chat split gets a quote and confirmation step like singing |
 | Emails | English only. Sent on completed, partial, needs-decision and failed. The job link inside is owner-only |
 | Job link (email) | Owner only; anyone else sees "This job isn't yours" and "Ask the owner for a share link" |
@@ -37,7 +37,7 @@ Builds on:
 | Unifying the backend | Stage 1 and stage 2 approved (Alan, 2026-11-03, §16). Moving chat takes onto the job model (stage 3) is not approved yet |
 | Retention | Paid plans: kept indefinitely. Free: a share link stops 30 days after the owner's last change (Alan, 2026-11-03) |
 | Free users | The quote shows "Upgrade to sing". A later free 30-second preview must fit without rework (§12) |
-| Quote-time split estimate | When the quote opens, a quick check with no LLM estimates which parts will be split and into how many parts, to price and list them (§5.1) |
+| Quote-time split estimate | When the quote opens, a quick check with no LLM finds which parts will be split and the most lanes each staff could need. The quote lists and reserves that worst case, and lanes not used are refunded (Alan, 2026-11-05, §5.1) |
 
 ## 2. Terms
 
@@ -220,44 +220,98 @@ The quote has to list and price parts that don't exist yet, because they come ou
 
 ```python
 def estimate_sing_all_parts(score):
-    signals = sheet_lane_counts(score)                    # planner v2's sheet skeleton: voice parts, staff densities
     parts = []
     for part in score.parts:
         if not is_vocal(part):                            # instruments -> the "Instrumentals" line
             continue
-        for staff in staff_scopes(part):
-            lanes = max(max_simultaneous_notes(staff),    # rule 17: one lane per simultaneous note
-                        voice_parts_marked(staff))        # e.g. MusicXML voices 1 and 2 on one staff
-            if lanes == 1:
+        for staff, counts in part_lane_counts(score, part_index=part.index).items():
+            if counts.most == 1:
                 parts.append(Estimated(part, staff, split=False))         # sung as it is
             else:
-                for rank in range(lanes):                # top line first
+                for rank in range(counts.most):          # top line first
                     parts.append(Estimated(part, staff, split=True, rank=rank,
                                            name=lane_name(part, staff, rank)))  # "Women" -> Soprano, Alto;
                                                                                   # else "Women · voice 1"
     for p in parts:
         p.split_seconds = written_order_seconds(score)    # a split part lasts as long as its staff
         p.sing_seconds  = p.split_seconds if not repeats else expanded_seconds(score)
-        p.voice = recommended_voice(range_of(p))          # today's recommended-voice logic, on that rank's notes
+        p.voice = recommended_voice(range_of(p))          # today's recommended-voice logic, on that row's notes:
+                                                          # the v2 skeleton with lane_layouts = separate where most > shared
     return parts
 ```
 
 The quick-mode summary ("4 vocal parts"), the parts table (✂ marks the parts to be split), and the split and sing lines of the quote all come from this list.
 
+**How many lanes** (Alan, 2026-11-05, from the Part Splitting improvement session). Voice tags don't always mean separate singers, and only reading the score can tell. So the quote reserves the worst case, and the LLM decides at split time. Alan prefers over-reserving and refunding to under-reserving and pausing.
+
+```python
+# src/api/voice_parts.py. One function, shared by the quote and the split's validator. No lyrics, no LLM.
+sheet_lane_counts(score, *, part_index, staff_scope) -> LaneCounts(peak, real_voices, most)
+part_lane_counts(score, *, part_index) -> {staff_scope: LaneCounts}    # the quote calls this per vocal part
+
+# peak        = most notes sounding at once on the staff
+# real_voices = distinct voice parts, excluding _default
+# most        = max(peak, sum of each real voice's own peak)
+shared = max(peak, real_voices)
+
+quote:      reserve most lanes
+validator:  peak <= lanes <= most
+split (v2): if most == shared: lanes = shared     # no LLM question, so the quote is exact
+            else: the LLM answers one question for the staff:
+                      "shared"   -> shared lanes  # one group of singers written in two voices
+                      "separate" -> most lanes    # each voice is its own group of singers
+after the split: refund the lanes not used
+```
+
+| Staff | peak | real voices | most | shared | Quote |
+|---|---|---|---|---|---|
+| One voice with two-note chords | 2 | 1 | 2 | 2 | 2 parts, exact |
+| Two voices taking turns, no chords | 1 | 2 | 2 | 2 | 2 parts, exact |
+| Voice 1 with a two-note chord, plus voice 2 | 2 | 2 | 3 | 2 | "2 or 3 parts", the LLM decides |
+
+**What the user sees** when a staff has `most > shared`:
+- the staff says "2 or 3 parts", and the summary and total say "up to": "up to 3 parts", "up to N credits, unused parts are refunded";
+- the parts table lists `most` rows for that staff, and their takes and part-dominant mixes are reserved like any other;
+- the receipt shows the refund as "not needed".
+
+**Not enough credits:** the balance is checked against the "up to" total, so a user can be told they lack credits for a job they could afford (worst seen: a staff reserving 9 lanes that probably needs about 4). They get the usual message: top up, or leave some parts out. Leaving a part out just means it isn't sung, whatever the LLM later picks.
+
 **One rule, one place: planner v2 is live for everyone before Sing All core** (Alan, 2026-11-03; its rollout is handled separately). The quote has to know the target lanes, and it must agree with what the split then produces. So the estimate is built on planner v2's sheet skeleton (`build_sheet_skeleton`) from the start, and Sing All's splits run on v2. There's no interim version on `analyze_score_voice_parts`.
 
-Sing All core needs two small changes on the v2 code:
-- `build_sheet_skeleton` returns early when a score has no lyrics, before counting lanes. The estimate needs the count anyway, for the no-lyrics cases below, so the lane count becomes its own function (`sheet_lane_counts`) that the skeleton also calls.
-- The skeleton works on one target part, so the estimate calls it per vocal part. The "well under a second" above is a target to measure on real scores.
+**Depends on planner v2 work:**
+
+| Issue | Gives Sing All | State (2026-11-05) |
+|---|---|---|
+| SIG-172 | `sheet_lane_counts`, the range in the validator | On `feature/preprocess-planner-v2`, not main |
+| SIG-173 | `part_lane_counts`, the job's `laneCounts` | On `feature/preprocess-planner-v2` (cdbf0d7), not main |
+| SIG-174 | The LLM question and the `separate` layout | Todo, not built |
+
+All three have to land before step 3 (§16). SIG-174 is needed even though the names won't change: the quote's rows above `shared` get their notes from the `separate` layout, for the recommended voice. Until it lands, `chosen` is always `shared`, so it can never reach `most`. Alan schedules these. The "well under a second" above is a target to measure on real scores.
 
 **When the split doesn't match the estimate:**
 
 | After the split | What happens |
 |---|---|
 | Same parts as estimated | Continue |
-| Fewer parts (a lane failed) | `needs_decision` (§3): review the partial split, continue with the parts that worked |
-| More or different parts (e.g. a divisi passage made a staff 3 lanes) | Pause and re-quote. Never charge more than quoted without asking |
+| Fewer parts, because the LLM picked `shared` (`chosen` < `most`, parts made = `chosen`) | Continue, match lanes to rows (below), and refund the unmatched rows' items as "not needed" |
+| Fewer parts, because a lane failed (parts made < `chosen`, or no `laneCounts` on the job) | `needs_decision` (§3): review the partial split, continue with the parts that worked |
+| More or different parts | Shouldn't happen, because the validator caps lanes at the quoted number. Kept as a safety rule: pause and re-quote. Never charge more than quoted without asking |
 | Parts named differently | No pause. Estimated parts map to real split parts by staff and rank (top to bottom), and the real names are shown from then on |
+
+A v2 job writes `laneCounts: [{partId, staff, peak, most, chosen}]` when it completes (SIG-173). `chosen` is the lanes planned, whether or not each one succeeded. v1 jobs don't write it, so they fall into the failed-lane row, which is the safe side.
+
+**Matching real lanes to quoted rows, when `shared` was picked.** Rank doesn't work, because the lane that goes away is usually in the middle:
+
+```python
+# rows quoted (separate):  C5/G5/F5   rest/E5/rest   G4/rest/A4
+# real lanes (shared):     C5/G5/F5   G4/E5/A4
+# by rank, the low lane would get the middle row's voice; it belongs to the bottom row
+for lane in real_lanes(staff):                    # top line first
+    row = unmatched row with the closest average pitch
+    row.lane = lane
+    row.voice = row.voice if user_picked(row) else recommended_voice(range_of(lane))
+refund every row left unmatched                   # same staff, same length, so the same credits
+```
 
 **A score with no lyrics** (from the Part Splitting improvement session, 2026-11-01). Under planner v2, a split of a score with no lyrics fails up front, with the catalog message `preprocess.score_needs_lyrics`. So the estimate also checks for lyrics:
 - **No lyrics and nothing to split:** quote as normal. The parts are sung in solfège, as already decided.
@@ -265,7 +319,9 @@ Sing All core needs two small changes on the v2 code:
 
 Every other failed split, e.g. v2's `planner_v2_repair_pending` before its local-repair task lands, arrives as an ordinary failed preprocess job. That goes through the `needs_decision` path above.
 
-**Known limit:** a staff with a few divisi bars counts as one more lane for the whole song, so the estimate can over-count. The mismatch rule above catches it, and once split charging is on, the user only pays for parts actually made.
+**Known limits:**
+- A staff with a few divisi bars needs one more lane for the whole song, because `peak` is the minimum. The split really makes that lane, so it's charged like any other. Only lanes above `shared` can come back as a refund.
+- The parser's voice labels can differ from the file's tags (one staff gives 4 by the parser, 3 by the tags). That over-reserves but stays safe. The Part Splitting improvement session checks it during the port.
 
 
 ### 5.2 The reconciler
@@ -353,7 +409,7 @@ Revenue per credit is $0.138 on the cheapest plan (Pro annual, Founding Offer) a
 
 This changes today's preprocess flow, which starts without a price. It's the biggest change to existing behaviour in this design, so it's built on planner v2 once that's live, and tested on the allowlist before launch (§16, step 8).
 
-**Contract Sing All relies on:** Sing All starts preprocess jobs and reads their result: the job's status, whether review is required, and the derived parts in the new score version. Planner v2 keeps that contract (the plan format, lint and postflight are unchanged). Any change to it must be flagged to Sing All first.
+**Contract Sing All relies on:** Sing All starts preprocess jobs and reads their result: the job's status, whether review is required, and the derived parts in the new score version. Planner v2 keeps that contract (the plan format, lint and postflight are unchanged). It also writes `laneCounts` (SIG-173), so Sing All can tell a lane it chose not to use from a lane that failed (§5.1). Any change to it must be flagged to Sing All first.
 
 ## 7. Concurrency and what's blocked
 
@@ -716,7 +772,7 @@ Agreed with Alan, 2026-11-03. Each step ships on its own, and Alan deploys and m
 | 0 | **Planner v2**, live for everyone (handled on its own thread) | Its own replay gate | Everyone |
 | 1 | **Stop** for all work (§7.1): button, `cancelled` status, stop point, worker and stage checks, upload refusal | 0 | Everyone |
 | 2 | **Songs** (§2.1, §4, §11, §13): `/app/song/{id}`, title, New song, the "New song or replace?" popup, My songs, player record, saved mix and instruments, `GET /sessions/{id}/workspace` | 1 | Everyone |
-| 3 | **Sing All core** (§5, §7, §8): deploy the `sing-all-reconcile` queue and the `sing-all-render` RTX Cloud Run Job with render-slot admission (§17); quote and parts estimate, with the two v2 lane-count changes (§5.1); parent job, reconciler, one-active guard, per-item reserve and settle (split items at 0 credits); splitting, solfège and singing stages; progress API, in-chat live card, header pill; Stop for the parent; sweeper; **premium RTX routing off in this release** | 1, 2 | Allowlist |
+| 3 | **Sing All core** (§5, §7, §8): deploy the `sing-all-reconcile` queue and the `sing-all-render` RTX Cloud Run Job with render-slot admission (§17); quote and parts estimate on `part_lane_counts`, which needs SIG-172, SIG-173 and SIG-174 first (§5.1); parent job, reconciler, one-active guard, per-item reserve and settle (split items at 0 credits), refund of lanes not used; splitting, solfège and singing stages; progress API, in-chat live card, header pill; Stop for the parent; sweeper; **premium RTX routing off in this release** | 1, 2 | Allowlist |
 | 4 | **Server mixes and zip** (§9, §9.1), starting with the listening trial on real songs: FluidSynth, balance, `sing-all-package` CPU job, WAVs, the player's opening balance | 3 | Allowlist |
 | 5 | **Emails and job link** (§10, §11) | 3 | Allowlist |
 | 6 | **Split or solfège failures** (§3, §5): needs_decision, review a partial split, re-quote on mismatch, retry failed parts | 3 | Allowlist |
@@ -883,6 +939,7 @@ Decided (Alan, 2026-11-01 to 2026-11-03):
 - **RTX quota:** no request before launch; request more when needed (§17.5).
 - **Routing:** every Sing All job sings on the RTX batch job (`sing-all-render`). Interactive single takes go to the L4: premium RTX routing is turned off at launch, so the one RTX GPU is free for Sing All (§17.5).
 - **Rollout order, allowlist and split charging at public launch** (§16).
+- **Lanes in the quote:** reserve the worst case per staff, the LLM answers "shared" or "separate" at split time only where the two differ, refund lanes not used (§5.1).
 - **Mix rate:** 1 credit per mix file.
 - **Player's default balance:** Sing All's player opens with the server mix's balance (§9.1).
 - **Stuck-job limits:** split 30 min per child, singing 20 min with no new take, mixing and packaging 10 min (§17.7).
