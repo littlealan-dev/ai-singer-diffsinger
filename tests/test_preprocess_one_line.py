@@ -61,7 +61,8 @@ def test_one_line_bars_ask_the_lower_lane_once_and_its_directed_bars(tmp_path):
     assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
     default = next(slot for slot in sheet.slots if slot.kind == "unison_default")
     assert [option.option_id for option in default.options] == ["every_lane", "top_lane_only"]
-    assert default.evidence == {"one_line_bars": 3, "own_note_bars": 2, "direction_bars": [4]}
+    # Who sings the part is read from the part name and the score; no bar counts are given.
+    assert default.evidence == {"direction_bars": [4]}
 
 
 @pytest.mark.parametrize(("lane_answer", "bar_answer", "lower"), [
@@ -159,8 +160,7 @@ def test_single_notes_in_the_split_voice_ask_the_lower_lane_once(tmp_path):
              if slot.kind in {"mode", "melody_source", "unison", "unison_default"}]
     assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
     default = next(slot for slot in sheet.slots if slot.kind == "unison_default")
-    # Own notes only where voice 1 has a chord (bars 1 and 3), though the top lane owns all five bars.
-    assert default.evidence == {"one_line_bars": 3, "own_note_bars": 2, "direction_bars": [4]}
+    assert default.evidence == {"direction_bars": [4]}
 
 
 @pytest.mark.parametrize(("lane_answer", "bar_answer", "lower"), [
@@ -196,3 +196,32 @@ def test_a_bar_where_the_split_voice_is_silent_still_asks_whether_to_sing(tmp_pa
     modes = {slot.start_measure: len(slot.options) for slot in sheet.slots
              if slot.kind == "mode" and slot.lane_ids == (lower.lane_id,)}
     assert modes == {2: 2}  # silent bar 2: sing or rest; single-note bar 3: not asked
+
+
+def _split_voice_with_a_second_voice(tmp_path):
+    # Voice 1 has chords in bars 1 and 3; in bar 2 it sings one note while voice 2 sings with it.
+    return _single_staff_score(tmp_path, [
+        _chord("G", "E", 4) + _BACKUP + _note("C", voice="2", lyric=None),
+        _note("F", voice="1") + _BACKUP + _note("D", voice="2", lyric=None),
+        _chord("A", "F", 4) + _BACKUP + _note("D", voice="2", lyric=None),
+    ])
+
+
+def test_single_notes_in_the_split_voice_count_while_another_voice_sings(tmp_path):
+    score = _split_voice_with_a_second_voice(tmp_path)
+    sheet = _sheet(score)
+    top, second_voice, split = _lanes(sheet)
+    assert split.source_voice_part_id == top.source_voice_part_id != second_voice.source_voice_part_id
+    asked = [(slot.kind, slot.start_measure) for slot in sheet.slots
+             if split.lane_id in slot.lane_ids and slot.kind in {"mode", "melody_source", "unison_default"}]
+    assert asked == [("unison_default", 1)]  # bar 2 asks no "sing or rest?" or "which line?"
+
+
+@pytest.mark.parametrize(("lane_answer", "bar_two"), [("every_lane", [77]), ("top_lane_only", [])])
+def test_the_split_lane_rests_at_its_voices_single_notes_through_the_lane_field(tmp_path, lane_answer, bar_two):
+    score = _split_voice_with_a_second_voice(tmp_path)
+    sheet = _sheet(score)
+    plan, sung = _sung(score, sheet, unison_default=lane_answer)  # the pre-run check passes
+    split_lane = sung[2]
+    assert (split_lane[1], split_lane[2], split_lane[3]) == ([76], bar_two, [77])
+    assert {section["mode"] for section in plan["targets"][2]["sections"]} == {"derive"}

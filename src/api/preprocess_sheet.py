@@ -1232,10 +1232,11 @@ PINNABLE_KINDS = ("lane_layout", "mode", "melody_source", "voice_assignment")
 
 
 def _unison_default_slot(score: dict, sheet: Sheet, lane: Lane, one_line: list[Segment]) -> Slot:
-    """Asked once for a lower lane: does it sing the staff's one line and unisons with the top lane?
+    """Asked once for a lower lane: does it sing the part's one line with the top lane?
 
-    every_lane writes what the lane would get without the question, so a first-option plan is
-    unchanged; top_lane_only also gives the top lane the single notes in this lane's own-note bars.
+    The answer depends on who sings the part (a group or one person), which the LLM reads from the
+    part name and the score; no counts are given. every_lane writes what the lane would get without
+    the question, so a first-option plan is unchanged.
     """
     staff = [segment for segment in sheet.segments
              if segment.part_index == lane.part_index and segment.scope_key == lane.scope_key]
@@ -1245,17 +1246,11 @@ def _unison_default_slot(score: dict, sheet: Sheet, lane: Lane, one_line: list[S
     every = ({"split_shared_note_policy": "duplicate_to_all"}
              if not freeform and _shared_notes_in_scope(score, lane) else {})
     top = {} if freeform else {"split_shared_note_policy": "assign_primary_only"}
-
-    def bars(segments: list[Segment]) -> int:
-        return sum(segment.end_measure - segment.start_measure + 1 for segment in segments)
-
     return _choice_slot((lane.lane_id,), span, "unison_default", (
         Option("every_lane", "every_lane", every, {}, ()),
         Option("top_lane_only", "top_lane_only", top, {}, ()),
     ), evidence={
-        "one_line_bars": bars(one_line),
-        # Own-note bars: the lane's voice gives it a note of its own (enough notes at once to reach it).
-        "own_note_bars": bars([segment for segment in staff if dict(segment.signature.lanes)[lane.lane_id]]),
+        # These bars get their own unison question.
         "direction_bars": sorted(measure for segment in one_line if segment.signature.annotation is not None
                                  for measure in range(segment.start_measure, segment.end_measure + 1)),
     })
@@ -1438,15 +1433,22 @@ def build_sheet(
                 and any(source["part_index"] == lane.part_index and source["voice_part_id"] == staff_line_id
                         and lane.scope_key in source["scopes"] for source in candidates)
             )
-            # The same music written in the voice this lane splits: single notes, none at its rank.
+            # The same music written in the voice this lane splits: that voice sings one note at a
+            # time here, whatever other voices on the staff do, so none is at this lane's rank.
             split_ranks = [other.default_rank for other in lanes
                            if other.source_voice_part_id == lane.source_voice_part_id]
+            own_voice = next((source for source in candidates
+                              if source["part_index"] == lane.part_index
+                              and source["voice_part_id"] == lane.source_voice_part_id), None)
+            own_onsets: dict[tuple[int, float], int] = {}
+            for note in (own_voice or {}).get("notes") or []:
+                if _staff_scope_key(note) == lane.scope_key:
+                    key = (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
+                    own_onsets[key] = own_onsets.get(key, 0) + 1
             split_line = (
-                not one_line and assignment is None and not native and segment.signature.density == 1
+                not one_line and assignment is None and not native
                 and len(split_ranks) > 1 and lane.default_rank != min(split_ranks)
-                and any(source["part_index"] == lane.part_index
-                        and source["voice_part_id"] == lane.source_voice_part_id
-                        and lane.scope_key in source["scopes"] for source in candidates)
+                and bool(own_onsets) and max(own_onsets.values()) == 1
             )
             if assignment is None:
                 melody = _melody_options(lane, candidates)
