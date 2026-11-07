@@ -38,6 +38,7 @@ import {
   SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE,
   SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE,
   submitAudioFeedback,
+  stopSessionWork,
   uploadScore,
   updateSolfegeSettings,
   type AudioTrackMetadata,
@@ -2755,6 +2756,9 @@ export default function MainApp() {
   const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
   const [feedbackPrompts, setFeedbackPrompts] = useState<Record<string, "open" | "minimized">>({});
   const [chatTurnInProgress, setChatTurnInProgress] = useState(false);
+  const [activeJobKind, setActiveJobKind] = useState<string | null>(null);
+  const [jobKindPending, setJobKindPending] = useState(false);
+  const [stopRequestInFlight, setStopRequestInFlight] = useState(false);
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
     url: string;
@@ -2818,6 +2822,8 @@ export default function MainApp() {
   const lastBillingSyncAtRef = useRef(0);
   const checkoutReturnSyncStartedRef = useRef(false);
   const chatTurnInProgressRef = useRef(false);
+  const stopRefundsRef = useRef(new Map<string, number>());
+  const stoppedJobIdsRef = useRef(new Set<string>());
   const activeSynthesisStreamRef = useRef<ChatStream | null>(null);
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
   const activeScoreIdRef = useRef<string | null>(null);
@@ -2836,6 +2842,10 @@ export default function MainApp() {
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
     setChatTurnInProgress(busy);
+    if (!busy) {
+      setActiveJobKind(null);
+      setJobKindPending(false);
+    }
   };
 
   const handleScorePlayerControlsChange = useCallback(
@@ -3905,6 +3915,10 @@ export default function MainApp() {
 
   const handleMultiTrackExport = useCallback(async () => {
     if (!sessionId || multiTrackExportProgress !== null) return;
+    if (chatTurnInProgressRef.current) {
+      setMultiTrackExportError("Stop the running work first");
+      return;
+    }
     setMultiTrackExportError(null);
     setError(null);
     if (isNoOpSingleTrackExport(multiTrackAudioTracks)) {
@@ -3934,6 +3948,7 @@ export default function MainApp() {
       ...multiTrackAnalyticsParams(multiTrackAudioTracks),
     });
     setMultiTrackExportProgress(0);
+    let exportMessageId: string | null = null;
     try {
       const response = await exportMix(
         sessionId,
@@ -3949,6 +3964,16 @@ export default function MainApp() {
         })),
         billingReferenceTrack.jobId
       );
+      exportMessageId = crypto.randomUUID();
+      appendMessage({
+        id: exportMessageId,
+        role: "assistant",
+        content: "Exporting mix…",
+        jobId: response.job_id,
+        isProgress: true,
+      });
+      setChatTurnBusy(true);
+      setActiveJobKind("export_mix");
       let latestProgress = 0;
       for (;;) {
         await wait(1200);
@@ -3959,7 +3984,24 @@ export default function MainApp() {
         }
         if (payload.status === "done" && payload.audio_url) {
           setMultiTrackExportProgress(1);
+          setMessages((current) => current.map((message) =>
+            message.id === exportMessageId
+              ? { ...message, content: appendProgressMessage(message.content, payload.message || "Mix ready."), isProgress: false }
+              : message
+          ));
           await downloadAudioUrl(payload.audio_url, "sightsinger-mix.wav");
+          break;
+        }
+        if (payload.status === "stopped") {
+          stoppedJobIdsRef.current.add(response.job_id);
+          const refunded = stopRefundsRef.current.get(response.job_id);
+          const stoppedMessage = `${payload.message || "Stopped."}${refunded ? ` Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.` : ""}`;
+          setMessages((current) => current.map((message) =>
+            message.id === exportMessageId
+              ? { ...message, content: appendProgressMessage(message.content, stoppedMessage), isProgress: false }
+              : message
+          ));
+          setSynthesisEstimateRevision((current) => current + 1);
           break;
         }
         if (payload.status === "error") {
@@ -3967,6 +4009,11 @@ export default function MainApp() {
         }
       }
     } catch (err) {
+      if (exportMessageId) {
+        setMessages((current) => current.map((message) =>
+          message.id === exportMessageId ? { ...message, isProgress: false } : message
+        ));
+      }
       const message = err instanceof Error ? err.message : "Export failed.";
       if (isInsufficientCreditError(message)) {
         openPaywall("insufficient_credits", message);
@@ -3976,6 +4023,7 @@ export default function MainApp() {
       setMultiTrackExportError(message);
     } finally {
       setMultiTrackExportProgress(null);
+      if (exportMessageId) setChatTurnBusy(false);
     }
   }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
@@ -4464,6 +4512,36 @@ export default function MainApp() {
     requestChatAutoScroll();
   };
 
+  const handleStopWork = async () => {
+    if (!sessionId || !chatTurnInProgressRef.current || stopRequestInFlight) return;
+    setStopRequestInFlight(true);
+    try {
+      const response = await stopSessionWork(sessionId);
+      const stoppedInThisRequest = new Set(
+        response.jobs.filter((job) => job.result === "stopped").map((job) => job.jobId)
+      );
+      for (const job of response.jobs) {
+        if (job.result === "stopped") {
+          stopRefundsRef.current.set(job.jobId, job.refundedCredits);
+        }
+      }
+      setMessages((current) => current.map((message) => {
+        if (!message.jobId || !stoppedInThisRequest.has(message.jobId) || !stoppedJobIdsRef.current.has(message.jobId)) return message;
+        const refunded = stopRefundsRef.current.get(message.jobId);
+        if (!refunded) return message;
+        const refundMessage = `Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.`;
+        return { ...message, content: appendProgressMessage(message.content, refundMessage) };
+      }));
+      if (response.result === "too_late") {
+        setNotice("Too late to stop: it's just finishing");
+      }
+    } catch {
+      setNotice("Couldn't stop the work. Please try again.");
+    } finally {
+      setStopRequestInFlight(false);
+    }
+  };
+
   const toggleThoughtSummary = (messageId: string) => {
     setExpandedThoughts((prev) => ({
       ...prev,
@@ -4497,6 +4575,10 @@ export default function MainApp() {
     ): Promise<boolean> => {
       if (generation !== workspaceGenerationRef.current) return false;
       if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return false;
+      setJobKindPending(false);
+      if (payload.job_kind && payload.status !== "stopped") {
+        setActiveJobKind(payload.job_kind);
+      }
       const nextMessage = payload.message;
       const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
@@ -4507,8 +4589,16 @@ export default function MainApp() {
         payload.status !== "error" || payload.job_kind === "preprocess";
       const isTerminalProgress =
         payload.status === "done" ||
+        payload.status === "stopped" ||
         payload.status === "error" ||
         payload.status === "action_required";
+      if (payload.status === "stopped" && payload.job_id) {
+        stoppedJobIdsRef.current.add(payload.job_id);
+      }
+      const refunded = payload.job_id ? stopRefundsRef.current.get(payload.job_id) : undefined;
+      const stoppedMessage = payload.status === "stopped"
+        ? `${nextMessage || "Stopped."}${refunded ? ` Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.` : ""}`
+        : nextMessage;
       const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) => {
         const messageIndex = prev.findIndex((msg) => msg.id === messageId);
@@ -4521,7 +4611,7 @@ export default function MainApp() {
             : appendTerminalPreprocessMessage
               ? appendPreprocessTerminalMessage(message.content, nextMessage)
               : appendProgressToChatBubble
-                ? appendProgressMessage(message.content, nextMessage)
+                ? appendProgressMessage(message.content, stoppedMessage)
                 : message.content;
         const nextMessageState: Message = {
           ...message,
@@ -4531,7 +4621,7 @@ export default function MainApp() {
           progressValue: typeof nextProgress === "number" ? nextProgress : message.progressValue,
           // Each progress payload carries a newly signed URL. Keep the first
           // one rather than rebuilding the player and re-fetching audio on every update.
-          audioUrl: message.audioUrl || nextAudioUrl,
+          audioUrl: message.audioUrl || (payload.status !== "stopped" ? nextAudioUrl : undefined),
           audioTrack: payload.audio_track ?? message.audioTrack,
           jobId: payload.job_id ?? message.jobId,
           feedback: payload.feedback ?? message.feedback,
@@ -4553,7 +4643,7 @@ export default function MainApp() {
         next[messageIndex] = nextMessageState;
         return next;
       });
-      if (nextAudioUrl) {
+      if (nextAudioUrl && payload.status !== "stopped") {
         setAudioUrl((current) => current || nextAudioUrl);
         if (payload.job_kind !== "preprocess") {
           addOrReplaceMultiTrackAudio(
@@ -4584,7 +4674,7 @@ export default function MainApp() {
       if (payload.warning) {
         setError(payload.warning);
       }
-      if (payload.status === "done") {
+      if (payload.status === "done" || payload.status === "stopped") {
         setActiveProgress((current) =>
           current?.messageId === messageId ? null : current
         );
@@ -5191,6 +5281,7 @@ export default function MainApp() {
   };
 
   const handleUpload = async (file: File, demoSongId: string | null = null) => {
+    if (chatTurnInProgressRef.current) return;
     if (browserMixBounceActive) {
       setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
       return;
@@ -5267,6 +5358,7 @@ export default function MainApp() {
   // A demo song is a score shipped with the app, loaded exactly like an upload.
   const loadDemoSong = async (song: DemoSong) => {
     setScoreMenuOpen(false);
+    if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall("upload_blocked");
       return;
@@ -5286,6 +5378,7 @@ export default function MainApp() {
 
   const chooseScoreFile = () => {
     setScoreMenuOpen(false);
+    if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
       openPaywall("upload_blocked");
       return;
@@ -5310,6 +5403,8 @@ export default function MainApp() {
     }
     let keepTurnBusy = false;
     setChatTurnBusy(true);
+    setActiveJobKind(null);
+    setJobKindPending(false);
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -5350,12 +5445,13 @@ export default function MainApp() {
           "details" in response ? response.details : undefined
         ),
       };
-      if (response.type === "chat_text" && response.selection_resolved) {
+      if (response.type === "chat_text" && !response.stopped && response.selection_resolved) {
         // A quote already fixes the part and verse: no picker now or later,
         // and any picker shown earlier disappears.
         setPendingSelection(false);
       } else if (
         response.type === "chat_text" &&
+        !response.stopped &&
         pendingSelection &&
         !selectorShown &&
         !response.suppress_selector
@@ -5391,6 +5487,7 @@ export default function MainApp() {
         assistantMessage.isProgress = true;
         assistantMessage.jobId = response.job_id;
         keepTurnBusy = true;
+        setJobKindPending(true);
         if (pendingSelection) {
           setPendingSelection(false);
         }
@@ -5522,7 +5619,7 @@ export default function MainApp() {
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (creditsLocked || browserMixBounceActive) return;
+    if (creditsLocked || browserMixBounceActive || chatTurnInProgress) return;
     if (!isDragging) setIsDragging(true);
   };
 
@@ -5533,6 +5630,7 @@ export default function MainApp() {
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (chatTurnInProgressRef.current) return;
     if (browserMixBounceActive) {
       setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
       return;
@@ -5760,7 +5858,8 @@ export default function MainApp() {
                       <button
                         type="button"
                         className="demo-song-link"
-                        disabled={uploading || browserMixBounceActive}
+                        disabled={uploading || browserMixBounceActive || chatTurnInProgress}
+                        title={chatTurnInProgress ? "Stop the running work first" : undefined}
                         onClick={() => void loadDemoSong(song)}
                       >
                         {song.title}
@@ -6035,6 +6134,19 @@ export default function MainApp() {
               >
                 <Send size={18} />
               </button>
+              {chatTurnInProgress && !jobKindPending && activeJobKind !== "preprocess" && (
+                <button
+                  type="button"
+                  className="stop-work-button"
+                  onClick={() => void handleStopWork()}
+                  disabled={stopRequestInFlight}
+                  aria-label="Stop"
+                  data-testid="stop-work"
+                  title={stopRequestInFlight ? "Stopping…" : "Stop"}
+                >
+                  {stopRequestInFlight ? "Stopping…" : <Square size={17} fill="currentColor" aria-hidden="true" />}
+                </button>
+              )}
             </div>
             {/* One compact toolbar of icon controls. Each control names itself
                 and its current value in an instant tooltip (data-tooltip). */}
@@ -6042,7 +6154,7 @@ export default function MainApp() {
               <div className="score-picker" ref={scorePickerRef}>
                 {scoreMenuOpen ? (
                   <div className="voice-picker-menu score-picker-menu" role="menu" aria-label="Add a score">
-                    <button type="button" role="menuitem" className="voice-picker-option" onClick={chooseScoreFile}>
+                    <button type="button" role="menuitem" className="voice-picker-option" disabled={chatTurnInProgress} title={chatTurnInProgress ? "Stop the running work first" : undefined} onClick={chooseScoreFile}>
                       <span className="voice-picker-option-avatar recommended" aria-hidden="true">
                         <Upload size={14} />
                       </span>
@@ -6058,6 +6170,8 @@ export default function MainApp() {
                         type="button"
                         role="menuitem"
                         className="voice-picker-option"
+                        disabled={chatTurnInProgress}
+                        title={chatTurnInProgress ? "Stop the running work first" : undefined}
                         onClick={() => void loadDemoSong(song)}
                       >
                         <span className="voice-picker-option-avatar recommended" aria-hidden="true">
@@ -6077,8 +6191,9 @@ export default function MainApp() {
                   aria-haspopup="menu"
                   aria-expanded={scoreMenuOpen}
                   aria-label={uploading ? "Uploading score" : "Add a score"}
-                  data-tooltip={uploading ? "Uploading score…" : "Upload a score or load a demo song"}
-                  disabled={uploading || browserMixBounceActive}
+                  data-tooltip={chatTurnInProgress ? "Stop the running work first" : uploading ? "Uploading score…" : "Upload a score or load a demo song"}
+                  title={chatTurnInProgress ? "Stop the running work first" : undefined}
+                  disabled={uploading || browserMixBounceActive || chatTurnInProgress}
                   onClick={() => {
                     setScoreMenuOpen((open) => !open);
                     setVoiceMenuOpen(false);
@@ -6093,7 +6208,7 @@ export default function MainApp() {
                   hidden
                   data-testid="score-upload-input"
                   accept=".musicxml,.xml,.mxl"
-                  disabled={uploading || creditsLocked || browserMixBounceActive}
+                  disabled={uploading || creditsLocked || browserMixBounceActive || chatTurnInProgress}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     if (file) handleUpload(file);
@@ -6637,7 +6752,8 @@ export default function MainApp() {
                           key={song.id}
                           type="button"
                           className="demo-song-card"
-                          disabled={uploading || browserMixBounceActive}
+                          disabled={uploading || browserMixBounceActive || chatTurnInProgress}
+                          title={chatTurnInProgress ? "Stop the running work first" : undefined}
                           onClick={() => void loadDemoSong(song)}
                         >
                           <Music2 size={18} aria-hidden="true" />

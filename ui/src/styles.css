@@ -1903,6 +1903,26 @@ div[id^="fire_app_check_"] {
   padding: 0;
 }
 
+.composer-row .stop-work-button {
+  flex: 0 0 52px;
+  min-height: 56px;
+  border: 1px solid rgba(155, 134, 255, 0.55);
+  border-radius: 14px;
+  background: rgba(155, 134, 255, 0.14);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.composer-row .stop-work-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .voice-picker {
   position: relative;
   flex: 0 1 220px;

@@ -122,6 +122,7 @@ export type ChatResponse =
   | {
       type: "chat_text";
       message: string;
+      stopped?: boolean;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
       suppress_selector?: boolean;
@@ -165,7 +166,7 @@ export type ProgressResponse = {
   score_id?: string;
   score_version_no?: number;
   result_score_ref?: { scoreId: string; scoreVersionNo: number };
-  status: "idle" | "queued" | "running" | "done" | "error" | "action_required";
+  status: "idle" | "queued" | "running" | "done" | "stopped" | "error" | "action_required";
   message?: string;
   step?: string;
   progress?: number;
@@ -621,6 +622,20 @@ async function request<T>(path: string, options: RequestInit): Promise<T> {
 
 export async function createSession(): Promise<{ session_id: string }> {
   return request("/sessions", { method: "POST" });
+}
+
+export type StopWorkResponse = {
+  result: "stopped" | "too_late" | "not_stoppable" | "nothing_running";
+  jobs: Array<{
+    jobId: string;
+    jobKind: string;
+    result: "stopped" | "too_late" | "not_stoppable";
+    refundedCredits: number;
+  }>;
+};
+
+export async function stopSessionWork(sessionId: string): Promise<StopWorkResponse> {
+  return request(`/sessions/${sessionId}/stop`, { method: "POST" });
 }
 
 export type CreditsBootstrapResponse = {
