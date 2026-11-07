@@ -2757,6 +2757,7 @@ export default function MainApp() {
   const [feedbackPrompts, setFeedbackPrompts] = useState<Record<string, "open" | "minimized">>({});
   const [chatTurnInProgress, setChatTurnInProgress] = useState(false);
   const [activeJobKind, setActiveJobKind] = useState<string | null>(null);
+  const [jobKindPending, setJobKindPending] = useState(false);
   const [stopRequestInFlight, setStopRequestInFlight] = useState(false);
   const [activeProgress, setActiveProgress] = useState<{
     messageId: string;
@@ -2841,7 +2842,10 @@ export default function MainApp() {
   const setChatTurnBusy = (busy: boolean) => {
     chatTurnInProgressRef.current = busy;
     setChatTurnInProgress(busy);
-    if (!busy) setActiveJobKind(null);
+    if (!busy) {
+      setActiveJobKind(null);
+      setJobKindPending(false);
+    }
   };
 
   const handleScorePlayerControlsChange = useCallback(
@@ -4564,6 +4568,7 @@ export default function MainApp() {
     ): Promise<boolean> => {
       if (generation !== workspaceGenerationRef.current) return false;
       if (payload.score_id && payload.score_id !== activeScoreIdRef.current) return false;
+      setJobKindPending(false);
       if (payload.job_kind && payload.status !== "stopped") {
         setActiveJobKind(payload.job_kind);
       }
@@ -5392,6 +5397,7 @@ export default function MainApp() {
     let keepTurnBusy = false;
     setChatTurnBusy(true);
     setActiveJobKind(null);
+    setJobKindPending(false);
     setStatus("Thinking...");
     setError(null);
     appendMessage({
@@ -5475,6 +5481,7 @@ export default function MainApp() {
         assistantMessage.isProgress = true;
         assistantMessage.jobId = response.job_id;
         keepTurnBusy = true;
+        setJobKindPending(true);
         if (pendingSelection) {
           setPendingSelection(false);
         }
@@ -6121,7 +6128,7 @@ export default function MainApp() {
               >
                 <Send size={18} />
               </button>
-              {chatTurnInProgress && activeJobKind !== "preprocess" && (
+              {chatTurnInProgress && !jobKindPending && activeJobKind !== "preprocess" && (
                 <button
                   type="button"
                   className="stop-work-button"
