@@ -3910,7 +3910,7 @@ export default function MainApp() {
   );
 
   const handleMultiTrackExport = useCallback(async () => {
-    if (!sessionId || multiTrackExportProgress !== null) return;
+    if (!sessionId || multiTrackExportProgress !== null || chatTurnInProgressRef.current) return;
     setMultiTrackExportError(null);
     setError(null);
     if (isNoOpSingleTrackExport(multiTrackAudioTracks)) {
@@ -3940,6 +3940,7 @@ export default function MainApp() {
       ...multiTrackAnalyticsParams(multiTrackAudioTracks),
     });
     setMultiTrackExportProgress(0);
+    let exportMessageId: string | null = null;
     try {
       const response = await exportMix(
         sessionId,
@@ -3955,6 +3956,16 @@ export default function MainApp() {
         })),
         billingReferenceTrack.jobId
       );
+      exportMessageId = crypto.randomUUID();
+      appendMessage({
+        id: exportMessageId,
+        role: "assistant",
+        content: "Exporting mix…",
+        jobId: response.job_id,
+        isProgress: true,
+      });
+      setChatTurnBusy(true);
+      setActiveJobKind("export_mix");
       let latestProgress = 0;
       for (;;) {
         await wait(1200);
@@ -3965,7 +3976,24 @@ export default function MainApp() {
         }
         if (payload.status === "done" && payload.audio_url) {
           setMultiTrackExportProgress(1);
+          setMessages((current) => current.map((message) =>
+            message.id === exportMessageId
+              ? { ...message, content: appendProgressMessage(message.content, payload.message || "Mix ready."), isProgress: false }
+              : message
+          ));
           await downloadAudioUrl(payload.audio_url, "sightsinger-mix.wav");
+          break;
+        }
+        if (payload.status === "stopped") {
+          stoppedJobIdsRef.current.add(response.job_id);
+          const refunded = stopRefundsRef.current.get(response.job_id);
+          const stoppedMessage = `${payload.message || "Stopped."}${refunded ? ` Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.` : ""}`;
+          setMessages((current) => current.map((message) =>
+            message.id === exportMessageId
+              ? { ...message, content: appendProgressMessage(message.content, stoppedMessage), isProgress: false }
+              : message
+          ));
+          setSynthesisEstimateRevision((current) => current + 1);
           break;
         }
         if (payload.status === "error") {
@@ -3973,6 +4001,11 @@ export default function MainApp() {
         }
       }
     } catch (err) {
+      if (exportMessageId) {
+        setMessages((current) => current.map((message) =>
+          message.id === exportMessageId ? { ...message, isProgress: false } : message
+        ));
+      }
       const message = err instanceof Error ? err.message : "Export failed.";
       if (isInsufficientCreditError(message)) {
         openPaywall("insufficient_credits", message);
@@ -3982,6 +4015,7 @@ export default function MainApp() {
       setMultiTrackExportError(message);
     } finally {
       setMultiTrackExportProgress(null);
+      if (exportMessageId) setChatTurnBusy(false);
     }
   }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
