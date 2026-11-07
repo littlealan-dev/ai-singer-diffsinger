@@ -34,6 +34,7 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
   let stopRequests = 0;
   let chatRequests = 0;
   let progressRequests = 0;
+  let progressKind = scenario === "split" ? "preprocess" : "synthesis";
   let stopped = false;
   let uploadConflict = false;
   let releaseChat: () => void = () => {};
@@ -82,7 +83,7 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
     }
     if (url.pathname.endsWith("/progress")) {
       progressRequests += 1;
-      const kind = scenario === "split" ? "preprocess" : "synthesis";
+      const kind = progressKind;
       if (stopped && scenario === "take") {
         return json({ status: "stopped", job_id: JOB_ID, job_kind: kind, ...(uploadInitial ? { score_id: SCORE_ID } : {}), message: "Stopped." });
       }
@@ -112,7 +113,13 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
     await page.getByTestId("score-upload-input").setInputFiles({ name: "synthetic.xml", mimeType: "application/xml", buffer: xml });
     await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
   }
-  return { xml, stopRequests: () => stopRequests, progressRequests: () => progressRequests, setUploadConflict: () => { uploadConflict = true; } };
+  return {
+    xml,
+    stopRequests: () => stopRequests,
+    progressRequests: () => progressRequests,
+    advanceSplitToSynthesis: () => { progressKind = "synthesis"; },
+    setUploadConflict: () => { uploadConflict = true; },
+  };
 }
 
 async function sendSyntheticRequest(page: Page) {
@@ -160,6 +167,9 @@ test("a running split never shows Stop", async ({ page }) => {
   await sendSyntheticRequest(page);
   await expect.poll(backend.progressRequests).toBeGreaterThan(0);
   await expect(page.getByTestId("stop-work")).toHaveCount(0);
+  backend.advanceSplitToSynthesis();
+  await expect.poll(backend.progressRequests).toBeGreaterThan(1);
+  await expect(page.getByTestId("stop-work")).toBeVisible();
 });
 
 test("upload and demo controls stay disabled during work, and 409 appears in chat", async ({ page }) => {

@@ -3914,7 +3914,11 @@ export default function MainApp() {
   );
 
   const handleMultiTrackExport = useCallback(async () => {
-    if (!sessionId || multiTrackExportProgress !== null || chatTurnInProgressRef.current) return;
+    if (!sessionId || multiTrackExportProgress !== null) return;
+    if (chatTurnInProgressRef.current) {
+      setMultiTrackExportError("Stop the running work first");
+      return;
+    }
     setMultiTrackExportError(null);
     setError(null);
     if (isNoOpSingleTrackExport(multiTrackAudioTracks)) {
@@ -4513,13 +4517,16 @@ export default function MainApp() {
     setStopRequestInFlight(true);
     try {
       const response = await stopSessionWork(sessionId);
+      const stoppedInThisRequest = new Set(
+        response.jobs.filter((job) => job.result === "stopped").map((job) => job.jobId)
+      );
       for (const job of response.jobs) {
         if (job.result === "stopped") {
           stopRefundsRef.current.set(job.jobId, job.refundedCredits);
         }
       }
       setMessages((current) => current.map((message) => {
-        if (!message.jobId || !stoppedJobIdsRef.current.has(message.jobId)) return message;
+        if (!message.jobId || !stoppedInThisRequest.has(message.jobId) || !stoppedJobIdsRef.current.has(message.jobId)) return message;
         const refunded = stopRefundsRef.current.get(message.jobId);
         if (!refunded) return message;
         const refundMessage = `Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.`;
@@ -5438,14 +5445,13 @@ export default function MainApp() {
           "details" in response ? response.details : undefined
         ),
       };
-      if (response.type === "chat_text" && response.stopped) {
-        setPendingSelection(false);
-      } else if (response.type === "chat_text" && response.selection_resolved) {
+      if (response.type === "chat_text" && !response.stopped && response.selection_resolved) {
         // A quote already fixes the part and verse: no picker now or later,
         // and any picker shown earlier disappears.
         setPendingSelection(false);
       } else if (
         response.type === "chat_text" &&
+        !response.stopped &&
         pendingSelection &&
         !selectorShown &&
         !response.suppress_selector
