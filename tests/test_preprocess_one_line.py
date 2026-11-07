@@ -61,7 +61,7 @@ def test_one_line_bars_ask_the_lower_lane_once_and_its_directed_bars(tmp_path):
     assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
     default = next(slot for slot in sheet.slots if slot.kind == "unison_default")
     assert [option.option_id for option in default.options] == ["every_lane", "top_lane_only"]
-    assert default.evidence == {"one_line_bars": 3, "divided_bars": 2, "direction_bars": [4]}
+    assert default.evidence == {"one_line_bars": 3, "own_note_bars": 2, "direction_bars": [4]}
 
 
 @pytest.mark.parametrize(("lane_answer", "bar_answer", "lower"), [
@@ -158,6 +158,9 @@ def test_single_notes_in_the_split_voice_ask_the_lower_lane_once(tmp_path):
     asked = [(slot.kind, slot.start_measure, slot.lane_ids) for slot in sheet.slots
              if slot.kind in {"mode", "melody_source", "unison", "unison_default"}]
     assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
+    default = next(slot for slot in sheet.slots if slot.kind == "unison_default")
+    # Own notes only where voice 1 has a chord (bars 1 and 3), though the top lane owns all five bars.
+    assert default.evidence == {"one_line_bars": 3, "own_note_bars": 2, "direction_bars": [4]}
 
 
 @pytest.mark.parametrize(("lane_answer", "bar_answer", "lower"), [

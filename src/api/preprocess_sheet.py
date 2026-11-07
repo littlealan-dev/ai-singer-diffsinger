@@ -1235,7 +1235,7 @@ def _unison_default_slot(score: dict, sheet: Sheet, lane: Lane, one_line: list[S
     """Asked once for a lower lane: does it sing the staff's one line and unisons with the top lane?
 
     every_lane writes what the lane would get without the question, so a first-option plan is
-    unchanged; top_lane_only gives unisons in divided bars to the top lane as well.
+    unchanged; top_lane_only also gives the top lane the single notes in this lane's own-note bars.
     """
     staff = [segment for segment in sheet.segments
              if segment.part_index == lane.part_index and segment.scope_key == lane.scope_key]
@@ -1254,7 +1254,8 @@ def _unison_default_slot(score: dict, sheet: Sheet, lane: Lane, one_line: list[S
         Option("top_lane_only", "top_lane_only", top, {}, ()),
     ), evidence={
         "one_line_bars": bars(one_line),
-        "divided_bars": bars([segment for segment in staff if any(native for _, native in segment.signature.lanes)]),
+        # Own-note bars: the lane's voice gives it a note of its own (enough notes at once to reach it).
+        "own_note_bars": bars([segment for segment in staff if dict(segment.signature.lanes)[lane.lane_id]]),
         "direction_bars": sorted(measure for segment in one_line if segment.signature.annotation is not None
                                  for measure in range(segment.start_measure, segment.end_measure + 1)),
     })
