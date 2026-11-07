@@ -61,6 +61,8 @@ def test_one_line_bars_ask_the_lower_lane_once_and_its_directed_bars(tmp_path):
     assert asked == [("unison_default", 1, (lower.lane_id,)), ("unison", 4, (lower.lane_id,))]
     default = next(slot for slot in sheet.slots if slot.kind == "unison_default")
     assert [option.option_id for option in default.options] == ["every_lane", "top_lane_only"]
+    bar = next(slot for slot in sheet.slots if slot.kind == "unison")
+    assert [option.option_id for option in bar.options] == ["as_lane", "every_lane", "top_lane_only"]
     # Who sings the part is read from the part name and the score; no bar counts are given.
     assert default.evidence == {"direction_bars": [4]}
 
@@ -70,6 +72,9 @@ def test_one_line_bars_ask_the_lower_lane_once_and_its_directed_bars(tmp_path):
     ("top_lane_only", "top_lane_only", {1: [72], 2: [], 3: [77], 4: [], 5: []}),
     ("top_lane_only", "every_lane", {1: [72], 2: [], 3: [77], 4: [74], 5: []}),
     ("every_lane", "top_lane_only", {1: [72], 2: [76], 3: [77], 4: [], 5: [76]}),
+    # A marking about something else: the bar follows the lane.
+    ("every_lane", "as_lane", {1: [72], 2: [76], 3: [77], 4: [74], 5: [76]}),
+    ("top_lane_only", "as_lane", {1: [72], 2: [], 3: [77], 4: [], 5: []}),
 ])
 def test_the_lane_answer_decides_and_a_directed_bar_overrides_it(tmp_path, lane_answer, bar_answer, lower):
     score = _score(tmp_path)
@@ -168,6 +173,9 @@ def test_single_notes_in_the_split_voice_ask_the_lower_lane_once(tmp_path):
     ("top_lane_only", "top_lane_only", {1: [72], 2: [], 3: [77], 4: [], 5: []}),
     ("top_lane_only", "every_lane", {1: [72], 2: [], 3: [77], 4: [74], 5: []}),
     ("every_lane", "top_lane_only", {1: [72], 2: [76], 3: [77], 4: [], 5: [76]}),
+    # A marking about something else: the bar follows the lane.
+    ("every_lane", "as_lane", {1: [72], 2: [76], 3: [77], 4: [74], 5: [76]}),
+    ("top_lane_only", "as_lane", {1: [72], 2: [], 3: [77], 4: [], 5: []}),
 ])
 def test_in_the_split_voice_the_lane_answer_decides_through_the_lane_field(tmp_path, lane_answer, bar_answer, lower):
     score = _split_score(tmp_path)

@@ -5687,20 +5687,47 @@ def _has_non_default_sibling_voice_parts(score: Dict[str, Any], part_index: int)
 
 
 def _hidden_derived_part_identifiers(score: Dict[str, Any]) -> Dict[str, set[str]]:
+    """Identify helper lanes: a staff's shared line while that staff has other voices.
+
+    Every lane made by a transform has a record, so a part with a record is a
+    helper only if its record says so (``recorded_part_ids`` vs ``part_ids``).
+    Names and voice-part labels are kept for parts without a record (older
+    sessions): a name built from the part name is the same on every staff of
+    a two-staff part, so it can't tell a helper from a real lane.
+    """
     part_ids: set[str] = set()
+    recorded_part_ids: set[str] = set()
     part_names: set[str] = set()
     voice_part_ids: set[str] = set()
+    hidden_lanes: set[tuple[int, str]] = set()
+    for part_index, part in enumerate(score.get("parts") or []):
+        analysis = _analyze_part_voice_parts(part, part_index)
+        for voice_part in analysis.get("voice_parts") or []:
+            voice_part_id = str(voice_part.get("voice_part_id") or "").strip()
+            if voice_part_id and _is_hidden_default_lane(
+                score=score,
+                part_index=part_index,
+                target_voice_part_id=voice_part_id,
+            ):
+                hidden_lanes.add((part_index, voice_part_id))
+
     transforms = score.get("voice_part_transforms")
     if isinstance(transforms, dict):
         for value in transforms.values():
             if not isinstance(value, dict):
                 continue
             appended_ref = value.get("appended_part_ref")
-            if not isinstance(appended_ref, dict) or not bool(
-                appended_ref.get("hidden_default_lane")
-            ):
+            if not isinstance(appended_ref, dict):
                 continue
             part_id = str(appended_ref.get("part_id") or "").strip()
+            if part_id:
+                recorded_part_ids.add(part_id)
+            try:
+                lane = (int(value.get("part_index")), str(value.get("target_voice_part_id") or "").strip())
+            except (TypeError, ValueError):
+                lane = None
+            if not bool(appended_ref.get("hidden_default_lane")) and lane not in hidden_lanes:
+                continue
             part_name = str(appended_ref.get("part_name") or "").strip()
             if part_id:
                 part_ids.add(part_id)
@@ -5710,32 +5737,37 @@ def _hidden_derived_part_identifiers(score: Dict[str, Any]) -> Dict[str, set[str
             if target_voice_part_id:
                 voice_part_ids.add(target_voice_part_id)
 
-    for part_index, part in enumerate(score.get("parts") or []):
-        analysis = _analyze_part_voice_parts(part, part_index)
-        for voice_part in analysis.get("voice_parts") or []:
-            voice_part_id = str(voice_part.get("voice_part_id") or "").strip()
-            if not voice_part_id:
-                continue
-            if not _is_hidden_default_lane(
+    for part_index, voice_part_id in hidden_lanes:
+        voice_part_ids.add(voice_part_id)
+        part_names.add(
+            _build_derived_part_name(
                 score=score,
                 part_index=part_index,
                 target_voice_part_id=voice_part_id,
-            ):
-                continue
-            voice_part_ids.add(voice_part_id)
-            part_names.add(
-                _build_derived_part_name(
-                    score=score,
-                    part_index=part_index,
-                    target_voice_part_id=voice_part_id,
-                )
             )
+        )
 
     return {
         "part_ids": part_ids,
+        "recorded_part_ids": recorded_part_ids,
         "part_names": part_names,
         "voice_part_ids": voice_part_ids,
     }
+
+
+def _matches_hidden_derived_part(
+    part_id: str, part_name: str, hidden_derived_parts: Dict[str, set[str]]
+) -> bool:
+    if part_id and part_id in hidden_derived_parts.get("recorded_part_ids", set()):
+        return part_id in hidden_derived_parts.get("part_ids", set())
+    return (
+        part_id in hidden_derived_parts.get("part_ids", set())
+        or part_name in hidden_derived_parts.get("part_names", set())
+        or _part_name_matches_hidden_voice_part_id(
+            part_name,
+            hidden_derived_parts.get("voice_part_ids", set()),
+        )
+    )
 
 
 def _cleanup_hidden_derived_outputs(
@@ -5750,7 +5782,7 @@ def _cleanup_hidden_derived_outputs(
         _hidden_derived_part_identifiers(source_score or {}),
         _hidden_derived_part_identifiers(result_score if isinstance(result_score, dict) else {}),
     )
-    if not any(hidden.values()):
+    if not any(values for key, values in hidden.items() if key != "recorded_part_ids"):
         return cleaned
 
     if isinstance(result_score, dict):
@@ -5768,6 +5800,7 @@ def _merge_hidden_derived_identifiers(
 ) -> Dict[str, set[str]]:
     merged: Dict[str, set[str]] = {
         "part_ids": set(),
+        "recorded_part_ids": set(),
         "part_names": set(),
         "voice_part_ids": set(),
     }
@@ -5790,21 +5823,15 @@ def _remove_hidden_derived_parts_from_score(
     parts = score.get("parts")
     if not isinstance(parts, list):
         return
-    hidden_ids = hidden_derived_parts.get("part_ids", set())
-    hidden_names = hidden_derived_parts.get("part_names", set())
-    hidden_voice_part_ids = hidden_derived_parts.get("voice_part_ids", set())
     score["parts"] = [
         part
         for part in parts
         if not (
             isinstance(part, dict)
-            and (
-                str(part.get("part_id") or "").strip() in hidden_ids
-                or str(part.get("part_name") or "").strip() in hidden_names
-                or _part_name_matches_hidden_voice_part_id(
-                    str(part.get("part_name") or ""),
-                    hidden_voice_part_ids,
-                )
+            and _matches_hidden_derived_part(
+                str(part.get("part_id") or "").strip(),
+                str(part.get("part_name") or "").strip(),
+                hidden_derived_parts,
             )
         )
     ]
@@ -5855,15 +5882,10 @@ def _appended_ref_matches_hidden(
 ) -> bool:
     if bool(appended_ref.get("hidden_default_lane")):
         return True
-    part_id = str(appended_ref.get("part_id") or "").strip()
-    part_name = str(appended_ref.get("part_name") or "").strip()
-    return (
-        part_id in hidden_derived_parts.get("part_ids", set())
-        or part_name in hidden_derived_parts.get("part_names", set())
-        or _part_name_matches_hidden_voice_part_id(
-            part_name,
-            hidden_derived_parts.get("voice_part_ids", set()),
-        )
+    return _matches_hidden_derived_part(
+        str(appended_ref.get("part_id") or "").strip(),
+        str(appended_ref.get("part_name") or "").strip(),
+        hidden_derived_parts,
     )
 
 
@@ -6054,26 +6076,20 @@ def _remove_hidden_derived_parts_from_musicxml(
     if not hidden_ids and not hidden_names and not hidden_voice_part_ids:
         return
 
+    removed_ids: set[str] = set()
     part_list = root.find(q("part-list"))
     if part_list is not None:
         for score_part in list(part_list.findall(q("score-part"))):
             part_id = str(score_part.get("id") or "").strip()
             part_name = str(score_part.findtext(q("part-name")) or "").strip()
-            if (
-                part_id in hidden_ids
-                or part_name in hidden_names
-                or _part_name_matches_hidden_voice_part_id(
-                    part_name,
-                    hidden_voice_part_ids,
-                )
-            ):
+            if _matches_hidden_derived_part(part_id, part_name, hidden_derived_parts):
                 if part_id:
-                    hidden_ids.add(part_id)
+                    removed_ids.add(part_id)
                 part_list.remove(score_part)
 
     for part_node in list(root.findall(q("part"))):
         part_id = str(part_node.get("id") or "").strip()
-        if part_id in hidden_ids:
+        if part_id in removed_ids or _matches_hidden_derived_part(part_id, "", hidden_derived_parts):
             root.remove(part_node)
 
 

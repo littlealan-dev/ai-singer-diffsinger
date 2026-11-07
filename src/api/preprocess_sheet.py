@@ -1498,15 +1498,16 @@ def build_sheet(
                 )))
             if one_line and lane.default_rank != top_rank:
                 if segment.signature.annotation is not None:
-                    # A direction here ("Solo", "Tutti") may override the lane's unison default.
+                    # A direction here ("Solo", "Tutti") may override the lane's unison default;
+                    # as_lane (a marking about something else) leaves it to the one_line marker.
                     segment_slots.append(_choice_slot((lane.lane_id,), segment, "unison", (
+                        Option("as_lane", "as_lane", {}, {}, ()),
                         Option("every_lane", "every_lane", {"mode": "derive"}, {}, ()),
                         Option("top_lane_only", "top_lane_only", {"mode": "rest"}, {}, ()),
                     ), evidence={"one_line_bars": list(range(segment.start_measure, segment.end_measure + 1))}))
-                else:
-                    segment_slots.append(_choice_slot((lane.lane_id,), segment, "one_line", (
-                        Option("lane_default", "lane_default", {}, {}, ()),
-                    )))
+                segment_slots.append(_choice_slot((lane.lane_id,), segment, "one_line", (
+                    Option("lane_default", "lane_default", {}, {}, ()),
+                )))
                 segment_one_line.append(lane.lane_id)
             if not melody:
                 continue
@@ -1728,6 +1729,7 @@ def build_sheet(
                         beats = _single_note_beats(score, segment, lane, default_melody, target_notes)
                 if beats:
                     segment_slots.append(_choice_slot((lane.lane_id,), segment, "unison", (
+                        Option("as_lane", "as_lane", {}, {}, ()),
                         Option("every_lane", "every_lane", {}, {}, ()),
                         Option("top_lane_only", "top_lane_only",
                                {"split_shared_note_policy": "assign_primary_only"}, {}, ()),

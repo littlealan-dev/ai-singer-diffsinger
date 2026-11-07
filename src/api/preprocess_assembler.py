@@ -253,7 +253,8 @@ def _action_for_measure(
     else:
         fields["decision_type"] = "COPY_UNISON_SECTION"
         fields["method"] = "trivial"
-    bar = next((option for kind, option in covered if kind == "unison"), None)
+    # as_lane: the bar's marking is about something else, so the lane's answer applies.
+    bar = next((option for kind, option in covered if kind == "unison" and option.option_id != "as_lane"), None)
     if fields["method"] != "ranked":
         # A unison answer only applies where the lane splits chords by rank.
         fields.pop("split_shared_note_policy", None)

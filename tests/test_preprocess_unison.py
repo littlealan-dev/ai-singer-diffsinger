@@ -57,7 +57,7 @@ def test_unison_is_asked_only_for_a_lower_lane_under_a_direction(tmp_path):
     unison = [slot for slot in sheet.slots if slot.kind == "unison"]
     # Bar 3's single E has no marking, and the top lane always sings a single note.
     assert [(slot.start_measure, slot.lane_ids) for slot in unison] == [(2, (_lower(sheet).lane_id,))]
-    assert [option.option_id for option in unison[0].options] == ["every_lane", "top_lane_only"]
+    assert [option.option_id for option in unison[0].options] == ["as_lane", "every_lane", "top_lane_only"]
     assert unison[0].evidence == {"single_note_bars": [2]}
 
 
