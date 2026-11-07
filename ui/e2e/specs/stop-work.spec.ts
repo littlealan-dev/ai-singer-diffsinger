@@ -29,10 +29,11 @@ function silentWav(): Buffer {
   return Buffer.concat([header, Buffer.alloc(dataBytes)]);
 }
 
-async function mockBackend(page: Page, scenario: Scenario) {
+async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true) {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   let stopRequests = 0;
   let chatRequests = 0;
+  let progressRequests = 0;
   let stopped = false;
   let uploadConflict = false;
   let releaseChat: () => void = () => {};
@@ -80,9 +81,10 @@ async function mockBackend(page: Page, scenario: Scenario) {
       return json({ type: "chat_progress", message: "Preparing synthetic work.", job_id: JOB_ID, progress_url: PROGRESS_URL });
     }
     if (url.pathname.endsWith("/progress")) {
+      progressRequests += 1;
       const kind = scenario === "split" ? "preprocess" : "synthesis";
       if (stopped && scenario === "take") {
-        return json({ status: "stopped", job_id: JOB_ID, job_kind: kind, score_id: SCORE_ID, message: "Stopped." });
+        return json({ status: "stopped", job_id: JOB_ID, job_kind: kind, ...(uploadInitial ? { score_id: SCORE_ID } : {}), message: "Stopped." });
       }
       if (stopped && scenario === "too-late") {
         return json({
@@ -93,7 +95,7 @@ async function mockBackend(page: Page, scenario: Scenario) {
           actual_duration_seconds: 0.5,
         });
       }
-      return json({ status: "running", job_id: JOB_ID, job_kind: kind, score_id: SCORE_ID, message: "Working on synthetic data.", progress: 0.3 });
+      return json({ status: "running", job_id: JOB_ID, job_kind: kind, ...(uploadInitial ? { score_id: SCORE_ID } : {}), message: "Working on synthetic data.", progress: 0.3 });
     }
     if (url.pathname.endsWith("/audio")) {
       return route.fulfill({ contentType: "audio/wav", body: silentWav() });
@@ -106,9 +108,11 @@ async function mockBackend(page: Page, scenario: Scenario) {
   const declineCookies = page.getByRole("button", { name: "Decline" });
   await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
   if (await declineCookies.isVisible()) await declineCookies.click();
-  await page.getByTestId("score-upload-input").setInputFiles({ name: "synthetic.xml", mimeType: "application/xml", buffer: xml });
-  await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
-  return { xml, stopRequests: () => stopRequests, setUploadConflict: () => { uploadConflict = true; } };
+  if (uploadInitial) {
+    await page.getByTestId("score-upload-input").setInputFiles({ name: "synthetic.xml", mimeType: "application/xml", buffer: xml });
+    await expect(page.getByTestId("score-preview-surface").locator("svg")).toBeVisible();
+  }
+  return { xml, stopRequests: () => stopRequests, progressRequests: () => progressRequests, setUploadConflict: () => { uploadConflict = true; } };
 }
 
 async function sendSyntheticRequest(page: Page) {
@@ -152,19 +156,17 @@ test("Too late to stop shows a notice and lets the take finish", async ({ page }
 });
 
 test("a running split never shows Stop", async ({ page }) => {
-  await mockBackend(page, "split");
+  const backend = await mockBackend(page, "split");
   await sendSyntheticRequest(page);
-  await expect(page.getByTestId("chat-stream")).toContainText("Working on synthetic data.");
+  await expect.poll(backend.progressRequests).toBeGreaterThan(0);
   await expect(page.getByTestId("stop-work")).toHaveCount(0);
 });
 
 test("upload and demo controls stay disabled during work, and 409 appears in chat", async ({ page }) => {
-  const backend = await mockBackend(page, "take");
-  await page.getByRole("button", { name: "Add a score" }).click();
+  const backend = await mockBackend(page, "take", false);
   await sendSyntheticRequest(page);
   await expect(page.getByRole("button", { name: "Add a score" })).toBeDisabled();
-  await expect(page.getByRole("menuitem", { name: /Upload MusicXML/ })).toBeDisabled();
-  await expect(page.getByRole("menuitem", { name: /Amazing Grace/ })).toBeDisabled();
+  await expect(page.locator(".demo-song-card").first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "Add a score" })).toHaveAttribute("title", "Stop the running work first");
   await expect(page.getByTestId("score-upload-input")).toBeDisabled();
   await page.getByTestId("stop-work").click();
