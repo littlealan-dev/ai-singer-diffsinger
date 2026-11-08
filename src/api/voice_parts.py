@@ -2038,6 +2038,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                 if (
                     section.get("lyric_strategy") != "staff_line"
+                    and "lyric_source_line" not in section
                     and isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
                     and lyric_source_voice_part_id
@@ -2145,6 +2146,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                 if (
                     section.get("lyric_strategy") != "staff_line"
+                    and "lyric_source_line" not in section
                     and isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
                     and lyric_source_voice_part_id
@@ -3342,6 +3344,7 @@ def _execute_timeline_sections(
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
+                source_line = section.get("lyric_source_line")
                 line_voice: Optional[str] = None
                 own_voice_exception = False
                 if (
@@ -3374,7 +3377,6 @@ def _execute_timeline_sections(
                         source_voice_parts,
                         str(lyric_source["voice_part_id"]),
                     )
-                    source_line = section.get("lyric_source_line")
                     if isinstance(source_line, dict) and source_line["voice_part_id"] is not None:
                         line_meta = _find_voice_part_by_id(
                             source_voice_parts, source_line["voice_part_id"]
@@ -3392,6 +3394,16 @@ def _execute_timeline_sections(
                         [note for note in source_part.get("notes") or []
                          if _is_countable_sung_note(note) and _staff_scope_key(note) in staves]
                         if source_meta is not None else None
+                    )
+                elif isinstance(source_line, dict) and isinstance(source_line.get("staff"), str):
+                    override_source_notes = _resolve_staff_lyric_source_notes(
+                        source_score,
+                        source_part_index=int(lyric_source["part_index"]),
+                        staff=source_line["staff"],
+                        source_voice_part_id=source_line.get("voice_part_id"),
+                        verse_number=verse_number,
+                        copy_all_verses=copy_all_verses,
+                        measure_range=(start_measure, end_measure),
                     )
                 else:
                     override_source_notes = _resolve_source_notes(
@@ -5086,6 +5098,53 @@ def _propagate_lyrics(
         "dropped_source_lyrics": dropped_source_lyrics,
     }
     return out, diagnostics
+
+
+def _resolve_staff_lyric_source_notes(
+    score: Dict[str, Any],
+    *,
+    source_part_index: int,
+    staff: str,
+    source_voice_part_id: Optional[str],
+    verse_number: Optional[str],
+    copy_all_verses: bool,
+    measure_range: Tuple[int, int],
+) -> Optional[List[Dict[str, Any]]]:
+    """Read one word per beat from a named donor staff, optionally by voice."""
+    parts = score.get("parts") or []
+    if not 0 <= source_part_index < len(parts):
+        return None
+    source_part = parts[source_part_index]
+    source_voice: Optional[str] = None
+    if source_voice_part_id is not None:
+        voice_parts = _analyze_part_voice_parts(source_part, source_part_index)["voice_parts"]
+        source_meta = _find_voice_part_by_id(voice_parts, source_voice_part_id)
+        if source_meta is None:
+            return None
+        source_voice = str(source_meta["source_voice_id"])
+
+    selected: List[Dict[str, Any]] = []
+    seen_onsets: set[float] = set()
+    for note in source_part.get("notes") or []:
+        if (
+            not _is_countable_sung_note(note)
+            or _staff_scope_key(note) != staff
+            or (source_voice is not None and _voice_key(note.get("voice")) != source_voice)
+            or _lyric_kind(note) != "word"
+            or _is_generated_solfege_lyric(note)
+            or not _lyric_matches_requested_verse(
+                str(note["lyric"]),
+                verse_number=verse_number,
+                copy_all_verses=copy_all_verses,
+            )
+            or not _note_in_measure_range(note, measure_range)
+        ):
+            continue
+        onset = round(float(note.get("offset_beats") or 0.0), 6)
+        if onset not in seen_onsets:
+            seen_onsets.add(onset)
+            selected.append(note)
+    return selected
 
 
 def _resolve_source_notes(

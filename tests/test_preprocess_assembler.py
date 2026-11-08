@@ -11,7 +11,10 @@ import pytest
 from src.api import parse_score
 from src.api import preprocess_assembler as assembler
 from src.api.preprocess_sheet import build_sheet, lyric_bar_cases, staff_lyric_lines
-from src.api.voice_parts import _propagate_lyrics, parse_voice_part_plan, preprocess_voice_parts
+from src.api.voice_parts import (
+    _propagate_lyrics, _resolve_staff_lyric_source_notes, parse_voice_part_plan,
+    preprocess_voice_parts,
+)
 from src.mcp.tools import _PREPROCESS_PLAN_REQUEST_SCHEMA
 from tests.test_preprocess_sheet import SATB, _chord_score, _parse_inline, _silence_voice_in_bar, _two_staff_score
 
@@ -31,6 +34,46 @@ def _shared_line_score(tmp_path):
 <type>half</type><lyric><text>second</text></lyric></note>
 </measure></part></score-partwise>'''
     return _parse_inline(tmp_path, xml)
+
+
+def test_borrowed_staff_line_reads_both_voice_words_across_parts(tmp_path):
+    score = _shared_line_score(tmp_path)
+    recipient = deepcopy(score["parts"][0])
+    recipient["part_id"] = "P2"
+    for note in recipient["notes"]:
+        note["lyric"] = None
+        note["lyric_is_extended"] = False
+    score["parts"].append(recipient)
+
+    sheet = _sheet(score, "P2")
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    assert all(
+        section["lyric_source_line"] == {"staff": "1", "voice_part_id": None}
+        for target in plan["targets"] for section in target["sections"]
+    )
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    for target in result["targets"]:
+        notes = result["score"]["parts"][target["appended_part_ref"]["part_index"]]["notes"]
+        assert [note.get("lyric") for note in notes if note.get("lyric")] == ["first", "second"]
+
+
+def test_borrowed_staff_line_deduplicates_chords_and_can_select_voice(tmp_path):
+    score = _shared_line_score(tmp_path)
+    first_word = next(note for note in score["parts"][0]["notes"]
+                      if note.get("lyric") == "first")
+    chord_tone = dict(first_word, pitch_midi=first_word["pitch_midi"] + 4)
+    score["parts"][0]["notes"].append(chord_tone)
+    arguments = dict(source_part_index=0, staff="1", verse_number=None,
+                     copy_all_verses=False, measure_range=(1, 1))
+    whole_line = _resolve_staff_lyric_source_notes(
+        score, source_voice_part_id=None, **arguments
+    )
+    voice_line = _resolve_staff_lyric_source_notes(
+        score, source_voice_part_id="voice part 1", **arguments
+    )
+    assert [note["lyric"] for note in whole_line] == ["first", "second"]
+    assert [note["lyric"] for note in voice_line] == ["first"]
 
 
 def test_shared_staff_line_plan_executes_without_quality_failure(tmp_path):
