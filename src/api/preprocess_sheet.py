@@ -181,6 +181,12 @@ def line_voice_for_staff(
     return None
 
 
+def clash_bars(line: StaffLyricLine) -> set[int]:
+    """Bars where different words start at the same beat on this staff."""
+    return {bar for (bar, _), entries in line.words.items()
+            if len({text.casefold() for _, text in entries}) > 1}
+
+
 def read_lane_lyrics(
     line: StaffLyricLine, notes: list[dict], line_voice: str | None = None,
 ) -> list[str | None]:
@@ -1560,8 +1566,15 @@ def build_sheet(
                     case_key = (staff[0], staff[1], default_melody["voice_part_id"], only)
                     if case_key not in case_cache:
                         case_cache[case_key] = lyric_bar_cases(score, lines, *case_key)
-                    cases = case_cache[case_key]
-                    for bar, case in cases.items():
+                    whole_key = (staff[0], staff[1], default_melody["voice_part_id"], None)
+                    if whole_key not in case_cache:
+                        case_cache[whole_key] = lyric_bar_cases(score, lines, *whole_key)
+                    clashes = clash_bars(lines[staff])
+                    for bar in case_cache[whole_key].keys() | case_cache[case_key].keys():
+                        case = (case_cache[case_key] if bar in clashes
+                                else case_cache[whole_key]).get(bar)
+                        if case is None:
+                            continue
                         if (segment.start_measure <= bar <= segment.end_measure
                                 and case.case == "ambiguous"):
                             ambiguous[str(bar)] = list(case.reasons)
