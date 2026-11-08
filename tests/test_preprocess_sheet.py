@@ -551,7 +551,9 @@ def test_native_lyricless_voice_uses_eligible_voice_on_same_staff(tmp_path):
     assert not _lyric_slot_kinds(sheet, lane)
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     target = plan["targets"][sheet.lanes.index(lane)]
-    assert {section["lyric_source"]["voice_part_id"] for section in target["sections"]} == {"voice part 1"}
+    assert {section["lyric_source"]["voice_part_id"] for section in target["sections"]} == {"voice part 2"}
+    assert all(section["lyric_source_line"] == {"staff": None, "voice_part_id": None}
+               for section in target["sections"])
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert result.get("action") != "invalid_section_source"
     assert score == original
@@ -1218,8 +1220,9 @@ def test_shared_line_with_extra_notes_is_read_by_code(tmp_path):
     assert _sung(result, 1) == ["Glo", "in", "ex", "cel", "sis"]
     bar_two = next(section for section in plan["targets"][0]["sections"]
                    if section["start_measure"] <= 2 <= section["end_measure"])
-    assert bar_two["lyric_source"]["voice_part_id"] == "voice part 2"
-    assert (bar_two["lyric_policy"], bar_two["lyric_strategy"]) == ("replace_all", "strict_onset")
+    assert bar_two["lyric_source"]["voice_part_id"] == "voice part 1"
+    assert (bar_two["lyric_policy"], bar_two["lyric_strategy"]) == ("replace_all", "staff_line")
+    assert bar_two["lyric_source_line"] == {"staff": None, "voice_part_id": None}
     assert score == original
     assert asdict(sheet) == asdict(build_sheet(score, context))
     assert json.dumps(asdict(sheet), sort_keys=True)

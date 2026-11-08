@@ -414,6 +414,8 @@ def test_lyric_reading_check_counts_mismatches_and_gates_runs_clean(tmp_path, mo
             for section in plan["targets"][0]["sections"]:
                 if section["start_measure"] <= 2 <= section["end_measure"]:
                     section["lyric_strategy"] = "overlap_best_match"
+                    section.pop("lyric_source_line", None)
+                    section["lyric_source"]["voice_part_id"] = "voice part 2"
         return plan
 
     monkeypatch.setattr(proof, "assemble_plan", assemble)

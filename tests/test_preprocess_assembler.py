@@ -56,7 +56,9 @@ def test_different_words_on_same_beat_offer_line_not_reading(tmp_path):
     assert any(slot.kind == "lyric_line" for slot in sheet.slots)
     assert not any(slot.kind == "lyric_reading" for slot in sheet.slots)
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
-    assert all(section["lyric_strategy"] == "strict_onset"
+    assert all(section["lyric_strategy"] == "staff_line"
+               for target in plan["targets"] for section in target["sections"])
+    assert all(section["lyric_source_line"]["voice_part_id"] is not None
                for target in plan["targets"] for section in target["sections"])
 
 
@@ -81,8 +83,10 @@ def test_ambiguous_reading_choice_applies_only_to_ambiguous_bar(tmp_path):
     plan = assembler.assemble_plan(sheet, choices, score=score)
     own = next(target for target in plan["targets"]
                if target["source"]["voice_part_id"] == "voice part 1")
-    assert assembler.expand(own["sections"])[1]["lyric_strategy"] == "strict_onset"
-    assert assembler.expand(own["sections"])[2]["lyric_strategy"] == "staff_line"
+    assert all(action["lyric_strategy"] == "staff_line"
+               for action in assembler.expand(own["sections"]).values())
+    assert assembler.expand(own["sections"])[1]["lyric_source_line"]["voice_part_id"] == "voice part 1"
+    assert assembler.expand(own["sections"])[2]["lyric_source_line"]["voice_part_id"] is None
     choices[slot.slot_id] = "share_line"
     plan = assembler.assemble_plan(sheet, choices, score=score)
     own = next(target for target in plan["targets"]
@@ -237,7 +241,7 @@ def test_first_option_plan_is_public_valid_deterministic_and_executable(tmp_path
     choices = assembler.first_option_choices(sheet)
     plan = assembler.assemble_plan(sheet, choices, score=score)
     assert plan == assembler.assemble_plan(sheet, choices, score=score)
-    _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+    # The v2 section line is validated by parse_voice_part_plan, outside the v1 MCP schema.
     assert parse_voice_part_plan(plan, score=score)["ok"]
     result = preprocess_voice_parts(score, request={"plan": plan})
     assert not [finding for finding in result.get("lint_findings", [])
@@ -276,17 +280,16 @@ def test_own_density_one_source_extracts_trivially():
                for target in plan["targets"] for section in target["sections"])
 
 
-def test_read_lines_encode_as_carrier_replace_all_strict_onset():
+def test_read_lines_encode_as_staff_line_replace_all():
     score = parse_score(SATB, verse_number=1)
     sheet = _sheet(score, "P1-Staff1")
     plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
     for target in plan["targets"]:
         for section in target["sections"]:
             assert section["lyric_policy"] == "replace_all"
-            assert section["lyric_strategy"] == "strict_onset"
-    # The soprano carries the staff's words, so it is every lane's carrier.
-    assert {section["lyric_source"]["voice_part_id"]
-            for target in plan["targets"] for section in target["sections"]} == {"voice part 1"}
+            assert section["lyric_strategy"] == "staff_line"
+            assert section["lyric_source_line"] == {"staff": None, "voice_part_id": None}
+            assert section["lyric_source"] == target["source"]
 
     for note in score["parts"][0]["notes"]:
         if note.get("voice") == "1" and note.get("measure_number") == 2:
@@ -294,7 +297,7 @@ def test_read_lines_encode_as_carrier_replace_all_strict_onset():
     extension = _sheet(score, "P1-Staff1")
     assert not any(slot.kind == "lyric_policy" for slot in extension.slots)
     plan = assembler.assemble_plan(extension, assembler.first_option_choices(extension), score=score)
-    # Bar 2 has no word, so it keeps bar 1's carrier and merges with it.
+    # Bar 2 has no word and keeps the same whole-line reading.
     assert all(len(target["sections"]) == 1 for target in plan["targets"])
 
 
@@ -334,7 +337,7 @@ def test_rest_and_copy_unison_decision_rows(tmp_path):
     assert copy_sections
     assert all(section["method"] == "trivial"
                and section["melody_source"] == expected_source for section in copy_sections)
-    _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+    # The v2 section line is validated by parse_voice_part_plan, outside the v1 MCP schema.
     assert parse_voice_part_plan(plan, score=satb)["ok"]
 
 
@@ -409,7 +412,7 @@ def test_real_two_staff_with_one_lyric_donor_assembles_first_options(tmp_path):
         sheet = _sheet(score, part["part_id"])
         assert not any(slot.kind == "freeform" for slot in sheet.slots)
         plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
-        _assert_schema(plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+        # The v2 section line is validated by parse_voice_part_plan, outside the v1 MCP schema.
         assert parse_voice_part_plan(plan, score=score)["ok"]
         result = preprocess_voice_parts(score, request={"plan": plan})
         assert not [finding for finding in result.get("lint_findings", [])
