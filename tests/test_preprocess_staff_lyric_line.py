@@ -59,6 +59,8 @@ def _build(score: dict, choices: dict | None = None, *, dedupe_cross_staff: bool
                     selected[slot.slot_id] = answer
     plan = assemble_plan(sheet, selected, score=score)
     if dedupe_cross_staff:
+        # The parser splits staves; the hand-merged fixture makes duplicate
+        # targets that complete-split lane-count lint rejects for non-lyric reasons.
         targets_by_voice = {}
         for target in plan["targets"]:
             targets_by_voice.setdefault(target["source"]["voice_part_id"], target)
