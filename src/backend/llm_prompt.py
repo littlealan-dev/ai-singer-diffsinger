@@ -82,6 +82,7 @@ def _default_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
         "requested_verse_number",
         "has_multi_voice_parts",
         "has_missing_lyric_voice_parts",
+        "has_lyric_sources",
     )
     part_fields = (
         "part_index",
