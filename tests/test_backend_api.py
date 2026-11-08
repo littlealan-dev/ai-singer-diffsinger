@@ -9012,6 +9012,49 @@ def test_chat_reparse_allows_direct_synthesis_same_turn(client):
     assert body["message"] == "Singing verse 2 now."
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_message"),
+    [
+        (None, "Original model reply"),
+        ("Followup failed", "Followup failed"),
+    ],
+)
+def test_verse_selection_followup_uses_model_or_error_only(client, monkeypatch, error, expected_message):
+    _, app = client
+    captured = {}
+
+    async def fake_followup(*args, **kwargs):
+        captured.update(kwargs)
+        return None, error
+
+    monkeypatch.setattr(
+        app.state.orchestrator,
+        "_decide_message_only_followup_with_llm",
+        fake_followup,
+    )
+    message = asyncio.run(
+        app.state.orchestrator._verse_selection_followup_message(
+            {},
+            {},
+            {"message": "Select a verse before reparsing, preparing the part, or synthesis."},
+            default_message="Original model reply",
+            session_id="",
+            user_id="",
+            user_email="",
+            current_credit_availability=None,
+            selected_voicebank_id=None,
+            selected_language=None,
+            expand_repeats=False,
+        )
+    )
+    assert message == expected_message
+    assert captured["instructions"] == (
+        "No tool ran: this score has several verses and none was chosen. "
+        "Ask the user which verse to sing, naming the available verses. "
+        "Return no tool calls."
+    )
+
+
 def test_chat_blocks_preprocess_without_explicit_verse_for_multiverse_score(client):
     test_client, app = client
     session_id = _create_session(test_client)

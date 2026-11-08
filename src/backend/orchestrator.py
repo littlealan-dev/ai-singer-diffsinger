@@ -637,6 +637,7 @@ class Orchestrator:
                             snapshot,
                             current_score["score"],
                             action_required,
+                            default_message=response_message,
                             session_id=session_id,
                             user_id=user_id,
                             user_email=user_email,
@@ -3407,6 +3408,7 @@ class Orchestrator:
                         latest_snapshot,
                         working_score,
                         action_required,
+                        default_message=response_message,
                         session_id=session_id,
                         user_id=user_id,
                         user_email=user_email,
@@ -5471,6 +5473,7 @@ class Orchestrator:
         score: Dict[str, Any],
         action_required: Dict[str, Any],
         *,
+        default_message: str,
         session_id: str,
         user_id: str,
         user_email: str,
@@ -5492,15 +5495,14 @@ class Orchestrator:
             selected_language=selected_language,
             expand_repeats=expand_repeats,
             instructions=(
-                "The attempted action is blocked until the user chooses a verse. "
-                "Ask which of the available verses they want to sing. "
-                "Return only a conversational question; do not call tools or "
-                "claim that preparation or synthesis has started."
+                "No tool ran: this score has several verses and none was chosen. "
+                "Ask the user which verse to sing, naming the available verses. "
+                "Return no tool calls."
             ),
         )
         if followup is not None and followup.final_message:
             return self._format_followup_message_text(followup.final_message)
-        return error or str(action_required["message"])
+        return error or default_message
 
     def _build_verse_selection_required_action(
         self,
