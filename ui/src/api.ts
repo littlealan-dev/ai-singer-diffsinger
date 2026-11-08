@@ -70,12 +70,6 @@ export type ScoreSummary = {
   selected_verse_number?: string | number | null;
 };
 
-export type ChatSelection = {
-  verse_number?: string | number;
-  part_index?: number;
-  part_id?: string;
-};
-
 export type VoicebankOption = {
   id: string;
   name: string;
@@ -124,9 +118,6 @@ export type ChatResponse =
       message: string;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
-      suppress_selector?: boolean;
-      /** The turn produced a quote, which fixes the part and lyric line. */
-      selection_resolved?: boolean;
       /** The repeat order this turn's quote used, when chat changed it; the With Repeats switch adopts it. */
       expand_repeats?: boolean;
       details?: unknown;
@@ -813,21 +804,16 @@ export async function fetchVoicebanks(): Promise<VoicebankOption[]> {
 export async function chat(
   sessionId: string,
   message: string,
-  selection?: ChatSelection,
   selectedVoicebankId?: string | null,
   expandRepeats = true,
   scorePlayerTakes: ScorePlayerTake[] = []
 ): Promise<ChatRequestResult> {
   const body: {
     message: string;
-    selection?: ChatSelection;
     selected_voicebank_id?: string;
     expand_repeats: boolean;
     score_player_takes: ScorePlayerTake[];
   } = { message, expand_repeats: expandRepeats, score_player_takes: scorePlayerTakes };
-  if (selection) {
-    body.selection = selection;
-  }
   if (selectedVoicebankId) {
     body.selected_voicebank_id = selectedVoicebankId;
   }
