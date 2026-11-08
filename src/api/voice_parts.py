@@ -7136,15 +7136,28 @@ def _normalize_timeline_sections(
             )["error"]
         has_source_line = "lyric_source_line" in raw_section
         source_line = raw_section.get("lyric_source_line")
-        if has_source_line and (
-            not isinstance(source_line, dict)
-            or set(source_line) != {"staff", "voice_part_id"}
-            or source_line["staff"] is not None
-            or (source_line["voice_part_id"] is not None
-                and (not isinstance(source_line["voice_part_id"], str)
-                     or not source_line["voice_part_id"]))
-            or strategy != "staff_line"
-        ):
+        source_line_invalid = False
+        if has_source_line:
+            source_line_invalid = (
+                not isinstance(source_line, dict)
+                or set(source_line) != {"staff", "voice_part_id"}
+                or (source_line["voice_part_id"] is not None
+                    and (not isinstance(source_line["voice_part_id"], str)
+                         or not source_line["voice_part_id"]))
+            )
+            if not source_line_invalid:
+                staff = source_line["staff"]
+                if staff is None:
+                    source_line_invalid = strategy != "staff_line"
+                else:
+                    source_line_invalid = (
+                        not isinstance(staff, str) or not staff
+                        or strategy not in {"strict_onset", "overlap_best_match", "syllable_flow"}
+                        or lyric_source is None
+                        or not any(_staff_scope_key(note) == staff for note in
+                                   (score["parts"][lyric_source["part_index"]].get("notes") or []))
+                    )
+        if source_line_invalid:
             return [], _plan_error(
                 "malformed_section_source",
                 f"{section_name}.lyric_source_line is invalid.",

@@ -303,6 +303,24 @@ def test_source_line_validation_and_legacy_section(tmp_path):
         "invalid_section_source")
 
 
+def test_named_donor_staff_requires_a_fitting_strategy_and_existing_staff(tmp_path):
+    score = _score(tmp_path, [{"1": [_n(4, "luma")], "2": [_n(4)]}])
+    _, plan, _ = _build(score)
+    named = deepcopy(plan)
+    section = next(item for target in named["targets"] for item in target["sections"]
+                   if item["mode"] == "derive")
+    section["lyric_source_line"] = {"staff": "1", "voice_part_id": None}
+    section["lyric_strategy"] = "strict_onset"
+    assert parse_voice_part_plan(named, score=score)["ok"]
+    for staff, strategy in (("1", "staff_line"), ("9", "strict_onset")):
+        malformed = deepcopy(named)
+        bad_section = next(item for target in malformed["targets"] for item in target["sections"]
+                           if item["mode"] == "derive")
+        bad_section["lyric_source_line"]["staff"] = staff
+        bad_section["lyric_strategy"] = strategy
+        assert parse_voice_part_plan(malformed, score=score)["error"]["code"] == "malformed_section_source"
+
+
 def test_staff_line_defaults_preserve_existing_direct_call():
     # Passes today: this call uses the original keyword set and fixed diagnostics.
     source = [{"voice": "1", "staff": "1", "measure_number": 1,
