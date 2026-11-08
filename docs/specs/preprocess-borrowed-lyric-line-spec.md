@@ -1,6 +1,6 @@
 # Borrowed words: read the donor staff's lyric line, not a voice
 
-Status: draft for review 2026-11-08. Linear: not filed yet.
+Status: building 2026-11-08. Linear: SIG-182 (§4c), SIG-183 (§4a, §4b, §5, §6), both Codex tasks.
 Area: planner v2 (sheet, assembler, prompt) and the shared executor (`src/api/voice_parts.py`).
 v1 never writes the new plan field, so v1 behaves as today.
 
