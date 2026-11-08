@@ -1199,3 +1199,23 @@ def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:
         "exactly as many visible executor-owned derived lanes",
     ):
         assert obsolete not in prompt
+
+
+def test_default_prompt_never_prepares_a_multi_voice_part_when_the_score_has_no_lyrics() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="default",
+    )
+    assert (
+        "When `voice_part_signals.has_lyric_sources=false` and the target part has "
+        "`multi_voice_part=true`, never call `start_preprocess_voice_part_workflow`"
+    ) in prompt
+    assert prompt.lower().count("no-lyrics limit") == 4
