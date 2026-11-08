@@ -14,6 +14,14 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: 'version_1_1_1',
+    title: 'SightSinger 1.1.1 Update',
+    content: '- More reliable part splitting: voices that take turns on one staff, and a separate voice next to a divided chord, now split correctly.\n\n- Scores without lyrics: a single-line part is sung in solfege straight away; a part with several voices or chords explains why it needs lyrics first.\n\n- The part and verse picker is gone: just tell SightSinger in the chat which part and verse to sing.\n\n- Bug fixes and stability improvements.',
+    effect: 'none',
+    date: '2026-11-08',
+    effectiveFrom: '2026-11-08',
+  },
+  {
     id: 'version_1_1_0',
     title: 'SightSinger 1.1.0 Update',
     content: '- Play vocal and instrument tracks together.\n\n- Support for repeat notations: repeat signs, 1st / 2nd endings, D.C., D.S. and more.\n\n- Download the full mix of vocals and instruments: what you hear is what you get.\n\n- Fewer AI hallucinations and improved stability.',
