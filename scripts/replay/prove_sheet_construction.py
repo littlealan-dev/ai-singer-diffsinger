@@ -242,7 +242,14 @@ def lyric_reading_check(score: dict, sheet: Any, choices: dict, plan: dict, resu
                 line = lines.get((part_index, staff)) if staff is not None else None
                 if line is None:
                     continue
-                only = line_voice_for_staff(line, part_index, line_voices.get(lane.lane_id, {}).get(bar))
+                source_line = section.get("lyric_source_line")
+                chosen_voice = (
+                    (part_index, source_line["voice_part_id"])
+                    if isinstance(source_line, dict) and source_line.get("voice_part_id") is not None
+                    else None if isinstance(source_line, dict)
+                    else line_voices.get(lane.lane_id, {}).get(bar)
+                )
+                only = line_voice_for_staff(line, part_index, chosen_voice)
                 expected = read_lane_lyrics(line, [note], only)[0]
                 if expected is None:
                     no_previous += 1
@@ -368,6 +375,39 @@ def _exception_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {message}"
 
 
+def _section_lyrics(plan: dict) -> list[dict]:
+    """Keep the section lyric fields together in the scratch proof for plan diffs."""
+    return [
+        {"target_index": target_index, "start_measure": section["start_measure"],
+         "end_measure": section["end_measure"],
+         "lyric_source": section.get("lyric_source"),
+         "lyric_strategy": section.get("lyric_strategy"),
+         "lyric_policy": section.get("lyric_policy"),
+         "lyric_source_line": section.get("lyric_source_line")}
+        for target_index, target in enumerate(plan.get("targets") or [])
+        for section in target.get("sections") or [] if section.get("mode") == "derive"
+    ]
+
+
+def _lane_notes(result: dict) -> list[dict]:
+    """Retain scratch-only note readings for aggregate before/after comparisons."""
+    score_parts = (result.get("score") or {}).get("parts") or []
+    notes = []
+    for target_index, target in enumerate(result.get("targets") or []):
+        ref = target.get("appended_part_ref") or {}
+        part_index = ref.get("part_index")
+        if not isinstance(part_index, int) or not 0 <= part_index < len(score_parts):
+            continue
+        for note_index, note in enumerate(score_parts[part_index].get("notes") or []):
+            if note.get("is_rest") or note.get("pitch_midi") is None:
+                continue
+            notes.append({"target_index": target_index, "note_index": note_index,
+                          "measure": note.get("measure_number"),
+                          "offset": note.get("offset_beats"),
+                          "lyric": note.get("lyric"), "kind": _lyric_kind(note)})
+    return notes
+
+
 def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
     started = time.monotonic()
     row: dict[str, Any] = {
@@ -415,8 +455,10 @@ def _run_job(corpus: Path, job_id: str) -> tuple[dict, Any, Any]:
             else:
                 choices = first_option_choices(sheet)
                 plan = assemble_plan(sheet, choices, score=score)
+                row["section_lyrics"] = _section_lyrics(plan)
                 row.update(planned_lyric_metrics(score, sheet, choices, plan, xml_bytes))
                 result = preprocess_voice_parts(copy.deepcopy(score), request={"plan": plan})
+                row["lane_notes"] = _lane_notes(result)
                 row["executor_status"] = result.get("status")
                 row["executor_action"] = result.get("action")
                 row["executor_codes"] = _executor_codes(result)

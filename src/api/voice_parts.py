@@ -3342,6 +3342,8 @@ def _execute_timeline_sections(
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
+                line_voice: Optional[str] = None
+                own_voice_exception = False
                 if (
                     not isinstance(melody_source, dict)
                     and not _has_sung_note_in_measure_range(
@@ -3366,10 +3368,24 @@ def _execute_timeline_sections(
                     source_parts = source_score.get("parts") or []
                     source_part = (source_parts[source_part_index]
                                    if 0 <= source_part_index < len(source_parts) else None)
-                    source_meta = (_find_voice_part_by_id(
-                        _analyze_part_voice_parts(source_part, source_part_index)["voice_parts"],
+                    source_voice_parts = (_analyze_part_voice_parts(source_part, source_part_index)["voice_parts"]
+                                          if source_part is not None else [])
+                    source_meta = _find_voice_part_by_id(
+                        source_voice_parts,
                         str(lyric_source["voice_part_id"]),
-                    ) if source_part is not None else None)
+                    )
+                    source_line = section.get("lyric_source_line")
+                    if isinstance(source_line, dict) and source_line["voice_part_id"] is not None:
+                        line_meta = _find_voice_part_by_id(
+                            source_voice_parts, source_line["voice_part_id"]
+                        )
+                        if line_meta is None:
+                            source_meta = None
+                        else:
+                            line_voice = str(line_meta["source_voice_id"])
+                            own_voice_exception = (
+                                source_line["voice_part_id"] == lyric_source["voice_part_id"]
+                            )
                     staves = {_staff_scope_key(note) for note in working_notes
                               if _is_countable_sung_note(note)}
                     override_source_notes = (
@@ -3409,6 +3425,8 @@ def _execute_timeline_sections(
                     verse_number=verse_number,
                     copy_all_verses=copy_all_verses,
                     measure_range=(start_measure, end_measure),
+                    line_voice=line_voice,
+                    own_voice_exception=own_voice_exception,
                 )
 
         after_lyric_count = _count_lyric_sung_notes_in_range(
@@ -4917,6 +4935,8 @@ def _propagate_lyrics(
     verse_number: Optional[str],
     copy_all_verses: bool,
     measure_range: Optional[Tuple[int, int]],
+    line_voice: Optional[str] = None,
+    own_voice_exception: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_strategy = strategy
     if strategy == "syllable_flow" and not _feature_flag_enabled(
@@ -4944,10 +4964,14 @@ def _propagate_lyrics(
     for item in source_timeline:
         source_by_offset.setdefault(item["start"], []).append(item)
     staff_words: Dict[str, Dict[float, Dict[str, Any]]] = {}
+    whole_staff_words: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
     if strategy == "staff_line":
         for item in source_timeline:
-            staff_words.setdefault(_staff_scope_key(item["note"]), {}).setdefault(item["start"], item)
-    first_word_offset = {staff: min(words) for staff, words in staff_words.items()}
+            staff = _staff_scope_key(item["note"])
+            whole_staff_words.setdefault(staff, {}).setdefault(item["start"], []).append(item)
+            if line_voice is None or _voice_key(item["note"].get("voice")) == line_voice:
+                staff_words.setdefault(staff, {}).setdefault(item["start"], item)
+    first_word_offset = {staff: min(words) for staff, words in whole_staff_words.items()}
 
     syllable_tokens = source_timeline
     syllable_index = 0
@@ -4990,6 +5014,19 @@ def _propagate_lyrics(
                                     _voice_key(copied.get("voice"))), None)
             elif not tied:
                 source_item = words.get(key)
+                if source_item is None and own_voice_exception and line_voice is not None:
+                    previous_sung = next((earlier_note for earlier_note in
+                                          reversed(target_notes[:note_idx])
+                                          if _is_countable_sung_note(earlier_note)), None)
+                    previous_entry_rest = note_idx > 0 and bool(target_notes[note_idx - 1].get("is_rest"))
+                    phrase_start = (previous_sung is None or previous_entry_rest or
+                                    float(previous_sung.get("offset_beats") or 0.0) +
+                                    float(previous_sung.get("duration_beats") or 0.0) < key - 1e-6)
+                    if phrase_start:
+                        whole_beat = whole_staff_words.get(staff, {}).get(key, [])
+                        if len({str(item["note"].get("lyric") or "").casefold()
+                                for item in whole_beat}) == 1 and whole_beat:
+                            source_item = whole_beat[0]
             if source_item is None and earlier:
                 copied.pop("lyric", None)
                 copied.pop("syllabic", None)
@@ -5016,8 +5053,9 @@ def _propagate_lyrics(
 
     diagnostic_timeline = (
         [item for item in source_timeline
-         if _note_in_measure_range(item["note"], measure_range)]
-        if strategy == "staff_line" and measure_range is not None else source_timeline
+         if (measure_range is None or _note_in_measure_range(item["note"], measure_range))
+         and (line_voice is None or _voice_key(item["note"].get("voice")) == line_voice)]
+        if strategy == "staff_line" else source_timeline
     )
     dropped_source_lyrics: List[Dict[str, Any]] = []
     for item in diagnostic_timeline:
@@ -7096,6 +7134,21 @@ def _normalize_timeline_sections(
                 "invalid_plan_enum",
                 f"{section_name} lyric_policy is invalid: {policy}",
             )["error"]
+        has_source_line = "lyric_source_line" in raw_section
+        source_line = raw_section.get("lyric_source_line")
+        if has_source_line and (
+            not isinstance(source_line, dict)
+            or set(source_line) != {"staff", "voice_part_id"}
+            or source_line["staff"] is not None
+            or (source_line["voice_part_id"] is not None
+                and (not isinstance(source_line["voice_part_id"], str)
+                     or not source_line["voice_part_id"]))
+            or strategy != "staff_line"
+        ):
+            return [], _plan_error(
+                "malformed_section_source",
+                f"{section_name}.lyric_source_line is invalid.",
+            )["error"]
         normalized_section = {
             "start_measure": int(start_measure),
             "end_measure": int(end_measure),
@@ -7109,6 +7162,8 @@ def _normalize_timeline_sections(
             "lyric_strategy": strategy,
             "lyric_policy": policy,
         }
+        if has_source_line:
+            normalized_section["lyric_source_line"] = dict(source_line)
         if section_shared_note_policy is not None:
             normalized_section["split_shared_note_policy"] = section_shared_note_policy
         normalized.append(normalized_section)
