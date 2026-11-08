@@ -825,15 +825,18 @@ def _line_label(notes: list[dict]) -> str:
 
 def _lyric_line_options(
     score: dict, lane: Lane, segment: Segment, staffs: list[tuple[int, str]],
+    lines: dict[tuple[int, str], StaffLyricLine],
 ) -> tuple[Option, ...]:
-    """One option per voice carrying words on these staffs in the segment (step 2, 2+ lines)."""
+    """One option per voice carrying words in clash bars of these staffs."""
     carried: dict[tuple[int, str], dict[tuple[int, float], dict]] = {}
     for part_index, scope in staffs:
         part = score["parts"][part_index]
         voice_part_ids = _voice_part_ids(part, part_index)
+        clashes = clash_bars(lines[(part_index, scope)])
         for note in part.get("notes") or []:
             if (not _is_countable_sung_note(note) or _staff_scope_key(note) != scope
                     or not segment.start_measure <= int(note.get("measure_number") or 0) <= segment.end_measure
+                    or int(note.get("measure_number") or 0) not in clashes
                     or _word_text(note) is None):
                 continue
             voice_part_id = voice_part_ids.get(_voice_key(note.get("voice")))
@@ -1574,10 +1577,11 @@ def build_sheet(
             if not lyric_needed:
                 # Lyric rule: code reads the page; the LLM only picks a line when a staff has two.
                 line_options: tuple[Option, ...] = ()
+                segment_bars = set(range(segment.start_measure, segment.end_measure + 1))
                 multiple = sorted({staff for staffs in staffs_by_ref for staff in staffs
-                                   if lines[staff].multiple})
+                                   if clash_bars(lines[staff]) & segment_bars})
                 if multiple:
-                    line_options = _lyric_line_options(score, lane, segment, multiple)
+                    line_options = _lyric_line_options(score, lane, segment, multiple, lines)
                     if line_options:
                         segment_slots.append(_choice_slot(
                             (lane.lane_id,), segment, "lyric_line", line_options

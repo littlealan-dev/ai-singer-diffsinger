@@ -83,6 +83,22 @@ def test_staff_bar_kinds_clash_takes_precedence_over_independent():
     }
 
 
+def test_lyric_line_options_only_name_voices_with_words_in_clash_bars():
+    first, second, later = _reading_note(1, 0, "la"), _reading_note(2, 0, "da"), _reading_note(3, 0, "do")
+    later["measure_number"] = 2
+    score = _reading_score(first, second, later)
+    lines = sheet_module.staff_lyric_lines(score)
+    lane = Lane("lane", "P1", 0, "1", "voice part 1", 0, "new_part")
+    signature = sheet_module.MeasureSignature(1, (), None)
+    segment = sheet_module.Segment(0, "1", 1, 2, signature)
+    options = sheet_module._lyric_line_options(score, lane, segment, [(0, "1")], lines)
+    assert [option.fields["lyric_line_voice"]["voice_part_id"] for option in options] == [
+        "voice part 1", "voice part 2",
+    ]
+    no_clash = sheet_module.Segment(0, "1", 2, 2, signature)
+    assert sheet_module._lyric_line_options(score, lane, no_clash, [(0, "1")], lines) == ()
+
+
 def test_lyric_bar_cases_shared_missing_independent_and_conflicting():
     make = _reading_note
     scenarios = [
