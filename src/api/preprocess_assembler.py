@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from src.api.preprocess_sheet import (
     Lane, Option, Segment, Sheet, StaffLyricLine, clash_bars, line_voice_for_staff, melody_line_staffs,
-    note_staffs_by_measure, staff_lyric_lines, lyric_bar_cases,
+    note_staffs_by_measure, staff_lyric_lines, staff_bar_kinds, lyric_bar_cases,
 )
 
 
@@ -193,7 +193,20 @@ def _action_for_measure(
             elif key in {"melody_source", "lyric_source"}:
                 if key == "melody_source":
                     melody_ref = (value.get("part_index"), value.get("voice_part_id"))
-                value = _public_source_ref(option, value)
+                source_line = option.fields.get("lyric_source_line") if key == "lyric_source" else None
+                if isinstance(source_line, dict):
+                    source_index = source_line["part_index"]
+                    value = {"part_id": str(score["parts"][source_index]["part_id"]),
+                             "voice_part_id": value["voice_part_id"]}
+                else:
+                    value = _public_source_ref(option, value)
+            elif key == "lyric_source_line":
+                source_index = value["part_index"]
+                staff = value["staff"]
+                kind = staff_bar_kinds(score, lines, source_index, staff).get(measure)
+                value = {"staff": staff,
+                         "voice_part_id": value["voice_part_id"]
+                                          if kind in {"clash", "independent"} else None}
             if key in fields and fields[key] != value:
                 raise AssemblyError(f"Conflicting {key} choices for {lane.lane_id}")
             fields[key] = deepcopy(value)

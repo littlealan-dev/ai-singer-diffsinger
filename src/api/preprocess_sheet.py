@@ -721,7 +721,7 @@ def _melody_options(lane: Lane, candidates: list[dict]) -> tuple[Option, ...]:
     ) for source in ordered)
 
 
-def _lyric_options(
+def _legacy_lyric_options(
     score: dict, lane: Lane, segment: Segment, candidates: list[dict],
     target_notes: list[dict], target_sung_note_count: int, derived_indices: set[int],
 ) -> tuple[Option, ...]:
@@ -809,6 +809,120 @@ def _lyric_options(
                 flags.append("P1 cross_staff_weak_lyric_source_with_better_alternative")
         options.append(_source_option(source, "lyric_source", flags=tuple(flags), evidence=dict(stats)))
     return tuple(options)
+
+
+def _staff_option_word_notes(
+    score: dict, part_index: int, staff: str, segment: Segment,
+    kinds: dict[int, str], selected_voice: str | None,
+) -> list[dict]:
+    """The word notes one donor-staff option reads, once per beat."""
+    part = score["parts"][part_index]
+    voice_ids = _voice_part_ids(part, part_index)
+    words: dict[tuple[int, float], dict] = {}
+    for note in part.get("notes") or []:
+        bar = int(note.get("measure_number") or 0)
+        if (not segment.start_measure <= bar <= segment.end_measure
+                or _staff_scope_key(note) != staff
+                or not _is_countable_sung_note(note)
+                or _word_text(note) is None):
+            continue
+        if (selected_voice is not None and kinds.get(bar) in {"clash", "independent"}
+                and voice_ids.get(_voice_key(note.get("voice"))) != selected_voice):
+            continue
+        words.setdefault(_beat(note), note)
+    return [words[beat] for beat in sorted(words)]
+
+
+def _lyric_options(
+    score: dict, lane: Lane, segment: Segment, target_notes: list[dict],
+    target_sung_note_count: int, derived_indices: set[int],
+    lines: dict[tuple[int, str], StaffLyricLine],
+) -> tuple[Option, ...]:
+    """Offer each other part's donor staff as a lyric line, with voice choices only when needed."""
+    target_onsets = {_beat(note) for note in target_notes}
+    valid: list[tuple[Option, dict, str | None]] = []
+    for (part_index, staff), line in sorted(lines.items()):
+        if part_index == lane.part_index or part_index in derived_indices:
+            continue
+        part = score["parts"][part_index]
+        if any(
+            _is_countable_sung_note(note) and _staff_scope_key(note) == staff
+            and segment.start_measure <= int(note.get("measure_number") or 0) <= segment.end_measure
+            and _is_generated_solfege_lyric(note)
+            for note in part.get("notes") or []
+        ):
+            continue
+        kinds = {bar: kind for bar, kind in staff_bar_kinds(score, lines, part_index, staff).items()
+                 if segment.start_measure <= bar <= segment.end_measure}
+        if not kinds:
+            continue
+        two_text = {bar for bar, kind in kinds.items() if kind != "one_text"}
+        clashes = {bar for bar, kind in kinds.items() if kind == "clash"}
+        voice_ids = _voice_part_ids(part, part_index)
+        voices_with_words = sorted({voice_part_id for (bar, _), entries in line.words.items()
+                                    if segment.start_measure <= bar <= segment.end_measure
+                                    for voice_part_id, _ in entries})
+        if not voices_with_words:
+            continue
+        choice_voices: list[str | None] = [] if clashes else [None]
+        voice_bars = clashes or two_text
+        if voice_bars:
+            choice_voices.extend(sorted({voice_part_id for (bar, _), entries in line.words.items()
+                                         if bar in voice_bars for voice_part_id, _ in entries}))
+        for selected_voice in choice_voices:
+            word_notes = _staff_option_word_notes(
+                score, part_index, staff, segment, kinds, selected_voice,
+            )
+            if not word_notes:
+                continue
+            source_notes = [note for note in part.get("notes") or []
+                            if _is_countable_sung_note(note) and _staff_scope_key(note) == staff
+                            and segment.start_measure <= int(note.get("measure_number") or 0) <= segment.end_measure
+                            and (selected_voice is None
+                                 or kinds.get(int(note.get("measure_number") or 0)) == "one_text"
+                                 or voice_ids.get(_voice_key(note.get("voice"))) == selected_voice)]
+            extensions = sum(_lyric_kind(note) == "extension" for note in source_notes)
+            empties = sum(_lyric_kind(note) == "empty" for note in source_notes)
+            aligned = len(target_onsets & {_beat(note) for note in word_notes})
+            stats = {
+                "sung_note_count": len(source_notes),
+                "source_sung_note_count": len(source_notes),
+                "target_sung_note_count": target_sung_note_count,
+                "lyric_note_count": len(word_notes) + extensions,
+                "word_lyric_note_count": len(word_notes),
+                "extension_lyric_note_count": extensions,
+                "empty_lyric_note_count": empties,
+                "word_lyric_coverage_ratio": round(len(word_notes) / max(1, target_sung_note_count), 4),
+                "extension_lyric_ratio": round(extensions / max(1, target_sung_note_count), 4),
+                "aligned_word_note_count": aligned,
+                "aligned_word_coverage_ratio": round(aligned / max(1, len(target_onsets)), 4),
+            }
+            voice = selected_voice or voices_with_words[0]
+            part_id = str(part.get("part_id") or "")
+            option_id = f"{part_id}|staff {staff}"
+            label = f"{part_id}: staff {staff}"
+            if selected_voice is not None:
+                option_id += f"|{selected_voice}"
+                label += f", {selected_voice}"
+            option = Option(
+                option_id=option_id, label=label,
+                fields={
+                    "lyric_source": {"part_index": part_index, "voice_part_id": voice},
+                    "lyric_source_line": {"part_index": part_index, "staff": staff,
+                                          "voice_part_id": selected_voice},
+                },
+                evidence=stats, flags=(),
+            )
+            valid.append((option, stats, selected_voice))
+    valid.sort(key=lambda item: (
+        -float(item[1]["word_lyric_coverage_ratio"]),
+        -float(item[1]["aligned_word_coverage_ratio"]),
+        item[0].fields["lyric_source"]["part_index"],
+        item[0].fields["lyric_source_line"]["staff"],
+        item[2] is not None,
+        item[2] or "",
+    ))
+    return tuple(option for option, _, _ in valid)
 
 
 def _line_label(notes: list[dict]) -> str:
@@ -1645,9 +1759,14 @@ def build_sheet(
                     melody_source_voice_part_id=default_melody["voice_part_id"],
                 )
                 lyric = _lyric_options(
-                    score, lane, segment, candidates, target_notes,
-                    target_sung_note_count, derived_indices,
+                    score, lane, segment, target_notes,
+                    target_sung_note_count, derived_indices, lines,
                 )
+                if not lyric:
+                    lyric = _legacy_lyric_options(
+                        score, lane, segment, candidates, target_notes,
+                        target_sung_note_count, derived_indices,
+                    )
                 if not lyric:
                     reason = {"reason": "no_word_lyric_donor"}
                     source_sings = bool(_target_notes(score, lane, segment))
@@ -1701,11 +1820,17 @@ def build_sheet(
                         (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
                         for note in target_notes
                     }
-                    donor_onsets = {
-                        (int(note["measure_number"]), round(float(note.get("offset_beats") or 0), 6))
-                        for note in (donor["notes"] if donor is not None else target_notes)
-                        if _lyric_kind(note) == "word"
-                    }
+                    source_line = lyric[0].fields.get("lyric_source_line")
+                    if isinstance(source_line, dict):
+                        donor_words = _staff_option_word_notes(
+                            score, donor_ref["part_index"], source_line["staff"], segment,
+                            staff_bar_kinds(score, lines, donor_ref["part_index"], source_line["staff"]),
+                            source_line["voice_part_id"],
+                        )
+                    else:
+                        donor_words = donor["notes"] if donor is not None else target_notes
+                    donor_onsets = {_beat(note) for note in donor_words
+                                    if _lyric_kind(note) == "word"}
                     strategies = ("strict_onset", "overlap_best_match", "syllable_flow")
                     if not target_onsets.issubset(donor_onsets):
                         strategies = ("overlap_best_match", "strict_onset", "syllable_flow")

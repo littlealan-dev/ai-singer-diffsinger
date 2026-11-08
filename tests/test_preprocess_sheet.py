@@ -1000,7 +1000,7 @@ def _lyric_slot_kinds(sheet, lane):
     return kinds & {"lyric_source", "lyric_strategy", "lyric_line"}
 
 
-def test_lyric_donor_order_flags_and_no_extension_policy():
+def test_lyric_donor_staff_is_fixed_and_no_extension_policy():
     score = _with_wordless_part(parse_score(SATB, verse_number=1))
     # The local soprano has eight words; the distant tenor has just one.
     tenor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
@@ -1009,13 +1009,13 @@ def test_lyric_donor_order_flags_and_no_extension_policy():
     _silence_voice_in_bar(score, 0, "2", 1)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
-    donors = [slot for slot in sheet.slots if slot.kind == "lyric_source" and alto_id in slot.lane_ids]
+    donors = [option for slot_id, option in sheet.fixed.items()
+              if slot_id.startswith(alto_id + "|") and slot_id.endswith("|lyric_source")]
     assert donors
-    assert donors[0].evidence == {"used_when": "melody from a staff without a lyric line"}
-    assert donors[0].options[0].fields["lyric_source"]["part_index"] == 0
-    cross = next(option for option in donors[0].options
-                 if option.fields["lyric_source"]["part_index"] == 1)
-    assert "P1 cross_staff_lyric_source_with_stronger_local_alternative" in cross.flags
+    assert donors[0].fields["lyric_source_line"] == {
+        "part_index": 1, "staff": "1", "voice_part_id": None,
+    }
+    assert donors[0].flags == ()
     assert "lyric_policy" not in SLOT_KINDS
 
     for note in score["parts"][0]["notes"]:
