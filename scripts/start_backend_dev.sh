@@ -62,6 +62,8 @@ fi
 : "${BACKEND_LOG_LEVEL:=debug}"
 : "${BACKEND_BUILD_ID:=dev-$(date +%s)}"
 : "${BACKEND_STARTUP_TIMEOUT_SECONDS:=30}"
+# Local dev runs the decision-menu planner; set PREPROCESS_PLANNER=v1 to compare.
+: "${PREPROCESS_PLANNER:=v2}"
 
 # Find python from .venv310 in current or parent/sibling project
 if [[ -f "${ROOT_DIR}/.venv310/bin/python" ]] && "${ROOT_DIR}/.venv310/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
@@ -118,6 +120,7 @@ export BACKEND_AUTH_DISABLED
 export BACKEND_USE_STORAGE
 export BACKEND_BUILD_ID
 export STORAGE_EMULATOR_HOST
+export PREPROCESS_PLANNER
 export PYTHONPATH="${ROOT_DIR}"
 
 cd "${ROOT_DIR}"

@@ -574,14 +574,15 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ],
             (1, 1.0): [
                 {"pitch_midi": 55.0},
+                {"pitch_midi": 48.0},
             ],
         }
         picked = _choose_notes_ranked(
             grouped,
-            rank_index=1,
+            rank_index=2,
             rank_fallback="greedy",
         )
-        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60, 55])
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [52, 48])
 
     def test_ranked_chord_split_skips_when_rank_missing(self) -> None:
         grouped = {
@@ -592,14 +593,30 @@ class VoicePartAnalysisAndPlanTests(unittest.TestCase):
             ],
             (1, 1.0): [
                 {"pitch_midi": 55.0},
+                {"pitch_midi": 48.0},
             ],
         }
         picked = _choose_notes_ranked(
             grouped,
-            rank_index=1,
+            rank_index=2,
             rank_fallback="skip",
         )
-        self.assertEqual([int(n["pitch_midi"]) for n in picked], [60])
+        self.assertEqual([int(n["pitch_midi"]) for n in picked], [52])
+
+    def test_ranked_chord_split_single_note_follows_shared_note_policy(self) -> None:
+        grouped = {(1, 0.0): [{"pitch_midi": 55.0}]}
+        for fallback in ("greedy", "skip"):
+            def pitches(rank_index: int, duplicate_singletons: bool) -> list[int]:
+                return [int(n["pitch_midi"]) for n in _choose_notes_ranked(
+                    grouped,
+                    rank_index=rank_index,
+                    rank_fallback=fallback,
+                    duplicate_singletons=duplicate_singletons,
+                )]
+            # A unison: every lane sings it, or only the top lane; the fallback never decides.
+            self.assertEqual(pitches(1, True), [55], fallback)
+            self.assertEqual(pitches(1, False), [], fallback)
+            self.assertEqual(pitches(0, False), [55], fallback)
 
     def test_preprocess_rejects_deprecated_public_method_b(self) -> None:
         score = parse_score(TEST_XML, part_index=0, verse_number=1)
@@ -4497,6 +4514,123 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         appended_refs = result.get("appended_part_refs") or []
         self.assertEqual(len(appended_refs), 1)
         self.assertFalse(any(bool(ref.get("hidden_default_lane")) for ref in appended_refs))
+
+
+    def test_two_staff_part_keeps_a_real_lane_named_like_another_staffs_helper(self) -> None:
+        def note(offset: float, pitch: float, voice: str, measure: int) -> dict:
+            return {
+                "offset_beats": offset,
+                "duration_beats": 1.0,
+                "pitch_midi": pitch,
+                "lyric": "la",
+                "syllabic": "single",
+                "lyric_is_extended": False,
+                "is_rest": False,
+                "voice": voice,
+                "measure_number": measure,
+            }
+
+        # Both staves carry the part's name. Staff 1's voice part 3 is voice 2,
+        # a real singer; staff 2's voice part 3 is its shared line, a helper.
+        score = {
+            "source_musicxml_path": None,
+            "parts": [
+                {
+                    "part_id": "P1-Staff1",
+                    "part_name": "Choir",
+                    "notes": [note(0.0, 72.0, "1", 1), note(0.0, 67.0, "2", 1), note(4.0, 70.0, "_default", 2)],
+                },
+                {
+                    "part_id": "P1-Staff2",
+                    "part_name": "Choir",
+                    "notes": [note(0.0, 55.0, "5", 1), note(0.0, 50.0, "6", 1), note(4.0, 48.0, "_default", 2)],
+                },
+            ],
+        }
+
+        def step(part_index: int, voice_part_id: str, voice: str) -> dict:
+            part = score["parts"][part_index]
+            return {
+                "part_index": part_index,
+                "target_voice_part_id": voice_part_id,
+                "source_voice_part_id": voice_part_id,
+                "source_part_index": part_index,
+                "transformed_part": {
+                    **dict(part),
+                    "part_name": voice_part_id,
+                    "notes": [dict(n) for n in part["notes"] if n["voice"] == voice],
+                },
+                "propagated": True,
+                "status": "ready",
+                "validation": {},
+                "source_musicxml_path": None,
+                "target_source_voice_id": voice,
+            }
+
+        result = finalize_review_materialization(
+            {
+                "base_score": score,
+                "steps": [
+                    step(0, "voice part 1", "1"),
+                    step(0, "voice part 3", "2"),
+                    step(1, "voice part 1", "5"),
+                    step(1, "voice part 2", "6"),
+                    step(1, "voice part 3", "_default"),
+                ],
+            }
+        )
+
+        score_after = result.get("score") or {}
+        derived = [
+            part for part in score_after.get("parts") or []
+            if str(part.get("part_name") or "").endswith("(Derived)")
+        ]
+        self.assertEqual(len(derived), 4)
+        self.assertEqual(
+            sum(1 for part in derived if part["part_name"] == "Choir - voice part 3 (Derived)"), 1
+        )
+        refs = result.get("appended_part_refs") or []
+        self.assertEqual(len(refs), 4)
+        self.assertFalse(any(bool(ref.get("hidden_default_lane")) for ref in refs))
+
+        # The MusicXML removal follows the same records.
+        hidden = voice_parts_module._hidden_derived_part_identifiers(score_after)
+        root = ET.fromstring(
+            "<score-partwise><part-list>"
+            + "".join(
+                f'<score-part id="{part["part_id"]}"><part-name>{part["part_name"]}</part-name></score-part>'
+                for part in score_after["parts"]
+            )
+            + "</part-list>"
+            + "".join(f'<part id="{part["part_id"]}"/>' for part in score_after["parts"])
+            + "</score-partwise>"
+        )
+        voice_parts_module._remove_hidden_derived_parts_from_musicxml(
+            root, q=lambda tag: tag, hidden_derived_parts=hidden
+        )
+        self.assertEqual(
+            [node.get("id") for node in root.findall("part")],
+            [part["part_id"] for part in score_after["parts"]],
+        )
+
+    def test_part_without_a_record_named_like_a_helper_is_still_removed(self) -> None:
+        hidden = {
+            "part_ids": set(),
+            "recorded_part_ids": {"P_RECORDED"},
+            "part_names": {"Choir - voice part 2 (Derived)"},
+            "voice_part_ids": {"voice part 2"},
+        }
+        score = {
+            "parts": [
+                {"part_id": "P_OLD", "part_name": "Choir - voice part 2 (Derived)", "notes": []},
+                {"part_id": "P_BARE", "part_name": "voice part 2 (Derived)", "notes": []},
+                {"part_id": "P_RECORDED", "part_name": "Choir - voice part 2 (Derived)", "notes": []},
+            ]
+        }
+
+        voice_parts_module._remove_hidden_derived_parts_from_score(score, hidden)
+
+        self.assertEqual([part["part_id"] for part in score["parts"]], ["P_RECORDED"])
 
 
 if __name__ == "__main__":

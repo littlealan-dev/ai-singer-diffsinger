@@ -78,7 +78,7 @@ class OpenAIRestClient:
             )
         role_config = (
             self._settings.openai_preprocess
-            if role == LlmRole.PREPROCESS
+            if role in {LlmRole.PREPROCESS, LlmRole.PREPROCESS_CHOOSER}
             else self._settings.openai_default
         )
         model = role_config.model

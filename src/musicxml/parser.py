@@ -2,7 +2,8 @@ from __future__ import annotations
 
 """MusicXML parsing utilities for extracting notes, tempos, and lyrics."""
 
-from dataclasses import dataclass
+from bisect import bisect_left
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -671,14 +672,20 @@ def _collect_part_events(
         if not element.isRest
     )
     voice_state: Dict[str, Dict[str, object]] = {}
+    # music21 makes Voice containers only in bars with two or more voices. Read
+    # each note's voice from the container that holds it: a context search
+    # would return an earlier bar's Voice for a note in a single-voice bar.
+    own_voice: Dict[int, str] = {
+        id(element): str(getattr(voice, "id", None) or getattr(voice, "number", None))
+        for voice in part.recurse().getElementsByClass(stream.Voice)
+        for element in voice.notesAndRests
+    }
+
+    def _voice_of(element: note.GeneralNote) -> Optional[str]:
+        return own_voice.get(id(element)) or fallback_voice
 
     def _voice_key(element: note.GeneralNote) -> str:
-        voice_ctx = element.getContextByClass(stream.Voice)
-        if voice_ctx is not None:
-            return str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
-        if fallback_voice:
-            return fallback_voice
-        return "_default"
+        return _voice_of(element) or "_default"
 
     def _state_for(key: str) -> Dict[str, object]:
         state = voice_state.get(key)
@@ -706,7 +713,7 @@ def _collect_part_events(
                     _make_rest_event(
                         element,
                         offset_beats=offset,
-                        fallback_voice=fallback_voice,
+                        voice=_voice_of(element),
                     )
                 )
             state["lyric"] = None
@@ -764,7 +771,7 @@ def _collect_part_events(
                             lyric_line_index=lyric_line_value,
                             lyric_name=lyric_name_value,
                             pitch_override=pitch,
-                            fallback_voice=fallback_voice,
+                            voice=_voice_of(element),
                         )
                     )
             else:
@@ -777,7 +784,7 @@ def _collect_part_events(
                         lyric_extended=lyric_extended,
                         lyric_line_index=lyric_line_value,
                         lyric_name=lyric_name_value,
-                        fallback_voice=fallback_voice,
+                        voice=_voice_of(element),
                     )
                 )
         if lyric_text is not None:
@@ -793,7 +800,50 @@ def _collect_part_events(
         elif not lyric_extended:
             state["extend"] = False
         state["end_offset"] = end_offset
-    return events
+    return _extend_words_held_on_staff(events)
+
+
+def _extend_words_held_on_staff(events: list[NoteEvent]) -> list[NoteEvent]:
+    """Mark a lyric-less note "+" while another voice on its staff holds a syllable.
+
+    Lyrics are often written once, under one voice. A second voice moving under
+    that held syllable sings it as a melisma; a note that starts together with
+    a new syllable is left for the lane to read that word.
+    """
+    holders_by_staff: Dict[str, List[NoteEvent]] = {}
+    for event in events:
+        if not event.is_rest and event.lyric is not None:
+            holders_by_staff.setdefault(event.staff or "1", []).append(event)
+    starts_by_staff: Dict[str, List[float]] = {}
+    longest_by_staff: Dict[str, float] = {}
+    for staff, holders in holders_by_staff.items():
+        holders.sort(key=lambda event: (event.offset_beats, -(event.pitch_midi or 0.0)))
+        starts_by_staff[staff] = [holder.offset_beats for holder in holders]
+        longest_by_staff[staff] = max(holder.duration_beats for holder in holders)
+    extended = list(events)
+    for index, event in enumerate(events):
+        staff = event.staff or "1"
+        if event.is_rest or event.lyric is not None or staff not in holders_by_staff:
+            continue
+        start = event.offset_beats
+        starts = starts_by_staff[staff]
+        # Only holders that start before this note and could still sound at it.
+        first = bisect_left(starts, start - longest_by_staff[staff] - 1e-6)
+        last = bisect_left(starts, start - 1e-6)
+        for holder in holders_by_staff[staff][first:last]:
+            if (
+                holder.voice != event.voice
+                and start < holder.offset_beats + holder.duration_beats - 1e-6
+            ):
+                extended[index] = replace(
+                    event,
+                    lyric="+",
+                    lyric_is_extended=True,
+                    lyric_line_index=holder.lyric_line_index,
+                    lyric_name=holder.lyric_name,
+                )
+                break
+    return extended
 
 
 def _extract_lyric_text(
@@ -994,7 +1044,7 @@ def _make_note_event(
     lyric_line_index: Optional[str],
     lyric_name: Optional[str],
     pitch_override: Optional[Any] = None,
-    fallback_voice: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> NoteEvent:
     pitch = pitch_override
     if pitch is None:
@@ -1012,12 +1062,6 @@ def _make_note_event(
         if accidental is not None and getattr(accidental, "alter", None) is not None:
             pitch_alter = int(round(float(accidental.alter)))
     tie_type = element.tie.type if element.tie is not None else None
-    voice = None
-    voice_ctx = element.getContextByClass(stream.Voice)
-    if voice_ctx is not None:
-        voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
-    elif fallback_voice:
-        voice = fallback_voice
     staff = None
     staff_number = getattr(element, "staffNumber", None)
     if staff_number is not None:
@@ -1059,16 +1103,10 @@ def _make_rest_event(
     element: note.Rest,
     *,
     offset_beats: float,
-    fallback_voice: Optional[str] = None,
+    voice: Optional[str] = None,
 ) -> NoteEvent:
     measure_ctx = element.getContextByClass(stream.Measure)
     measure_number = measure_ctx.number if measure_ctx is not None else None
-    voice = None
-    voice_ctx = element.getContextByClass(stream.Voice)
-    if voice_ctx is not None:
-        voice = str(getattr(voice_ctx, "id", None) or getattr(voice_ctx, "number", None))
-    elif fallback_voice:
-        voice = fallback_voice
     staff = None
     staff_number = getattr(element, "staffNumber", None)
     if staff_number is not None:
