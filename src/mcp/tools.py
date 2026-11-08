@@ -672,6 +672,10 @@ _PARSE_SCORE_OUTPUT_SCHEMA: Dict[str, Any] = {
                     "type": "boolean",
                     "description": "True when at least one lane has notes with missing lexical lyrics.",
                 },
+                "has_lyric_sources": {
+                    "type": "boolean",
+                    "description": "True when some voice in the score has lyrics, other than generated solfege, that a split could copy.",
+                },
                 "parts": {
                     "type": "array",
                     "description": "Per-part planning signal objects.",

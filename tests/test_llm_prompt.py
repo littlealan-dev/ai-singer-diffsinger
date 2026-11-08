@@ -117,6 +117,13 @@ def test_default_role_keeps_song_part_and_voice_summaries() -> None:
     assert "full_score_analysis" in signals
 
 
+def test_default_role_keeps_whether_the_score_has_lyrics_to_copy() -> None:
+    signals = _sample_voice_part_signals()
+    signals["has_lyric_sources"] = False
+
+    assert _prompt_voice_part_signals(signals, role="default")["has_lyric_sources"] is False
+
+
 def test_preprocess_role_keeps_all_voice_part_signals() -> None:
     signals = _sample_voice_part_signals()
 

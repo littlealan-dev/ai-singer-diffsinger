@@ -4633,5 +4633,88 @@ class VoicePartMaterializeAndPersistenceTests(unittest.TestCase):
         self.assertEqual([part["part_id"] for part in score["parts"]], ["P_RECORDED"])
 
 
+
+def _one_staff_score(tmp_dir: str, name: str, voices: dict[str, list[tuple[str, str | None]]],
+                     *, second_part_words: bool = False) -> dict:
+    """One part, one staff, whole notes in 4/4; each voice is a list of (pitch step, word or None)."""
+    bars = []
+    for number in range(1, len(next(iter(voices.values()))) + 1):
+        notes = []
+        for index, (voice, line) in enumerate(voices.items()):
+            if index:
+                notes.append("<backup><duration>4</duration></backup>")
+            step, word = line[number - 1]
+            lyric = f'<lyric number="1"><syllabic>single</syllabic><text>{word}</text></lyric>' if word else ""
+            notes.append(f"<note><pitch><step>{step}</step><octave>4</octave></pitch><duration>4</duration>"
+                         f"<voice>{voice}</voice><type>whole</type>{lyric}</note>")
+        attributes = ("<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+                      "<clef><sign>G</sign><line>2</line></clef></attributes>") if number == 1 else ""
+        bars.append(f'<measure number="{number}">{attributes}{"".join(notes)}</measure>')
+    parts = [("P1", "Tenor", "".join(bars))]
+    part_list = '<score-part id="P1"><part-name>Tenor</part-name></score-part>'
+    if second_part_words:
+        sung = "".join(
+            f'<measure number="{n}">' + ("<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+                                         "<clef><sign>G</sign><line>2</line></clef></attributes>" if n == 1 else "")
+            + '<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type>'
+              '<lyric number="1"><syllabic>single</syllabic><text>la</text></lyric></note></measure>'
+            for n in range(1, len(bars) + 1)
+        )
+        parts.append(("P2", "Soprano", sung))
+        part_list += '<score-part id="P2"><part-name>Soprano</part-name></score-part>'
+    xml = ('<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1">'
+           f"<part-list>{part_list}</part-list>"
+           + "".join(f'<part id="{pid}">{body}</part>' for pid, _, body in parts)
+           + "</score-partwise>")
+    path = Path(tmp_dir) / f"{name}.xml"
+    path.write_text(xml, encoding="utf-8")
+    return parse_score(path, part_index=0, verse_number=1)
+
+
+class LyriclessComplexityTests(unittest.TestCase):
+    """A voice without words needs a split only when the score has words a split could copy."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_one_line_without_lyrics_in_a_score_without_lyrics_is_simple(self) -> None:
+        score = _one_staff_score(self._tmp, "solo", {"1": [("C", None), ("D", None)]})
+        signals = score["voice_part_signals"]
+        self.assertFalse(signals["has_lyric_sources"])
+        self.assertTrue(signals["parts"][0]["has_missing_lyric_voice_parts"])
+        self.assertFalse(signals["parts"][0]["is_potentially_complex_for_preprocess"])
+        self.assertIsNone(synthesize_preflight_action_required(score, part_index=0))
+
+    def test_one_line_without_lyrics_beside_a_part_with_lyrics_still_needs_preparation(self) -> None:
+        score = _one_staff_score(self._tmp, "beside", {"1": [("C", None), ("D", None)]},
+                                 second_part_words=True)
+        signals = score["voice_part_signals"]
+        self.assertTrue(signals["has_lyric_sources"])
+        self.assertTrue(signals["parts"][0]["is_potentially_complex_for_preprocess"])
+        result = synthesize_preflight_action_required(score, part_index=0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "complex_score_missing_lyrics_without_derived_target")
+
+    def test_two_voices_without_lyrics_still_need_preparation_for_the_voices_only(self) -> None:
+        score = _one_staff_score(self._tmp, "two", {"1": [("E", None), ("F", None)],
+                                                    "2": [("C", None), ("D", None)]})
+        signals = score["voice_part_signals"]
+        self.assertFalse(signals["has_lyric_sources"])
+        self.assertTrue(signals["parts"][0]["is_potentially_complex_for_preprocess"])
+        result = synthesize_preflight_action_required(score, part_index=0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "complex_score_multi_voice_without_derived_target")
+        self.assertNotIn("complexity_signal.missing_lyric_voice_parts", result["failed_validation_rules"])
+
+    def test_signals_without_the_field_keep_the_old_rule(self) -> None:
+        score = _one_staff_score(self._tmp, "old", {"1": [("C", None), ("D", None)]})
+        score["voice_part_signals"].pop("has_lyric_sources")
+        result = synthesize_preflight_action_required(score, part_index=0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "complex_score_missing_lyrics_without_derived_target")
+
 if __name__ == "__main__":
     unittest.main()

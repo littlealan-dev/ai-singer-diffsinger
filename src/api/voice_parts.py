@@ -185,8 +185,9 @@ def analyze_score_voice_parts(
                 "has_same_voice_simultaneous_notes": full["has_same_voice_simultaneous_notes"],
                 "missing_lyric_voice_parts": full["missing_lyric_voice_parts"],
                 "has_missing_lyric_voice_parts": len(full["missing_lyric_voice_parts"]) > 0,
+                # A voice without words needs a split only when the score has words to copy.
                 "is_potentially_complex_for_preprocess": bool(full["multi_voice_part"])
-                or len(full["missing_lyric_voice_parts"]) > 0,
+                or (len(full["missing_lyric_voice_parts"]) > 0 and bool(all_sources)),
                 "lyric_source_candidates": all_sources,
                 "measure_lyric_coverage": measure_coverage,
                 "voice_part_measure_spans": measure_spans,
@@ -217,6 +218,7 @@ def analyze_score_voice_parts(
         "has_missing_lyric_voice_parts": any(
             len(p["missing_lyric_voice_parts"]) > 0 for p in part_signals
         ),
+        "has_lyric_sources": bool(all_sources),
         "parts": part_signals,
         "full_score_analysis": {
             "parts": analysis_parts,
@@ -7914,6 +7916,11 @@ def synthesize_preflight_action_required(
     )
     diagnostics["has_multi_voice_part_signal"] = bool(has_multi_voice)
     diagnostics["has_missing_lyric_voice_parts_signal"] = bool(has_missing_lyric_voice_parts)
+    # Missing words call for a split only when the score has words to copy; a
+    # single line with no words anywhere gets solfege instead. Older signals lack the field.
+    has_lyric_sources = bool(signals.get("has_lyric_sources", True))
+    diagnostics["has_lyric_sources_signal"] = has_lyric_sources
+    has_missing_lyric_voice_parts = has_missing_lyric_voice_parts and has_lyric_sources
     preprocess_required = has_multi_voice or has_missing_lyric_voice_parts
     preprocessed_score_detected = bool(
         (isinstance(transforms, dict) and len(transforms) > 0)
