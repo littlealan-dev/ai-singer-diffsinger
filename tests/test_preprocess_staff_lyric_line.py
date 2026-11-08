@@ -235,7 +235,13 @@ def test_source_line_validation_and_legacy_section(tmp_path):
     for target in legacy["targets"]:
         for item in target["sections"]:
             item.pop("lyric_source_line", None)
-    assert parse_voice_part_plan(legacy, score=score)["ok"]
+    legacy_normalized = parse_voice_part_plan(legacy, score=score)
+    assert legacy_normalized["ok"]
+    with_line_removed = deepcopy(normalized)
+    for target in with_line_removed["plan"]["targets"]:
+        for item in target["sections"]:
+            item.pop("lyric_source_line", None)
+    assert legacy_normalized == with_line_removed
     for bad in ({"staff": "1", "voice_part_id": None},
                 {"staff": None, "voice_part_id": None, "extra": 1},
                 {"staff": None, "voice_part_id": ""}, None):
@@ -259,6 +265,7 @@ def test_source_line_validation_and_legacy_section(tmp_path):
 
 
 def test_staff_line_defaults_preserve_existing_direct_call():
+    # Passes today: this call uses the original keyword set and fixed diagnostics.
     source = [{"voice": "1", "staff": "1", "measure_number": 1,
                "offset_beats": 0.0, "duration_beats": 1.0, "pitch_midi": 60, "lyric": "luma"}]
     target = [dict(source[0]), {"voice": "2", "staff": "1", "measure_number": 1,
@@ -266,5 +273,11 @@ def test_staff_line_defaults_preserve_existing_direct_call():
     kwargs = dict(target_notes=target, source_notes=source, strategy="staff_line",
                   policy="replace_all", verse_number=None, copy_all_verses=False,
                   measure_range=(1, 1))
-    assert _propagate_lyrics(**kwargs) == _propagate_lyrics(
-        **kwargs, line_voice=None, own_voice_exception=False)
+    copied, diagnostics = _propagate_lyrics(**kwargs)
+    assert [note.get("lyric") for note in copied] == ["luma", "+"]
+    assert diagnostics == {
+        "strategy": "staff_line", "source_lyric_candidates_count": 1,
+        "target_note_count_in_range": 2, "target_note_attempted_count": 2,
+        "target_note_matched_count": 2, "mapped_source_lyrics_count": 1,
+        "dropped_source_lyrics_count": 0, "dropped_source_lyrics": [],
+    }
