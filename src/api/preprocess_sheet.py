@@ -187,6 +187,59 @@ def clash_bars(line: StaffLyricLine) -> set[int]:
             if len({text.casefold() for _, text in entries}) > 1}
 
 
+def _exclusive_word_carriers(
+    words: dict[tuple[int, float], list[tuple[str, str]]],
+    staff_notes: list[dict],
+    source_voices: dict[str, str],
+) -> set[str]:
+    """Voices with a word on a beat where no other voice has a note."""
+    carriers = {voice_part_id for entries in words.values() for voice_part_id, _ in entries}
+    return {
+        voice_part_id for voice_part_id in carriers
+        if any(
+            any(vp == voice_part_id for vp, _ in entries)
+            and not any(
+                _beat(note) == beat
+                and _voice_key(note.get("voice")) != source_voices.get(voice_part_id)
+                for note in staff_notes
+            )
+            for beat, entries in words.items()
+        )
+    }
+
+
+def staff_bar_kinds(
+    score: dict,
+    lines: dict[tuple[int, str], StaffLyricLine],
+    part_index: int,
+    staff: str,
+) -> dict[int, str]:
+    """Each bar with words on this staff: one_text, clash, or independent."""
+    line = lines.get((part_index, staff))
+    if line is None:
+        return {}
+    part = score["parts"][part_index]
+    source_voices = {
+        str(vp["voice_part_id"]): str(vp["source_voice_id"])
+        for vp in _analyze_part_voice_parts(part, part_index)["voice_parts"]
+    }
+    staff_notes = [note for note in part.get("notes") or []
+                   if _is_countable_sung_note(note) and _staff_scope_key(note) == staff]
+    words_by_bar: dict[int, dict[tuple[int, float], list[tuple[str, str]]]] = {}
+    for beat, entries in line.words.items():
+        words_by_bar.setdefault(beat[0], {})[beat] = entries
+    clashes = clash_bars(line)
+    kinds: dict[int, str] = {}
+    for bar, words in sorted(words_by_bar.items()):
+        if bar in clashes:
+            kinds[bar] = "clash"
+        elif len(_exclusive_word_carriers(words, staff_notes, source_voices)) >= 2:
+            kinds[bar] = "independent"
+        else:
+            kinds[bar] = "one_text"
+    return kinds
+
+
 def read_lane_lyrics(
     line: StaffLyricLine, notes: list[dict], line_voice: str | None = None,
 ) -> list[str | None]:
@@ -280,14 +333,7 @@ def lyric_bar_cases(
             cases[bar] = LyricBarCase("single")
             continue
         reasons: list[str] = []
-        exclusive_carriers = {
-            voice_part_id for voice_part_id in carriers
-            if any(any(vp == voice_part_id for vp, _ in entries)
-                   and not any(_beat(note) == beat
-                               and _voice_key(note.get("voice")) != voices.get(voice_part_id)
-                               for note in all_notes)
-                   for beat, entries in words.items())
-        }
+        exclusive_carriers = _exclusive_word_carriers(words, all_notes, voices)
         if len(exclusive_carriers) >= 2:
             reasons.append("independent_rhythm")
         if bar in broken_bars:

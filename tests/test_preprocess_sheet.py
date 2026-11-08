@@ -66,6 +66,23 @@ def _reading_note(voice, beat, lyric=None, *, syllabic=None, tie_type=None):
     return note
 
 
+def test_staff_bar_kinds_clash_takes_precedence_over_independent():
+    make = _reading_note
+    one_a, one_b = make(1, 0, "la"), make(2, 0)
+    independent_a, independent_b = make(1, 0, "la"), make(2, 2, "da")
+    clash_a, clash_b, clash_c = make(1, 0, "la"), make(2, 0, "da"), make(2, 2, "do")
+    for note in (independent_a, independent_b):
+        note["measure_number"] = 2
+    for note in (clash_a, clash_b, clash_c):
+        note["measure_number"] = 3
+    score = _reading_score(one_a, one_b, independent_a, independent_b,
+                           clash_a, clash_b, clash_c)
+    lines = sheet_module.staff_lyric_lines(score)
+    assert sheet_module.staff_bar_kinds(score, lines, 0, "1") == {
+        1: "one_text", 2: "independent", 3: "clash",
+    }
+
+
 def test_lyric_bar_cases_shared_missing_independent_and_conflicting():
     make = _reading_note
     scenarios = [
