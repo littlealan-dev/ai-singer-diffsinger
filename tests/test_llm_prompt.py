@@ -1201,7 +1201,7 @@ def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:
         assert obsolete not in prompt
 
 
-def test_default_prompt_never_prepares_a_multi_voice_part_when_the_score_has_no_lyrics() -> None:
+def test_default_prompt_never_prepares_a_line_when_the_score_has_no_lyrics() -> None:
     prompt = build_system_prompt(
         tools=[],
         score_available=True,
@@ -1215,7 +1215,7 @@ def test_default_prompt_never_prepares_a_multi_voice_part_when_the_score_has_no_
         role="default",
     )
     assert (
-        "When `voice_part_signals.has_lyric_sources=false` and the target part has "
-        "`multi_voice_part=true`, never call `start_preprocess_voice_part_workflow`"
+        "When `voice_part_signals.has_lyric_sources=false`, never call "
+        "`start_preprocess_voice_part_workflow`, for any part, even when the user asks to split a part."
     ) in prompt
     assert prompt.lower().count("no-lyrics limit") == 4
