@@ -17,7 +17,7 @@ def _n(duration: float, lyric: str | None = None, *, rest: bool = False,
     return {"duration": duration, "lyric": lyric, "rest": rest, "tie": tie, "staff": staff}
 
 
-def _score(tmp_path, bars: list[dict[str, list[dict]]], *, staves: int = 1) -> dict:
+def _score(tmp_path, bars: list[dict[str, list[dict]]]) -> dict:
     measures = []
     for bar_number, voices in enumerate(bars, 1):
         chunks = []
@@ -36,7 +36,8 @@ def _score(tmp_path, bars: list[dict[str, list[dict]]], *, staves: int = 1) -> d
                               f"<staff>{event['staff']}</staff>{tie}{lyric}</note>")
         attributes = ("<attributes><divisions>2</divisions><time><beats>4</beats>"
                       "<beat-type>4</beat-type></time>"
-                      f"<staves>{staves}</staves></attributes>" if bar_number == 1 else "")
+                      "<clef><sign>G</sign><line>2</line></clef></attributes>"
+                      if bar_number == 1 else "")
         measures.append(f"<measure number=\"{bar_number}\">{attributes}{''.join(chunks)}</measure>")
     xml = ('<score-partwise version="3.1"><part-list><score-part id="P1">'
            '<part-name>Synthetic</part-name></score-part></part-list>'
@@ -155,6 +156,7 @@ def test_ambiguous_bar_own_words_only_vs_share_line(tmp_path):
 
 
 def test_lane_notes_read_words_on_each_staff():
+    # Passes today: staff_line already scopes word lookup by each target note's staff.
     source = [
         {"voice": "1", "staff": "1", "measure_number": 1, "offset_beats": 0.0,
          "duration_beats": 1.0, "pitch_midi": 60, "lyric": "luma"},
@@ -178,8 +180,9 @@ def test_one_text_line_reads_words_from_either_voice(tmp_path):
     # Passes today: the new line field leaves an unambiguous shared reading intact.
     score = _score(tmp_path, [{
         "1": [_n(2, "luma"), _n(2)],
-        "2": [_n(2), _n(2, "nora")],
+        "2": [_n(2, "LUMA"), _n(2, "nora")],
     }])
+    assert clash_bars(staff_lyric_lines(score)[(0, "1")]) == set()
     _, plan, result = _build(score)
     assert result["status"] == "ready"
     for voice in ("voice part 1", "voice part 2"):

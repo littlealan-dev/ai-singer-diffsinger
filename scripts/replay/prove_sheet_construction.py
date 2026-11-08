@@ -242,7 +242,14 @@ def lyric_reading_check(score: dict, sheet: Any, choices: dict, plan: dict, resu
                 line = lines.get((part_index, staff)) if staff is not None else None
                 if line is None:
                     continue
-                only = line_voice_for_staff(line, part_index, line_voices.get(lane.lane_id, {}).get(bar))
+                source_line = section.get("lyric_source_line")
+                chosen_voice = (
+                    (part_index, source_line["voice_part_id"])
+                    if isinstance(source_line, dict) and source_line.get("voice_part_id") is not None
+                    else None if isinstance(source_line, dict)
+                    else line_voices.get(lane.lane_id, {}).get(bar)
+                )
+                only = line_voice_for_staff(line, part_index, chosen_voice)
                 expected = read_lane_lyrics(line, [note], only)[0]
                 if expected is None:
                     no_previous += 1
