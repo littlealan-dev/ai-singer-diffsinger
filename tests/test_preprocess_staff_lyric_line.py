@@ -8,7 +8,9 @@ import pytest
 
 from src.api import parse_score
 from src.api.preprocess_assembler import assemble_plan, expand, first_option_choices
-from src.api.preprocess_sheet import build_sheet, clash_bars, staff_lyric_lines
+from src.api.preprocess_sheet import (
+    build_sheet, clash_bars, melody_line_staffs, note_staffs_by_measure, staff_lyric_lines,
+)
 from src.api.voice_parts import _propagate_lyrics, parse_voice_part_plan, preprocess_voice_parts
 
 
@@ -47,7 +49,7 @@ def _score(tmp_path, bars: list[dict[str, list[dict]]]) -> dict:
     return parse_score(path)
 
 
-def _build(score: dict, choices: dict | None = None):
+def _build(score: dict, choices: dict | None = None, *, dedupe_cross_staff: bool = False):
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
     selected = first_option_choices(sheet)
     if choices:
@@ -56,6 +58,13 @@ def _build(score: dict, choices: dict | None = None):
                 if slot.kind == kind:
                     selected[slot.slot_id] = answer
     plan = assemble_plan(sheet, selected, score=score)
+    if dedupe_cross_staff:
+        targets_by_voice = {}
+        for target in plan["targets"]:
+            targets_by_voice.setdefault(target["source"]["voice_part_id"], target)
+        plan["targets"] = list(targets_by_voice.values())
+        for target in targets_by_voice.values():
+            target["split_coverage"] = "selective"
     result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
     return sheet, plan, result
 
@@ -155,25 +164,53 @@ def test_ambiguous_bar_own_words_only_vs_share_line(tmp_path):
     assert [note.get("lyric") for note in shared_notes] == ["sela", "nora"]
 
 
-def test_lane_notes_read_words_on_each_staff():
-    # Passes today: staff_line already scopes word lookup by each target note's staff.
-    source = [
-        {"voice": "1", "staff": "1", "measure_number": 1, "offset_beats": 0.0,
-         "duration_beats": 1.0, "pitch_midi": 60, "lyric": "luma"},
-        {"voice": "1", "staff": "2", "measure_number": 1, "offset_beats": 1.0,
-         "duration_beats": 1.0, "pitch_midi": 62, "lyric": "nora"},
-    ]
-    target = [
-        {"voice": "2", "staff": "1", "measure_number": 1, "offset_beats": 0.0,
-         "duration_beats": 1.0, "pitch_midi": 65},
-        {"voice": "2", "staff": "2", "measure_number": 1, "offset_beats": 1.0,
-         "duration_beats": 1.0, "pitch_midi": 67},
-    ]
-    copied, _ = _propagate_lyrics(
-        target_notes=target, source_notes=source, strategy="staff_line", policy="replace_all",
-        verse_number=None, copy_all_verses=False, measure_range=(1, 1),
-    )
-    assert [note.get("lyric") for note in copied] == ["luma", "nora"]
+def test_lane_notes_read_words_on_each_staff(tmp_path):
+    # MusicXML has one part and two staves; the parser exposes each staff as a
+    # separate part, so restore the original part for this cross-staff planner case.
+    xml = '''<score-partwise version="3.1"><part-list><score-part id="P1">
+      <part-name>Synthetic</part-name></score-part></part-list><part id="P1">
+      <measure number="1"><attributes><divisions>1</divisions><staves>2</staves>
+      <time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef number="1"><sign>G</sign><line>2</line></clef>
+      <clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration>
+      <voice>1</voice><type>half</type><staff>1</staff></note>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>2</duration>
+      <voice>1</voice><type>half</type><staff>2</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration>
+      <voice>2</voice><type>half</type><staff>1</staff>
+      <lyric><text>luma</text></lyric></note>
+      <note><rest/><duration>2</duration><voice>2</voice><type>half</type><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>2</duration><voice>3</voice><type>half</type><staff>2</staff></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>2</duration>
+      <voice>3</voice><type>half</type><staff>2</staff>
+      <lyric><text>nora</text></lyric></note>
+      </measure></part></score-partwise>'''
+    path = tmp_path / "two_staves.xml"
+    path.write_text(xml, encoding="utf-8")
+    score = parse_score(path)
+    assert len(score["parts"]) == 2
+    merged = score["parts"][0]
+    for staff, part in enumerate(score["parts"], start=1):
+        for note in part["notes"]:
+            note["staff"] = str(staff)
+        if staff == 2:
+            merged["notes"].extend(part["notes"])
+    merged["part_id"] = "P1"
+    score["parts"] = [merged]
+
+    assert melody_line_staffs(note_staffs_by_measure(score), 0, "voice part 2", 1, 1) == {
+        (0, "1"), (0, "2")}
+    _, plan, result = _build(score, dedupe_cross_staff=True)
+    assert result["status"] == "ready", result.get("lint_findings")
+    target, notes = _lane(plan, result, "voice part 2")
+    assert target["sections"][0]["lyric_strategy"] == "staff_line"
+    assert target["sections"][0]["lyric_source_line"] == {
+        "staff": None, "voice_part_id": None}
+    assert [(note.get("staff"), note.get("lyric")) for note in notes] == [
+        ("1", "luma"), ("2", "nora")]
 
 
 def test_one_text_line_reads_words_from_either_voice(tmp_path):
