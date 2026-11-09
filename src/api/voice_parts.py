@@ -840,6 +840,9 @@ def _normalize_output_lane_request(raw_output: Any) -> Dict[str, Any]:
     lane_id = raw_output.get("derived_lane_id")
     if isinstance(lane_id, str) and lane_id.strip():
         normalized["derived_lane_id"] = lane_id.strip()
+    slot = raw_output.get("slot")
+    if type(slot) is int and slot > 0:
+        normalized["slot"] = slot
     return normalized
 
 
@@ -905,9 +908,23 @@ def _resolve_plan_output_lanes(score: Dict[str, Any], plan: Dict[str, Any]) -> D
             resolved_lane = dict(lane)
         else:
             slots = used_slots.setdefault(key, set())
-            slot = 1
-            while slot in slots:
-                slot += 1
+            requested_slot = output.get("slot")
+            if isinstance(requested_slot, int):
+                slot = requested_slot
+                if slot in slots:
+                    return {
+                        "ok": False,
+                        "error": _action_required(
+                            "derived_lane_slot_taken",
+                            "The requested derived lane slot is already occupied.",
+                            target_index=target_idx,
+                            slot=slot,
+                        ),
+                    }
+            else:
+                slot = 1
+                while slot in slots:
+                    slot += 1
             slots.add(slot)
             lane_id = f"dl:p{part_index}:source:{_lane_id_slug(voice_part_id)}:slot:{slot}"
             resolved_lane = {
