@@ -411,7 +411,7 @@ class Settings:
             raise ValueError("PREPROCESS_PLANNER must be either 'v1' or 'v2'.")
         # Large chooser response schemas can be rejected by Gemini with HTTP 400.
         preprocess_chooser_max_slots_per_request = _env_int(
-            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 40
+            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 60
         )
         if preprocess_chooser_max_slots_per_request < 1:
             raise ValueError("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST must be at least 1.")

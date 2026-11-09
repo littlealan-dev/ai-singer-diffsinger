@@ -172,9 +172,9 @@ def test_chooser_role_defaults_follow_the_preprocess_model_and_can_be_overridden
     assert (chooser.model, chooser.thinking_level, chooser.timeout_seconds) == ("chooser-model", "low", 45.0)
 
 
-def test_chooser_batch_size_defaults_to_40_and_must_be_positive(monkeypatch):
+def test_chooser_batch_size_defaults_to_60_and_must_be_positive(monkeypatch):
     monkeypatch.delenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", raising=False)
-    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 40
+    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 60
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "50")
     assert Settings.from_env().preprocess_chooser_max_slots_per_request == 50
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "0")
@@ -189,7 +189,7 @@ def test_default_chooser_batch_size_splits_large_sheet(monkeypatch):
         sheet, {}, max_slots_per_request=Settings.from_env().preprocess_chooser_max_slots_per_request,
     )
     sizes = [len(request.key_to_slot) for request in requests]
-    assert sizes == [39, 39, 33]
+    assert sizes == [60, 51]
 
 
 def test_chooser_evidence_limit_defaults_to_400000_and_must_be_positive(monkeypatch):
