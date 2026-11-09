@@ -54,7 +54,7 @@ export const ANNOUNCEMENTS: Announcement[] = [
 export const PENDING_1_2_0_ANNOUNCEMENT: Announcement = {
   id: 'version_1_2_0',
   title: 'SightSinger 1.2.0 Update',
-  content: '- Much faster part splitting: 3 to 7 times faster in our tests, about 20 seconds instead of a minute for short songs, and about a minute instead of 8 minutes or more for long multi-part songs.\n\n- More reliable on long, complex scores: no timeouts in our tests.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
+  content: '- Much faster part splitting: about 2x faster for short songs (under 3 minutes), and up to 5x faster for long, complex songs (over 5 minutes, with several parts).\n\n- More reliable on long, complex scores: far fewer timeouts.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
   effect: 'none',
   date: '2026-11-09',
   effectiveFrom: '2026-11-09',
