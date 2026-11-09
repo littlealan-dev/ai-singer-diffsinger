@@ -76,6 +76,105 @@ def test_borrowed_staff_line_deduplicates_chords_and_can_select_voice(tmp_path):
     assert [note["lyric"] for note in voice_line] == ["first"]
 
 
+def _append_wordless_part(score, *, notes=None):
+    recipient = deepcopy(score["parts"][0])
+    recipient["part_id"] = "P2"
+    recipient["notes"] = deepcopy(notes if notes is not None else recipient["notes"])
+    for note in recipient["notes"]:
+        note["lyric"] = None
+        note["lyric_is_extended"] = False
+    score["parts"].append(recipient)
+
+
+def test_borrowed_line_follows_words_into_single_voice_bar(tmp_path):
+    score = _shared_line_score(tmp_path)
+    donor = score["parts"][0]
+    single_voice_note = deepcopy(next(note for note in donor["notes"]
+                                      if note.get("lyric") == "first"))
+    single_voice_note.update(measure_number=2, offset_beats=4.0, voice=None, lyric="luma")
+    donor["notes"].append(single_voice_note)
+    recipient_notes = [note for note in donor["notes"]
+                       if note.get("lyric") in {"first", "luma"}]
+    _append_wordless_part(score, notes=recipient_notes)
+
+    sheet = _sheet(score, "P2")
+    assert not any(slot.kind == "lyric_source" for slot in sheet.slots)
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    part_index = result["targets"][0]["appended_part_ref"]["part_index"]
+    notes = result["score"]["parts"][part_index]["notes"]
+    assert [note["lyric"] for note in notes if note.get("lyric") not in (None, "+")] == [
+        "first", "luma",
+    ]
+
+
+def test_borrowed_clash_choice_filters_only_the_clash_bar(tmp_path):
+    score = _shared_line_score(tmp_path)
+    donor = score["parts"][0]
+    next(note for note in donor["notes"]
+         if note.get("voice") == "2" and note.get("offset_beats") == 0)["lyric"] = "other"
+    second_bar = deepcopy(donor["notes"])
+    for note in second_bar:
+        note["measure_number"] = 2
+        note["offset_beats"] += 4
+        note["lyric"] = "next" if note.get("voice") == "2" and note["offset_beats"] == 6 else None
+        note["lyric_is_extended"] = False
+    donor["notes"].extend(second_bar)
+    recipient_notes = [note for note in donor["notes"]
+                       if (note["measure_number"], note.get("lyric")) in
+                       {(1, "first"), (2, "next")}]
+    _append_wordless_part(score, notes=recipient_notes)
+
+    sheet = _sheet(score, "P2")
+    lyric_slot = next(slot for slot in sheet.slots if slot.kind == "lyric_source")
+    assert {option.option_id for option in lyric_slot.options} == {
+        "Choir|staff 1|voice part 1", "Choir|staff 1|voice part 2",
+    }
+    choices = assembler.first_option_choices(sheet)
+    choices[lyric_slot.slot_id] = "Choir|staff 1|voice part 1"
+    plan = assembler.assemble_plan(sheet, choices, score=score)
+    assert [section["lyric_source_line"]["voice_part_id"]
+            for section in plan["targets"][0]["sections"]] == ["voice part 1", None]
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    part_index = result["targets"][0]["appended_part_ref"]["part_index"]
+    notes = result["score"]["parts"][part_index]["notes"]
+    assert [note["lyric"] for note in notes if note.get("lyric") not in (None, "+")] == [
+        "first", "next",
+    ]
+
+
+def test_independent_donor_offers_staff_then_voice_readings(tmp_path):
+    score = _shared_line_score(tmp_path)
+    score["parts"][0]["notes"] = [note for note in score["parts"][0]["notes"]
+                                  if note.get("lyric") not in (None, "+")]
+    _append_wordless_part(score)
+    sheet = _sheet(score, "P2")
+    lyric_slot = next(slot for slot in sheet.slots if slot.kind == "lyric_source")
+    assert [option.option_id for option in lyric_slot.options] == [
+        "Choir|staff 1", "Choir|staff 1|voice part 1", "Choir|staff 1|voice part 2",
+    ]
+
+
+def test_two_worded_donor_staves_offer_one_choice_each(tmp_path):
+    score = _shared_line_score(tmp_path)
+    second_donor = deepcopy(score["parts"][0])
+    second_donor["part_id"] = "P3"
+    for note in second_donor["notes"]:
+        if note.get("lyric") == "first":
+            note["lyric"] = "luma"
+        elif note.get("lyric") == "second":
+            note["lyric"] = "nora"
+    score["parts"].append(second_donor)
+    _append_wordless_part(score)
+    sheet = _sheet(score, "P2")
+    lyric_slot = next(slot for slot in sheet.slots if slot.kind == "lyric_source")
+    assert [option.option_id for option in lyric_slot.options] == [
+        "Choir|staff 1", "P3|staff 1",
+    ]
+
+
 def test_shared_staff_line_plan_executes_without_quality_failure(tmp_path):
     score = _shared_line_score(tmp_path)
     strategy_schema = _PREPROCESS_PLAN_REQUEST_SCHEMA["properties"]["targets"]["items"]["properties"]["sections"]["items"]["properties"]["lyric_strategy"]
