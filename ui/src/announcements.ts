@@ -14,14 +14,6 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
-    id: 'version_1_2_0',
-    title: 'SightSinger 1.2.0 Update',
-    content: '- Much faster part splitting: short songs are split about 8x faster (around 8 seconds instead of about a minute), and long multi-part songs about 8x faster (around 35 seconds instead of 5 minutes or more).\n\n- More reliable on long, complex scores: no timeouts in our tests, down from 7 in 12 runs, and every song finished.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
-    effect: 'none',
-    date: '2026-11-09',
-    effectiveFrom: '2026-11-09',
-  },
-  {
     id: 'version_1_1_0',
     title: 'SightSinger 1.1.0 Update',
     content: '- Play vocal and instrument tracks together.\n\n- Support for repeat notations: repeat signs, 1st / 2nd endings, D.C., D.S. and more.\n\n- Download the full mix of vocals and instruments: what you hear is what you get.\n\n- Fewer AI hallucinations and improved stability.',
