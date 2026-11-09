@@ -1233,4 +1233,7 @@ def test_default_prompt_never_prepares_a_line_when_the_score_has_no_lyrics() -> 
         "When `voice_part_signals.has_lyric_sources=false`, never call "
         "`start_preprocess_voice_part_workflow`, for any part, even when the user asks to split a part."
     ) in prompt
-    assert prompt.lower().count("no-lyrics limit") == 4
+    assert (
+        "If the selected original part has `is_potentially_complex_for_preprocess=true`, "
+        "do not quote or synthesize that part."
+    ) in prompt
