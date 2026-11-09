@@ -370,7 +370,7 @@ def assemble_plan(
         sections = run_length_merge(per_measure)
         if expand(sections) != per_measure:
             raise AssemblyError(f"Round-trip mismatch for {lane.lane_id}")
-        output: dict[str, str] = {"mode": lane.output_mode}
+        output: dict[str, str | int] = {"mode": lane.output_mode, "slot": lane.slot}
         if lane.output_mode == "update_existing_derived_lane":
             if not lane.existing_derived_lane_id:
                 raise AssemblyError(f"Update lane lacks derived_lane_id: {lane.lane_id}")
