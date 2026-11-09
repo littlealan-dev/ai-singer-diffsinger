@@ -1092,6 +1092,23 @@ class Orchestrator:
         originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
+        signals = score.get("voice_part_signals")
+        if isinstance(signals, dict) and signals.get("has_lyric_sources") is False:
+            action_required = {
+                "status": "action_required",
+                "action": "lyrics_required_for_line_preparation",
+                "code": "lyrics_required_for_line_preparation",
+                "message": (
+                    "This score has no lyrics to copy into a prepared singing line. "
+                    "A single-line part can be sung in solfege; for a part with "
+                    "multiple lines or chords, add lyrics and upload the score again."
+                ),
+            }
+            return {
+                "type": "chat_text",
+                "message": action_required["message"],
+                "action_required": action_required,
+            }
         busy = await self._preprocess_busy_response(session_id, user_id)
         if busy is not None:
             return busy
@@ -8017,6 +8034,70 @@ class Orchestrator:
                 action_required_payload=action_required,
                 explicit_verse_number=selected_explicit_verse_number,
             )
+        quote_part_index = self._resolve_synthesize_part_index(
+            current_score,
+            score_summary=score_summary,
+            part_id=quote_args.get("part_id"),
+            part_index=quote_args.get("part_index"),
+        )
+        precheck = synthesize_preflight_action_required(
+            current_score, part_index=quote_part_index
+        )
+        if precheck is not None:
+            requested_verse = self._extract_call_requested_verse(call)
+            selected_verse = self._score_selected_verse_number(current_score)
+            if (
+                requested_verse
+                and selected_verse
+                and requested_verse != selected_verse
+            ):
+                precheck = self._build_verse_change_requires_repreprocess_action(
+                    score=current_score,
+                    requested_verse_number=requested_verse,
+                    selected_verse_number=selected_verse,
+                    part_index=quote_part_index,
+                    reparse_applied=False,
+                    reparsed_selected_verse_number=None,
+                )
+            elif (
+                isinstance(quote_args.get("lyric_selection"), dict)
+                and current_score.get("selected_lyric_selection")
+                != quote_args["lyric_selection"]
+            ):
+                precheck = {
+                    **precheck,
+                    "reason": "lyric_selection_requires_reparse_before_preprocess",
+                    "message": (
+                        "The requested lyric line is not loaded. Reparse the score "
+                        "for that lyric selection first, then prepare the selected "
+                        "singing line before requesting a quote."
+                    ),
+                }
+            elif (precheck.get("diagnostics") or {}).get("has_lyric_sources_signal") is False:
+                precheck = {
+                    **precheck,
+                    "reason": "complex_part_without_lyric_sources",
+                    "message": (
+                        "This part has multiple singing lines or chords, but the score has no "
+                        "lyrics to copy into a prepared line. Add lyrics and upload the score "
+                        "again, or choose a single-line part."
+                    ),
+                }
+            # A rejected attempt must not leave a previous quote available for
+            # confirmation after the user has changed the target or verse.
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY, ""
+            )
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY, ""
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(precheck, sort_keys=True),
+                action_required_payload=precheck,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
         quote_args = await self._apply_forced_voicebank(
             quote_args, forced_voicebank_id
         )
@@ -8067,12 +8148,6 @@ class Orchestrator:
         # back to its active score index, exactly as synthesize does.
         # Without it a preprocessed target resolves to -1 and the user
         # could never obtain a quote for it.
-        quote_part_index = self._resolve_synthesize_part_index(
-            current_score,
-            score_summary=score_summary,
-            part_id=quote_args.get("part_id"),
-            part_index=quote_args.get("part_index"),
-        )
         if not self._lyric_selection_belongs_to_part(
             score_summary, quote_part_index, lyric_selection
         ):

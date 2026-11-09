@@ -6,6 +6,19 @@ from pathlib import Path
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
 
+def test_quote_guidance_requires_target_classification_before_quoting() -> None:
+    bundle = build_prompt_bundle(tools=[], score_available=True, role="default")
+    guidance = bundle.dynamic_prompt_text
+    system = build_system_prompt(tools=[], score_available=True)
+
+    assert "First classify the requested target" in guidance
+    assert "Call prepare_synthesis_quote only for a directly singable target" in guidance
+    assert "no modifications does not make a multi-voice or chordal part" in guidance
+    assert "call `start_preprocess_voice_part_workflow` first" in system
+    assert "do not quote the raw part" in system
+    assert "choose one suggested derived target" not in system
+
+
 def _sample_voice_part_signals() -> dict:
     return {
         "analysis_version": "v2",
@@ -628,7 +641,7 @@ def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration(
         expand_repeats=False,
     )
 
-    assert "Call prepare_synthesis_quote after resolving all render choices." in with_repeats.dynamic_prompt_text
+    assert "Call prepare_synthesis_quote only for a directly singable target" in with_repeats.dynamic_prompt_text
     assert '"expand_repeats": true' in with_repeats.dynamic_prompt_text
     assert '"expand_repeats": false' in without_repeats.dynamic_prompt_text
 
@@ -942,7 +955,7 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
     assert "Synthesis quote instruction:" in (
         bundle.dynamic_prompt_text
     )
-    assert "Call prepare_synthesis_quote after resolving all render choices." in bundle.dynamic_prompt_text
+    assert "Call prepare_synthesis_quote only for a directly singable target" in bundle.dynamic_prompt_text
 
 
 def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability() -> None:

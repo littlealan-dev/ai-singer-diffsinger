@@ -302,7 +302,13 @@ def build_prompt_bundle(
             current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
         )
     current_synthesis_estimate_text = (
-        "Call prepare_synthesis_quote after resolving all render choices."
+        "First classify the requested target using its voice-part signals and check whether "
+        "it is an already prepared derived line. If the raw target is complex and has lyric "
+        "sources, call start_preprocess_voice_part_workflow, then wait for user review of the "
+        "derived line. Call prepare_synthesis_quote only for a directly singable target or "
+        "a selected, reviewed derived line, after resolving all render choices. The user "
+        "asking for no modifications does not make a multi-voice or chordal part directly "
+        "singable."
     )
     # The quote tool's result is delivered in a message-only follow-up, so its
     # quote_id is not in conversation history on the confirmation turn. Carry it

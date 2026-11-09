@@ -92,6 +92,14 @@ def test_prepare_synthesis_quote_schema_requires_complete_render_identity() -> N
     assert tool["outputSchema"]["properties"]["quote_id"]["type"] == "string"
 
 
+def test_prepare_synthesis_quote_description_requires_prepared_complex_line() -> None:
+    description = _tool_schema_map()["prepare_synthesis_quote"]["description"]
+    assert "Classify the selected target first" in description
+    assert "start_preprocess_voice_part_workflow" in description
+    assert "selected, reviewed derived line" in description
+    assert "No requested modifications does not make a multi-voice or chordal part simple" in description
+
+
 def test_quote_repeat_override_has_no_model_filling_default() -> None:
     schemas = _tool_schema_map()
     quote_repeats = schemas["prepare_synthesis_quote"]["inputSchema"]["properties"]["expand_repeats"]

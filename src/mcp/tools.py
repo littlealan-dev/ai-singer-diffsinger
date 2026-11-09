@@ -1972,8 +1972,12 @@ TOOLS: List[Tool] = [
     Tool(
         name="prepare_synthesis_quote",
         description=(
-            "Create the authoritative synthesis credit quote after all render choices "
-            "are resolved and before asking the user for billable confirmation."
+            "Classify the selected target first. For a complex raw part with lyric "
+            "sources, call start_preprocess_voice_part_workflow and wait for review of "
+            "the derived line. Create the authoritative synthesis credit quote only "
+            "for a directly singable part or a selected, reviewed derived line, after "
+            "all render choices are resolved and before billable confirmation. No "
+            "requested modifications does not make a multi-voice or chordal part simple."
         ),
         input_schema={
             "type": "object",
