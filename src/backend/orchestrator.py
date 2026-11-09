@@ -659,8 +659,7 @@ class Orchestrator:
                             llm_response.tool_calls,
                             user_message=message,
                         )
-                        await self._sessions.append_history(session_id, "assistant", response_message)
-                        return await self._start_preprocess_job(
+                        start_response = await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
                             [],
@@ -671,6 +670,10 @@ class Orchestrator:
                             planning_context=planning_context,
                             originating_turn_id=turn_id,
                         )
+                        await self._sessions.append_history(
+                            session_id, "assistant", start_response.get("message") or response_message
+                        )
+                        return start_response
                 if self._should_start_preprocess_job(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
