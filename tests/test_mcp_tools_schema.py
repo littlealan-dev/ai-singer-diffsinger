@@ -94,10 +94,12 @@ def test_prepare_synthesis_quote_schema_requires_complete_render_identity() -> N
 
 def test_prepare_synthesis_quote_description_requires_prepared_complex_line() -> None:
     description = _tool_schema_map()["prepare_synthesis_quote"]["description"]
-    assert "Classify the selected target first" in description
+    assert "voice_part_signals.parts[]" in description
+    assert "prepared derived part in the mapping context" in description
+    assert "is_potentially_complex_for_preprocess=true" in description
     assert "start_preprocess_voice_part_workflow" in description
-    assert "selected, reviewed derived line" in description
-    assert "No requested modifications does not make a multi-voice or chordal part simple" in description
+    assert "ask which derived part to use if ambiguous" in description
+    assert "request for no modifications does not change the complexity signal" in description
 
 
 def test_quote_repeat_override_has_no_model_filling_default() -> None:

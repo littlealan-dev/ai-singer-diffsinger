@@ -2700,7 +2700,7 @@ def test_orchestrator_injects_live_credit_availability_and_estimate_into_prompt(
     assert '"available_credits": 53' in prompt
     assert '"topup_credits_available": 45' in prompt
     assert '"duration_seconds": 169.0877' in prompt
-    assert "Call prepare_synthesis_quote only for a directly singable target" in prompt
+    assert "is_potentially_complex_for_preprocess=true" in prompt
 
 
 @pytest.mark.parametrize("helper_name", [
@@ -2744,7 +2744,7 @@ def test_followup_prompts_receive_request_credit_context(client, helper_name):
     assert '"available_credits": 53' in prompts[0]
     assert '"topup_credits_available": 45' in prompts[0]
     assert '"duration_seconds": 169.0877' in prompts[0]
-    assert "Call prepare_synthesis_quote only for a directly singable target" in prompts[0]
+    assert "is_potentially_complex_for_preprocess=true" in prompts[0]
 
 
 def test_background_action_required_prompt_reads_canonical_credit_context(client, monkeypatch):

@@ -302,13 +302,18 @@ def build_prompt_bundle(
             current_credit_availability, indent=2, sort_keys=True, ensure_ascii=False
         )
     current_synthesis_estimate_text = (
-        "First classify the requested target using its voice-part signals and check whether "
-        "it is an already prepared derived line. If the raw target is complex and has lyric "
-        "sources, call start_preprocess_voice_part_workflow, then wait for user review of the "
-        "derived line. Call prepare_synthesis_quote only for a directly singable target or "
-        "a selected, reviewed derived line, after resolving all render choices. The user "
-        "asking for no modifications does not make a multi-voice or chordal part directly "
-        "singable."
+        "First check whether the requested part_id names an original part in "
+        "voice_part_signals.parts[] or a prepared derived part in the mapping context. "
+        "If the original part has is_potentially_complex_for_preprocess=true, do not call "
+        "prepare_synthesis_quote for the original part. With lyric sources, call "
+        "start_preprocess_voice_part_workflow and ask the user to review the resulting "
+        "derived score; without lyric sources, do not prepare or quote that complex "
+        "original part. After the user "
+        "confirms the derived score, quote the intended derived part_id from the mapping "
+        "context after resolving "
+        "render choices; ask which derived part to use if that is ambiguous. For an original part with "
+        "is_potentially_complex_for_preprocess=false, resolve render choices and quote "
+        "that part. A request for no modifications does not change the complexity signal."
     )
     # The quote tool's result is delivered in a message-only follow-up, so its
     # quote_id is not in conversation history on the confirmation turn. Carry it
