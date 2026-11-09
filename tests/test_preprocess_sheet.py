@@ -1028,7 +1028,7 @@ def test_lyric_donor_staff_is_fixed_and_no_extension_policy():
     assert not any(slot_id.endswith("|lyric_policy") for slot_id in extension.fixed)
 
 
-def test_same_part_other_staff_uses_weak_source_flag():
+def test_same_part_other_staff_is_fixed_without_voice_flags():
     score = parse_score(SATB, verse_number=1)
     combined = deepcopy(score["parts"][0])
     combined["part_id"] = "P1-Combined"
@@ -1038,7 +1038,7 @@ def test_same_part_other_staff_uses_weak_source_flag():
         for note in part["notes"]
     ]
     next(note for note in combined["notes"] if note.get("voice") == "5")["lyric"] = "one"
-    # A third staff with no words keeps the lyric source menu in play.
+    # A third staff with no words makes the lane consider a lyric donor.
     combined["notes"] += [
         {**note, "staff": "3", "voice": "9", "lyric": None, "lyric_is_extended": False}
         for note in score["parts"][0]["notes"] if note.get("voice") == "1"
@@ -1050,13 +1050,11 @@ def test_same_part_other_staff_uses_weak_source_flag():
     sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes
                    if lane.source_voice_part_id == voice_part_by_voice["2"])
-    donors = [option for slot in sheet.slots
-              if slot.kind == "lyric_source" and alto_id in slot.lane_ids
-              for option in slot.options]
-    weak_other_scope = next(option for option in donors
-                            if option.fields["lyric_source"]["voice_part_id"] == voice_part_by_voice["5"])
-    assert "P1 weak_lyric_source_with_better_alternative" in weak_other_scope.flags
-    assert not any("cross_staff" in flag for flag in weak_other_scope.flags)
+    donors = [option for slot_id, option in sheet.fixed.items()
+              if slot_id.startswith(alto_id + "|") and slot_id.endswith("lyric_source")]
+    assert len(donors) == 1
+    assert donors[0].option_id == "P1-Combined|staff 2"
+    assert donors[0].flags == ()
 
 
 def test_derived_and_generated_solfege_donors_are_excluded():
