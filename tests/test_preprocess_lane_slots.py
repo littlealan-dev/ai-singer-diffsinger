@@ -9,6 +9,7 @@ import pytest
 from src.api.preprocess_assembler import assemble_plan, first_option_choices
 from src.api.preprocess_sheet import build_sheet, build_sheet_skeleton
 from src.api.voice_parts import (
+    _analyze_part_voice_parts,
     _normalize_output_lane_request,
     _resolve_plan_output_lanes,
     _staff_scope_key,
@@ -78,19 +79,33 @@ def test_reversing_plan_targets_preserves_each_skeleton_slot(tmp_path):
 
 def test_hidden_shared_line_slot_does_not_shift_sibling_voice(tmp_path):
     score = _single_staff_score(tmp_path, [_note("C", voice="1", lyric="word")])
+    shared_note = deepcopy(score["parts"][0]["notes"][0])
+    shared_note["voice"] = "_default"
+    score["parts"][0]["notes"].append(shared_note)
+    voice_parts = _analyze_part_voice_parts(score["parts"][0], 0)["voice_parts"]
+    hidden_source = next(
+        part["voice_part_id"] for part in voice_parts if part["source_voice_id"] == "_default"
+    )
+    sibling_source = next(
+        part["voice_part_id"] for part in voice_parts if part["source_voice_id"] == "1"
+    )
     score["voice_part_transforms"] = {
         "hidden": {"derived_lane": {
             "derived_lane_id": "dl:p0:source:default:slot:1",
-            "source": {"part_index": 0, "voice_part_id": "voice part _default"},
+            "source": {"part_index": 0, "voice_part_id": hidden_source},
             "slot": 1,
         }}
     }
+    assert [(lane.source_voice_part_id, lane.slot) for lane in
+            build_sheet_skeleton(score, _context(score)).lanes] == [
+        (sibling_source, 1), (sibling_source, 2)
+    ]
     assert _normalize_output_lane_request({
         "mode": "append_new_derived_lane", "slot": 1
     })["slot"] == 1
     plan = {"targets": [{
         "uses_derived_lane_contract": True,
-        "source": {"part_index": 0, "voice_part_id": "voice part 1"},
+        "source": {"part_index": 0, "voice_part_id": sibling_source},
         "output": {"mode": "append_new_derived_lane", "slot": 1},
     }]}
     resolved = _resolve_plan_output_lanes(score, plan)
@@ -157,6 +172,23 @@ def test_two_targets_cannot_claim_one_explicit_slot(tmp_path):
         "output": {"mode": "append_new_derived_lane", "slot": 1},
     }
     resolved = _resolve_plan_output_lanes(score, {"targets": [deepcopy(target), deepcopy(target)]})
+    assert not resolved["ok"]
+    assert resolved["error"]["action"] == "derived_lane_slot_taken"
+
+
+def test_recorded_lane_blocks_explicit_append_slot(tmp_path):
+    score = _single_staff_score(tmp_path, [_note("C", voice="1", lyric="word")])
+    score["voice_part_transforms"] = {"existing": {"derived_lane": {
+        "derived_lane_id": "dl:p0:source:voice-part-1:slot:1",
+        "source": {"part_index": 0, "voice_part_id": "voice part 1"},
+        "slot": 1,
+    }}}
+    plan = {"targets": [{
+        "uses_derived_lane_contract": True,
+        "source": {"part_index": 0, "voice_part_id": "voice part 1"},
+        "output": {"mode": "append_new_derived_lane", "slot": 1},
+    }]}
+    resolved = _resolve_plan_output_lanes(score, plan)
     assert not resolved["ok"]
     assert resolved["error"]["action"] == "derived_lane_slot_taken"
 
