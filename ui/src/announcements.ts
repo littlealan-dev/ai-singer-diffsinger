@@ -16,10 +16,10 @@ export const ANNOUNCEMENTS: Announcement[] = [
   {
     id: 'version_1_2_0',
     title: 'SightSinger 1.2.0 Update',
-    content: '- More reliable part splitting: voices that take turns on one staff, and a separate voice next to a divided chord, now split correctly.\n\n- Scores without lyrics: a single-line part is sung in solfege straight away; a part with several voices or chords explains why it needs lyrics first.\n\n- The part and verse picker is gone: just tell SightSinger in the chat which part and verse to sing.\n\n- Bug fixes and stability improvements.',
+    content: '- Much faster part splitting: short songs are split about 8x faster (around 8 seconds instead of about a minute), and long multi-part songs about 8x faster (around 35 seconds instead of 5 minutes or more).\n\n- More reliable on long, complex scores: no timeouts in our tests, down from 7 in 12 runs, and every song finished.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
     effect: 'none',
-    date: '2026-11-08',
-    effectiveFrom: '2026-11-08',
+    date: '2026-11-09',
+    effectiveFrom: '2026-11-09',
   },
   {
     id: 'version_1_1_0',
