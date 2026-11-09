@@ -15,6 +15,12 @@ from src.api.voice_part_lint_rules import (
 
 LLM_SCHEMA_VERSION = "v1"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt.txt"
+# The line-preparation model's base prompt: the chat prompt's identity, reply
+# format, verse and tool-output rules, copied verbatim, without the chat-only
+# rules (quotes, credits, voices, solfege, synthesis).
+_SYSTEM_PROMPT_PLANNER_BASE_PATH = (
+    Path(__file__).resolve().parent / "config" / "system_prompt_planner_base.txt"
+)
 _SYSTEM_PROMPT_LESSONS_PATH = (
     Path(__file__).resolve().parent / "config" / "system_prompt_lessons.txt"
 )
@@ -76,6 +82,7 @@ def _default_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
         "requested_verse_number",
         "has_multi_voice_parts",
         "has_missing_lyric_voice_parts",
+        "has_lyric_sources",
     )
     part_fields = (
         "part_index",
@@ -123,6 +130,62 @@ def _default_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
     return compact
 
 
+# Per-part fields that full_score_analysis.parts[] repeats from parts[] (key in
+# full_score_analysis -> key in parts[]): both are built from the same analysis.
+_DUPLICATED_ANALYSIS_PART_FIELDS = {
+    "measure_lyric_coverage": "measure_lyric_coverage",
+    "voice_part_measure_spans": "voice_part_measure_spans",
+    "voice_part_id_to_source_voice_id": "voice_part_id_to_source_voice_id",
+    "part_region_indices": "part_region_indices",
+    "section_source_candidate_hints": "source_candidate_hints",
+}
+
+
+def _preprocess_voice_part_signals(signals: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop full_score_analysis copies of per-part values that parts[] already has.
+
+    A field is dropped only when the matching parts[] entry holds the identical
+    value, so the line-preparation model still sees every value once.
+    """
+    full_analysis = signals.get("full_score_analysis")
+    if not isinstance(full_analysis, dict) or not isinstance(full_analysis.get("parts"), list):
+        return signals
+    parts_by_key = {
+        (part.get("part_index"), part.get("part_id")): part
+        for part in signals.get("parts") or []
+        if isinstance(part, dict)
+    }
+    analysis_parts = []
+    for part in full_analysis["parts"]:
+        twin = (
+            parts_by_key.get((part.get("part_index"), part.get("part_id")))
+            if isinstance(part, dict)
+            else None
+        )
+        if twin is None:
+            analysis_parts.append(part)
+            continue
+        analysis_parts.append(
+            {
+                key: value
+                for key, value in part.items()
+                if not (
+                    key in _DUPLICATED_ANALYSIS_PART_FIELDS
+                    and _DUPLICATED_ANALYSIS_PART_FIELDS[key] in twin
+                    and twin[_DUPLICATED_ANALYSIS_PART_FIELDS[key]] == value
+                )
+            }
+        )
+    return {**signals, "full_score_analysis": {**full_analysis, "parts": analysis_parts}}
+
+
+def _context_json(value: Any, *, compact: bool) -> str:
+    """Serialize a Dynamic Context value; the line-preparation model gets it unindented."""
+    if compact:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
+
+
 def build_prompt_bundle(
     tools: List[Dict[str, Any]],
     score_available: bool,
@@ -156,40 +219,34 @@ def build_prompt_bundle(
         )
 
     tool_json = json.dumps(tool_specs, indent=2, sort_keys=True, ensure_ascii=False)
+    # The line-preparation model reads the largest score facts, so its JSON is compact.
+    compact_context = _is_preprocess_role(role)
     score_hint = "available" if score_available else "missing"
     voicebanks_text = "none"
     if voicebank_ids:
         voicebanks_text = ", ".join(voicebank_ids)
     score_summary_text = "none"
     if score_summary:
-        score_summary_text = json.dumps(
-            score_summary, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        score_summary_text = _context_json(score_summary, compact=compact_context)
     parsed_score_json_text = "none"
     if parsed_score_json:
-        parsed_score_json_text = json.dumps(
-            parsed_score_json, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        parsed_score_json_text = _context_json(parsed_score_json, compact=compact_context)
     voice_part_signals_text = "none"
     if voice_part_signals:
         prompt_signals = (
-            voice_part_signals
+            _preprocess_voice_part_signals(voice_part_signals)
             if _is_preprocess_role(role)
             else _default_voice_part_signals(voice_part_signals)
         )
-        voice_part_signals_text = json.dumps(
-            prompt_signals, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        voice_part_signals_text = _context_json(prompt_signals, compact=compact_context)
     preprocess_mapping_context_text = "none"
     if preprocess_mapping_context:
-        preprocess_mapping_context_text = json.dumps(
-            preprocess_mapping_context, indent=2, sort_keys=True, ensure_ascii=False
+        preprocess_mapping_context_text = _context_json(
+            preprocess_mapping_context, compact=compact_context
         )
     last_preprocess_plan_text = "none"
     if last_preprocess_plan:
-        last_preprocess_plan_text = json.dumps(
-            last_preprocess_plan, indent=2, sort_keys=True, ensure_ascii=False
-        )
+        last_preprocess_plan_text = _context_json(last_preprocess_plan, compact=compact_context)
     voicebank_details_text = "none"
     if voicebank_details:
         voicebank_details_text = json.dumps(
@@ -322,6 +379,31 @@ def build_prompt_bundle(
             "Tools available for this score (call them like the tools listed in the "
             f"system prompt):\n{score_tools_json}\n"
         )
+    # Voices, overrides, solfege, credits, quotes and repeats feed synthesis
+    # replies only; the line-preparation model never reads them.
+    synthesis_context = (
+        ""
+        if _is_preprocess_role(role)
+        else (
+            f"Available voicebanks (IDs): {voicebanks_text}\n"
+            "Voicebank metadata (if available):\n"
+            f"{voicebank_details_text}\n"
+            f"User-selected voicebank override: {selected_voicebank_text}\n"
+            f"User-selected language override: {selected_language_text}\n"
+            "Canonical current solfege settings (authoritative):\n"
+            f"{solfege_settings_text}\n"
+            "Current credit availability (authoritative, refreshed for this request):\n"
+            f"{current_credit_availability_text}\n"
+            "Synthesis quote instruction:\n"
+            f"{current_synthesis_estimate_text}\n"
+            "Active synthesis quote awaiting confirmation (authoritative; pass this "
+            "exact quote_id to synthesize once the user confirms it):\n"
+            f"{active_synthesis_quote_text}\n"
+            "Repeat-expansion setting (authoritative):\n"
+            f"{repeat_expansion_text}\n"
+            f"{score_tools_text}"
+        )
+    )
     dynamic_prompt = (
         "Dynamic Context:\n"
         "AUTHORITATIVE CURRENT APPLICATION STATE: The values below are current and supersede "
@@ -339,23 +421,7 @@ def build_prompt_bundle(
         f"{preprocess_mapping_context_text}\n"
         "Latest attempted preprocess plan (if available):\n"
         f"{last_preprocess_plan_text}\n"
-        f"Available voicebanks (IDs): {voicebanks_text}\n"
-        "Voicebank metadata (if available):\n"
-        f"{voicebank_details_text}\n"
-        f"User-selected voicebank override: {selected_voicebank_text}\n"
-        f"User-selected language override: {selected_language_text}\n"
-        "Canonical current solfege settings (authoritative):\n"
-        f"{solfege_settings_text}\n"
-        "Current credit availability (authoritative, refreshed for this request):\n"
-        f"{current_credit_availability_text}\n"
-        "Synthesis quote instruction:\n"
-        f"{current_synthesis_estimate_text}\n"
-        "Active synthesis quote awaiting confirmation (authoritative; pass this "
-        "exact quote_id to synthesize once the user confirms it):\n"
-        f"{active_synthesis_quote_text}\n"
-        "Repeat-expansion setting (authoritative):\n"
-        f"{repeat_expansion_text}\n"
-        f"{score_tools_text}"
+        f"{synthesis_context}"
         "End Dynamic Context."
     )
     return PromptBundle(
@@ -414,9 +480,12 @@ def _is_preprocess_role(role: Any) -> bool:
 
 def _load_system_prompt(*, include_preprocess_guidance: bool = False) -> str:
     """Load and combine system prompt templates from disk."""
-    if not _SYSTEM_PROMPT_PATH.exists():
-        raise FileNotFoundError(f"Missing system prompt template: {_SYSTEM_PROMPT_PATH}")
-    base_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    base_path = (
+        _SYSTEM_PROMPT_PLANNER_BASE_PATH if include_preprocess_guidance else _SYSTEM_PROMPT_PATH
+    )
+    if not base_path.exists():
+        raise FileNotFoundError(f"Missing system prompt template: {base_path}")
+    base_prompt = base_path.read_text(encoding="utf-8")
     # The role line goes right after the opening identity line.
     identity, _, rest = base_prompt.partition("\n")
     role_line = _PREPROCESS_ROLE_LINE if include_preprocess_guidance else _DEFAULT_ROLE_LINE

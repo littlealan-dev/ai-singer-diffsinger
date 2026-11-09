@@ -12,6 +12,7 @@ import contextvars
 import hashlib
 import logging
 import copy
+import functools
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from src.backend.quote_presentation import (
 )
 from src.backend.llm_prompt import (
     LlmResponse,
+    PromptBundle,
     ToolCall,
     build_prompt_bundle,
     parse_llm_response,
@@ -62,7 +64,7 @@ from src.backend.language_selection import (
     normalize_language_code,
     resolve_synthesis_language,
 )
-from src.backend.session import SessionStore
+from src.backend.session import SessionMusicXmlUnavailableError, SessionStore
 from src.backend.storage_client import (
     copy_blob,
     delete_blob,
@@ -117,6 +119,16 @@ class ChatTurnStopped(RuntimeError):
 
 class SynthesisStopped(Exception):
     """The take was stopped before its publication point."""
+
+
+@dataclass
+class _PlannerV2State:
+    """Planner v2's latest sheet and choices for one preprocess job; each repair builds on them."""
+
+    score: Dict[str, Any]
+    planning_context: Dict[str, Any]
+    sheet: Any
+    choices: Dict[str, Any]
 
 
 class LlmTurnLimitReached(RuntimeError):
@@ -441,7 +453,6 @@ class Orchestrator:
         *,
         user_id: str,
         user_email: str,
-        selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         expand_repeats: bool = False,
@@ -450,7 +461,7 @@ class Orchestrator:
         try:
             return await self._handle_chat_impl(
                 session_id, message, user_id=user_id, user_email=user_email,
-                selection=selection, selected_voicebank_id=selected_voicebank_id,
+                selected_voicebank_id=selected_voicebank_id,
                 selected_language=selected_language, expand_repeats=expand_repeats,
                 score_player_takes=score_player_takes,
             )
@@ -466,7 +477,6 @@ class Orchestrator:
         *,
         user_id: str,
         user_email: str,
-        selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         expand_repeats: bool = False,
@@ -547,23 +557,6 @@ class Orchestrator:
             current_score = snapshot.get("current_score")
             response_message = "Acknowledged."
             include_score = self._should_include_score(message)
-            explicit_verse_from_selection = self._normalize_verse_number(
-                selection.get("verse_number")
-                if isinstance(selection, dict)
-                else None
-            )
-            if explicit_verse_from_selection:
-                await self._sessions.set_metadata(
-                    session_id,
-                    EXPLICIT_VERSE_METADATA_KEY,
-                    explicit_verse_from_selection,
-                )
-                files = snapshot.get("files")
-                next_files = dict(files) if isinstance(files, dict) else {}
-                next_files[EXPLICIT_VERSE_METADATA_KEY] = explicit_verse_from_selection
-                snapshot = dict(snapshot)
-                snapshot["files"] = next_files
-
             if current_score is None:
                 # Require a score before any synthesis steps.
                 response_message = "Please upload a MusicXML file first."
@@ -660,8 +653,7 @@ class Orchestrator:
                     elif followup_error:
                         response_message = followup_error
                     await self._append_chat_reply(session_id, response_message)
-                    # A reply to a tool error never carries the part picker.
-                    return {"type": "chat_text", "message": response_message, "suppress_selector": True}
+                    return {"type": "chat_text", "message": response_message}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -681,8 +673,18 @@ class Orchestrator:
                             tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
                             explicit_verse_number=explicit_verse_number,
                         )
-                        response_message = str(
-                            action_required.get("message") or response_message
+                        response_message = await self._verse_selection_followup_message(
+                            snapshot,
+                            current_score["score"],
+                            action_required,
+                            default_message=response_message,
+                            session_id=session_id,
+                            user_id=user_id,
+                            user_email=user_email,
+                            current_credit_availability=current_credit_availability,
+                            selected_voicebank_id=forced_voicebank_id,
+                            selected_language=forced_language,
+                            expand_repeats=expand_repeats,
                         )
                         await self._append_chat_reply(session_id, response_message)
                         return {
@@ -2630,7 +2632,16 @@ class Orchestrator:
             current_credit_availability = await self._get_current_credit_availability(
                 user_id,
             )
-            if not tool_calls and isinstance(planning_context, dict):
+            planner_v2: Optional[_PlannerV2State] = None
+            if (
+                not tool_calls
+                and isinstance(planning_context, dict)
+                and self._settings.preprocess_planner == "v2"
+            ):
+                tool_calls, initial_thought_summary, planner_v2 = await self._plan_preprocess_v2(
+                    score, planning_context, session_id=session_id, user_id=user_id
+                )
+            elif not tool_calls and isinstance(planning_context, dict):
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
                     snapshot,
                     score,
@@ -2664,6 +2675,7 @@ class Orchestrator:
                 preprocess_job_id=job_id,
                 progress_callback=publish_attempt_messages,
                 originating_turn_id=originating_turn_id,
+                planner_v2=planner_v2,
             )
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
@@ -2681,6 +2693,26 @@ class Orchestrator:
                 )
             else:
                 warning_message = response.get("warning")
+                lane_counts = None
+                if planner_v2 is not None:
+                    from src.api.voice_parts import sheet_lane_counts
+
+                    planned_by_staff: Dict[tuple[int, str], int] = {}
+                    for lane in planner_v2.sheet.lanes:
+                        key = (lane.part_index, lane.scope_key)
+                        planned_by_staff[key] = planned_by_staff.get(key, 0) + 1
+                    lane_counts = []
+                    for (part_index, scope), chosen in sorted(planned_by_staff.items()):
+                        counts = sheet_lane_counts(
+                            planner_v2.score, part_index=part_index, staff_scope=scope,
+                        )
+                        lane_counts.append({
+                            "partId": planner_v2.score["parts"][part_index]["part_id"],
+                            "staff": scope,
+                            "peak": counts.peak,
+                            "most": counts.most,
+                            "chosen": chosen,
+                        })
                 await asyncio.to_thread(
                     self._job_store.update_job,
                     job_id,
@@ -2694,6 +2726,7 @@ class Orchestrator:
                     details=response.get("details"),
                     warningMessage=warning_message,
                     completedAt=datetime.now(timezone.utc),
+                    **({"laneCounts": lane_counts} if lane_counts is not None else {}),
                 )
         except asyncio.CancelledError:
             # Shutdown cancels this task. CancelledError is not an Exception,
@@ -2868,8 +2901,14 @@ class Orchestrator:
         progress_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
         workflow_user_message: Optional[str] = None,
         originating_turn_id: Optional[str] = None,
+        planner_v2: Optional["_PlannerV2State"] = None,
     ) -> Dict[str, Any]:
-        """Execute an LLM-driven tool workflow with bounded repair turns."""
+        """Execute an LLM-driven tool workflow with bounded repair turns.
+
+        With planner_v2 (the job's first attempt came from planner v2), a repair
+        re-asks the chooser only about the failing bars instead of asking the
+        LLM for a new plan.
+        """
         include_score = initial_include_score
         if current_credit_availability is None:
             current_credit_availability = await self._get_current_credit_availability(
@@ -2893,9 +2932,7 @@ class Orchestrator:
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
-        selection_resolved = False
         repeat_setting_changed = False
-        selector_suppressed = False
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
         bootstrap_plan_baseline: Optional[BootstrapPlanBaseline] = None
@@ -2987,7 +3024,6 @@ class Orchestrator:
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
-            selection_resolved = selection_resolved or tool_result.selection_resolved
             if tool_result.expand_repeats is not None and tool_result.expand_repeats != expand_repeats:
                 expand_repeats = tool_result.expand_repeats
                 repeat_setting_changed = True
@@ -3134,9 +3170,6 @@ class Orchestrator:
                     response["review_required"] = True
                 break
 
-            if self._tool_payload_has_error(followup_prompt):
-                selector_suppressed = True
-
             if preprocess_iteration:
                 if best_valid_candidate is not None and best_valid_candidate.quality_class == 3:
                     best_valid_candidate = await self._materialize_review_candidate_if_needed(
@@ -3155,37 +3188,18 @@ class Orchestrator:
                     break
 
                 if attempt_number >= max_attempts:
-                    best_valid_candidate = await self._materialize_review_candidate_if_needed(
-                        session_id, best_valid_candidate
-                    )
-                    candidate_response = await self._render_selected_candidate_response(
+                    best_valid_candidate, response, has_candidate = await self._final_attempt_response(
                         session_id,
                         user_id,
                         working_score,
                         best_valid_candidate,
+                        best_invalid_candidate,
                         user_email=user_email,
                         current_credit_availability=current_credit_availability,
+                        max_attempts=max_attempts,
                         stop_reason="attempt_budget_exhausted",
                     )
-                    if candidate_response is not None:
-                        response = candidate_response
-                        include_score = True
-                    elif best_invalid_candidate is not None:
-                        response = self._build_invalid_candidate_error(best_invalid_candidate) or {
-                            "type": "chat_error",
-                            "message": (
-                                f"Unable to produce a clean single singing line after "
-                                f"{max_attempts} attempts."
-                            ),
-                        }
-                    else:
-                        response = {
-                            "type": "chat_text",
-                            "message": (
-                                f"I couldn't finish preparing a clean singing line after {max_attempts} attempts. "
-                                "Please revise the request or part details."
-                            ),
-                        }
+                    include_score = include_score or has_candidate
                     break
 
                 latest_snapshot = await self._sessions.get_snapshot(session_id, user_id)
@@ -3203,6 +3217,41 @@ class Orchestrator:
                         include_score = True
                     score_version = _snapshot_score_version(latest_snapshot)
                     score_summary = latest_snapshot.get("score_summary")
+                if planner_v2 is not None:
+                    v2_calls, v2_stop_reason = await self._plan_preprocess_v2_repair(
+                        planner_v2, last_action_required_payload or {}
+                    )
+                    if v2_calls is None:
+                        best_valid_candidate, response, has_candidate = await self._final_attempt_response(
+                            session_id,
+                            user_id,
+                            working_score,
+                            best_valid_candidate,
+                            best_invalid_candidate,
+                            user_email=user_email,
+                            current_credit_availability=current_credit_availability,
+                            max_attempts=max_attempts,
+                            stop_reason=v2_stop_reason or "planner_v2_nothing_to_rechoose",
+                        )
+                        include_score = include_score or has_candidate
+                        break
+                    attempt_messages.append({
+                        "attempt_number": attempt_number + 1,
+                        "message": backend_message("preprocess.v2_repairing"),
+                    })
+                    if progress_callback is not None:
+                        await progress_callback(attempt_messages)
+                    current_repair_scopes = self._build_repair_scopes(
+                        last_action_required_payload or {},
+                        baseline_plan=self._select_repair_baseline(
+                            best_candidate=best_valid_candidate,
+                            bootstrap_baseline=bootstrap_plan_baseline,
+                            latest_attempted_plan=attempted_plan,
+                        )[1],
+                    )
+                    pending_calls = v2_calls
+                    pending_thought_summary = ""
+                    continue
                 repair_envelope = self._build_repair_planning_envelope(
                     best_valid_candidate,
                     bootstrap_plan_baseline,
@@ -3229,7 +3278,7 @@ class Orchestrator:
                 try:
                     repair_response, repair_error = await self._decide_followup_with_llm(
                         latest_snapshot,
-                        json.dumps(repair_envelope, sort_keys=True),
+                        json.dumps(repair_envelope, sort_keys=True, separators=(",", ":")),
                         working_score,
                         session_id=session_id,
                         user_id=user_id,
@@ -3494,9 +3543,23 @@ class Orchestrator:
                         tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
                         explicit_verse_number=handoff_explicit_verse_number,
                     )
+                    verse_message = await self._verse_selection_followup_message(
+                        latest_snapshot,
+                        working_score,
+                        action_required,
+                        default_message=response_message,
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
+                        selected_voicebank_id=forced_voicebank_id,
+                        selected_language=forced_language,
+                        expand_repeats=expand_repeats,
+                    )
+                    await self._sessions.append_history(session_id, "assistant", verse_message)
                     return {
                         "type": "chat_text",
-                        "message": str(action_required.get("message") or response_message),
+                        "message": verse_message,
                         "action_required": action_required,
                     }
                 planning_context = self._build_preprocess_workflow_planning_context(
@@ -3543,13 +3606,8 @@ class Orchestrator:
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
             response["action_required"] = copy.deepcopy(last_action_required_payload)
-        # Set here: the reply dict is rebuilt when the LLM's final message arrives.
-        if selection_resolved:
-            response["selection_resolved"] = True
         if repeat_setting_changed:
             response["expand_repeats"] = expand_repeats
-        if selector_suppressed:
-            response["suppress_selector"] = True
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
@@ -4913,6 +4971,54 @@ class Orchestrator:
             session_id, score, summary=summary if isinstance(summary, dict) else None
         )
 
+    async def _final_attempt_response(
+        self,
+        session_id: str,
+        user_id: str,
+        working_score: Dict[str, Any],
+        best_valid_candidate: Optional["WorkflowCandidate"],
+        best_invalid_candidate: Optional["WorkflowCandidate"],
+        *,
+        user_email: Optional[str],
+        current_credit_availability: Optional[Dict[str, int]],
+        max_attempts: int,
+        stop_reason: str,
+    ) -> tuple[Optional["WorkflowCandidate"], Dict[str, Any], bool]:
+        """Stop the preprocess attempts: the best candidate, else the best invalid one's error.
+
+        Returns the (materialized) best candidate, the response, and whether the
+        response shows a candidate.
+        """
+        best_valid_candidate = await self._materialize_review_candidate_if_needed(
+            session_id, best_valid_candidate
+        )
+        candidate_response = await self._render_selected_candidate_response(
+            session_id,
+            user_id,
+            working_score,
+            best_valid_candidate,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            stop_reason=stop_reason,
+        )
+        if candidate_response is not None:
+            return best_valid_candidate, candidate_response, True
+        if best_invalid_candidate is not None:
+            return best_valid_candidate, self._build_invalid_candidate_error(best_invalid_candidate) or {
+                "type": "chat_error",
+                "message": (
+                    f"Unable to produce a clean single singing line after "
+                    f"{max_attempts} attempts."
+                ),
+            }, False
+        return best_valid_candidate, {
+            "type": "chat_text",
+            "message": (
+                f"I couldn't finish preparing a clean singing line after {max_attempts} attempts. "
+                "Please revise the request or part details."
+            ),
+        }, False
+
     async def _render_selected_candidate_response(
         self,
         session_id: str,
@@ -4948,6 +5054,7 @@ class Orchestrator:
                 "in singer-friendly language, explain why the workflow is stopping "
                 "here, and ask the user to review the score or request revisions."
             ),
+            compact_context=True,
         )
         if followup_error:
             return candidate_response
@@ -5396,7 +5503,7 @@ class Orchestrator:
                 "The request object states target and synthesis intent only; it is not an executable line-preparation plan.",
                 "Generate exactly one preprocess_voice_parts tool call.",
                 "Do not call synthesize in this planning turn.",
-                "Use split_coverage=selective only for an explicit user request for a particular lane, chord rank, or note subset. Otherwise, for each requested staff scope, use complete coverage and create all visible derived lanes required by that scope's maximum simultaneous note count.",
+                "Use split_coverage=selective only for an explicit user request for a particular lane, chord rank, or note subset. Otherwise, for each requested staff scope, use complete coverage and create visible derived lanes for every simultaneous note and every real source voice: at least that scope's maximum simultaneous note count, and at most that count or, if larger, the sum of each real source voice's own maximum simultaneous note count.",
                 "Interpret other_instruction only as part-splitting/source-selection guidance for constructing a valid preprocess_voice_parts.request.plan.",
                 "Allowed other_instruction examples: take the lower note in each chord; use a named part/staff/voice as the melody or lyric source; use one source for some measures and another source for other measures; select a verse lyric line.",
                 "Disallowed other_instruction examples: transpose down an octave; change key; change tempo or rhythm; rewrite lyrics; change musical style; tune, mix, or process audio.",
@@ -5498,6 +5605,43 @@ class Orchestrator:
                 return False
             return True
         return False
+
+    async def _verse_selection_followup_message(
+        self,
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        action_required: Dict[str, Any],
+        *,
+        default_message: str,
+        session_id: str,
+        user_id: str,
+        user_email: str,
+        current_credit_availability: Optional[Dict[str, int]],
+        selected_voicebank_id: Optional[str],
+        selected_language: Optional[str],
+        expand_repeats: bool,
+    ) -> str:
+        """Have the chat model ask for a verse after the verse gate blocks tools."""
+        followup, error = await self._decide_message_only_followup_with_llm(
+            snapshot,
+            json.dumps(action_required, sort_keys=True),
+            score,
+            session_id=session_id,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            selected_voicebank_id=selected_voicebank_id,
+            selected_language=selected_language,
+            expand_repeats=expand_repeats,
+            instructions=(
+                "No tool ran: this score has several verses and none was chosen. "
+                "Ask the user which verse to sing, naming the available verses. "
+                "Return no tool calls."
+            ),
+        )
+        if followup is not None and followup.final_message:
+            return self._format_followup_message_text(followup.final_message)
+        return error or default_message
 
     def _build_verse_selection_required_action(
         self,
@@ -6201,6 +6345,7 @@ class Orchestrator:
             selected_voicebank_id=selected_voicebank_id,
             instructions=REPAIR_NOTICE_INSTRUCTIONS,
             rejection_detail=REPAIR_NOTICE_REJECTION_DETAIL,
+            compact_context=True,
         )
         if error or response is None:
             if error:
@@ -6289,7 +6434,7 @@ class Orchestrator:
             )
             response, error = await self._decide_followup_with_llm(
                 snapshot,
-                json.dumps(attempt_context, sort_keys=True),
+                json.dumps(attempt_context, sort_keys=True, separators=(",", ":")),
                 score,
                 role=LlmRole.PREPROCESS,
                 current_credit_availability=current_credit_availability,
@@ -6317,6 +6462,283 @@ class Orchestrator:
                 response = replace(response, tool_calls=preprocess_calls)
             return response, None
         return None, PREPROCESS_PLANNING_ERROR_MESSAGE
+
+    async def _plan_preprocess_v2(
+        self,
+        score: Dict[str, Any],
+        planning_context: Dict[str, Any],
+        *,
+        session_id: str,
+        user_id: str,
+    ) -> tuple[List[ToolCall], str, "_PlannerV2State"]:
+        """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
+        from src.api.preprocess_assembler import AssemblyError
+        from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose
+        from src.api.preprocess_evidence import EvidenceUnavailable
+        from src.api.preprocess_sheet import build_sheet_skeleton
+
+        # The recorded source may belong to another worker. Resolve the active
+        # artifact before asking the chooser, and retain it for local repairs.
+        score = dict(score)
+        try:
+            for attempt in range(3):
+                try:
+                    score["source_musicxml_path"] = str(
+                        await self._sessions.ensure_active_musicxml(session_id, user_id)
+                    )
+                    break
+                except SessionMusicXmlUnavailableError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(attempt + 1)
+        except Exception as exc:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=active_musicxml_unavailable"
+            )
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        issues = build_sheet_skeleton(score, planning_context).issues
+        if "score_has_no_lyrics" in issues:
+            raise PreprocessPlanningError(backend_message("preprocess.score_needs_lyrics"))
+        if "target_unresolved" in issues:
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE)
+        started = time.monotonic()
+        try:
+            # The chooser's whole step is one call against the turn budget: code,
+            # not the LLM, decides how many requests it makes.
+            self._charge_llm_turn_budget()
+        except LlmTurnLimitReached as exc:
+            raise PreprocessPlanningError(str(exc)) from exc
+        try:
+            sheet, choices, stats = await choose(
+                score,
+                planning_context,
+                call=self._call_preprocess_chooser,
+                max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
+            )
+        except EvidenceUnavailable as exc:
+            self._logger.warning("planner_v2_evidence_unavailable reason=%s", exc.reason)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        except ChooserError as exc:
+            self._logger.warning("planner_v2_chooser_error error=%s", exc)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        self._log_planner_v2_freeform(sheet)
+        try:
+            plan = assemble_chosen(sheet, choices, score=score)
+        except AssemblyError as exc:
+            self._logger.error("planner_v2_construction_violation error=%s", exc)
+            raise PreprocessPlanningError(PREPROCESS_PLANNING_ERROR_MESSAGE) from exc
+        self._logger.info(
+            "planner_v2_choose requests=%s retries=%s slots_asked=%s second_pass_slots=%s "
+            "wall_seconds=%.2f",
+            stats.requests,
+            stats.retries,
+            stats.slots_asked,
+            stats.second_pass_slots,
+            time.monotonic() - started,
+        )
+        tool_calls = self._apply_preprocess_planning_context_defaults(
+            [ToolCall(name=TOOL_PREPROCESS_VOICE_PARTS, arguments={"request": {"plan": plan}})],
+            planning_context,
+        )
+        summary = (
+            f"planner v2: {stats.slots_asked} choices in {stats.requests} requests, "
+            f"{stats.retries} retries, {stats.second_pass_slots} second-pass"
+        )
+        return tool_calls, summary, _PlannerV2State(score, planning_context, sheet, choices)
+
+    def _log_planner_v2_freeform(self, sheet: Any) -> None:
+        for slot in sheet.slots:
+            if slot.kind == "freeform":
+                self._logger.info(
+                    "planner_v2_freeform_segment slot=%s reason=%s",
+                    slot.slot_id,
+                    slot.evidence.get("reason"),
+                )
+
+    def _planner_v2_issue_spans(self, issue: Dict[str, Any]) -> List[Dict[str, int]]:
+        """Bars of a failing issue: its impacted spans, a lint finding's section, or its own bounds."""
+        spans = self._normalize_issue_spans(issue)
+        if spans:
+            return spans
+        section = issue.get("section")
+        bounds = section if isinstance(section, dict) else issue
+        return self._normalize_spans(
+            [{"start": bounds.get("start_measure"), "end": bounds.get("end_measure")}]
+        )
+
+    def _planner_v2_failures(
+        self, sheet: Any, payload: Dict[str, Any]
+    ) -> tuple[Dict[str, List[Tuple[int, int]]], Dict[str, List[Any]]]:
+        """Failing bar spans and findings per sheet lane, from a failing attempt's payload.
+
+        The plan has one target per sheet lane, in sheet.lanes order, so a result
+        or finding that names its target index maps to that lane; otherwise every
+        lane with the same part and source voice part.
+        """
+        from src.api.preprocess_chooser import SlotFinding
+
+        lanes = list(sheet.lanes)
+
+        def lanes_for(index: Any, part_index: Any, voice_part_id: Any) -> List[Any]:
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(lanes):
+                return [lanes[index]]
+            return [lane for lane in lanes
+                    if lane.part_index == part_index and lane.source_voice_part_id == voice_part_id]
+
+        def section_quality_entries(
+            result: Dict[str, Any], index: Any = None
+        ) -> List[Tuple[List[Any], Dict[str, Any]]]:
+            issue_lanes = lanes_for(
+                index, result.get("part_index"),
+                result.get("target_voice_part_id") or result.get("target_voice_part"),
+            )
+            return [
+                (issue_lanes, {**issue, "message": issue.get("message") or result.get("message")})
+                for issue in result.get("section_quality_issues") or []
+                if isinstance(issue, dict)
+            ]
+
+        entries: List[Tuple[List[Any], Dict[str, Any]]] = section_quality_entries(payload)
+        targets = self._extract_target_results(payload)
+        for position, target in enumerate(targets):
+            index = target.get("target_index")
+            if index is None and len(targets) == len(lanes):
+                index = position
+            entries.extend(section_quality_entries(target, index))
+            for issue in target.get("issues") or []:
+                entries.append((
+                    lanes_for(issue.get("target_index", index), target.get("part_index"),
+                              target.get("target_voice_part_id")),
+                    issue,
+                ))
+        if not targets:
+            for issue in self._extract_issue_entries(payload):
+                entries.append((
+                    lanes_for(issue.get("target_index"), issue.get("part_index"),
+                              issue.get("target_voice_part_id")),
+                    issue,
+                ))
+        failing: Dict[str, List[Tuple[int, int]]] = {}
+        findings: Dict[str, List[Any]] = {}
+        for issue_lanes, issue in entries:
+            spans = self._planner_v2_issue_spans(issue)
+            rule = str(issue.get("rule") or issue.get("code") or issue.get("action") or "unknown")
+            severity = str(issue.get("rule_severity") or issue.get("severity") or "")
+            message = str(issue.get("message") or issue.get("rule_name") or "")
+            for lane in issue_lanes:
+                for span in spans:
+                    failing.setdefault(lane.lane_id, []).append((span["start"], span["end"]))
+                    finding = SlotFinding(rule, severity, message, span["start"], span["end"])
+                    lane_findings = findings.setdefault(lane.lane_id, [])
+                    if finding not in lane_findings:
+                        lane_findings.append(finding)
+        merged = {
+            lane_id: [(span["start"], span["end"]) for span in self._normalize_spans(
+                [{"start": start, "end": end} for start, end in spans]
+            )]
+            for lane_id, spans in failing.items()
+        }
+        return merged, findings
+
+    async def _plan_preprocess_v2_repair(
+        self, state: "_PlannerV2State", payload: Dict[str, Any]
+    ) -> tuple[Optional[List[ToolCall]], Optional[str]]:
+        """Re-choose only the failing bars; None and a stop reason when there is nothing to ask."""
+        from src.api.preprocess_assembler import AssemblyError
+        from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose_repair
+        from src.api.preprocess_evidence import EvidenceUnavailable
+
+        failing, findings = self._planner_v2_failures(state.sheet, payload)
+        p0 = any(finding.severity == "P0" for items in findings.values() for finding in items)
+        charged = False
+
+        async def call(request: Any) -> str:
+            # The repair's whole chooser step is one call against the turn budget.
+            nonlocal charged
+            if not charged:
+                charged = True
+                self._charge_llm_turn_budget()
+            return await self._call_preprocess_chooser(request)
+
+        started = time.monotonic()
+        try:
+            sheet, choices, stats = await choose_repair(
+                state.score,
+                state.planning_context,
+                sheet=state.sheet,
+                choices=state.choices,
+                failing=failing,
+                findings_by_lane=findings,
+                pinned=None,
+                call=call,
+                max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
+                evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
+            )
+        except EvidenceUnavailable as exc:
+            self._logger.warning("planner_v2_evidence_unavailable reason=%s", exc.reason)
+            return None, "repair_planning_failed"
+        except (ChooserError, LlmTurnLimitReached) as exc:
+            self._logger.warning("planner_v2_repair_chooser_error error=%s", exc)
+            return None, "repair_planning_failed"
+        if stats.slots_asked == 0:
+            if p0:
+                self._logger.error(
+                    "planner_v2_construction_violation reason=p0_with_nothing_to_rechoose lanes=%s",
+                    sorted(failing),
+                )
+            self._logger.info("planner_v2_nothing_to_rechoose lanes=%s", sorted(failing))
+            return None, "planner_v2_nothing_to_rechoose"
+        self._log_planner_v2_freeform(sheet)
+        try:
+            plan = assemble_chosen(sheet, choices, score=state.score)
+        except AssemblyError as exc:
+            self._logger.error("planner_v2_construction_violation error=%s", exc)
+            return None, "repair_planning_failed"
+        self._logger.info(
+            "planner_v2_repair requests=%s retries=%s slots_asked=%s second_pass_slots=%s "
+            "wall_seconds=%.2f",
+            stats.requests,
+            stats.retries,
+            stats.slots_asked,
+            stats.second_pass_slots,
+            time.monotonic() - started,
+        )
+        state.sheet, state.choices = sheet, choices
+        return self._apply_preprocess_planning_context_defaults(
+            [ToolCall(name=TOOL_PREPROCESS_VOICE_PARTS, arguments={"request": {"plan": plan}})],
+            state.planning_context,
+        ), None
+
+    async def _call_preprocess_chooser(self, request: Any) -> str:
+        """Ask the chooser role one request: the v2 prompt, no history, an enum-only schema."""
+        from src.api.preprocess_evidence import EvidenceUnavailable
+
+        if not request.evidence_chars:
+            raise EvidenceUnavailable("missing_score_xml")
+        self._logger.info("planner_v2_evidence_chars count=%s", request.evidence_chars)
+        if request.evidence_unavailable:
+            self._logger.warning(
+                "planner_v2_evidence_unavailable reason=%s", request.evidence_unavailable
+            )
+        bundle = PromptBundle(
+            static_prompt_text=_planner_v2_prompt(),
+            dynamic_prompt_text=request.dynamic_text,
+        )
+        reply = await asyncio.to_thread(
+            self._call_llm_client_generate,
+            bundle,
+            [],
+            LlmRole.PREPROCESS_CHOOSER,
+            request.response_schema,
+            count_against_turn_budget=False,
+        )
+        reply = _without_thought_summary(reply)
+        # The Gemini client logs the request; log the chosen options beside it.
+        self._logger.info(
+            "planner_v2_chooser_reply slots=%s reply=%s", len(request.key_to_slot), reply
+        )
+        return reply
 
     def _preprocess_planning_context_for_attempt(
         self,
@@ -6386,34 +6808,43 @@ class Orchestrator:
         cleaned = message.strip()
         return cleaned == LLM_ERROR_FALLBACK or cleaned.startswith("LLM error ")
 
+    def _charge_llm_turn_budget(self) -> None:
+        """Count one LLM call against this turn's budget, or raise when it is used up."""
+        budget = _llm_turn_budget.get()
+        if budget is None:
+            return
+        if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
+            self._logger.error(
+                "llm_turn_limit_reached calls=%s limit=%s elapsed_seconds=%.1f",
+                budget.calls,
+                LLM_CALLS_PER_TURN_LIMIT,
+                time.monotonic() - budget.started_at,
+            )
+            raise LlmTurnLimitReached(
+                backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
+            )
+        budget.calls += 1
+
     def _call_llm_client_generate(
         self,
         prompt_bundle: Any,
         history: List[Dict[str, str]],
         role: LlmRole,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        count_against_turn_budget: bool = True,
     ) -> str:
         """Call the LLM client with role fallback for legacy test clients.
 
         A response_schema is always passed through: a client that cannot honour
-        it must fail rather than answer without the structure.
+        it must fail rather than answer without the structure. A caller that
+        charges the turn budget for a whole step passes count_against_turn_budget=False.
         """
         if self._llm_client is None:
             raise RuntimeError("LLM is not configured.")
         self._check_chat_turn_stopped_from_thread()
-        budget = _llm_turn_budget.get()
-        if budget is not None:
-            if budget.calls >= LLM_CALLS_PER_TURN_LIMIT:
-                self._logger.error(
-                    "llm_turn_limit_reached calls=%s limit=%s elapsed_seconds=%.1f",
-                    budget.calls,
-                    LLM_CALLS_PER_TURN_LIMIT,
-                    time.monotonic() - budget.started_at,
-                )
-                raise LlmTurnLimitReached(
-                    backend_message("chat.llm_turn_limit_reached", reference=budget.reference)
-                )
-            budget.calls += 1
+        if count_against_turn_budget:
+            self._charge_llm_turn_budget()
         try:
             if response_schema is not None:
                 return self._llm_client.generate(
@@ -6615,8 +7046,13 @@ class Orchestrator:
         instructions: str = MESSAGE_ONLY_FOLLOWUP_INSTRUCTIONS,
         rejection_detail: str = MESSAGE_ONLY_REJECTION_DETAIL,
         presentation_quote: Optional[Dict[str, Any]] = None,
+        compact_context: bool = False,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM for prose only; a reply that calls a tool is rejected, never shown.
+
+        compact_context gives a line-preparation progress or review message the
+        score's part list and the derived-part mapping only, instead of the full
+        session context.
 
         With presentation_quote, the reply must present that quote in its
         quote_presentation_schema and match it exactly; it is then shown as the
@@ -6654,6 +7090,11 @@ class Orchestrator:
                         selected_voicebank_id=selected_voicebank_id,
                         selected_language=selected_language,
                         expand_repeats=expand_repeats,
+                    )
+                    if not compact_context
+                    else (
+                        self._build_line_preparation_message_prompt(snapshot, current_score),
+                        current_credit_availability,
                     )
                 )
                 history = [*snapshot.get("history", []), payload_entry]
@@ -6850,6 +7291,39 @@ class Orchestrator:
             and session_id
         ):
             await self._sessions.acknowledge_score_context_updated(session_id)
+
+    def _build_line_preparation_message_prompt(
+        self,
+        snapshot: Dict[str, Any],
+        current_score: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Build a small prompt for a line-preparation progress or review message.
+
+        Such a message only reports what happened to the parts, so it gets the
+        score's title, verses and part list and the derived-part mapping, not the
+        voice, credit, solfege or planning-signal context.
+        """
+        score_summary = snapshot.get("score_summary")
+        return build_prompt_bundle(
+            [],
+            score_available=True,
+            score_summary=(
+                _line_preparation_message_score_summary(score_summary)
+                if isinstance(score_summary, dict)
+                else None
+            ),
+            preprocess_mapping_context=(
+                self._build_preprocess_mapping_context(
+                    current_score,
+                    score_summary=score_summary,
+                )
+                if isinstance(current_score, dict)
+                else None
+            ),
+            score_context_updated=bool(snapshot.get("score_context_updated")),
+            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds,
+            role=LlmRole.DEFAULT,
+        )
 
     async def _build_message_only_rich_prompt(
         self,
@@ -7938,7 +8412,6 @@ class Orchestrator:
             followup_message_only=True,
             explicit_verse_number=selected_explicit_verse_number,
             session_state_changed=quote_reparsed,
-            selection_resolved=True,
             expand_repeats=expand_repeats,
             # The tool result reaches the model through a message-only
             # follow-up, so the id is remembered on the session: the
@@ -8851,7 +9324,6 @@ class Orchestrator:
                             action_required_payload=action_required,
                             explicit_verse_number=selected_explicit_verse_number,
                             session_state_changed=requote.session_state_changed,
-                            selection_resolved=quoted,
                             metadata_on_presented=requote.metadata_on_presented,
                         )
                     est_credits = int(quote.get("totalEstimatedCredits", 0) or 0)
@@ -9890,9 +10362,6 @@ class ToolExecutionResult:
     explicit_verse_number: Optional[str] = None
     session_state_changed: bool = False
     preprocess_execution: Optional[Dict[str, Any]] = None
-    # A billable quote fixes the part and lyric line, so the UI's part/verse
-    # picker has nothing left to ask.
-    selection_resolved: bool = False
     # Repeat order bound to a successful quote, for the rest of this turn and the UI.
     expand_repeats: Optional[bool] = None
     # Session metadata that holds only once the message-only reply presenting
@@ -9979,10 +10448,49 @@ def _score_player_takes_removed_by(
     return removed
 
 
+_PLANNER_V2_PROMPT_PATH = Path(__file__).resolve().parent / "config" / "system_prompt_planner_v2.txt"
+
+
+@functools.lru_cache(maxsize=1)
+def _planner_v2_prompt() -> str:
+    """The planner v2 chooser's static prompt, read once."""
+    return _PLANNER_V2_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _without_thought_summary(reply: str) -> str:
+    """Drop the key the Gemini client adds to a JSON reply; other text stays for the chooser's retry."""
+    try:
+        payload = json.loads(reply)
+    except (TypeError, ValueError):
+        return reply
+    if not isinstance(payload, dict) or "thought_summary" not in payload:
+        return reply
+    del payload["thought_summary"]
+    return json.dumps(payload)
+
+
 def _snapshot_score_version(snapshot: Any) -> Any:
     """The version of a session snapshot's current score; every score save bumps it."""
     current = snapshot.get("current_score") if isinstance(snapshot, dict) else None
     return current.get("version") if isinstance(current, dict) else None
+
+
+_LINE_PREPARATION_MESSAGE_PART_FIELDS = ("part_id", "part_name", "is_derived_part", "has_lyrics")
+
+
+def _line_preparation_message_score_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the score summary fields a line-preparation message can mention."""
+    compact: Dict[str, Any] = {
+        key: summary[key]
+        for key in ("title", "selected_verse_number", "available_verses")
+        if key in summary
+    }
+    compact["parts"] = [
+        {key: part[key] for key in _LINE_PREPARATION_MESSAGE_PART_FIELDS if key in part}
+        for part in summary.get("parts") or []
+        if isinstance(part, dict)
+    ]
+    return compact
 
 
 def _job_storage_input_path(user_id: str, session_id: str, job_id: str, suffix: str) -> str:

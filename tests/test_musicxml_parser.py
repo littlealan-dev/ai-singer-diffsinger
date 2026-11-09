@@ -423,6 +423,118 @@ class MusicXmlParserTests(unittest.TestCase):
         voices = {event.voice for event in score.parts[0].notes}
         self.assertEqual(voices, {"1", "2"})
 
+    def test_single_voice_bar_does_not_take_an_earlier_bars_voice(self) -> None:
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>3</octave></pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+      </note>
+    </measure>
+    <measure number="2">
+      <note>
+        <pitch><step>D</step><octave>3</octave></pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+      </note>
+      <backup><duration>4</duration></backup>
+      <note>
+        <rest/>
+        <duration>4</duration>
+        <voice>2</voice>
+        <type>whole</type>
+      </note>
+    </measure>
+    <measure number="3">
+      <note>
+        <pitch><step>E</step><octave>3</octave></pitch>
+        <duration>4</duration>
+        <voice>1</voice>
+        <type>whole</type>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stray-voice-rest.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, keep_rests=True, lyrics_only=False)
+
+        voices = {
+            (event.measure_number, event.is_rest): event.voice
+            for event in score.parts[0].notes
+        }
+        # Bar 3 has no voice of its own in music21; it must not borrow bar 2's
+        # voice 2 (the stray rest), which made one sung line look like two.
+        self.assertEqual(voices[(2, False)], "1")
+        self.assertEqual(voices[(2, True)], "2")
+        self.assertIsNone(voices[(1, False)])
+        self.assertIsNone(voices[(3, False)])
+
+    def test_note_under_another_voices_held_syllable_extends_it(self) -> None:
+        def note(step: str, octave: int, duration: int, voice: str, kind: str, lyric: str = "") -> str:
+            text = (
+                f"<lyric number=\"1\"><syllabic>single</syllabic><text>{lyric}</text></lyric>"
+                if lyric else ""
+            )
+            return (
+                f"<note><pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+                f"<duration>{duration}</duration><voice>{voice}</voice><type>{kind}</type>{text}</note>"
+            )
+
+        backup = "<backup><duration>4</duration></backup>"
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Women</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      {note("E", 5, 4, "1", "whole", "la")}{backup}{note("C", 5, 2, "2", "half")}{note("B", 4, 2, "2", "half")}
+    </measure>
+    <measure number="2">
+      {note("E", 5, 2, "1", "half", "da")}{note("D", 5, 2, "1", "half", "di")}{backup}{note("C", 5, 1, "2", "quarter")}{note("B", 4, 1, "2", "quarter")}{note("A", 4, 1, "2", "quarter")}{note("G", 4, 1, "2", "quarter")}
+    </measure>
+  </part>
+</score-partwise>
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "held-syllable.xml"
+            path.write_text(xml, encoding="utf-8")
+            score = parse_musicxml(path, keep_rests=True, lyrics_only=False)
+
+        voice_two = {
+            event.offset_beats: event.lyric
+            for event in score.parts[0].notes
+            if event.voice == "2"
+        }
+        # Voice 1 holds a syllable over voice 2's later notes ("+"); where
+        # voice 1 starts a syllable with voice 2, the note is left for the
+        # lane to read that word.
+        self.assertEqual(
+            voice_two,
+            {0.0: None, 2.0: "+", 4.0: None, 5.0: "+", 6.0: None, 7.0: "+"},
+        )
+
     def test_lyric_selection_maps_derived_parts_after_staff_expansion(self) -> None:
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">

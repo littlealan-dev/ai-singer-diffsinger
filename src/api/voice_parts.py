@@ -6,10 +6,13 @@ import os
 import re
 import json
 import hashlib
+import math
 import tempfile
 import threading
 import unicodedata
 from copy import deepcopy
+from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
@@ -36,6 +39,7 @@ VALID_PROPAGATION_STRATEGIES = {
     "strict_onset",
     "overlap_best_match",
     "syllable_flow",
+    "staff_line",
 }
 VALID_PROPAGATION_POLICIES = {
     "fill_missing_only",
@@ -181,8 +185,9 @@ def analyze_score_voice_parts(
                 "has_same_voice_simultaneous_notes": full["has_same_voice_simultaneous_notes"],
                 "missing_lyric_voice_parts": full["missing_lyric_voice_parts"],
                 "has_missing_lyric_voice_parts": len(full["missing_lyric_voice_parts"]) > 0,
+                # A voice without words needs a split only when the score has words to copy.
                 "is_potentially_complex_for_preprocess": bool(full["multi_voice_part"])
-                or len(full["missing_lyric_voice_parts"]) > 0,
+                or (len(full["missing_lyric_voice_parts"]) > 0 and bool(all_sources)),
                 "lyric_source_candidates": all_sources,
                 "measure_lyric_coverage": measure_coverage,
                 "voice_part_measure_spans": measure_spans,
@@ -213,6 +218,7 @@ def analyze_score_voice_parts(
         "has_missing_lyric_voice_parts": any(
             len(p["missing_lyric_voice_parts"]) > 0 for p in part_signals
         ),
+        "has_lyric_sources": bool(all_sources),
         "parts": part_signals,
         "full_score_analysis": {
             "parts": analysis_parts,
@@ -2031,7 +2037,8 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             )
                         )
                 if (
-                    isinstance(lyric_source_part, int)
+                    section.get("lyric_strategy") != "staff_line"
+                    and isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
                     and lyric_source_voice_part_id
                 ):
@@ -2137,7 +2144,8 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                             )
                         )
                 if (
-                    isinstance(lyric_source_part, int)
+                    section.get("lyric_strategy") != "staff_line"
+                    and isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
                     and lyric_source_voice_part_id
                 ):
@@ -2366,13 +2374,19 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
             part_index=part_index,
             staff_scope=staff_scope,
         )
-        maximum = max(density_by_measure.values(), default=0)
-        if maximum <= 0 or len(lane_ids) == maximum:
+        lane_counts = sheet_lane_counts(
+            score,
+            part_index=part_index,
+            staff_scope=staff_scope,
+        )
+        minimum = lane_counts.peak
+        maximum = lane_counts.most
+        if minimum <= 0 or minimum <= len(lane_ids) <= maximum:
             continue
         peak_measures = [
             measure
             for measure, count in density_by_measure.items()
-            if count == maximum
+            if count == minimum
         ]
         findings.append(
             _lint_finding(
@@ -2382,7 +2396,9 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                 missing_ranges=_collapse_measure_ranges(sorted(peak_measures)),
                 failing_attributes={
                     "staff_scope": staff_scope,
-                    "maximum_simultaneous_note_count": maximum,
+                    "maximum_simultaneous_note_count": minimum,
+                    "minimum_lane_count": minimum,
+                    "maximum_lane_count": maximum,
                     "visible_derived_lane_count": len(lane_ids),
                     "visible_derived_lane_ids": sorted(lane_ids),
                 },
@@ -2864,6 +2880,67 @@ def _source_voice_staff_scopes(
     }
 
 
+@dataclass(frozen=True)
+class LaneCounts:
+    peak: int
+    real_voices: int
+    most: int
+
+
+def part_lane_counts(
+    score: Dict[str, Any], *, part_index: int
+) -> Dict[str, LaneCounts]:
+    """Return lane bounds for each staff with countable sung notes in a part."""
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return {}
+    scopes = {
+        _staff_scope_key(note)
+        for note in (parts[part_index].get("notes") or [])
+        if _is_countable_sung_note(note)
+    }
+    return {
+        scope: sheet_lane_counts(score, part_index=part_index, staff_scope=scope)
+        for scope in sorted(scopes)
+    }
+
+
+def sheet_lane_counts(
+    score: Dict[str, Any], *, part_index: int, staff_scope: str
+) -> LaneCounts:
+    """Return the allowed complete-split lane bounds for one staff scope."""
+    density_by_measure = _staff_scope_measure_max_simultaneous_notes(
+        score, part_index=part_index, staff_scope=staff_scope
+    )
+    peak = max(density_by_measure.values(), default=0)
+    parts = score.get("parts") or []
+    if part_index < 0 or part_index >= len(parts):
+        return LaneCounts(peak=peak, real_voices=0, most=peak)
+
+    by_voice_onset: Dict[tuple[str, int, float], int] = {}
+    for note in (parts[part_index].get("notes") or []):
+        if not _is_countable_sung_note(note) or _staff_scope_key(note) != staff_scope:
+            continue
+        measure = int(note.get("measure_number") or 0)
+        if measure <= 0:
+            continue
+        voice = _voice_key(note.get("voice"))
+        if voice == "_default":
+            continue
+        onset = round(float(note.get("offset_beats") or 0.0), 6)
+        key = (voice, measure, onset)
+        by_voice_onset[key] = by_voice_onset.get(key, 0) + 1
+
+    voice_peaks: Dict[str, int] = {}
+    for (voice, _measure, _onset), count in by_voice_onset.items():
+        voice_peaks[voice] = max(voice_peaks.get(voice, 0), count)
+    return LaneCounts(
+        peak=peak,
+        real_voices=len(voice_peaks),
+        most=max(peak, sum(voice_peaks.values())),
+    )
+
+
 def _staff_scope_measure_max_simultaneous_notes(
     score: Dict[str, Any], *, part_index: int, staff_scope: str
 ) -> Dict[int, int]:
@@ -3242,7 +3319,9 @@ def _execute_timeline_sections(
                         split_selector=str(section.get("split_selector") or "upper"),
                         rank_index=int(section.get("rank_index") or 0),
                         rank_fallback=str(section.get("rank_fallback") or "greedy"),
-                        split_shared_note_policy=split_shared_note_policy,
+                        split_shared_note_policy=str(
+                            section.get("split_shared_note_policy") or split_shared_note_policy
+                        ),
                         preserve_source_lyrics=_should_preserve_copied_melody_lyrics(
                             melody_source, section.get("lyric_source")
                         ),
@@ -3263,6 +3342,8 @@ def _execute_timeline_sections(
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
+                line_voice: Optional[str] = None
+                own_voice_exception = False
                 if (
                     not isinstance(melody_source, dict)
                     and not _has_sung_note_in_measure_range(
@@ -3282,11 +3363,42 @@ def _execute_timeline_sections(
                         section_start_measure=start_measure,
                         section_end_measure=end_measure,
                     )
-                override_source_notes = _resolve_source_notes(
-                    source_score,
-                    source_part_index=int(lyric_source["part_index"]),
-                    source_voice_part_id=str(lyric_source["voice_part_id"]),
-                )
+                if section.get("lyric_strategy") == "staff_line":
+                    source_part_index = int(lyric_source["part_index"])
+                    source_parts = source_score.get("parts") or []
+                    source_part = (source_parts[source_part_index]
+                                   if 0 <= source_part_index < len(source_parts) else None)
+                    source_voice_parts = (_analyze_part_voice_parts(source_part, source_part_index)["voice_parts"]
+                                          if source_part is not None else [])
+                    source_meta = _find_voice_part_by_id(
+                        source_voice_parts,
+                        str(lyric_source["voice_part_id"]),
+                    )
+                    source_line = section.get("lyric_source_line")
+                    if isinstance(source_line, dict) and source_line["voice_part_id"] is not None:
+                        line_meta = _find_voice_part_by_id(
+                            source_voice_parts, source_line["voice_part_id"]
+                        )
+                        if line_meta is None:
+                            source_meta = None
+                        else:
+                            line_voice = str(line_meta["source_voice_id"])
+                            own_voice_exception = (
+                                source_line["voice_part_id"] == lyric_source["voice_part_id"]
+                            )
+                    staves = {_staff_scope_key(note) for note in working_notes
+                              if _is_countable_sung_note(note)}
+                    override_source_notes = (
+                        [note for note in source_part.get("notes") or []
+                         if _is_countable_sung_note(note) and _staff_scope_key(note) in staves]
+                        if source_meta is not None else None
+                    )
+                else:
+                    override_source_notes = _resolve_source_notes(
+                        source_score,
+                        source_part_index=int(lyric_source["part_index"]),
+                        source_voice_part_id=str(lyric_source["voice_part_id"]),
+                    )
                 if override_source_notes is None:
                     return _action_required(
                         "invalid_section_source",
@@ -3313,6 +3425,8 @@ def _execute_timeline_sections(
                     verse_number=verse_number,
                     copy_all_verses=copy_all_verses,
                     measure_range=(start_measure, end_measure),
+                    line_voice=line_voice,
+                    own_voice_exception=own_voice_exception,
                 )
 
         after_lyric_count = _count_lyric_sung_notes_in_range(
@@ -3368,6 +3482,7 @@ def _execute_timeline_sections(
         lyric_source = section.get("lyric_source")
         if (
             mode == "derive"
+            and section.get("lyric_strategy") != "staff_line"
             and copied_note_count > 0
             and isinstance(lyric_source, dict)
             and isinstance(lyric_source.get("part_index"), int)
@@ -3712,6 +3827,7 @@ def _split_chords_select_notes_into_target(
             split_selector=split_selector,
             rank_index=rank_index,
             rank_fallback=rank_fallback,
+            split_shared_note_policy=split_shared_note_policy,
             preserve_source_lyrics=preserve_source_lyrics,
         )
 
@@ -3800,6 +3916,7 @@ def _merge_source_timeline_events_into_native_target(
     split_selector: str,
     rank_index: int,
     rank_fallback: str,
+    split_shared_note_policy: str = "duplicate_to_all",
     preserve_source_lyrics: bool = False,
 ) -> int:
     protected = [
@@ -3838,6 +3955,7 @@ def _merge_source_timeline_events_into_native_target(
             rank_index=rank_index,
             rank_fallback=rank_fallback,
             previous_pitch=previous_pitch,
+            duplicate_singletons=split_shared_note_policy == "duplicate_to_all",
         )
         if selected is None:
             continue
@@ -3890,10 +4008,19 @@ def _choose_voice_timeline_event(
     rank_index: int,
     rank_fallback: str,
     previous_pitch: Optional[float],
+    duplicate_singletons: bool = True,
 ) -> Optional[Dict[str, Any]]:
     if not events:
         return None
     if len(events) == 1:
+        # A single note in a ranked split is a unison: every lane sings it, or only the top lane.
+        if (
+            not duplicate_singletons
+            and str(method or "").strip().lower() == "ranked"
+            and int(rank_index) > 0
+            and not events[0].get("is_rest")
+        ):
+            return None
         return dict(events[0])
     unknown_position_rest = next(
         (
@@ -3998,8 +4125,11 @@ def _choose_notes_ranked(
             key=lambda n: float(n.get("pitch_midi") or 0.0),
             reverse=True,
         )
-        if duplicate_singletons and len(ordered) == 1:
-            chosen.append(dict(ordered[0]))
+        if len(ordered) == 1:
+            # A single note is a unison: every lane sings it, or only the top lane.
+            # rank_fallback is for chords too thin to reach this lane, not for unisons.
+            if duplicate_singletons or rank == 0:
+                chosen.append(dict(ordered[0]))
             continue
         if rank < len(ordered):
             chosen.append(dict(ordered[rank]))
@@ -4805,6 +4935,8 @@ def _propagate_lyrics(
     verse_number: Optional[str],
     copy_all_verses: bool,
     measure_range: Optional[Tuple[int, int]],
+    line_voice: Optional[str] = None,
+    own_voice_exception: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_strategy = strategy
     if strategy == "syllable_flow" and not _feature_flag_enabled(
@@ -4817,7 +4949,11 @@ def _propagate_lyrics(
         verse_number=verse_number,
         copy_all_verses=copy_all_verses,
     )
-    if measure_range is not None:
+    if strategy == "staff_line":
+        source_timeline = [item for item in source_timeline
+                           if _lyric_kind(item["note"]) == "word"
+                           and not _is_generated_solfege_lyric(item["note"])]
+    if measure_range is not None and strategy != "staff_line":
         source_timeline = [
             item
             for item in source_timeline
@@ -4827,6 +4963,15 @@ def _propagate_lyrics(
     source_by_offset: Dict[float, List[Dict[str, Any]]] = {}
     for item in source_timeline:
         source_by_offset.setdefault(item["start"], []).append(item)
+    staff_words: Dict[str, Dict[float, Dict[str, Any]]] = {}
+    whole_staff_words: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
+    if strategy == "staff_line":
+        for item in source_timeline:
+            staff = _staff_scope_key(item["note"])
+            whole_staff_words.setdefault(staff, {}).setdefault(item["start"], []).append(item)
+            if line_voice is None or _voice_key(item["note"].get("voice")) == line_voice:
+                staff_words.setdefault(staff, {}).setdefault(item["start"], item)
+    first_word_offset = {staff: min(words) for staff, words in whole_staff_words.items()}
 
     syllable_tokens = source_timeline
     syllable_index = 0
@@ -4856,6 +5001,41 @@ def _propagate_lyrics(
             key = round(float(copied.get("offset_beats") or 0.0), 6)
             candidates = source_by_offset.get(key, [])
             source_item = candidates[0] if candidates else None
+        elif effective_strategy == "staff_line":
+            key = round(float(copied.get("offset_beats") or 0.0), 6)
+            staff = _staff_scope_key(copied)
+            words = staff_words.get(staff, {})
+            earlier = staff in first_word_offset and first_word_offset[staff] < key
+            tied = str(copied.get("tie_type") or "").strip() in {"stop", "continue"}
+            if tied and _lyric_kind(copied) == "word" and not _is_generated_solfege_lyric(copied):
+                source_item = next((item for item in source_by_offset.get(key, [])
+                                    if _staff_scope_key(item["note"]) == staff
+                                    and _voice_key(item["note"].get("voice")) ==
+                                    _voice_key(copied.get("voice"))), None)
+            elif not tied:
+                source_item = words.get(key)
+                if source_item is None and own_voice_exception and line_voice is not None:
+                    previous_sung = next((earlier_note for earlier_note in
+                                          reversed(target_notes[:note_idx])
+                                          if _is_countable_sung_note(earlier_note)), None)
+                    previous_entry_rest = note_idx > 0 and bool(target_notes[note_idx - 1].get("is_rest"))
+                    phrase_start = (previous_sung is None or previous_entry_rest or
+                                    float(previous_sung.get("offset_beats") or 0.0) +
+                                    float(previous_sung.get("duration_beats") or 0.0) < key - 1e-6)
+                    if phrase_start:
+                        whole_beat = whole_staff_words.get(staff, {}).get(key, [])
+                        if len({str(item["note"].get("lyric") or "").casefold()
+                                for item in whole_beat}) == 1 and whole_beat:
+                            source_item = whole_beat[0]
+            if source_item is None and earlier:
+                copied.pop("lyric", None)
+                copied.pop("syllabic", None)
+                copied.pop("lyric_is_extended", None)
+                copied.pop("lyric_name", None)
+                copied["lyric"] = "+"
+                copied["syllabic"] = None
+                copied["lyric_is_extended"] = True
+                target_note_matched_count += 1
         elif effective_strategy == "overlap_best_match":
             source_item = _choose_overlap_best_match(copied, source_timeline)
         elif effective_strategy == "syllable_flow":
@@ -4871,8 +5051,14 @@ def _propagate_lyrics(
             target_note_matched_count += 1
         out.append(copied)
 
+    diagnostic_timeline = (
+        [item for item in source_timeline
+         if (measure_range is None or _note_in_measure_range(item["note"], measure_range))
+         and (line_voice is None or _voice_key(item["note"].get("voice")) == line_voice)]
+        if strategy == "staff_line" else source_timeline
+    )
     dropped_source_lyrics: List[Dict[str, Any]] = []
-    for item in source_timeline:
+    for item in diagnostic_timeline:
         source_index = int(item.get("source_index", -1))
         if source_index in matched_source_indices:
             continue
@@ -4891,7 +5077,7 @@ def _propagate_lyrics(
 
     diagnostics = {
         "strategy": effective_strategy,
-        "source_lyric_candidates_count": len(source_timeline),
+        "source_lyric_candidates_count": len(diagnostic_timeline),
         "target_note_count_in_range": target_note_count_in_range,
         "target_note_attempted_count": target_note_attempted_count,
         "target_note_matched_count": target_note_matched_count,
@@ -5541,20 +5727,47 @@ def _has_non_default_sibling_voice_parts(score: Dict[str, Any], part_index: int)
 
 
 def _hidden_derived_part_identifiers(score: Dict[str, Any]) -> Dict[str, set[str]]:
+    """Identify helper lanes: a staff's shared line while that staff has other voices.
+
+    Every lane made by a transform has a record, so a part with a record is a
+    helper only if its record says so (``recorded_part_ids`` vs ``part_ids``).
+    Names and voice-part labels are kept for parts without a record (older
+    sessions): a name built from the part name is the same on every staff of
+    a two-staff part, so it can't tell a helper from a real lane.
+    """
     part_ids: set[str] = set()
+    recorded_part_ids: set[str] = set()
     part_names: set[str] = set()
     voice_part_ids: set[str] = set()
+    hidden_lanes: set[tuple[int, str]] = set()
+    for part_index, part in enumerate(score.get("parts") or []):
+        analysis = _analyze_part_voice_parts(part, part_index)
+        for voice_part in analysis.get("voice_parts") or []:
+            voice_part_id = str(voice_part.get("voice_part_id") or "").strip()
+            if voice_part_id and _is_hidden_default_lane(
+                score=score,
+                part_index=part_index,
+                target_voice_part_id=voice_part_id,
+            ):
+                hidden_lanes.add((part_index, voice_part_id))
+
     transforms = score.get("voice_part_transforms")
     if isinstance(transforms, dict):
         for value in transforms.values():
             if not isinstance(value, dict):
                 continue
             appended_ref = value.get("appended_part_ref")
-            if not isinstance(appended_ref, dict) or not bool(
-                appended_ref.get("hidden_default_lane")
-            ):
+            if not isinstance(appended_ref, dict):
                 continue
             part_id = str(appended_ref.get("part_id") or "").strip()
+            if part_id:
+                recorded_part_ids.add(part_id)
+            try:
+                lane = (int(value.get("part_index")), str(value.get("target_voice_part_id") or "").strip())
+            except (TypeError, ValueError):
+                lane = None
+            if not bool(appended_ref.get("hidden_default_lane")) and lane not in hidden_lanes:
+                continue
             part_name = str(appended_ref.get("part_name") or "").strip()
             if part_id:
                 part_ids.add(part_id)
@@ -5564,32 +5777,37 @@ def _hidden_derived_part_identifiers(score: Dict[str, Any]) -> Dict[str, set[str
             if target_voice_part_id:
                 voice_part_ids.add(target_voice_part_id)
 
-    for part_index, part in enumerate(score.get("parts") or []):
-        analysis = _analyze_part_voice_parts(part, part_index)
-        for voice_part in analysis.get("voice_parts") or []:
-            voice_part_id = str(voice_part.get("voice_part_id") or "").strip()
-            if not voice_part_id:
-                continue
-            if not _is_hidden_default_lane(
+    for part_index, voice_part_id in hidden_lanes:
+        voice_part_ids.add(voice_part_id)
+        part_names.add(
+            _build_derived_part_name(
                 score=score,
                 part_index=part_index,
                 target_voice_part_id=voice_part_id,
-            ):
-                continue
-            voice_part_ids.add(voice_part_id)
-            part_names.add(
-                _build_derived_part_name(
-                    score=score,
-                    part_index=part_index,
-                    target_voice_part_id=voice_part_id,
-                )
             )
+        )
 
     return {
         "part_ids": part_ids,
+        "recorded_part_ids": recorded_part_ids,
         "part_names": part_names,
         "voice_part_ids": voice_part_ids,
     }
+
+
+def _matches_hidden_derived_part(
+    part_id: str, part_name: str, hidden_derived_parts: Dict[str, set[str]]
+) -> bool:
+    if part_id and part_id in hidden_derived_parts.get("recorded_part_ids", set()):
+        return part_id in hidden_derived_parts.get("part_ids", set())
+    return (
+        part_id in hidden_derived_parts.get("part_ids", set())
+        or part_name in hidden_derived_parts.get("part_names", set())
+        or _part_name_matches_hidden_voice_part_id(
+            part_name,
+            hidden_derived_parts.get("voice_part_ids", set()),
+        )
+    )
 
 
 def _cleanup_hidden_derived_outputs(
@@ -5604,7 +5822,7 @@ def _cleanup_hidden_derived_outputs(
         _hidden_derived_part_identifiers(source_score or {}),
         _hidden_derived_part_identifiers(result_score if isinstance(result_score, dict) else {}),
     )
-    if not any(hidden.values()):
+    if not any(values for key, values in hidden.items() if key != "recorded_part_ids"):
         return cleaned
 
     if isinstance(result_score, dict):
@@ -5622,6 +5840,7 @@ def _merge_hidden_derived_identifiers(
 ) -> Dict[str, set[str]]:
     merged: Dict[str, set[str]] = {
         "part_ids": set(),
+        "recorded_part_ids": set(),
         "part_names": set(),
         "voice_part_ids": set(),
     }
@@ -5644,21 +5863,15 @@ def _remove_hidden_derived_parts_from_score(
     parts = score.get("parts")
     if not isinstance(parts, list):
         return
-    hidden_ids = hidden_derived_parts.get("part_ids", set())
-    hidden_names = hidden_derived_parts.get("part_names", set())
-    hidden_voice_part_ids = hidden_derived_parts.get("voice_part_ids", set())
     score["parts"] = [
         part
         for part in parts
         if not (
             isinstance(part, dict)
-            and (
-                str(part.get("part_id") or "").strip() in hidden_ids
-                or str(part.get("part_name") or "").strip() in hidden_names
-                or _part_name_matches_hidden_voice_part_id(
-                    str(part.get("part_name") or ""),
-                    hidden_voice_part_ids,
-                )
+            and _matches_hidden_derived_part(
+                str(part.get("part_id") or "").strip(),
+                str(part.get("part_name") or "").strip(),
+                hidden_derived_parts,
             )
         )
     ]
@@ -5709,15 +5922,10 @@ def _appended_ref_matches_hidden(
 ) -> bool:
     if bool(appended_ref.get("hidden_default_lane")):
         return True
-    part_id = str(appended_ref.get("part_id") or "").strip()
-    part_name = str(appended_ref.get("part_name") or "").strip()
-    return (
-        part_id in hidden_derived_parts.get("part_ids", set())
-        or part_name in hidden_derived_parts.get("part_names", set())
-        or _part_name_matches_hidden_voice_part_id(
-            part_name,
-            hidden_derived_parts.get("voice_part_ids", set()),
-        )
+    return _matches_hidden_derived_part(
+        str(appended_ref.get("part_id") or "").strip(),
+        str(appended_ref.get("part_name") or "").strip(),
+        hidden_derived_parts,
     )
 
 
@@ -5908,26 +6116,20 @@ def _remove_hidden_derived_parts_from_musicxml(
     if not hidden_ids and not hidden_names and not hidden_voice_part_ids:
         return
 
+    removed_ids: set[str] = set()
     part_list = root.find(q("part-list"))
     if part_list is not None:
         for score_part in list(part_list.findall(q("score-part"))):
             part_id = str(score_part.get("id") or "").strip()
             part_name = str(score_part.findtext(q("part-name")) or "").strip()
-            if (
-                part_id in hidden_ids
-                or part_name in hidden_names
-                or _part_name_matches_hidden_voice_part_id(
-                    part_name,
-                    hidden_voice_part_ids,
-                )
-            ):
+            if _matches_hidden_derived_part(part_id, part_name, hidden_derived_parts):
                 if part_id:
-                    hidden_ids.add(part_id)
+                    removed_ids.add(part_id)
                 part_list.remove(score_part)
 
     for part_node in list(root.findall(q("part"))):
         part_id = str(part_node.get("id") or "").strip()
-        if part_id in hidden_ids:
+        if part_id in removed_ids or _matches_hidden_derived_part(part_id, "", hidden_derived_parts):
             root.remove(part_node)
 
 
@@ -6070,7 +6272,25 @@ def _derived_lane_tie_types(
 def _reference_measure_length_beats(
     measure: ET.Element, q: Any, divisions: int, nominal_beats: float
 ) -> float:
-    """Use the source bar's written length, including an unmarked pickup."""
+    """Use the source bar's length as the parser reads it.
+
+    That is its written length, including an unmarked pickup, except that a
+    bar holding only one rest typed whole (or marked as a measure rest) lasts
+    its full time signature: music21 stretches that rest, so the notes in later
+    bars sit where the stretched bar ends.
+    """
+    notes = measure.findall(q("note"))
+    if len(notes) == 1 and notes[0].find(q("rest")) is not None:
+        rest = notes[0]
+        rest_type = (rest.findtext(q("type")) or "").strip()
+        marked = rest.find(q("rest")).get("measure") == "yes" and rest_type in {"", "whole", "breve"}
+        plain_whole = (
+            rest_type in {"whole", "breve"}
+            and rest.find(q("dot")) is None
+            and rest.find(q("time-modification")) is None
+        )
+        if marked or plain_whole:
+            return nominal_beats
     cursor = 0
     end = 0
     for child in measure:
@@ -6085,6 +6305,48 @@ def _reference_measure_length_beats(
         end = max(end, cursor)
     written_beats = end / float(divisions)
     return written_beats if written_beats > 0 else nominal_beats
+
+
+def _reference_bar_lengths(
+    reference_measures: Sequence[ET.Element], q: Any, divisions: int
+) -> List[float]:
+    """Return each source bar's length in beats, counted in the source's own divisions."""
+    current_time = {"beats": 4, "beat_type": 4}
+    current_divisions = divisions
+    lengths: List[float] = []
+    for measure in reference_measures:
+        attributes = measure.find(q("attributes"))
+        _update_time_signature(attributes, q, current_time)
+        if attributes is not None:
+            source_divisions = attributes.findtext(q("divisions"))
+            if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
+                current_divisions = int(source_divisions)
+        nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
+        lengths.append(
+            _reference_measure_length_beats(measure, q, current_divisions, nominal_beats)
+        )
+    return lengths
+
+
+def _derived_lane_divisions(
+    reference_divisions: int,
+    transformed_notes: Sequence[Dict[str, Any]],
+    bar_lengths: Sequence[float],
+) -> int:
+    """Return the fewest divisions per quarter that count every lane length exactly.
+
+    A lane can hold notes from a part written in finer divisions than the part
+    it is laid over, so the reference part's divisions are only the floor.
+    """
+    values = list(bar_lengths)
+    for note in transformed_notes:
+        values.append(float(note.get("offset_beats") or 0.0))
+        values.append(float(note.get("duration_beats") or 1.0))
+    divisions = reference_divisions
+    for value in values:
+        # music21 keeps offsets as fractions up to this denominator.
+        divisions = math.lcm(divisions, Fraction(value).limit_denominator(65535).denominator)
+    return divisions
 
 
 def _append_gap_rests(
@@ -6149,9 +6411,9 @@ def _append_transformed_measures(
             ET.Element(q("measure"), {"number": str(num)})
             for num in sorted(by_measure)
         ]
+    bar_lengths = _reference_bar_lengths(reference_measures, q, divisions)
+    divisions = _derived_lane_divisions(divisions, transformed_notes, bar_lengths)
 
-    current_time = {"beats": 4, "beat_type": 4}
-    current_divisions = divisions
     bar_start = 0.0
     for idx, ref_measure in enumerate(ordered_measures):
         measure_number = ref_measure.attrib.get("number") or str(idx + 1)
@@ -6162,23 +6424,24 @@ def _append_transformed_measures(
         measure_node = ET.SubElement(part_node, q("measure"), measure_attributes)
 
         ref_attributes = ref_measure.find(q("attributes"))
-        if ref_attributes is not None:
-            measure_node.append(_single_staff_attributes_copy(ref_attributes, q, source_staff))
-        elif idx == 0:
-            attributes = ET.SubElement(measure_node, q("attributes"))
-            ET.SubElement(attributes, q("divisions")).text = str(divisions)
-
-        _update_time_signature(ref_attributes, q, current_time)
-        if ref_attributes is not None:
-            source_divisions = ref_attributes.findtext(q("divisions"))
-            if source_divisions and source_divisions.isdigit() and int(source_divisions) > 0:
-                current_divisions = int(source_divisions)
-        nominal_beats = float(current_time["beats"]) * (4.0 / float(current_time["beat_type"]))
-        written_length = (
-            _reference_measure_length_beats(ref_measure, q, current_divisions, nominal_beats)
-            if reference_measures else nominal_beats
+        attributes = (
+            _single_staff_attributes_copy(ref_attributes, q, source_staff)
+            if ref_attributes is not None
+            else ET.Element(q("attributes"))
         )
-        bar_length = written_length
+        # Every lane duration is counted in the lane's own divisions, written
+        # once in its first bar. A source change of divisions would rescale them.
+        for divisions_node in attributes.findall(q("divisions")):
+            attributes.remove(divisions_node)
+        if idx == 0:
+            divisions_node = ET.Element(q("divisions"))
+            divisions_node.text = str(divisions)
+            attributes.insert(0, divisions_node)
+        if len(attributes):
+            measure_node.append(attributes)
+
+        # Without a source part, every bar holds lane notes, which set its length below.
+        bar_length = bar_lengths[idx] if reference_measures else 4.0
         bar_end = bar_start + bar_length
         notes = sorted(
             by_measure.get(measure_int, []),
@@ -6799,6 +7062,23 @@ def _normalize_timeline_sections(
                 "invalid_plan_enum",
                 f"{section_name} rank_fallback is invalid: {rank_fallback}",
             )["error"]
+        # Who sings a single note in these bars; overrides the target's policy.
+        section_shared_note_policy = raw_section.get("split_shared_note_policy")
+        if section_shared_note_policy is not None:
+            section_shared_note_policy = str(section_shared_note_policy).strip()
+            if section_shared_note_policy not in VALID_SPLIT_SHARED_NOTE_POLICIES:
+                return [], _plan_error(
+                    "invalid_plan_enum",
+                    f"{section_name} split_shared_note_policy is invalid: {section_shared_note_policy}",
+                )["error"]
+            if decision_type != "SPLIT_CHORDS_SELECT_NOTES" or method != "ranked":
+                return [], _plan_error(
+                    "invalid_plan_payload",
+                    (
+                        f"{section_name} split_shared_note_policy applies only to "
+                        "SPLIT_CHORDS_SELECT_NOTES sections with method ranked."
+                    ),
+                )["error"]
 
         melody_raw = raw_section.get("melody_source")
         lyric_raw = raw_section.get("lyric_source")
@@ -6854,21 +7134,39 @@ def _normalize_timeline_sections(
                 "invalid_plan_enum",
                 f"{section_name} lyric_policy is invalid: {policy}",
             )["error"]
-        normalized.append(
-            {
-                "start_measure": int(start_measure),
-                "end_measure": int(end_measure),
-                "mode": mode,
-                "decision_type": decision_type,
-                "method": method,
-                "rank_index": rank_index,
-                "rank_fallback": rank_fallback,
-                "melody_source": melody_source,
-                "lyric_source": lyric_source,
-                "lyric_strategy": strategy,
-                "lyric_policy": policy,
-            }
-        )
+        has_source_line = "lyric_source_line" in raw_section
+        source_line = raw_section.get("lyric_source_line")
+        if has_source_line and (
+            not isinstance(source_line, dict)
+            or set(source_line) != {"staff", "voice_part_id"}
+            or source_line["staff"] is not None
+            or (source_line["voice_part_id"] is not None
+                and (not isinstance(source_line["voice_part_id"], str)
+                     or not source_line["voice_part_id"]))
+            or strategy != "staff_line"
+        ):
+            return [], _plan_error(
+                "malformed_section_source",
+                f"{section_name}.lyric_source_line is invalid.",
+            )["error"]
+        normalized_section = {
+            "start_measure": int(start_measure),
+            "end_measure": int(end_measure),
+            "mode": mode,
+            "decision_type": decision_type,
+            "method": method,
+            "rank_index": rank_index,
+            "rank_fallback": rank_fallback,
+            "melody_source": melody_source,
+            "lyric_source": lyric_source,
+            "lyric_strategy": strategy,
+            "lyric_policy": policy,
+        }
+        if has_source_line:
+            normalized_section["lyric_source_line"] = dict(source_line)
+        if section_shared_note_policy is not None:
+            normalized_section["split_shared_note_policy"] = section_shared_note_policy
+        normalized.append(normalized_section)
         prev_end = end_measure
 
     if max_measure is not None and prev_end != max_measure:
@@ -7673,6 +7971,11 @@ def synthesize_preflight_action_required(
     )
     diagnostics["has_multi_voice_part_signal"] = bool(has_multi_voice)
     diagnostics["has_missing_lyric_voice_parts_signal"] = bool(has_missing_lyric_voice_parts)
+    # Missing words call for a split only when the score has words to copy; a
+    # single line with no words anywhere gets solfege instead. Older signals lack the field.
+    has_lyric_sources = bool(signals.get("has_lyric_sources", True))
+    diagnostics["has_lyric_sources_signal"] = has_lyric_sources
+    has_missing_lyric_voice_parts = has_missing_lyric_voice_parts and has_lyric_sources
     preprocess_required = has_multi_voice or has_missing_lyric_voice_parts
     preprocessed_score_detected = bool(
         (isinstance(transforms, dict) and len(transforms) > 0)

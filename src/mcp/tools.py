@@ -483,9 +483,19 @@ _PREPROCESS_PLAN_SECTION_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["greedy", "skip"],
             "description": (
-                "For method=ranked, behavior when the requested rank does not exist: "
-                "greedy = use the nearest available lower rank; "
-                "skip = emit no note at that onset."
+                "For method=ranked, behavior when a chord of two or more notes has no note "
+                "at the requested rank: greedy = use the nearest available lower rank; "
+                "skip = emit no note at that onset. A single note follows "
+                "split_shared_note_policy instead."
+            ),
+        },
+        "split_shared_note_policy": {
+            "type": "string",
+            "enum": ["duplicate_to_all", "assign_primary_only"],
+            "description": (
+                "Optional, for method=ranked SPLIT_CHORDS_SELECT_NOTES sections: who sings a "
+                "single note (unison) in these measures, overriding the target's policy. "
+                "duplicate_to_all = every lane; assign_primary_only = only the top lane."
             ),
         },
         "melody_source": {
@@ -661,6 +671,10 @@ _PARSE_SCORE_OUTPUT_SCHEMA: Dict[str, Any] = {
                 "has_missing_lyric_voice_parts": {
                     "type": "boolean",
                     "description": "True when at least one lane has notes with missing lexical lyrics.",
+                },
+                "has_lyric_sources": {
+                    "type": "boolean",
+                    "description": "True when some voice in the score has lyrics, other than generated solfege, that a split could copy.",
                 },
                 "parts": {
                     "type": "array",

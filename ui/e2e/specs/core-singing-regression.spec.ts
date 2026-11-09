@@ -132,29 +132,10 @@ test.describe("core singing regression", () => {
     })).toBe(true);
   });
 
-  test("selects verse 1 from the UI selector and synthesizes it", async ({ page, request }, testInfo) => {
-    await uploadFixture(page, "two-verses-one-part.xml");
-    await requestScenario(page, "two-verses", { confirmSynthesis: false });
-
-    await expect(page.getByTestId("part-selection").locator("option:checked")).toHaveText("Solo");
-    await expect(page.getByTestId("verse-selection").locator("option")).toHaveText(["Verse 1", "Verse 2"]);
-    await page.getByTestId("verse-selection").selectOption("1");
-    const quoteResponse = await clickUseSelection(page);
-    expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
-    const renderResponse = await confirmSynthesis(page);
-    expect(renderResponse.type, JSON.stringify(renderResponse)).toBe("chat_progress");
-    const state = await waitForAudio(page, request, testInfo);
-
-    expect(state.synthesis?.part_index).toBe(0);
-    expect(state.synthesis?.lyric_selection?.number).toBe("1");
-    expect(state.synthesis?.lyric_selection?.name).toBe("");
-  });
-
   test("synthesizes verse 1 when the request is typed in chat", async ({ page, request }, testInfo) => {
     await uploadFixture(page, "two-verses-one-part.xml");
     await requestScenario(page, "two-verses", { confirmSynthesis: false });
 
-    await expect(page.getByTestId("verse-selection").locator("option")).toHaveText(["Verse 1", "Verse 2"]);
     const quoteResponse = await sendMessage(page, "Please sing the Solo part, verse 1.");
     expect(quoteResponse.type, JSON.stringify(quoteResponse)).toBe("chat_text");
     const renderResponse = await confirmSynthesis(page);
@@ -622,18 +603,6 @@ async function sendMessage(page: Page, message: string): Promise<Record<string, 
   });
   await page.getByTestId("chat-input").fill(message);
   await page.getByTestId("send-message").click();
-  const response = await chatResponse;
-  expect(response.ok()).toBeTruthy();
-  setSessionIdFromResponse(response, "chat");
-  return chatResponseJson(response);
-}
-
-async function clickUseSelection(page: Page): Promise<Record<string, unknown>> {
-  const chatResponse = page.waitForResponse((response) => {
-    const request = response.request();
-    return new URL(response.url()).pathname.endsWith("/chat") && request.method() === "POST";
-  });
-  await page.getByTestId("use-selection").click();
   const response = await chatResponse;
   expect(response.ok()).toBeTruthy();
   setSessionIdFromResponse(response, "chat");

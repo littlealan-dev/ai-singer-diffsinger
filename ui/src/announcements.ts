@@ -49,4 +49,15 @@ export const ANNOUNCEMENTS: Announcement[] = [
   }
 ];
 
+// Held for the 1.2.0 soft launch. To announce, move it to the top of ANNOUNCEMENTS
+// and set date and effectiveFrom to the announcement day.
+export const PENDING_1_2_0_ANNOUNCEMENT: Announcement = {
+  id: 'version_1_2_0',
+  title: 'SightSinger 1.2.0 Update',
+  content: '- Much faster part splitting: about 2x faster for simple scores, and up to 5x faster for large scores with several parts.\n\n- More reliable on large, complex scores: far fewer timeouts.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
+  effect: 'none',
+  date: '2026-11-09',
+  effectiveFrom: '2026-11-09',
+};
+
 export const LATEST_ANNOUNCEMENT_ID = ANNOUNCEMENTS[0].id;

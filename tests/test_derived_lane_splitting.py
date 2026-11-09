@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.api.voice_parts import analyze_score_voice_parts, preprocess_voice_parts
 
 
@@ -325,6 +327,53 @@ def test_assign_primary_only_omits_unison_onsets_from_secondary_lane() -> None:
     ] == [[72.0, 65.0, 70.0], [60.0, 58.0]]
 
 
+
+def _split_pitches(high: dict, low: dict) -> list[list[float]]:
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [high, low]})
+    assert result["status"] == "ready"
+    return [
+        [note["pitch_midi"] for note in part["notes"] if not note.get("is_rest")]
+        for part in result["score"]["parts"][1:]
+    ]
+
+
+def test_section_shared_note_policy_overrides_the_target_policy() -> None:
+    # Beat 2 is a unison (65). A section override decides who sings it, whatever the fallback.
+    high, low = _target(0), _target(1)
+    for section in (high["sections"][0], low["sections"][0]):
+        section["rank_fallback"] = "greedy"
+        section["split_shared_note_policy"] = "assign_primary_only"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 58.0]]
+
+    high, low = _target(0), _target(1)
+    for target in (high, low):
+        target["split_shared_note_policy"] = "assign_primary_only"
+        target["sections"][0]["split_shared_note_policy"] = "duplicate_to_all"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 65.0, 58.0]]
+
+
+def test_assign_primary_only_rests_lower_lanes_at_unisons_even_with_greedy() -> None:
+    high, low = _target(0), _target(1)
+    for target in (high, low):
+        target["split_shared_note_policy"] = "assign_primary_only"
+        target["sections"][0]["rank_fallback"] = "greedy"
+    assert _split_pitches(high, low) == [[72.0, 65.0, 70.0], [60.0, 58.0]]
+
+
+def test_section_shared_note_policy_is_validated() -> None:
+    low = _target(1)
+    low["sections"][0]["split_shared_note_policy"] = "every_lane"
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [_target(0), low]})
+    assert result["action"] == "invalid_plan_enum", result
+
+    low = _target(1)
+    low["sections"][0].update({
+        "decision_type": "EXTRACT_FROM_VOICE", "method": "trivial",
+        "split_shared_note_policy": "assign_primary_only",
+    })
+    result = preprocess_voice_parts(_mixed_chord_and_unison_score(), plan={"targets": [_target(0), low]})
+    assert result["action"] == "invalid_plan_payload", result
+
 def test_hidden_lane_cleanup_does_not_remove_another_parts_derived_lane() -> None:
     score = _same_voice_chord_score()
     score["parts"].append(
@@ -492,3 +541,214 @@ def test_complete_staff_scope_requires_lane_count_at_peak_density() -> None:
         finding["rule"] == "complete_split_scope_lane_count_mismatch"
         for finding in result["lint_findings"]
     )
+
+# Synthetic one-staff MusicXML cases for complete-split lane bounds.
+def _lane_bounds_score(tmp_path, kind: str) -> dict:
+    from src.api import parse_score
+
+    examples = {
+        "turns": [((("C", 5),), ()), ((("D", 5),), ()), ((), (("G", 4),)), ((), (("A", 4),))],
+        "chord_turns": [((("C", 5), ("E", 5)), ()), ((("D", 5), ("F", 5)), ()), ((), (("G", 4), ("B", 4))), ((), (("A", 4), ("C", 5)))],
+        "mixed": [((("C", 5),), (("G", 4),)), ((("E", 5), ("G", 5)), ()), ((("F", 5),), (("A", 4),))],
+        "solo": [((("C", 5),),), ((("D", 5),),)],
+        "solo_chord": [((("E", 5), ("G", 5)),), ((("F", 5),),)],
+    }
+    bars = examples[kind]
+    xml_bars = []
+    for number, pitches in enumerate(bars, 1):
+        voices = pitches
+        notes = []
+        for voice_number, voice_pitches in enumerate(voices, 1):
+            if voice_number > 1:
+                notes.append("<backup><duration>4</duration></backup>")
+            sounding = [pitch for pitch in voice_pitches if pitch is not None]
+            if not sounding:
+                notes.append(f'<note print-object="no"><rest/><duration>4</duration><voice>{voice_number}</voice><type>whole</type></note>')
+            for chord_index, (step, octave) in enumerate(sounding):
+                notes.append(
+                    "<note>" + ("<chord/>" if chord_index else "")
+                    + f"<pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+                    + f"<duration>4</duration><voice>{voice_number}</voice><type>whole</type>"
+                    + ('<lyric number="1"><syllabic>single</syllabic><text>nava</text></lyric>' if chord_index == 0 else "")
+                    + "</note>"
+                )
+        attributes = (
+            "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>"
+            "<clef><sign>G</sign><line>2</line></clef></attributes>"
+            if number == 1 else ""
+        )
+        xml_bars.append(f'<measure number="{number}">{attributes}{"".join(notes)}</measure>')
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1">'
+        '<part-list><score-part id="P1"><part-name>Synthetic</part-name></score-part></part-list>'
+        f'<part id="P1">{"".join(xml_bars)}</part></score-partwise>'
+    )
+    path = tmp_path / f"{kind}.xml"
+    path.write_text(xml, encoding="utf-8")
+    return parse_score(path, verse_number=1)
+
+
+def _bounds_lane(source_voice: str, steps: list, *, complete: bool = True) -> dict:
+    source = {"part_index": 0, "voice_part_id": f"voice part {source_voice}"}
+    sections = []
+    for measure, step in enumerate(steps, 1):
+        section = {"start_measure": measure, "end_measure": measure}
+        if step is None:
+            section["mode"] = "rest"
+        else:
+            voice, rank, decision = step
+            selected = {"part_index": 0, "voice_part_id": f"voice part {voice}"}
+            section.update({
+                "mode": "derive",
+                "decision_type": decision,
+                "melody_source": selected,
+                "lyric_source": selected,
+                "lyric_strategy": "strict_onset",
+                "lyric_policy": "replace_all",
+            })
+            if rank is not None:
+                section.update({"method": "ranked", "rank_index": rank, "rank_fallback": "skip"})
+        sections.append(section)
+    return {
+        "source": source,
+        "output": {"mode": "append_new_derived_lane"},
+        "split_coverage": "complete" if complete else "selective",
+        "sections": sections,
+        "split_shared_note_policy": "assign_primary_only",
+    }
+
+
+def _bounds_plan(kind: str, case: int) -> dict:
+    extract = "EXTRACT_FROM_VOICE"
+    rank = "SPLIT_CHORDS_SELECT_NOTES"
+    if kind == "turns":
+        first = _bounds_lane("1", [("1", None, extract)] * 2 + [None] * 2)
+        second = _bounds_lane("2", [None] * 2 + [("2", None, extract)] * 2)
+        if case == 1:
+            lanes = [first, second]
+        elif case == 6:
+            lanes = [first, second, first.copy()]
+        else:
+            lanes = [_bounds_lane("1", [("1", None, extract)] * 2 + [("2", None, extract)] * 2)]
+    elif kind == "mixed":
+        high = _bounds_lane("1", [("1", 0, rank)] * 3)
+        low = _bounds_lane("1", [("1", 1, rank)] * 3)
+        other = _bounds_lane("2", [("2", None, extract), None, ("2", None, extract)])
+        if case == 2:
+            lanes = [high, low, other]
+        else:
+            lanes = [high, _bounds_lane("2", [("2", None, extract), ("1", 1, rank), ("2", None, extract)])]
+    elif kind == "chord_turns":
+        if case == 4:
+            lanes = [
+                _bounds_lane(voice, [(voice, rank_index, rank) if (measure < 2) == (voice == "1") else None for measure in range(4)])
+                for voice in ("1", "2") for rank_index in (0, 1)
+            ]
+        else:
+            lanes = [
+                _bounds_lane("1" if rank_index == 0 else "2", [("1" if measure < 2 else "2", rank_index, rank) for measure in range(4)])
+                for rank_index in (0, 1)
+            ]
+    elif kind == "solo":
+        first = _bounds_lane("1", [("1", 0 if case == 10 else None, rank if case == 10 else extract)] * 2)
+        lanes = [first, _bounds_lane("1", [("1", 1 if case == 10 else None, rank if case == 10 else extract)] * 2)]
+    else:
+        first = _bounds_lane("1", [("1", 0, rank), ("1", 0, rank)])
+        second = _bounds_lane("1", [("1", 0 if case == 12 else 1, rank), None])
+        if case == 11:
+            lanes = [first]
+        elif case == 14:
+            lanes = [_bounds_lane("1", [("1", 0, rank), ("1", 0, rank)], complete=False)]
+        elif case == 8:
+            lanes = [first, second, _bounds_lane("1", [("1", None, extract)] * 2)]
+        elif case == 9:
+            lanes = [first, second, _bounds_lane("1", [("1", 2, rank), None])]
+        else:
+            lanes = [first, second]
+    return {"targets": lanes}
+
+
+@pytest.mark.parametrize(
+    "case,kind,status,note_counts",
+    [
+        (1, "turns", "ready", [2, 2]),
+        (2, "mixed", "ready", [3, 1, 2]),
+        (3, "mixed", "ready", [3, 2]),
+        (4, "chord_turns", "ready", [2, 2, 2, 2]),
+        (5, "chord_turns", "ready", [2, 2]),
+        (6, "turns", "action_required", None),
+        (7, "solo", "action_required", None),
+        (8, "solo_chord", "action_required", None),
+        (9, "solo_chord", "action_required", None),
+        (10, "solo", "action_required", None),
+        (11, "solo_chord", "action_required", None),
+        (12, "solo_chord", "action_required", None),
+        (13, "turns", "action_required", None),
+        (14, "solo_chord", "ready", [2]),
+    ],
+)
+def test_complete_split_staff_lane_bounds(tmp_path, case, kind, status, note_counts) -> None:
+    score = _lane_bounds_score(tmp_path, kind)
+    plan = _bounds_plan(kind, case)
+    result = preprocess_voice_parts(score, plan=plan)
+    assert result["status"] == status, result
+    findings = {finding["rule"]: finding for finding in result.get("lint_findings", [])}
+    if status == "action_required":
+        if case in (6, 7, 8, 9, 10, 11):
+            assert "complete_split_scope_lane_count_mismatch" in findings
+        elif case == 12:
+            assert "complete_split_duplicate_rank" in findings
+            assert "complete_split_scope_lane_count_mismatch" not in findings
+        elif case == 13:
+            assert "same_part_target_completeness" in findings
+    else:
+        derived = result["score"]["parts"][1:]
+        sounding = [[n for n in part["notes"] if not n.get("is_rest")] for part in derived]
+        assert [len(notes) for notes in sounding] == note_counts
+        if case in (1, 4):
+            source_notes = score["parts"][0]["notes"]
+            for part_notes, target in zip(sounding, plan["targets"]):
+                voice = target["source"]["voice_part_id"].split()[-1]
+                assert all(n.get("voice") == voice for n in part_notes)
+                assert len({(n["measure_number"], n["offset_beats"]) for n in part_notes}) == len(part_notes)
+                assert all(any(n["pitch_midi"] == src["pitch_midi"] and n["measure_number"] == src["measure_number"] and str(src.get("voice")) == voice for src in source_notes) for n in part_notes)
+        if case == 2:
+            from collections import Counter
+            from src.api import parse_score
+            original = Counter((n["measure_number"], n["pitch_midi"]) for n in score["parts"][0]["notes"] if not n.get("is_rest"))
+            output = Counter((n["measure_number"], n["pitch_midi"]) for notes in sounding for n in notes)
+            assert output == original
+            reparsed = parse_score(result["modified_musicxml_path"], verse_number=1)
+            written = Counter((n["measure_number"], n["pitch_midi"]) for part in reparsed["parts"][1:] for n in part["notes"] if not n.get("is_rest"))
+            assert written == original
+    if case == 6:
+        attributes = findings["complete_split_scope_lane_count_mismatch"]["failing_attributes"]
+        assert (attributes["minimum_lane_count"], attributes["maximum_lane_count"], attributes["visible_derived_lane_count"]) == (1, 2, 3)
+    if case == 11:
+        assert "complete_split_source_underclaimed" in findings
+    if case == 14:
+        assert "complete_split_scope_lane_count_mismatch" not in findings
+
+
+def test_sheet_lane_counts_excludes_default_voice_from_upper_bound(tmp_path) -> None:
+    from dataclasses import FrozenInstanceError
+    from src.api.voice_parts import sheet_lane_counts
+
+    turns = _lane_bounds_score(tmp_path, "turns")
+    counts = sheet_lane_counts(turns, part_index=0, staff_scope="1")
+    assert (counts.peak, counts.real_voices, counts.most) == (1, 2, 2)
+    turns["parts"][0]["notes"].append({
+        "measure_number": 5,
+        "offset_beats": 0.0,
+        "duration_beats": 4.0,
+        "pitch_midi": 60.0,
+        "voice": None,
+        "staff": 1,
+        "is_rest": False,
+    })
+    assert sheet_lane_counts(turns, part_index=0, staff_scope="1") == counts
+    with pytest.raises(FrozenInstanceError):
+        counts.most = 3
+
+    mixed = _lane_bounds_score(tmp_path, "mixed")
+    assert sheet_lane_counts(mixed, part_index=0, staff_scope="1").most == 3

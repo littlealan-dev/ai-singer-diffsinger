@@ -117,10 +117,74 @@ def test_default_role_keeps_song_part_and_voice_summaries() -> None:
     assert "full_score_analysis" in signals
 
 
+def test_default_role_keeps_whether_the_score_has_lyrics_to_copy() -> None:
+    signals = _sample_voice_part_signals()
+    signals["has_lyric_sources"] = False
+
+    assert _prompt_voice_part_signals(signals, role="default")["has_lyric_sources"] is False
+
+
 def test_preprocess_role_keeps_all_voice_part_signals() -> None:
     signals = _sample_voice_part_signals()
 
     assert _prompt_voice_part_signals(signals, role="preprocess") == signals
+
+
+def test_preprocess_role_drops_only_identical_duplicate_analysis_fields() -> None:
+    signals = _sample_voice_part_signals()
+    part = signals["parts"][0]
+    analysis_part = signals["full_score_analysis"]["parts"][0]
+    part["measure_lyric_coverage"] = [{"measure_number": 7}]
+    part["source_candidate_hints"] = [{"target_voice_part_id": "alto"}]
+    analysis_part["section_source_candidate_hints"] = [{"target_voice_part_id": "alto"}]
+    analysis_part["voice_part_measure_spans"] = {"soprano": [{"start": 1, "end": 2}]}
+
+    prompt_signals = _prompt_voice_part_signals(signals, role="preprocess")
+
+    prompt_analysis_part = prompt_signals["full_score_analysis"]["parts"][0]
+    assert "measure_lyric_coverage" not in prompt_analysis_part
+    assert "section_source_candidate_hints" not in prompt_analysis_part
+    # Differs from parts[], so it is not a copy and stays.
+    assert prompt_analysis_part["voice_part_measure_spans"] == {"soprano": [{"start": 1, "end": 2}]}
+    assert prompt_analysis_part["voice_parts"] == analysis_part["voice_parts"]
+    assert prompt_signals["parts"] == signals["parts"]
+
+
+def test_preprocess_role_signals_lose_no_value_on_a_parsed_score() -> None:
+    from src.api import parse_score
+    from src.backend.llm_prompt import (
+        _DUPLICATED_ANALYSIS_PART_FIELDS,
+        _preprocess_voice_part_signals,
+    )
+
+    signals = parse_score("tests/fixtures/split/satb_two_bars.xml")["voice_part_signals"]
+    compact = _preprocess_voice_part_signals(signals)
+
+    parts_by_key = {(p["part_index"], p["part_id"]): p for p in compact["parts"]}
+    restored = json.loads(json.dumps(compact))
+    for part in restored["full_score_analysis"]["parts"]:
+        twin = parts_by_key[(part["part_index"], part["part_id"])]
+        for analysis_key, part_key in _DUPLICATED_ANALYSIS_PART_FIELDS.items():
+            if analysis_key not in part and part_key in twin:
+                part[analysis_key] = twin[part_key]
+    assert restored == json.loads(json.dumps(signals))
+    assert len(json.dumps(compact)) < len(json.dumps(signals))
+
+
+def test_preprocess_role_writes_dynamic_json_compactly() -> None:
+    signals = _sample_voice_part_signals()
+    preprocess_text = build_prompt_bundle(
+        tools=[], score_available=True, score_summary={"title": "T", "parts": [1]},
+        voice_part_signals=signals, role="preprocess",
+    ).dynamic_prompt_text
+    default_text = build_prompt_bundle(
+        tools=[], score_available=True, score_summary={"title": "T", "parts": [1]},
+        voice_part_signals=signals, role="default",
+    ).dynamic_prompt_text
+
+    assert '{"parts":[1],"title":"T"}' in preprocess_text
+    assert '"analysis_version":"v2"' in preprocess_text
+    assert '{\n  "parts": [\n    1\n  ],\n  "title": "T"\n}' in default_text
 
 
 def test_build_system_prompt_injects_nonempty_parsed_score_json() -> None:
@@ -976,6 +1040,93 @@ def test_build_prompt_bundle_expands_selected_voicebank_override() -> None:
     assert "list the compatible available voices" in bundle.dynamic_prompt_text
 
 
+_PLANNER_ONLY_LINES = {
+    "",
+    "Capability contract:",
+    "The current score facts (score summary, voice-part planning signals, line-preparation "
+    "mapping context and the latest attempted plan) are given in Dynamic Context.",
+    "Tool list (name, description, input schema):",
+    "{tool_json}",
+    '- Do not use "preprocess" or "preprocessing" in user-facing text.',
+    "- Verse lock:",
+}
+
+
+def test_planner_base_prompt_copies_chat_prompt_lines_verbatim() -> None:
+    from src.backend.llm_prompt import _SYSTEM_PROMPT_PATH, _SYSTEM_PROMPT_PLANNER_BASE_PATH
+
+    chat_lines = set(_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").split("\n"))
+    planner_lines = _SYSTEM_PROMPT_PLANNER_BASE_PATH.read_text(encoding="utf-8").split("\n")
+    drifted = [
+        line for line in planner_lines if line not in _PLANNER_ONLY_LINES and line not in chat_lines
+    ]
+    assert drifted == []
+
+
+def test_preprocess_role_uses_planner_prompt_without_chat_only_rules() -> None:
+    preprocess = _role_prompt("preprocess")
+    default = _role_prompt("default")
+
+    for text in (
+        '"tool_calls": [',
+        "Every reply must be a single valid JSON object in this format",
+        '"phase": "preprocess_postflight_repair"',
+        "Treat `score_summary.selected_verse_number`",
+        "SVS Voice-Part Lint Rules (Canonical Runtime Validation)",
+        "SVS Postflight Validation Rules (Canonical Runtime Validation)",
+        "You are the line-preparation model.",
+    ):
+        assert text in preprocess
+    for chat_only in (
+        "Billable synthesis confirmation",
+        "Voicebank selection:",
+        "Language selection for synthesis:",
+        "Instrument playback presets",
+        "Solfege lyric selection:",
+    ):
+        assert chat_only in default
+        assert chat_only not in preprocess
+
+
+_SYNTHESIS_ONLY_SECTIONS = (
+    "Available voicebanks (IDs):",
+    "Voicebank metadata (if available):",
+    "User-selected voicebank override:",
+    "User-selected language override:",
+    "Canonical current solfege settings (authoritative):",
+    "Current credit availability (authoritative, refreshed for this request):",
+    "Synthesis quote instruction:",
+    "Active synthesis quote awaiting confirmation",
+    "Repeat-expansion setting (authoritative):",
+)
+
+
+def test_preprocess_role_leaves_out_synthesis_only_context() -> None:
+    kwargs = dict(
+        tools=[],
+        score_available=True,
+        voicebank_ids=["voice-a"],
+        score_summary={"title": "T"},
+        voice_part_signals=_sample_voice_part_signals(),
+        voicebank_details=[{"id": "voice-a"}],
+        selected_voicebank_id="voice-a",
+        selected_language="en",
+        solfege_settings={"system": "movable_do"},
+        current_credit_availability={"credits": 3},
+        active_synthesis_quote={"quote_id": "q-1"},
+        expand_repeats=True,
+    )
+    preprocess = build_prompt_bundle(**kwargs, role="preprocess").dynamic_prompt_text
+    default = build_prompt_bundle(**kwargs, role="default").dynamic_prompt_text
+
+    for section in _SYNTHESIS_ONLY_SECTIONS:
+        assert section in default
+        assert section not in preprocess
+    for section in ("Score summary (if available):", "Voice-part planning signals (if available):"):
+        assert section in preprocess
+    assert preprocess.endswith("End Dynamic Context.")
+
+
 def test_prompt_points_users_to_app_controls_instead_of_refusing() -> None:
     prompt = _role_prompt("default")
 
@@ -1025,3 +1176,46 @@ def test_app_controls_name_only_controls_that_exist_in_the_ui() -> None:
     assert 'accept=".musicxml,.xml,.mxl"' in ui_source
     assert "BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60" in ui_source
     assert 'BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav"' in ui_source
+
+
+def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="preprocess",
+    )
+    assert "Source voices that take turns may stay in separate lanes" in prompt
+    assert "at most that count or, if larger, the sum of each real source voice's own maximum simultaneous note count" in prompt
+    for obsolete in (
+        "to equal that scope's maximum simultaneous note count",
+        "must equal that scope's maximum simultaneous note count",
+        "exactly as many visible executor-owned derived lanes",
+    ):
+        assert obsolete not in prompt
+
+
+def test_default_prompt_never_prepares_a_line_when_the_score_has_no_lyrics() -> None:
+    prompt = build_system_prompt(
+        tools=[],
+        score_available=True,
+        voicebank_ids=None,
+        score_summary=None,
+        parsed_score_json=None,
+        voice_part_signals=None,
+        preprocess_mapping_context=None,
+        last_preprocess_plan=None,
+        voicebank_details=None,
+        role="default",
+    )
+    assert (
+        "When `voice_part_signals.has_lyric_sources=false`, never call "
+        "`start_preprocess_voice_part_workflow`, for any part, even when the user asks to split a part."
+    ) in prompt
+    assert prompt.lower().count("no-lyrics limit") == 4
