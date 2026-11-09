@@ -409,9 +409,9 @@ class Settings:
         preprocess_planner = os.getenv("PREPROCESS_PLANNER", "v1").strip().lower() or "v1"
         if preprocess_planner not in {"v1", "v2"}:
             raise ValueError("PREPROCESS_PLANNER must be either 'v1' or 'v2'.")
-        # Gemini rejects a response schema of about 150-176 enum questions with a 400.
+        # Large chooser response schemas can be rejected by Gemini with HTTP 400.
         preprocess_chooser_max_slots_per_request = _env_int(
-            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 120
+            "PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", 40
         )
         if preprocess_chooser_max_slots_per_request < 1:
             raise ValueError("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST must be at least 1.")

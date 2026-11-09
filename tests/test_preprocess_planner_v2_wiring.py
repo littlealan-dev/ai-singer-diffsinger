@@ -31,7 +31,7 @@ from src.backend.orchestrator import (
 from tests.test_backend_api import (  # noqa: F401 - pytest fixture
     _create_session, _preprocess_plan_response, _upload_score, client,
 )
-from tests.test_preprocess_chooser import _chord_beside_a_line, _two_staff_part
+from tests.test_preprocess_chooser import _chord_beside_a_line, _synthetic_sheet, _two_staff_part
 from tests.test_preprocess_sheet import (
     SATB, _chord_score, _note, _rest, _single_staff_score, _too_many_chord_claims,
 )
@@ -172,14 +172,24 @@ def test_chooser_role_defaults_follow_the_preprocess_model_and_can_be_overridden
     assert (chooser.model, chooser.thinking_level, chooser.timeout_seconds) == ("chooser-model", "low", 45.0)
 
 
-def test_chooser_batch_size_defaults_to_120_and_must_be_positive(monkeypatch):
+def test_chooser_batch_size_defaults_to_40_and_must_be_positive(monkeypatch):
     monkeypatch.delenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", raising=False)
-    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 120
+    assert Settings.from_env().preprocess_chooser_max_slots_per_request == 40
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "50")
     assert Settings.from_env().preprocess_chooser_max_slots_per_request == 50
     monkeypatch.setenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", "0")
     with pytest.raises(ValueError, match="PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST"):
         Settings.from_env()
+
+
+def test_default_chooser_batch_size_splits_large_sheet(monkeypatch):
+    monkeypatch.delenv("PREPROCESS_CHOOSER_MAX_SLOTS_PER_REQUEST", raising=False)
+    sheet = _synthetic_sheet([3] * 37)
+    requests = build_requests(
+        sheet, {}, max_slots_per_request=Settings.from_env().preprocess_chooser_max_slots_per_request,
+    )
+    sizes = [len(request.key_to_slot) for request in requests]
+    assert sizes == [39, 39, 33]
 
 
 def test_chooser_evidence_limit_defaults_to_400000_and_must_be_positive(monkeypatch):
