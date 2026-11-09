@@ -1762,7 +1762,8 @@ def build_sheet(
                 lyric = _lyric_options(
                     score, lane, segment, target_notes,
                     target_sung_note_count, derived_indices, lines,
-                    set().union(*staffs_by_ref),
+                    # Evidence and target notes use the first melody option.
+                    staffs_by_ref[0],
                 )
                 if not lyric:
                     lyric = _legacy_lyric_options(
