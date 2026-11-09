@@ -461,3 +461,52 @@ def test_real_two_staff_with_one_lyric_donor_assembles_first_options(tmp_path):
         assert not [finding for finding in result.get("lint_findings", [])
                     if finding.get("rule_severity") == "P0"]
     assert score == original
+
+
+def _single_part_two_staff_score(tmp_path):
+    score = _two_staff_score(tmp_path)
+    combined = deepcopy(score["parts"][0])
+    combined["part_id"] = "P1"
+    combined["notes"] = [
+        {**note, "staff": str(staff)}
+        for staff, part in enumerate(score["parts"], start=1)
+        for note in part["notes"]
+    ]
+    score["parts"] = [combined]
+    return score
+
+
+def test_same_part_other_staff_is_one_fixed_lyric_donor(tmp_path):
+    score = _single_part_two_staff_score(tmp_path)
+    sheet = _sheet(score, "P1")
+    staff_two_lanes = {lane.lane_id for lane in sheet.lanes if lane.scope_key == "2"}
+    lyric_options = [option for slot_id, option in sheet.fixed.items()
+                     if slot_id.endswith("|lyric_source")
+                     and any(slot_id.startswith(lane_id + "|") for lane_id in staff_two_lanes)]
+    assert len(lyric_options) == len(staff_two_lanes)
+    assert all(option.option_id == "P1|staff 1" for option in lyric_options)
+    assert not any(slot.kind == "lyric_source" and
+                   any(lane_id in staff_two_lanes for lane_id in slot.lane_ids)
+                   for slot in sheet.slots)
+
+
+def test_same_part_named_staff_source_executes_across_staffs(tmp_path):
+    score = _single_part_two_staff_score(tmp_path)
+    sheet = _sheet(score, "P1")
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    staff_two_voice_ids = {lane.source_voice_part_id for lane in sheet.lanes
+                           if lane.scope_key == "2"}
+    assert all(
+        section["lyric_source_line"] == {"staff": "1", "voice_part_id": None}
+        for target in plan["targets"]
+        if target["source"]["voice_part_id"] in staff_two_voice_ids
+        for section in target["sections"]
+    )
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    for target_plan, target_result in zip(plan["targets"], result["targets"]):
+        if target_plan["source"]["voice_part_id"] not in staff_two_voice_ids:
+            continue
+        part_index = target_result["appended_part_ref"]["part_index"]
+        notes = result["score"]["parts"][part_index]["notes"]
+        assert [note["lyric"] for note in notes if note.get("lyric")] == ["word"]

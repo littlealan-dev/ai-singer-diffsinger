@@ -837,12 +837,13 @@ def _lyric_options(
     score: dict, lane: Lane, segment: Segment, target_notes: list[dict],
     target_sung_note_count: int, derived_indices: set[int],
     lines: dict[tuple[int, str], StaffLyricLine],
+    melody_staffs: set[tuple[int, str]],
 ) -> tuple[Option, ...]:
-    """Offer each other part's donor staff as a lyric line, with voice choices only when needed."""
+    """Offer donor staff lines outside the melody's staves, including this part."""
     target_onsets = {_beat(note) for note in target_notes}
     valid: list[tuple[Option, dict, str | None]] = []
     for (part_index, staff), line in sorted(lines.items()):
-        if part_index == lane.part_index or part_index in derived_indices:
+        if (part_index, staff) in melody_staffs or part_index in derived_indices:
             continue
         part = score["parts"][part_index]
         if any(
@@ -1761,6 +1762,7 @@ def build_sheet(
                 lyric = _lyric_options(
                     score, lane, segment, target_notes,
                     target_sung_note_count, derived_indices, lines,
+                    set().union(*staffs_by_ref),
                 )
                 if not lyric:
                     lyric = _legacy_lyric_options(
