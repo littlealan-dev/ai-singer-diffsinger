@@ -66,6 +66,39 @@ def _reading_note(voice, beat, lyric=None, *, syllabic=None, tie_type=None):
     return note
 
 
+def test_staff_bar_kinds_clash_takes_precedence_over_independent():
+    make = _reading_note
+    one_a, one_b = make(1, 0, "la"), make(2, 0)
+    independent_a, independent_b = make(1, 0, "la"), make(2, 2, "da")
+    clash_a, clash_b, clash_c = make(1, 0, "la"), make(2, 0, "da"), make(2, 2, "do")
+    for note in (independent_a, independent_b):
+        note["measure_number"] = 2
+    for note in (clash_a, clash_b, clash_c):
+        note["measure_number"] = 3
+    score = _reading_score(one_a, one_b, independent_a, independent_b,
+                           clash_a, clash_b, clash_c)
+    lines = sheet_module.staff_lyric_lines(score)
+    assert sheet_module.staff_bar_kinds(score, lines, 0, "1") == {
+        1: "one_text", 2: "independent", 3: "clash",
+    }
+
+
+def test_lyric_line_options_only_name_voices_with_words_in_clash_bars():
+    first, second, later = _reading_note(1, 0, "la"), _reading_note(2, 0, "da"), _reading_note(3, 0, "do")
+    later["measure_number"] = 2
+    score = _reading_score(first, second, later)
+    lines = sheet_module.staff_lyric_lines(score)
+    lane = Lane("lane", "P1", 0, "1", "voice part 1", 0, "new_part")
+    signature = sheet_module.MeasureSignature(1, (), None)
+    segment = sheet_module.Segment(0, "1", 1, 2, signature)
+    options = sheet_module._lyric_line_options(score, lane, segment, [(0, "1")], lines)
+    assert [option.fields["lyric_line_voice"]["voice_part_id"] for option in options] == [
+        "voice part 1", "voice part 2",
+    ]
+    no_clash = sheet_module.Segment(0, "1", 2, 2, signature)
+    assert sheet_module._lyric_line_options(score, lane, no_clash, [(0, "1")], lines) == ()
+
+
 def test_lyric_bar_cases_shared_missing_independent_and_conflicting():
     make = _reading_note
     scenarios = [
@@ -967,7 +1000,7 @@ def _lyric_slot_kinds(sheet, lane):
     return kinds & {"lyric_source", "lyric_strategy", "lyric_line"}
 
 
-def test_lyric_donor_order_flags_and_no_extension_policy():
+def test_lyric_donor_staff_is_fixed_and_no_extension_policy():
     score = _with_wordless_part(parse_score(SATB, verse_number=1))
     # The local soprano has eight words; the distant tenor has just one.
     tenor = next(note for note in score["parts"][1]["notes"] if note.get("voice") == "5")
@@ -976,13 +1009,13 @@ def test_lyric_donor_order_flags_and_no_extension_policy():
     _silence_voice_in_bar(score, 0, "2", 1)
     sheet = build_sheet(score, {"target": {"part_id": "P1-Staff1"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes if lane.source_voice_part_id == "voice part 2")
-    donors = [slot for slot in sheet.slots if slot.kind == "lyric_source" and alto_id in slot.lane_ids]
+    donors = [option for slot_id, option in sheet.fixed.items()
+              if slot_id.startswith(alto_id + "|") and slot_id.endswith("|lyric_source")]
     assert donors
-    assert donors[0].evidence == {"used_when": "melody from a staff without a lyric line"}
-    assert donors[0].options[0].fields["lyric_source"]["part_index"] == 0
-    cross = next(option for option in donors[0].options
-                 if option.fields["lyric_source"]["part_index"] == 1)
-    assert "P1 cross_staff_lyric_source_with_stronger_local_alternative" in cross.flags
+    assert donors[0].fields["lyric_source_line"] == {
+        "part_index": 1, "staff": "1", "voice_part_id": None,
+    }
+    assert donors[0].flags == ()
     assert "lyric_policy" not in SLOT_KINDS
 
     for note in score["parts"][0]["notes"]:
@@ -995,7 +1028,7 @@ def test_lyric_donor_order_flags_and_no_extension_policy():
     assert not any(slot_id.endswith("|lyric_policy") for slot_id in extension.fixed)
 
 
-def test_same_part_other_staff_uses_weak_source_flag():
+def test_same_part_other_staff_is_fixed_without_voice_flags():
     score = parse_score(SATB, verse_number=1)
     combined = deepcopy(score["parts"][0])
     combined["part_id"] = "P1-Combined"
@@ -1005,7 +1038,7 @@ def test_same_part_other_staff_uses_weak_source_flag():
         for note in part["notes"]
     ]
     next(note for note in combined["notes"] if note.get("voice") == "5")["lyric"] = "one"
-    # A third staff with no words keeps the lyric source menu in play.
+    # A third staff with no words makes the lane consider a lyric donor.
     combined["notes"] += [
         {**note, "staff": "3", "voice": "9", "lyric": None, "lyric_is_extended": False}
         for note in score["parts"][0]["notes"] if note.get("voice") == "1"
@@ -1017,13 +1050,11 @@ def test_same_part_other_staff_uses_weak_source_flag():
     sheet = build_sheet(score, {"target": {"part_id": "P1-Combined"}})
     alto_id = next(lane.lane_id for lane in sheet.lanes
                    if lane.source_voice_part_id == voice_part_by_voice["2"])
-    donors = [option for slot in sheet.slots
-              if slot.kind == "lyric_source" and alto_id in slot.lane_ids
-              for option in slot.options]
-    weak_other_scope = next(option for option in donors
-                            if option.fields["lyric_source"]["voice_part_id"] == voice_part_by_voice["5"])
-    assert "P1 weak_lyric_source_with_better_alternative" in weak_other_scope.flags
-    assert not any("cross_staff" in flag for flag in weak_other_scope.flags)
+    donors = [option for slot_id, option in sheet.fixed.items()
+              if slot_id.startswith(alto_id + "|") and slot_id.endswith("lyric_source")]
+    assert len(donors) == 1
+    assert donors[0].option_id == "P1-Combined|staff 2"
+    assert donors[0].flags == ()
 
 
 def test_derived_and_generated_solfege_donors_are_excluded():

@@ -6,6 +6,16 @@ from pathlib import Path
 from src.backend.llm_prompt import build_prompt_bundle, build_system_prompt
 
 
+def test_planner_v2_prompt_explains_borrowed_staff_voice_option_once():
+    prompt = (Path(__file__).resolve().parents[1]
+              / "src/backend/config/system_prompt_planner_v2.txt").read_text()
+    sentence = (
+        "An option that names a voice means that staff sings two texts in some of these bars, "
+        "and the option reads that voice's words there."
+    )
+    assert prompt.count(sentence) == 1
+
+
 def test_quote_guidance_requires_target_classification_before_quoting() -> None:
     bundle = build_prompt_bundle(tools=[], score_available=True, role="default")
     guidance = bundle.dynamic_prompt_text

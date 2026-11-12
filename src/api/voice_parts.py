@@ -2038,6 +2038,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                 if (
                     section.get("lyric_strategy") != "staff_line"
+                    and "lyric_source_line" not in section
                     and isinstance(lyric_source_part, int)
                     and lyric_source_part != part_index
                     and lyric_source_voice_part_id
@@ -2145,6 +2146,7 @@ def _run_preflight_plan_lint(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
                         )
                 if (
                     section.get("lyric_strategy") != "staff_line"
+                    and "lyric_source_line" not in section
                     and isinstance(lyric_source_part, int)
                     and lyric_source_part == part_index
                     and lyric_source_voice_part_id
@@ -3342,6 +3344,7 @@ def _execute_timeline_sections(
                     )
             lyric_source = section.get("lyric_source")
             if isinstance(lyric_source, dict):
+                source_line = section.get("lyric_source_line")
                 line_voice: Optional[str] = None
                 own_voice_exception = False
                 if (
@@ -3374,7 +3377,6 @@ def _execute_timeline_sections(
                         source_voice_parts,
                         str(lyric_source["voice_part_id"]),
                     )
-                    source_line = section.get("lyric_source_line")
                     if isinstance(source_line, dict) and source_line["voice_part_id"] is not None:
                         line_meta = _find_voice_part_by_id(
                             source_voice_parts, source_line["voice_part_id"]
@@ -3392,6 +3394,16 @@ def _execute_timeline_sections(
                         [note for note in source_part.get("notes") or []
                          if _is_countable_sung_note(note) and _staff_scope_key(note) in staves]
                         if source_meta is not None else None
+                    )
+                elif isinstance(source_line, dict) and isinstance(source_line.get("staff"), str):
+                    override_source_notes = _resolve_staff_lyric_source_notes(
+                        source_score,
+                        source_part_index=int(lyric_source["part_index"]),
+                        staff=source_line["staff"],
+                        source_voice_part_id=source_line.get("voice_part_id"),
+                        verse_number=verse_number,
+                        copy_all_verses=copy_all_verses,
+                        measure_range=(start_measure, end_measure),
                     )
                 else:
                     override_source_notes = _resolve_source_notes(
@@ -5086,6 +5098,59 @@ def _propagate_lyrics(
         "dropped_source_lyrics": dropped_source_lyrics,
     }
     return out, diagnostics
+
+
+def _resolve_staff_lyric_source_notes(
+    score: Dict[str, Any],
+    *,
+    source_part_index: int,
+    staff: str,
+    source_voice_part_id: Optional[str],
+    verse_number: Optional[str],
+    copy_all_verses: bool,
+    measure_range: Tuple[int, int],
+) -> Optional[List[Dict[str, Any]]]:
+    """Read one note per beat from a named donor staff, optionally by voice.
+
+    No filter by lyric kind: an extender line reaches the fitting rule as it
+    does from a voice source, and becomes the lane's hold ("+").
+    """
+    parts = score.get("parts") or []
+    if not 0 <= source_part_index < len(parts):
+        return None
+    source_part = parts[source_part_index]
+    source_voice: Optional[str] = None
+    if source_voice_part_id is not None:
+        voice_parts = _analyze_part_voice_parts(source_part, source_part_index)["voice_parts"]
+        source_meta = _find_voice_part_by_id(voice_parts, source_voice_part_id)
+        if source_meta is None:
+            return None
+        source_voice = str(source_meta["source_voice_id"])
+
+    def rank(note: Dict[str, Any]) -> Tuple[bool, bool]:
+        # Prefer text in the requested verse, then a word over an extender line.
+        in_verse = _has_lyric(note) and _lyric_matches_requested_verse(
+            str(note["lyric"]),
+            verse_number=verse_number,
+            copy_all_verses=copy_all_verses,
+        )
+        return in_verse, _lyric_kind(note) == "word"
+
+    by_onset: Dict[float, Dict[str, Any]] = {}
+    for note in source_part.get("notes") or []:
+        if (
+            not _is_countable_sung_note(note)
+            or _staff_scope_key(note) != staff
+            or (source_voice is not None and _voice_key(note.get("voice")) != source_voice)
+            or _is_generated_solfege_lyric(note)
+            or not _note_in_measure_range(note, measure_range)
+        ):
+            continue
+        onset = round(float(note.get("offset_beats") or 0.0), 6)
+        kept = by_onset.get(onset)
+        if kept is None or rank(note) > rank(kept):
+            by_onset[onset] = note
+    return list(by_onset.values())
 
 
 def _resolve_source_notes(
@@ -7136,15 +7201,28 @@ def _normalize_timeline_sections(
             )["error"]
         has_source_line = "lyric_source_line" in raw_section
         source_line = raw_section.get("lyric_source_line")
-        if has_source_line and (
-            not isinstance(source_line, dict)
-            or set(source_line) != {"staff", "voice_part_id"}
-            or source_line["staff"] is not None
-            or (source_line["voice_part_id"] is not None
-                and (not isinstance(source_line["voice_part_id"], str)
-                     or not source_line["voice_part_id"]))
-            or strategy != "staff_line"
-        ):
+        source_line_invalid = False
+        if has_source_line:
+            source_line_invalid = (
+                not isinstance(source_line, dict)
+                or set(source_line) != {"staff", "voice_part_id"}
+                or (source_line["voice_part_id"] is not None
+                    and (not isinstance(source_line["voice_part_id"], str)
+                         or not source_line["voice_part_id"]))
+            )
+            if not source_line_invalid:
+                staff = source_line["staff"]
+                if staff is None:
+                    source_line_invalid = strategy != "staff_line"
+                else:
+                    source_line_invalid = (
+                        not isinstance(staff, str) or not staff
+                        or strategy not in {"strict_onset", "overlap_best_match", "syllable_flow"}
+                        or lyric_source is None
+                        or not any(_staff_scope_key(note) == staff for note in
+                                   (score["parts"][lyric_source["part_index"]].get("notes") or []))
+                    )
+        if source_line_invalid:
             return [], _plan_error(
                 "malformed_section_source",
                 f"{section_name}.lyric_source_line is invalid.",
