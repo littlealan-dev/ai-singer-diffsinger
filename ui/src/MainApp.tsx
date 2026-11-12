@@ -41,7 +41,6 @@ import {
   uploadScore,
   updateSolfegeSettings,
   type AudioTrackMetadata,
-  type ChatSelection,
   type ChatStream,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
@@ -195,7 +194,6 @@ type Message = {
   audioTrack?: AudioTrackMetadata;
   details?: unknown;
   attemptMessages?: AttemptMessage[];
-  showSelector?: boolean;
   progressUrl?: string;
   isProgress?: boolean;
   progressValue?: number;
@@ -1933,15 +1931,6 @@ const buildPartOptions = (summary: ScoreSummary | null): PartOption[] => {
   return lyricOptions.length ? lyricOptions : options;
 };
 
-const buildVerseOptions = (summary: ScoreSummary | null): string[] => {
-  if (!summary) return [];
-  const verses =
-    summary.available_verses && summary.available_verses.length > 0
-      ? summary.available_verses
-      : ["1"];
-  return verses.map((value) => String(value));
-};
-
 const downloadTextFile = (fileName: string, content: string) => {
   const blob = new Blob([content], { type: "application/vnd.recordare.musicxml+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -2246,12 +2235,6 @@ const renderScorePageLayoutForPrint = async (
     }
     container.remove();
   }
-};
-
-const shouldPromptSelection = (summary: ScoreSummary | null): boolean => {
-  const parts = buildPartOptions(summary);
-  const verses = buildVerseOptions(summary);
-  return (parts.length > 1 || verses.length > 1) && parts.length > 0 && verses.length > 0;
 };
 
 const isInsufficientCreditError = (message: string): boolean =>
@@ -2729,10 +2712,6 @@ export default function MainApp() {
   const [expandRepeats, setExpandRepeats] = useState(false);
   const [scoreReady, setScoreReady] = useState(false);
   const [scorePreviewError, setScorePreviewError] = useState<string | null>(null);
-  const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
-  const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
-  const [pendingSelection, setPendingSelection] = useState(false);
-  const [selectorShown, setSelectorShown] = useState(false);
   const [voicebanks, setVoicebanks] = useState<VoicebankOption[]>([]);
   const [voicebanksLoading, setVoicebanksLoading] = useState(false);
   const [selectedVoicebankId, setSelectedVoicebankId] = useState<string | null>(null);
@@ -3291,9 +3270,6 @@ export default function MainApp() {
   }, [performanceMidi?.has_instrumental_parts, playbackExpandRepeats, sessionId]);
 
   const partOptions = useMemo(() => buildPartOptions(scoreSummary), [scoreSummary]);
-  const verseOptions = useMemo(() => buildVerseOptions(scoreSummary), [scoreSummary]);
-  const estimatePartId =
-    partOptions.find((option) => option.key === selectedPartKey)?.part_id ?? null;
 
   // Refresh after upload/reparse, on a With Repeats change, on a vocal part
   // change, and after any terminal billing state, because a first successful
@@ -3307,7 +3283,7 @@ export default function MainApp() {
     let cancelled = false;
     setSynthesisEstimate(null);
     setSynthesisEstimateLoading(true);
-    void fetchSynthesisEstimate(sessionId, expandRepeats, estimatePartId)
+    void fetchSynthesisEstimate(sessionId, expandRepeats, null)
       .then((estimate) => {
         if (!cancelled) setSynthesisEstimate(estimate);
       })
@@ -3321,7 +3297,6 @@ export default function MainApp() {
       cancelled = true;
     };
   }, [
-    estimatePartId,
     expandRepeats,
     scoreSummary,
     sessionId,
@@ -3349,7 +3324,7 @@ export default function MainApp() {
       const partId = typeof audioTrack?.part_id === "string" ? audioTrack.part_id.trim() : "";
       const key =
         (typeof audioTrack?.key === "string" && audioTrack.key.trim()) ||
-        (partId ? `id:${partId}` : partIndex !== null ? `index:${partIndex}` : selectedPartKey || "latest-vocal");
+        (partId ? `id:${partId}` : partIndex !== null ? `index:${partIndex}` : "latest-vocal");
       const matchingPart = partOptions.find((option) => option.key === key);
       const label =
         (typeof audioTrack?.label === "string" && audioTrack.label.trim()) ||
@@ -3360,10 +3335,10 @@ export default function MainApp() {
         label,
         partId: partId || matchingPart?.part_id || null,
         partIndex: partIndex ?? matchingPart?.part_index ?? null,
-        verseNumber: audioTrack?.verse_number ?? selectedVerse ?? null,
+        verseNumber: audioTrack?.verse_number ?? scoreSummary?.selected_verse_number ?? null,
       };
     },
-    [partOptions, selectedPartKey, selectedVerse]
+    [partOptions, scoreSummary]
   );
 
   const addOrReplaceMultiTrackAudio = useCallback(
@@ -5244,12 +5219,6 @@ export default function MainApp() {
             ? null
             : current,
       );
-      setPendingSelection(shouldPromptSelection(summary));
-      setSelectorShown(false);
-      const nextPartOptions = buildPartOptions(summary);
-      const nextVerseOptions = buildVerseOptions(summary);
-      setSelectedPartKey(nextPartOptions[0]?.key ?? null);
-      setSelectedVerse(nextVerseOptions[0] ?? null);
       const data = await fetchScoreXml(activeSessionId);
       setScore({ name: file.name, data });
       setActiveDemoSongId(demoSongId);
@@ -5295,7 +5264,6 @@ export default function MainApp() {
 
   const sendMessage = async (
     content: string,
-    selection?: ChatSelection,
     voicebankId: string | null = selectedVoicebankId
   ) => {
     if (!content.trim()) return;
@@ -5305,7 +5273,7 @@ export default function MainApp() {
     }
     if (chatTurnInProgressRef.current) return;
     if (creditsLocked) {
-      openPaywall(selection ? "selection_blocked" : "chat_blocked");
+      openPaywall("chat_blocked");
       return;
     }
     let keepTurnBusy = false;
@@ -5323,7 +5291,6 @@ export default function MainApp() {
       const { response, stream } = await chat(
         activeSessionId,
         content,
-        selection,
         voicebankId,
         expandRepeats,
         multiTrackAudioTracks.flatMap((track) =>
@@ -5350,19 +5317,6 @@ export default function MainApp() {
           "details" in response ? response.details : undefined
         ),
       };
-      if (response.type === "chat_text" && response.selection_resolved) {
-        // A quote already fixes the part and verse: no picker now or later,
-        // and any picker shown earlier disappears.
-        setPendingSelection(false);
-      } else if (
-        response.type === "chat_text" &&
-        pendingSelection &&
-        !selectorShown &&
-        !response.suppress_selector
-      ) {
-        assistantMessage.showSelector = true;
-        setSelectorShown(true);
-      }
       if (response.type === "chat_audio") {
         assistantMessage.audioUrl = response.audio_url;
         assistantMessage.audioTrack = response.audio_track;
@@ -5382,26 +5336,17 @@ export default function MainApp() {
             { audioUrl: response.audio_url }
           );
         }
-        if (pendingSelection) {
-          setPendingSelection(false);
-        }
       }
       if (response.type === "chat_progress") {
         assistantMessage.progressUrl = response.progress_url;
         assistantMessage.isProgress = true;
         assistantMessage.jobId = response.job_id;
         keepTurnBusy = true;
-        if (pendingSelection) {
-          setPendingSelection(false);
-        }
       }
       appendMessage(assistantMessage);
       if ("score_summary" in response && response.score_summary) {
         setScoreSummary(response.score_summary);
         setPerformanceMidi(response.score_summary.performance_midi ?? null);
-        if (response.score_summary.selected_verse_number != null) {
-          setSelectedVerse(String(response.score_summary.selected_verse_number));
-        }
       }
       if (typeof response.expand_repeats === "boolean" && !repeatsUnavailable) {
         setExpandRepeats(response.expand_repeats);
@@ -5457,7 +5402,7 @@ export default function MainApp() {
     const content = input.trim();
     const voicebankId = selectedVoicebankId;
     setInput("");
-    await sendMessage(content, undefined, voicebankId);
+    await sendMessage(content, voicebankId);
   };
 
   const handleConfirmSolfegeSettings = async () => {
@@ -5488,32 +5433,6 @@ export default function MainApp() {
       setSolfegeSettingsSaving(false);
     }
   };
-
-  const handleSelectionSend = async () => {
-    if (!selectedPartKey || !selectedVerse) return;
-    if (chatTurnInProgressRef.current) return;
-    if (creditsLocked) {
-      openPaywall("selection_blocked");
-      return;
-    }
-    const selected = partOptions.find((option) => option.key === selectedPartKey);
-    if (!selected) return;
-    const partDescriptor = selected.part_name
-      ? `the ${selected.part_name} part`
-      : selected.part_id
-        ? `part ${selected.part_id}`
-        : `part ${selected.part_index + 1}`;
-    const message = `Please sing ${partDescriptor}, verse ${selectedVerse}.`;
-    setPendingSelection(false);
-    await sendMessage(message, {
-      part_index: selected.part_index,
-      part_id: selected.part_id,
-      verse_number: selectedVerse,
-    }, selectedVoicebankId);
-  };
-
-  const canShowSelector =
-    pendingSelection && partOptions.length > 0 && verseOptions.length > 0;
 
   const handleZoom = (delta: number) => {
     const next = Math.min(2, Math.max(0.6, zoomLevel + delta));
@@ -5883,54 +5802,6 @@ export default function MainApp() {
                     <span />
                     <span />
                     <span />
-                  </div>
-                )}
-                {msg.showSelector && canShowSelector && (
-                  <div className="selection-panel">
-                    <div className="selection-grid">
-                      <label className="selection-field">
-                        <span className="selection-label">Part</span>
-                        <select
-                          data-testid="part-selection"
-                          className="selection-select"
-                          value={selectedPartKey ?? ""}
-                          onChange={(event) => setSelectedPartKey(event.target.value)}
-                        >
-                          {partOptions.map((option) => (
-                            <option key={option.key} value={option.key}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="selection-field">
-                        <span className="selection-label">Verse</span>
-                        <select
-                          data-testid="verse-selection"
-                          className="selection-select"
-                          value={selectedVerse ?? ""}
-                          onChange={(event) => setSelectedVerse(event.target.value)}
-                        >
-                          {verseOptions.map((verse) => (
-                            <option key={verse} value={verse}>
-                              Verse {verse}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <div className="selection-actions">
-                      <button
-                        type="button"
-                        className="selection-send"
-                        data-testid="use-selection"
-                        onClick={handleSelectionSend}
-                  disabled={!selectedPartKey || !selectedVerse || chatTurnInProgress || browserMixBounceActive}
-                      >
-                        Use selection
-                      </button>
-                      <span className="selection-hint">Or type your request below.</span>
-                    </div>
                   </div>
                 )}
                 {msg.audioUrl && (

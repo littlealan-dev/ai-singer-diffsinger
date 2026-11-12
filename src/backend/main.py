@@ -365,9 +365,6 @@ class ScorePlayerTake(BaseModel):
 class ChatRequest(BaseModel):
     """Request payload for chat-based interactions."""
     message: str
-    # Optional structured selector payload from UI widgets (for example verse dropdown).
-    # Values are treated as authoritative user selections and avoid fragile text parsing.
-    selection: dict[str, Any] | None = None
     selected_voicebank_id: str | None = None
     # Score notation always remains unchanged; this only controls render order
     # and the estimate used before a synthesis job is started.
@@ -1056,7 +1053,6 @@ def create_app() -> FastAPI:
                 payload.message,
                 user_id=user_id,
                 user_email=user_email,
-                selection=payload.selection,
                 selected_voicebank_id=payload.selected_voicebank_id,
                 selected_language=payload.selected_language,
                 expand_repeats=payload.expand_repeats,

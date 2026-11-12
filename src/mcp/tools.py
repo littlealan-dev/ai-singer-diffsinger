@@ -1972,8 +1972,16 @@ TOOLS: List[Tool] = [
     Tool(
         name="prepare_synthesis_quote",
         description=(
-            "Create the authoritative synthesis credit quote after all render choices "
-            "are resolved and before asking the user for billable confirmation."
+            "Check whether part_id names an original part in voice_part_signals.parts[] "
+            "or a prepared derived part in the mapping context. If the original part has "
+            "is_potentially_complex_for_preprocess=true, do not quote "
+            "it. With lyric sources, call start_preprocess_voice_part_workflow; without "
+            "them, do not prepare or quote that complex original part. Once the user confirms the prepared "
+            "derived score, quote the intended derived part_id from the mapping context; ask which derived part "
+            "to use if ambiguous. An "
+            "original part with is_potentially_complex_for_preprocess=false may be "
+            "quoted after all render choices are resolved. A request for no "
+            "modifications does not change the complexity signal."
         ),
         input_schema={
             "type": "object",

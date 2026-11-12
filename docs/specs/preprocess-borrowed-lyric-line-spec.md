@@ -1,6 +1,6 @@
 # Borrowed words: read the donor staff's lyric line, not a voice
 
-Status: building 2026-11-08. Linear: SIG-182 (§4c), SIG-183 (§4a, §4b, §5, §6), both Codex tasks.
+Status: building 2026-11-08; §5 executor source notes corrected 2026-11-12 (holds). Linear: SIG-182 (§4c), SIG-183 (§4a, §4b, §5, §6), both Codex tasks.
 Area: planner v2 (sheet, assembler, prompt) and the shared executor (`src/api/voice_parts.py`).
 v1 never writes the new plan field, so v1 behaves as today.
 
@@ -198,13 +198,19 @@ classifies bars. It only filters by what the plan says.
 ```
 executor, when a section has lyric_source_line:
     staff = lyric_source_line.staff, or each lane note's own staff when null
-    source notes = notes of the lyric_source part on that staff that carry a word of the
-                   requested verse
+    source notes = the sung notes of the lyric_source part on that staff (not generated solfège);
+                   no filter by lyric kind: the fitting rule reads them as it reads a voice source
     if lyric_source_line.voice_part_id: keep only that voice's notes
                    (the whole staff stays available for 4c's own-voice exception)
-    keep one note per beat (the chord tones carrying one word count once)
+    keep one note per beat (the chord tones carrying one word count once), preferring a note
+                   with text in the requested verse, and a word over an extender line
     run the section's fitting rule on these notes, as today
 ```
+
+- Copy what the donor prints, by the same rule as a voice source: a word, or an extender line (or a
+  typed "+"), which the fitting rule turns into a hold ("+") on the lane's note. A source of words
+  only drops every hold under a borrowed line: the review of SIG-183 found 14 held notes in the
+  corpus (slurred notes and tied continuations under the donor's extender) that lost their "+".
 
 - The donor staff is named explicitly. `staff_line` today pairs staves by number only, so borrowing
   works only when both staves happen to be staff 1.
@@ -257,6 +263,10 @@ Each test fails on today's code unless marked.
 - Same-staff, `share_line` and one-text bars: the same words as today (passes today).
 - Executor: a section with `lyric_source_line` on donor staff 1, lane on staff 2, copies words by
   beat. A section without the field is unchanged (passes today).
+- Executor, named donor staff, `overlap_best_match` and `strict_onset`: the donor prints a word, then
+  an extender line over the next slurred note, and a word on a tied note with an extender over its
+  continuation. A lane with the same rhythm gets the word, then "+" on each held note, as a voice
+  source gives today.
 - v1, offline proof on the 40 jobs: plans and executor results identical (passes today).
 
 ## 9. Proof
@@ -267,7 +277,7 @@ Each test fails on today's code unless marked.
   - Total questions go from 745 to about 678.
 - Executor results change in the 7 jobs with borrowed words and in same-staff lanes (4c). Every
   changed lane must have equal or higher word coverage; list any lane where it is lower, and every
-  changed note by kind (word, "+", none). The emulation in 4c predicts 4 jobs with a better status,
+  changed note by kind (word, "+", none). A held note under the donor's extender line keeps its "+". The emulation in 4c predicts 4 jobs with a better status,
   none worse, and 11 changed notes in jobs ready both times.
 - v1: identical.
 - Full suite: the same baseline failures.

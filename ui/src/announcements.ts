@@ -14,20 +14,28 @@ export interface Announcement {
 
 export const ANNOUNCEMENTS: Announcement[] = [
   {
+    id: 'version_1_2_1',
+    title: 'SightSinger 1.2.1 Update',
+    content: 'The LIEE voicebank is temporarily unavailable while we clarify its licence. We’ll restore the service as soon as possible. Thank you for your patience.',
+    effect: 'none',
+    date: '2026-11-12',
+    effectiveFrom: '2026-11-12',
+  },
+  {
+    id: 'version_1_2_0',
+    title: 'SightSinger 1.2.0 Update',
+    content: '- Much faster part splitting: about 2x faster for simple scores, and up to 5x faster for large scores with several parts.\n\n- More reliable on large, complex scores: far fewer timeouts.\n\n- More accurate part splitting for parts that take turns on one staff and parts written in chords.\n\n- Bug fixes and stability improvements.',
+    effect: 'none',
+    date: '2026-11-09',
+    effectiveFrom: '2026-11-09',
+  },
+  {
     id: 'version_1_1_0',
     title: 'SightSinger 1.1.0 Update',
     content: '- Play vocal and instrument tracks together.\n\n- Support for repeat notations: repeat signs, 1st / 2nd endings, D.C., D.S. and more.\n\n- Download the full mix of vocals and instruments: what you hear is what you get.\n\n- Fewer AI hallucinations and improved stability.',
     effect: 'none',
     date: '2026-10-05',
     effectiveFrom: '2026-10-05',
-  },
-  {
-    id: 'version_1_0_3',
-    title: 'SightSinger 1.0.3 Update',
-    content: '- New AI Voice: DiffSinger LIEE: Immortal Idol, supporting English, Spanish, French, Italian, Japanese, Portuguese, European Portuguese, Mandarin Chinese, and Cantonese Chinese.\n\n- Support Bass voice through LIEE: Immortal Idol.\n\n- Bug fixes.',
-    effect: 'none',
-    date: '2026-08-29',
-    effectiveFrom: '2026-08-29',
   },
   {
     id: 'version_1_0_2',

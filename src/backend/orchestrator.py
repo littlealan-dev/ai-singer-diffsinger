@@ -441,7 +441,6 @@ class Orchestrator:
         *,
         user_id: str,
         user_email: str,
-        selection: Optional[Dict[str, Any]] = None,
         selected_voicebank_id: Optional[str] = None,
         selected_language: Optional[str] = None,
         expand_repeats: bool = False,
@@ -518,23 +517,6 @@ class Orchestrator:
             current_score = snapshot.get("current_score")
             response_message = "Acknowledged."
             include_score = self._should_include_score(message)
-            explicit_verse_from_selection = self._normalize_verse_number(
-                selection.get("verse_number")
-                if isinstance(selection, dict)
-                else None
-            )
-            if explicit_verse_from_selection:
-                await self._sessions.set_metadata(
-                    session_id,
-                    EXPLICIT_VERSE_METADATA_KEY,
-                    explicit_verse_from_selection,
-                )
-                files = snapshot.get("files")
-                next_files = dict(files) if isinstance(files, dict) else {}
-                next_files[EXPLICIT_VERSE_METADATA_KEY] = explicit_verse_from_selection
-                snapshot = dict(snapshot)
-                snapshot["files"] = next_files
-
             if current_score is None:
                 # Require a score before any synthesis steps.
                 response_message = "Please upload a MusicXML file first."
@@ -631,8 +613,7 @@ class Orchestrator:
                     elif followup_error:
                         response_message = followup_error
                     await self._sessions.append_history(session_id, "assistant", response_message)
-                    # A reply to a tool error never carries the part picker.
-                    return {"type": "chat_text", "message": response_message, "suppress_selector": True}
+                    return {"type": "chat_text", "message": response_message}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -652,8 +633,18 @@ class Orchestrator:
                             tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
                             explicit_verse_number=explicit_verse_number,
                         )
-                        response_message = str(
-                            action_required.get("message") or response_message
+                        response_message = await self._verse_selection_followup_message(
+                            snapshot,
+                            current_score["score"],
+                            action_required,
+                            default_message=response_message,
+                            session_id=session_id,
+                            user_id=user_id,
+                            user_email=user_email,
+                            current_credit_availability=current_credit_availability,
+                            selected_voicebank_id=forced_voicebank_id,
+                            selected_language=forced_language,
+                            expand_repeats=expand_repeats,
                         )
                         await self._sessions.append_history(
                             session_id, "assistant", response_message
@@ -668,8 +659,7 @@ class Orchestrator:
                             llm_response.tool_calls,
                             user_message=message,
                         )
-                        await self._sessions.append_history(session_id, "assistant", response_message)
-                        return await self._start_preprocess_job(
+                        start_response = await self._start_preprocess_job(
                             session_id,
                             current_score["score"],
                             [],
@@ -680,6 +670,10 @@ class Orchestrator:
                             planning_context=planning_context,
                             originating_turn_id=turn_id,
                         )
+                        await self._sessions.append_history(
+                            session_id, "assistant", start_response.get("message") or response_message
+                        )
+                        return start_response
                 if self._should_start_preprocess_job(llm_response.tool_calls):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -1101,6 +1095,23 @@ class Orchestrator:
         originating_turn_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
+        signals = score.get("voice_part_signals")
+        if isinstance(signals, dict) and signals.get("has_lyric_sources") is False:
+            action_required = {
+                "status": "action_required",
+                "action": "lyrics_required_for_line_preparation",
+                "code": "lyrics_required_for_line_preparation",
+                "message": (
+                    "This score has no lyrics to copy into a prepared singing line. "
+                    "A single-line part can be sung in solfege; for a part with "
+                    "multiple lines or chords, add lyrics and upload the score again."
+                ),
+            }
+            return {
+                "type": "chat_text",
+                "message": action_required["message"],
+                "action_required": action_required,
+            }
         busy = await self._preprocess_busy_response(session_id, user_id)
         if busy is not None:
             return busy
@@ -2802,9 +2813,7 @@ class Orchestrator:
         review_required_pending = False
         response: Dict[str, Any] = {"type": "chat_text", "message": response_message}
         last_action_required_payload: Optional[Dict[str, Any]] = None
-        selection_resolved = False
         repeat_setting_changed = False
-        selector_suppressed = False
         best_valid_candidate: Optional[WorkflowCandidate] = None
         best_invalid_candidate: Optional[WorkflowCandidate] = None
         bootstrap_plan_baseline: Optional[BootstrapPlanBaseline] = None
@@ -2896,7 +2905,6 @@ class Orchestrator:
             review_required_pending = review_required_pending or tool_result.review_required
             if tool_result.action_required_payload:
                 last_action_required_payload = tool_result.action_required_payload
-            selection_resolved = selection_resolved or tool_result.selection_resolved
             if tool_result.expand_repeats is not None and tool_result.expand_repeats != expand_repeats:
                 expand_repeats = tool_result.expand_repeats
                 repeat_setting_changed = True
@@ -3042,9 +3050,6 @@ class Orchestrator:
                 if review_required_pending:
                     response["review_required"] = True
                 break
-
-            if self._tool_payload_has_error(followup_prompt):
-                selector_suppressed = True
 
             if preprocess_iteration:
                 if best_valid_candidate is not None and best_valid_candidate.quality_class == 3:
@@ -3419,9 +3424,23 @@ class Orchestrator:
                         tool_attempted=TOOL_START_PREPROCESS_WORKFLOW,
                         explicit_verse_number=handoff_explicit_verse_number,
                     )
+                    verse_message = await self._verse_selection_followup_message(
+                        latest_snapshot,
+                        working_score,
+                        action_required,
+                        default_message=response_message,
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_email=user_email,
+                        current_credit_availability=current_credit_availability,
+                        selected_voicebank_id=forced_voicebank_id,
+                        selected_language=forced_language,
+                        expand_repeats=expand_repeats,
+                    )
+                    await self._sessions.append_history(session_id, "assistant", verse_message)
                     return {
                         "type": "chat_text",
-                        "message": str(action_required.get("message") or response_message),
+                        "message": verse_message,
                         "action_required": action_required,
                     }
                 planning_context = self._build_preprocess_workflow_planning_context(
@@ -3468,13 +3487,8 @@ class Orchestrator:
         response = self._attach_attempt_messages(response, attempt_messages)
         if isinstance(last_action_required_payload, dict):
             response["action_required"] = copy.deepcopy(last_action_required_payload)
-        # Set here: the reply dict is rebuilt when the LLM's final message arrives.
-        if selection_resolved:
-            response["selection_resolved"] = True
         if repeat_setting_changed:
             response["expand_repeats"] = expand_repeats
-        if selector_suppressed:
-            response["suppress_selector"] = True
         if include_score or response.get("review_required"):
             updated_snapshot = await self._sessions.get_snapshot(session_id, user_id)
             updated_score = updated_snapshot.get("current_score")
@@ -5472,6 +5486,43 @@ class Orchestrator:
                 return False
             return True
         return False
+
+    async def _verse_selection_followup_message(
+        self,
+        snapshot: Dict[str, Any],
+        score: Dict[str, Any],
+        action_required: Dict[str, Any],
+        *,
+        default_message: str,
+        session_id: str,
+        user_id: str,
+        user_email: str,
+        current_credit_availability: Optional[Dict[str, int]],
+        selected_voicebank_id: Optional[str],
+        selected_language: Optional[str],
+        expand_repeats: bool,
+    ) -> str:
+        """Have the chat model ask for a verse after the verse gate blocks tools."""
+        followup, error = await self._decide_message_only_followup_with_llm(
+            snapshot,
+            json.dumps(action_required, sort_keys=True),
+            score,
+            session_id=session_id,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            selected_voicebank_id=selected_voicebank_id,
+            selected_language=selected_language,
+            expand_repeats=expand_repeats,
+            instructions=(
+                "No tool ran: this score has several verses and none was chosen. "
+                "Ask the user which verse to sing, naming the available verses. "
+                "Return no tool calls."
+            ),
+        )
+        if followup is not None and followup.final_message:
+            return self._format_followup_message_text(followup.final_message)
+        return error or default_message
 
     def _build_verse_selection_required_action(
         self,
@@ -7986,6 +8037,70 @@ class Orchestrator:
                 action_required_payload=action_required,
                 explicit_verse_number=selected_explicit_verse_number,
             )
+        quote_part_index = self._resolve_synthesize_part_index(
+            current_score,
+            score_summary=score_summary,
+            part_id=quote_args.get("part_id"),
+            part_index=quote_args.get("part_index"),
+        )
+        precheck = synthesize_preflight_action_required(
+            current_score, part_index=quote_part_index
+        )
+        if precheck is not None:
+            requested_verse = self._extract_call_requested_verse(call)
+            selected_verse = self._score_selected_verse_number(current_score)
+            if (
+                requested_verse
+                and selected_verse
+                and requested_verse != selected_verse
+            ):
+                precheck = self._build_verse_change_requires_repreprocess_action(
+                    score=current_score,
+                    requested_verse_number=requested_verse,
+                    selected_verse_number=selected_verse,
+                    part_index=quote_part_index,
+                    reparse_applied=False,
+                    reparsed_selected_verse_number=None,
+                )
+            elif (
+                isinstance(quote_args.get("lyric_selection"), dict)
+                and current_score.get("selected_lyric_selection")
+                != quote_args["lyric_selection"]
+            ):
+                precheck = {
+                    **precheck,
+                    "reason": "lyric_selection_requires_reparse_before_preprocess",
+                    "message": (
+                        "The requested lyric line is not loaded. Reparse the score "
+                        "for that lyric selection first, then prepare the selected "
+                        "singing line before requesting a quote."
+                    ),
+                }
+            elif (precheck.get("diagnostics") or {}).get("has_lyric_sources_signal") is False:
+                precheck = {
+                    **precheck,
+                    "reason": "complex_part_without_lyric_sources",
+                    "message": (
+                        "This part has multiple singing lines or chords, but the score has no "
+                        "lyrics to copy into a prepared line. Add lyrics and upload the score "
+                        "again, or choose a single-line part."
+                    ),
+                }
+            # A rejected attempt must not leave a previous quote available for
+            # confirmation after the user has changed the target or verse.
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_METADATA_KEY, ""
+            )
+            await self._sessions.set_metadata(
+                session_id, ACTIVE_SYNTHESIS_QUOTE_TURN_METADATA_KEY, ""
+            )
+            return ToolExecutionResult(
+                score=current_score,
+                audio_response={"type": "chat_text", "message": ""},
+                followup_prompt=json.dumps(precheck, sort_keys=True),
+                action_required_payload=precheck,
+                explicit_verse_number=selected_explicit_verse_number,
+            )
         quote_args = await self._apply_forced_voicebank(
             quote_args, forced_voicebank_id
         )
@@ -8036,12 +8151,6 @@ class Orchestrator:
         # back to its active score index, exactly as synthesize does.
         # Without it a preprocessed target resolves to -1 and the user
         # could never obtain a quote for it.
-        quote_part_index = self._resolve_synthesize_part_index(
-            current_score,
-            score_summary=score_summary,
-            part_id=quote_args.get("part_id"),
-            part_index=quote_args.get("part_index"),
-        )
         if not self._lyric_selection_belongs_to_part(
             score_summary, quote_part_index, lyric_selection
         ):
@@ -8232,7 +8341,6 @@ class Orchestrator:
             followup_message_only=True,
             explicit_verse_number=selected_explicit_verse_number,
             session_state_changed=quote_reparsed,
-            selection_resolved=True,
             expand_repeats=expand_repeats,
             # The tool result reaches the model through a message-only
             # follow-up, so the id is remembered on the session: the
@@ -9144,7 +9252,6 @@ class Orchestrator:
                             action_required_payload=action_required,
                             explicit_verse_number=selected_explicit_verse_number,
                             session_state_changed=requote.session_state_changed,
-                            selection_resolved=quoted,
                             metadata_on_presented=requote.metadata_on_presented,
                         )
                     est_credits = int(quote.get("totalEstimatedCredits", 0) or 0)
@@ -10183,9 +10290,6 @@ class ToolExecutionResult:
     explicit_verse_number: Optional[str] = None
     session_state_changed: bool = False
     preprocess_execution: Optional[Dict[str, Any]] = None
-    # A billable quote fixes the part and lyric line, so the UI's part/verse
-    # picker has nothing left to ask.
-    selection_resolved: bool = False
     # Repeat order bound to a successful quote, for the rest of this turn and the UI.
     expand_repeats: Optional[bool] = None
     # Session metadata that holds only once the message-only reply presenting

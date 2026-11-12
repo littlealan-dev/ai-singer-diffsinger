@@ -173,6 +173,22 @@ ZIPPED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
+SYNTHETIC_TWO_VOICE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list><score-part id='P1'><part-name>Alto</part-name></score-part></part-list>
+  <part id='P1'><measure number='1'>
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>G</sign><line>2</line></clef></attributes>
+    <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration>
+      <voice>1</voice><type>quarter</type><lyric number='1'><text>Ah</text></lyric></note>
+    <backup><duration>1</duration></backup>
+    <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration>
+      <voice>2</voice><type>quarter</type></note>
+  </measure></part>
+</score-partwise>
+"""
+
+
 def _preprocess_workflow_response(
     *,
     part_index: int = 0,
@@ -2069,7 +2085,7 @@ def test_deterministic_complex_selection_uses_default_message_and_preprocess_pla
 
     chat_response = test_client.post(
         f"/sessions/{session_id}/chat",
-        json={"message": "sing this part", "selection": {"part_index": 0}},
+        json={"message": "sing this part"},
     )
     assert chat_response.status_code == 200
     chat_payload = chat_response.json()
@@ -2684,7 +2700,7 @@ def test_orchestrator_injects_live_credit_availability_and_estimate_into_prompt(
     assert '"available_credits": 53' in prompt
     assert '"topup_credits_available": 45' in prompt
     assert '"duration_seconds": 169.0877' in prompt
-    assert "Call prepare_synthesis_quote after resolving all render choices." in prompt
+    assert "is_potentially_complex_for_preprocess=true" in prompt
 
 
 @pytest.mark.parametrize("helper_name", [
@@ -2728,7 +2744,7 @@ def test_followup_prompts_receive_request_credit_context(client, helper_name):
     assert '"available_credits": 53' in prompts[0]
     assert '"topup_credits_available": 45' in prompts[0]
     assert '"duration_seconds": 169.0877' in prompts[0]
-    assert "Call prepare_synthesis_quote after resolving all render choices." in prompts[0]
+    assert "is_potentially_complex_for_preprocess=true" in prompts[0]
 
 
 def test_background_action_required_prompt_reads_canonical_credit_context(client, monkeypatch):
@@ -3683,7 +3699,6 @@ def test_a_stale_quote_refusal_carries_the_new_quote_and_allows_no_tool_call(cli
     # The next "yes" confirms the new quote.
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
     assert snapshot["files"].get("active_synthesis_quote_id") == new_quote["quote_id"]
-    assert response.json()["selection_resolved"] is True
 
 
 def test_lyric_selection_blocker_names_recovery_when_part_has_no_lyrics(client):
@@ -4101,12 +4116,10 @@ def test_a_quote_settles_the_part_and_a_redundant_instrument_assignment_is_ignor
     quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
     assert quote.status_code == 200
     assert '"status": "quote_ready"' in llm_client.tool_results[-1], llm_client.tool_results
-    assert quote.json()["selection_resolved"] is True
 
     confirm = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes, go ahead"})
     assert confirm.status_code == 200
     assert "instrument_program_assignments" not in started["arguments"], confirm.json()
-    assert "selection_resolved" not in confirm.json()
 
 
 def test_solfege_for_all_parts_is_one_tool_call_and_one_saved_version(client):
@@ -4469,7 +4482,6 @@ def test_a_requote_that_fails_is_nested_as_is_and_ends_the_turn(client, monkeypa
     # No new quote was made: the old one is still the active one.
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, None))
     assert snapshot["files"].get("active_synthesis_quote_id") == first_quote["quote_id"]
-    assert "selection_resolved" not in response.json()
 
 
 _CORRECTIVE_QUOTE_REPLY = {
@@ -4994,7 +5006,6 @@ def test_a_birthday_name_edits_the_score_then_quotes_in_the_same_turn(client, mo
     assert statuses == ["name_ready", "quote_ready"], llm_client.tool_results
     assert llm_client.tool_results[0]["sung_text"] == "Hen-ry"
     assert "current_score" in response.json()
-    assert response.json()["selection_resolved"] is True
 
     active = asyncio.run(app.state.sessions.ensure_active_musicxml(session_id, None))
     root = ET.parse(active).getroot()
@@ -5811,6 +5822,8 @@ def test_followup_preprocess_handoff_starts_background_job(client):
                                 "part_id": "Women",
                                 "verse_number": "1",
                                 "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+                                "language": "en",
+                                "intensity": 0.7,
                                 "solfege_pronunciation_patch": True,
                                 "reason": "The selected line needs preparation.",
                             }
@@ -5878,10 +5891,83 @@ def test_followup_preprocess_handoff_starts_background_job(client):
     }
     assert started["planning_context"]["future_synthesis_request"] == {
         "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+        "language": "en",
+        "intensity": 0.7,
         "solfege_pronunciation_patch": True,
         "require_solfege_lyrics": True,
     }
     assert started["planning_context"]["user_request"] == "sing women in solfege"
+
+
+def test_followup_preprocess_handoff_asks_for_verse_with_model(client):
+    _, app = client
+    orchestrator = app.state.orchestrator
+    score = {
+        "title": "Test",
+        "parts": [{"part_id": "Women", "part_name": "Women", "notes": []}],
+        "selected_verse_number": "1",
+    }
+    snapshot = {
+        "files": {},
+        "history": [{"role": "user", "content": "sing women in solfege"}],
+        "score_summary": {"available_verses": ["1", "2"], "selected_verse_number": "1"},
+    }
+    model_payloads: list[dict] = []
+    history_messages: list[str] = []
+
+    async def fake_execute_tool_calls(*args, **kwargs):
+        return ToolExecutionResult(
+            score=score,
+            audio_response={"type": "chat_text", "message": ""},
+            followup_prompt=json.dumps({"status": "action_required", "code": "preparation_needed"}),
+        )
+
+    async def fake_decide_followup(*args, **kwargs):
+        return LlmResponse(
+            tool_calls=[ToolCall(name="start_preprocess_voice_part_workflow", arguments={
+                "request": {"part_id": "Women", "reason": "Needs preparation."}
+            })],
+            final_message="Preparing the Women's line now.",
+            include_score=False,
+        ), None
+
+    async def fake_message_only(*args, **kwargs):
+        model_payloads.append(json.loads(args[1]))
+        return LlmResponse(
+            tool_calls=[],
+            final_message="Which verse would you like to sing, 1 or 2?",
+            include_score=False,
+        ), None
+
+    async def fake_get_snapshot(*args, **kwargs):
+        return snapshot
+
+    async def fake_append_history(session_id, role, message):
+        history_messages.append(message)
+
+    orchestrator._execute_tool_calls = fake_execute_tool_calls
+    orchestrator._decide_followup_with_llm = fake_decide_followup
+    orchestrator._decide_message_only_followup_with_llm = fake_message_only
+    app.state.sessions.get_snapshot = fake_get_snapshot
+    app.state.sessions.append_history = fake_append_history
+
+    response = asyncio.run(orchestrator._run_llm_tool_workflow(
+        "session-1", snapshot, score,
+        [ToolCall(name="add_solfege_lyric_verse", arguments={"part_index": 0})],
+        initial_response_message="Adding solfege.",
+        initial_include_score=False,
+        initial_thought_block=None,
+        initial_thought_summary=None,
+        user_id="test-user",
+        user_email="test@example.com",
+        workflow_user_message="sing women in solfege",
+    ))
+
+    assert response["type"] == "chat_text"
+    assert response["message"] == "Which verse would you like to sing, 1 or 2?"
+    assert response["action_required"]["action"] == "verse_selection_required"
+    assert model_payloads[0]["action"] == "verse_selection_required"
+    assert history_messages == [response["message"]]
 
 
 def test_workflow_returns_best_invalid_error_when_no_structurally_valid_candidate_exists(client):
@@ -8946,6 +9032,49 @@ def test_chat_reparse_allows_direct_synthesis_same_turn(client):
     assert body["message"] == "Singing verse 2 now."
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_message"),
+    [
+        (None, "Original model reply"),
+        ("Followup failed", "Followup failed"),
+    ],
+)
+def test_verse_selection_followup_uses_model_or_error_only(client, monkeypatch, error, expected_message):
+    _, app = client
+    captured = {}
+
+    async def fake_followup(*args, **kwargs):
+        captured.update(kwargs)
+        return None, error
+
+    monkeypatch.setattr(
+        app.state.orchestrator,
+        "_decide_message_only_followup_with_llm",
+        fake_followup,
+    )
+    message = asyncio.run(
+        app.state.orchestrator._verse_selection_followup_message(
+            {},
+            {},
+            {"message": "Select a verse before reparsing, preparing the part, or synthesis."},
+            default_message="Original model reply",
+            session_id="",
+            user_id="",
+            user_email="",
+            current_credit_availability=None,
+            selected_voicebank_id=None,
+            selected_language=None,
+            expand_repeats=False,
+        )
+    )
+    assert message == expected_message
+    assert captured["instructions"] == (
+        "No tool ran: this score has several verses and none was chosen. "
+        "Ask the user which verse to sing, naming the available verses. "
+        "Return no tool calls."
+    )
+
+
 def test_chat_blocks_preprocess_without_explicit_verse_for_multiverse_score(client):
     test_client, app = client
     session_id = _create_session(test_client)
@@ -9261,88 +9390,7 @@ def test_chat_blocks_reparse_without_explicit_verse_for_multiverse_score(client)
     assert len(reparses) == 1, "Expected only the initial upload parse, not a reparse."
 
 
-def test_chat_selection_verse_number_allows_preprocess_for_multiverse_score(client):
-    test_client, app = client
-    session_id = _create_session(test_client)
-    _upload_score(test_client, session_id)
-
-    asyncio.run(
-        app.state.sessions.set_score_summary(
-            session_id,
-            {
-                "title": "Test",
-                "composer": None,
-                "lyricist": None,
-                "parts": [{"part_id": "P1", "part_index": 0}],
-                "available_verses": ["1", "2"],
-                "selected_verse_number": "1",
-            },
-        )
-    )
-    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    seeded_score = dict(snapshot["current_score"]["score"])
-    seeded_score["selected_verse_number"] = "1"
-    asyncio.run(app.state.sessions.set_score(session_id, seeded_score))
-
-    preprocess_called = {"count": 0}
-
-    def call_tool(name, arguments):
-        if name == "preprocess_voice_parts":
-            preprocess_called["count"] += 1
-            return {
-                "status": "ready",
-                "score": arguments.get("score", {}),
-                "part_index": 0,
-                "modified_musicxml_path": "tests/output/derived.xml",
-            }
-        return _make_router_call_tool()(name, arguments)
-
-    class SelectionAwareClient:
-        def generate(self, system_prompt, history, *, role=LlmRole.DEFAULT):
-            if role == LlmRole.PREPROCESS:
-                return _preprocess_plan_response(
-                    voice_part_id="alto",
-                    final_message="Setting up Alto verse 1.",
-                )
-            last = history[-1].get("content", "") if history else ""
-            if isinstance(last, str) and last.startswith("Interpret output and respond: <TOOL_OUTPUT_INTERNAL_v1>"):
-                return json.dumps(
-                    {
-                        "tool_calls": [],
-                        "final_message": "Please review the derived score.",
-                        "include_score": True,
-                    }
-                )
-            return _preprocess_workflow_response(
-                voice_part_id="alto",
-                verse_number=1,
-                final_message="Setting up Alto verse 1.",
-            )
-
-    app.state.router.call_tool = call_tool
-    llm_client = SelectionAwareClient()
-    app.state.llm_client = llm_client
-    app.state.orchestrator._llm_client = llm_client
-
-    response = test_client.post(
-        f"/sessions/{session_id}/chat",
-        json={
-            "message": "Please sing the Alto part, verse 1.",
-            "selection": {"verse_number": "1", "part_index": 0},
-        },
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["type"] == "chat_progress"
-    progress_payload = _wait_for_progress(test_client, payload["progress_url"])
-    assert progress_payload["status"] == "done"
-    assert bool(progress_payload.get("review_required")) is True
-    assert preprocess_called["count"] == 1
-    updated = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
-    assert updated["files"]["explicit_verse_number"] == "1"
-
-
-def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(client):
+def test_chat_text_verse_still_requires_explicit_verse_for_multiverse_preprocess(client):
     test_client, app = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
@@ -9367,7 +9415,7 @@ def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(cl
 
     def call_tool(name, arguments):
         if name == "preprocess_voice_parts":
-            raise AssertionError("preprocess_voice_parts should be blocked without structured selection")
+            raise AssertionError("preprocess_voice_parts should be blocked without explicit verse")
         return _make_router_call_tool()(name, arguments)
 
     class TextOnlyClient:
@@ -9379,7 +9427,7 @@ def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(cl
                 return json.dumps(
                     {
                         "tool_calls": [],
-                        "final_message": "Please pick a verse from the selector.",
+                        "final_message": "Which verse would you like to sing, verse 1 or verse 2?",
                         "include_score": False,
                     }
                 )
@@ -9400,6 +9448,7 @@ def test_chat_text_verse_without_selection_still_blocks_multiverse_preprocess(cl
     assert response.status_code == 200
     body = response.json()
     assert body["type"] == "chat_text"
+    assert body["message"] == "Which verse would you like to sing, verse 1 or verse 2?"
     action_required = body.get("action_required") or {}
     assert action_required.get("action") == "verse_selection_required"
 
@@ -10075,20 +10124,13 @@ def test_chat_blocks_multiple_tool_calls_before_reserving_credits(client, monkey
     body = response.json()
     assert body["type"] == "chat_text"
     assert body["message"] == "I can only do one action at a time. Which part should I sing first?"
-    # A reply to a tool error never carries the part picker.
-    assert body["suppress_selector"] is True
     assert reserve_calls["count"] == 0
     assert followup_payloads
     assert followup_payloads[0]["error"]["type"] == "multiple_tool_calls_not_allowed"
     assert followup_payloads[0]["error"]["tool_names"] == ["reparse", "synthesize"]
 
 
-def test_a_reply_after_a_tool_error_keeps_the_picker_suppressed(client):
-    """A tool error inside the tool loop hides the part picker on the final reply.
-
-    The final reply is rebuilt from the LLM's message, so the flag is set once
-    the turn ends rather than on the reply in progress.
-    """
+def test_a_reply_after_a_tool_error_uses_the_model_message(client):
     test_client, app = client
     session_id = _create_session(test_client)
     _upload_score(test_client, session_id)
@@ -10125,8 +10167,6 @@ def test_a_reply_after_a_tool_error_keeps_the_picker_suppressed(client):
     assert any("multiple_tool_calls_not_allowed" in result for result in tool_results), tool_results
     body = response.json()
     assert body["message"] == "Which part should I sing first?"
-    assert body["suppress_selector"] is True
-    assert "selection_resolved" not in body
 
 
 def test_execute_tool_calls_blocks_multiple_tools_with_followup_prompt(client):
@@ -11054,6 +11094,328 @@ def test_quote_that_switches_lyric_line_returns_the_new_score(client, monkeypatc
     after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert after["current_score"]["score"]["selected_lyric_selection"] == alto_selection
     assert payload["score_summary"]["performance_midi"] == publication["performance_midi"]
+
+
+@pytest.mark.parametrize(
+    "has_lyric_sources, requested_verse, alternate_selection, expected_reason",
+    [
+        (True, "1", False, "complex_score_multi_voice_without_derived_target"),
+        (True, "1", True, "lyric_selection_requires_reparse_before_preprocess"),
+        (False, "1", False, "complex_part_without_lyric_sources"),
+        (True, "2", False, "verse_change_requires_repreprocess"),
+    ],
+)
+def test_quote_rejects_complex_raw_part_before_reparse_or_billing(
+    client, monkeypatch, has_lyric_sources, requested_verse, alternate_selection,
+    expected_reason
+):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = _create_session(test_client)
+    selected = {"id": "verse-1", "number": "1", "name": "Verse 1"}
+    requested = {"id": "alternate-1" if alternate_selection else f"verse-{requested_verse}",
+                 "number": requested_verse,
+                 "name": f"Verse {requested_verse}"}
+    score = {
+        "parts": [{"part_id": "Alto", "part_name": "Alto", "notes": []}],
+        "score_summary": {"parts": [{"part_id": "Alto"}]},
+        "selected_verse_number": "1",
+        "selected_lyric_selection": selected,
+        "voice_part_signals": {
+            "has_lyric_sources": has_lyric_sources,
+            "parts": [{"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+                       "missing_lyric_voice_parts": []}],
+        },
+    }
+    summary = {"parts": [{"part_id": "Alto", "lyric_selections": [selected, requested]}],
+               "available_verses": ["1", "2"]}
+    side_effects = []
+
+    async def forbidden(*args, **kwargs):
+        side_effects.append("job_or_reparse")
+        raise AssertionError("A rejected quote must not start work or reparse")
+
+    def forbidden_quote(*args, **kwargs):
+        side_effects.append("quote")
+        raise AssertionError("A rejected quote must not be created")
+
+    async def record_metadata(session_id_arg, key, value):
+        side_effects.append((key, value))
+
+    monkeypatch.setattr(orchestrator, "_start_preprocess_job", forbidden)
+    monkeypatch.setattr(orchestrator, "_reparse_score", forbidden)
+    monkeypatch.setattr(orchestrator._sessions, "set_metadata", record_metadata)
+    monkeypatch.setattr("src.backend.credits.create_synthesis_quote", forbidden_quote)
+    result = asyncio.run(orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": "Alto", "voicebank": "Dummy", "language": "en",
+            "lyric_selection": requested,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number=requested_verse,
+        forced_voicebank_id=None, forced_language=None, expand_repeats=False,
+        score_player_takes=None,
+    ))
+
+    assert result.action_required_payload["status"] == "action_required"
+    assert result.action_required_payload["action"] == "preprocessing_required"
+    assert result.action_required_payload["reason"] == expected_reason
+    assert "job_or_reparse" not in side_effects
+    assert "quote" not in side_effects
+    assert ("active_synthesis_quote_id", "") in side_effects
+    if not has_lyric_sources:
+        assert "no lyrics" in result.action_required_payload["message"]
+
+
+def test_quote_rejects_raw_part_when_derived_line_exists(client, monkeypatch):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = _create_session(test_client)
+    score = {
+        "parts": [
+            {"part_id": "Alto", "part_name": "Alto", "notes": []},
+            {"part_id": "P_DERIVED_ALTO", "part_name": "Alto (Derived)", "notes": []},
+        ],
+        "score_summary": {"parts": [{"part_id": "Alto"}]},
+        "voice_part_transforms": {"alto": {
+            "source_part_index": 0,
+            "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_ALTO",
+                                  "part_name": "Alto (Derived)"},
+        }},
+        "voice_part_signals": {"has_lyric_sources": True, "parts": [
+            {"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+             "missing_lyric_voice_parts": []},
+        ]},
+    }
+    summary = {"parts": [{"part_id": "Alto"}, {"part_id": "P_DERIVED_ALTO"}]}
+
+    async def record_metadata(*args):
+        pass
+
+    monkeypatch.setattr(orchestrator._sessions, "set_metadata", record_metadata)
+    result = asyncio.run(orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={"part_id": "Alto"}),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number=None, forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert result.action_required_payload["reason"] == "preprocessed_score_without_derived_target_selection"
+    assert result.action_required_payload["diagnostics"]["suggested_derived_targets_for_input_part"]
+
+
+def test_default_model_quote_attempt_does_not_start_line_preparation(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    score["parts"][0].update(part_id="Alto", part_name="Alto")
+    score["selected_verse_number"] = "1"
+    selection = {"id": "verse-1", "number": "1", "name": "Verse 1"}
+    score["selected_lyric_selection"] = selection
+    score["voice_part_signals"] = {"has_lyric_sources": True, "parts": [
+        {"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+         "missing_lyric_voice_parts": []},
+    ]}
+    summary = {"parts": [{"part_id": "Alto", "part_index": 0,
+                          "lyric_selections": [selection]}],
+               "available_verses": ["1"]}
+    score["score_summary"] = summary
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+    tool_results = []
+
+    class QuoteAttemptClient:
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                tool_results.append(last)
+                return json.dumps({"tool_calls": [],
+                                   "final_message": "This line needs preparation.",
+                                   "include_score": False})
+            return json.dumps({"tool_calls": [{"name": "prepare_synthesis_quote",
+                                               "arguments": {
+                                                   "part_id": "Alto", "voicebank": "Dummy",
+                                                   "language": "en",
+                                                   "lyric_selection": selection,
+                                               }}],
+                               "final_message": "Preparing the quote.",
+                               "include_score": False})
+
+    async def forbidden_job(*args, **kwargs):
+        raise AssertionError("The quote call must not become a handoff")
+
+    def forbidden_quote(*args, **kwargs):
+        raise AssertionError("The complex raw part must not be quoted")
+
+    app.state.llm_client = QuoteAttemptClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+    monkeypatch.setattr(app.state.orchestrator, "_start_preprocess_job", forbidden_job)
+    monkeypatch.setattr("src.backend.credits.create_synthesis_quote", forbidden_quote)
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "sing Alto verse 1"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert any('"action": "preprocessing_required"' in item for item in tool_results)
+    assert not any('"status": "quote_ready"' in item for item in tool_results)
+
+
+def test_no_lyric_sources_cannot_start_line_preparation_job(client):
+    _, app = client
+    result = asyncio.run(app.state.orchestrator._start_preprocess_job(
+        "session-1",
+        {"voice_part_signals": {"has_lyric_sources": False}},
+        [],
+        initial_message="Preparing the line.", initial_thought_summary="",
+        user_id="test-user", user_email="test@example.com",
+    ))
+    assert result["type"] == "chat_text"
+    assert result["action_required"]["action"] == "lyrics_required_for_line_preparation"
+    assert "progress_url" not in result
+
+
+def test_model_handoff_without_lyric_sources_does_not_queue_job(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    score["voice_part_signals"]["has_lyric_sources"] = False
+    asyncio.run(app.state.sessions.set_score(session_id, score))
+    llm_client = StaticLlmClient(_preprocess_workflow_response(part_id="P1"))
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "split this part"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert response.json()["action_required"]["action"] == "lyrics_required_for_line_preparation"
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["current_job_id"] is None
+    assert "no lyrics" in after["history"][-1]["content"]
+
+
+@pytest.mark.parametrize("derived", [False, True])
+def test_quote_allows_simple_or_reviewed_derived_target(client, derived):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id, content=VERSED_SCORE_XML).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    summary = copy.deepcopy(snapshot["score_summary"])
+    target = summary["parts"][0]
+    selection = next(item for item in target["lyric_selections"] if item["number"] == "1")
+    selection = {key: selection[key] for key in ("id", "number", "name")}
+    if derived:
+        derived_part = copy.deepcopy(score["parts"][0])
+        derived_part["part_id"] = "P_DERIVED_SOLO"
+        derived_part["part_name"] = "Solo (Derived)"
+        score["parts"].append(derived_part)
+        derived_summary = copy.deepcopy(target)
+        derived_summary["part_id"] = "P_DERIVED_SOLO"
+        derived_summary["part_index"] = 1
+        summary["parts"].append(derived_summary)
+        score["voice_part_transforms"] = {"solo": {
+            "source_part_index": 0,
+            "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_SOLO",
+                                  "part_name": "Solo (Derived)"},
+        }}
+        target = derived_summary
+    score["selected_lyric_selection"] = selection
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+
+    result = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": target["part_id"], "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert json.loads(result.followup_prompt)["status"] == "quote_ready"
+    assert result.action_required_payload is None
+
+
+def test_synthetic_two_voice_score_requires_handoff_then_quotes_derived_line(
+    client, monkeypatch
+):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id,
+                         content=SYNTHETIC_TWO_VOICE_XML).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    summary = copy.deepcopy(snapshot["score_summary"])
+    target = summary["parts"][0]
+    selection = target["lyric_selections"][0]
+    selection = {key: selection[key] for key in ("id", "number", "name")}
+    assert score["voice_part_signals"]["has_lyric_sources"] is True
+    assert score["voice_part_signals"]["parts"][0]["multi_voice_part"] is True
+
+    started = []
+
+    async def fake_start_job(*args, **kwargs):
+        started.append(kwargs["planning_context"])
+        return {"type": "chat_progress", "message": "Preparing the line.",
+                "progress_url": "/jobs/preprocess-smoke"}
+
+    monkeypatch.setattr(app.state.orchestrator, "_start_preprocess_job", fake_start_job)
+    handoff = StaticLlmClient(_preprocess_workflow_response(
+        part_id=target["part_id"], verse_number="1"
+    ))
+    app.state.llm_client = handoff
+    app.state.orchestrator._llm_client = handoff
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "sing Alto verse 1"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_progress"
+    assert len(started) == 1
+    assert started[0]["target"]["part_id"] == target["part_id"]
+    assert started[0]["target"]["verse_number"] == "1"
+
+    raw_quote = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": target["part_id"], "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert raw_quote.action_required_payload["action"] == "preprocessing_required"
+    assert len(started) == 1
+
+    derived_part = copy.deepcopy(score["parts"][0])
+    derived_part.update(part_id="P_DERIVED_ALTO", part_name="Alto (Derived)")
+    score["parts"].append(derived_part)
+    derived_summary = copy.deepcopy(target)
+    derived_summary.update(part_id="P_DERIVED_ALTO", part_index=1)
+    summary["parts"].append(derived_summary)
+    score["voice_part_transforms"] = {"alto": {
+        "source_part_index": 0,
+        "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_ALTO",
+                              "part_name": "Alto (Derived)"},
+    }}
+    score["selected_lyric_selection"] = selection
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+    derived_quote = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": "P_DERIVED_ALTO", "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert json.loads(derived_quote.followup_prompt)["status"] == "quote_ready"
 
 
 def test_midi_source_signature_follows_what_the_midi_is_built_from(tmp_path):

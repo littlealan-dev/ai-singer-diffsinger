@@ -16,6 +16,21 @@ def test_planner_v2_prompt_explains_borrowed_staff_voice_option_once():
     assert prompt.count(sentence) == 1
 
 
+def test_quote_guidance_requires_target_classification_before_quoting() -> None:
+    bundle = build_prompt_bundle(tools=[], score_available=True, role="default")
+    guidance = bundle.dynamic_prompt_text
+    system = build_system_prompt(tools=[], score_available=True)
+
+    assert "voice_part_signals.parts[] or a prepared derived part" in guidance
+    assert "is_potentially_complex_for_preprocess=true" in guidance
+    assert "do not call prepare_synthesis_quote for the original part" in guidance
+    assert "ask which derived part to use if that is ambiguous" in guidance
+    assert "request for no modifications does not change the complexity signal" in guidance
+    assert "do not call `prepare_synthesis_quote` for that original part" in system
+    assert "is_potentially_complex_for_preprocess=true" in system
+    assert "choose one suggested derived target" not in system
+
+
 def _sample_voice_part_signals() -> dict:
     return {
         "analysis_version": "v2",
@@ -638,7 +653,7 @@ def test_build_system_prompt_estimates_credits_for_the_selected_repeat_duration(
         expand_repeats=False,
     )
 
-    assert "Call prepare_synthesis_quote after resolving all render choices." in with_repeats.dynamic_prompt_text
+    assert "is_potentially_complex_for_preprocess=true" in with_repeats.dynamic_prompt_text
     assert '"expand_repeats": true' in with_repeats.dynamic_prompt_text
     assert '"expand_repeats": false' in without_repeats.dynamic_prompt_text
 
@@ -952,7 +967,7 @@ def test_build_prompt_bundle_includes_current_credit_availability() -> None:
     assert "Synthesis quote instruction:" in (
         bundle.dynamic_prompt_text
     )
-    assert "Call prepare_synthesis_quote after resolving all render choices." in bundle.dynamic_prompt_text
+    assert "is_potentially_complex_for_preprocess=true" in bundle.dynamic_prompt_text
 
 
 def test_system_prompt_selects_from_language_compatible_voicebanks_by_capability() -> None:
@@ -1228,4 +1243,7 @@ def test_default_prompt_never_prepares_a_line_when_the_score_has_no_lyrics() -> 
         "When `voice_part_signals.has_lyric_sources=false`, never call "
         "`start_preprocess_voice_part_workflow`, for any part, even when the user asks to split a part."
     ) in prompt
-    assert prompt.lower().count("no-lyrics limit") == 4
+    assert (
+        "If the selected original part has `is_potentially_complex_for_preprocess=true`, "
+        "do not quote or synthesize that part."
+    ) in prompt

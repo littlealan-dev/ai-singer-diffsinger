@@ -8023,7 +8023,13 @@ def synthesize_preflight_action_required(
 
     signal = None
     for item in signal_parts:
-        if isinstance(item, dict) and int(item.get("part_index", -1)) == part_index:
+        if not isinstance(item, dict):
+            continue
+        try:
+            signal_index = int(item.get("part_index", -1))
+        except (TypeError, ValueError):
+            continue
+        if signal_index == part_index:
             signal = item
             break
     if not isinstance(signal, dict):
@@ -8034,6 +8040,16 @@ def synthesize_preflight_action_required(
             diagnostics=diagnostics,
         )
     diagnostics["target_signal_found"] = True
+    signal_part_id = str(signal.get("part_id") or "").strip()
+    if signal_part_id and part_id and signal_part_id != part_id:
+        diagnostics["signal_part_id"] = signal_part_id
+        return build_preprocessing_required_action(
+            part_index=part_index,
+            reason="complexity_signal_inconsistent_with_target",
+            failed_validation_rules=["complexity_signal.target_part_id_mismatch"],
+            diagnostics=diagnostics,
+            message="The selected part could not be checked against the score analysis. Refresh the score and select the part again.",
+        )
 
     missing = signal.get("missing_lyric_voice_parts")
     has_multi_voice = bool(signal.get("multi_voice_part"))
