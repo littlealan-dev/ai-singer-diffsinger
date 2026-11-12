@@ -73,7 +73,7 @@ def test_borrowed_staff_line_deduplicates_chords_and_can_select_voice(tmp_path):
         score, source_voice_part_id="voice part 1", **arguments
     )
     assert [note["lyric"] for note in whole_line] == ["first", "second"]
-    assert [note["lyric"] for note in voice_line] == ["first"]
+    assert [note["lyric"] for note in voice_line] == ["first", "+"]
 
 
 def _append_wordless_part(score, *, notes=None):
@@ -107,6 +107,77 @@ def test_borrowed_line_follows_words_into_single_voice_bar(tmp_path):
     assert [note["lyric"] for note in notes if note.get("lyric") not in (None, "+")] == [
         "first", "luma",
     ]
+
+
+def _held_line_score(tmp_path):
+    def note(step, voice, duration, kind, *, lyric="", tie="", slur=""):
+        notations = f"<notations>{slur}</notations>" if slur else ""
+        return (f"<note><pitch><step>{step}</step><octave>4</octave></pitch>"
+                f"<duration>{duration}</duration>{tie}<voice>{voice}</voice><type>{kind}</type>"
+                f"{notations}{lyric}</note>")
+
+    tie_start, tie_stop = '<tie type="start"/>', '<tie type="stop"/>'
+    xml = ('<score-partwise version="3.1"><part-list><score-part id="P1">'
+           '<part-name>Choir</part-name></score-part></part-list><part id="P1"><measure number="1">'
+           '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type>'
+           '</time><clef><sign>G</sign><line>2</line></clef></attributes>'
+           + note("G", 1, 1, "quarter", slur='<slur type="start"/>',
+                  lyric="<lyric><text>la</text><extend/></lyric>")
+           + note("A", 1, 1, "quarter", slur='<slur type="stop"/>')
+           + note("B", 1, 2, "half", tie=tie_start, lyric="<lyric><text>mo</text></lyric>")
+           + '<backup><duration>4</duration></backup>'
+           + note("C", 2, 1, "quarter") + note("D", 2, 1, "quarter")
+           + note("E", 2, 2, "half", tie=tie_start)
+           + '</measure><measure number="2">'
+           + note("B", 1, 4, "whole", tie=tie_stop)
+           + '<backup><duration>4</duration></backup>'
+           + note("E", 2, 4, "whole", tie=tie_stop)
+           + '</measure></part></score-partwise>')
+    return _parse_inline(tmp_path, xml)
+
+
+def test_borrowed_staff_line_prefers_word_over_extender_on_one_beat():
+    # Passes today: the words-only reader never saw the extender; this guards the per-beat choice.
+    def note(voice, beat, lyric, *, extended=False):
+        return {"voice": voice, "staff": "1", "measure_number": 1, "offset_beats": beat,
+                "duration_beats": 1.0, "pitch_midi": 70 - int(voice), "lyric": lyric,
+                "lyric_is_extended": extended}
+
+    donor = [note("2", 0.0, "ka"), note("2", 1.0, "+", extended=True), note("1", 1.0, "lu")]
+    score = {"parts": [{"part_id": "P1", "notes": donor}]}
+    source = _resolve_staff_lyric_source_notes(
+        score, source_part_index=0, staff="1", source_voice_part_id=None,
+        verse_number=None, copy_all_verses=False, measure_range=(1, 1),
+    )
+    assert [item["lyric"] for item in source] == ["ka", "lu"]
+    lane = [dict(item, voice="3", lyric=None, lyric_is_extended=False) for item in donor[:2]]
+    copied, _ = _propagate_lyrics(
+        target_notes=lane, source_notes=source, strategy="strict_onset",
+        policy="replace_all", verse_number=None, copy_all_verses=False, measure_range=(1, 1),
+    )
+    assert [item["lyric"] for item in copied] == ["ka", "lu"]
+
+
+@pytest.mark.parametrize("strategy", ["overlap_best_match", "strict_onset"])
+def test_borrowed_staff_line_keeps_holds_under_donor_extender(tmp_path, strategy):
+    score = _held_line_score(tmp_path)
+    assert [note.get("lyric") for note in score["parts"][0]["notes"]
+            if note.get("voice") == "1"] == ["la", "+", "mo", "+"]
+    _append_wordless_part(score)
+
+    sheet = _sheet(score, "P2")
+    plan = assembler.assemble_plan(sheet, assembler.first_option_choices(sheet), score=score)
+    for target in plan["targets"]:
+        for section in target["sections"]:
+            if section["mode"] == "derive":
+                assert section["lyric_source_line"] == {"staff": "1", "voice_part_id": None}
+                section["lyric_strategy"] = strategy
+    result = preprocess_voice_parts(deepcopy(score), request={"plan": plan})
+    assert result["status"] == "ready"
+    for target in result["targets"]:
+        notes = result["score"]["parts"][target["appended_part_ref"]["part_index"]]["notes"]
+        assert [note.get("lyric") for note in notes
+                if note.get("pitch_midi") is not None] == ["la", "+", "mo", "+"]
 
 
 def test_borrowed_clash_choice_filters_only_the_clash_bar(tmp_path):

@@ -5110,7 +5110,11 @@ def _resolve_staff_lyric_source_notes(
     copy_all_verses: bool,
     measure_range: Tuple[int, int],
 ) -> Optional[List[Dict[str, Any]]]:
-    """Read one word per beat from a named donor staff, optionally by voice."""
+    """Read one note per beat from a named donor staff, optionally by voice.
+
+    No filter by lyric kind: an extender line reaches the fitting rule as it
+    does from a voice source, and becomes the lane's hold ("+").
+    """
     parts = score.get("parts") or []
     if not 0 <= source_part_index < len(parts):
         return None
@@ -5123,28 +5127,30 @@ def _resolve_staff_lyric_source_notes(
             return None
         source_voice = str(source_meta["source_voice_id"])
 
-    selected: List[Dict[str, Any]] = []
-    seen_onsets: set[float] = set()
+    def rank(note: Dict[str, Any]) -> Tuple[bool, bool]:
+        # Prefer text in the requested verse, then a word over an extender line.
+        in_verse = _has_lyric(note) and _lyric_matches_requested_verse(
+            str(note["lyric"]),
+            verse_number=verse_number,
+            copy_all_verses=copy_all_verses,
+        )
+        return in_verse, _lyric_kind(note) == "word"
+
+    by_onset: Dict[float, Dict[str, Any]] = {}
     for note in source_part.get("notes") or []:
         if (
             not _is_countable_sung_note(note)
             or _staff_scope_key(note) != staff
             or (source_voice is not None and _voice_key(note.get("voice")) != source_voice)
-            or _lyric_kind(note) != "word"
             or _is_generated_solfege_lyric(note)
-            or not _lyric_matches_requested_verse(
-                str(note["lyric"]),
-                verse_number=verse_number,
-                copy_all_verses=copy_all_verses,
-            )
             or not _note_in_measure_range(note, measure_range)
         ):
             continue
         onset = round(float(note.get("offset_beats") or 0.0), 6)
-        if onset not in seen_onsets:
-            seen_onsets.add(onset)
-            selected.append(note)
-    return selected
+        kept = by_onset.get(onset)
+        if kept is None or rank(note) > rank(kept):
+            by_onset[onset] = note
+    return list(by_onset.values())
 
 
 def _resolve_source_notes(
