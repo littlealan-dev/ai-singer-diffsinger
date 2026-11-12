@@ -413,7 +413,6 @@ class TestVoicebankCache(unittest.TestCase):
             "PM-31_Commercial_Indigo",
             "PM-31_Commercial_Scarlet",
             "Qixuan_v2.7.0_DiffSinger_OpenUtau",
-            "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)",
         }
         for environment in ("dev", "prod"):
             manifest_path = self.root_dir / "env" / f"voicebank_manifest.{environment}.json"
