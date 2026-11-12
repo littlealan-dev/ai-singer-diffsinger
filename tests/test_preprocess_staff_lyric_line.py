@@ -96,8 +96,10 @@ def test_tied_lane_note_keeps_extension_at_other_voice_word(tmp_path):
 def test_own_words_only_uses_phrase_start_word_independent_of_voice_word_count(
     tmp_path, other_voice_words,
 ):
+    # With one word, voice 3 rests at the end: a wordless note after a rest has no word.
     third = [_n(0.5, "rilo"), _n(0.5, "mira" if other_voice_words == 3 else None),
-             _n(2, rest=True), _n(1, "vona" if other_voice_words == 3 else None)]
+             _n(2, rest=True),
+             _n(1, "vona") if other_voice_words == 3 else _n(1, rest=True)]
     score = _score(tmp_path, [
         {"1": [_n(4, "sura")], "2": [_n(4, "sura")], "3": [_n(4)]},
         {"1": [_n(1, rest=True), _n(1, "nora"), _n(1, "pema"), _n(1, rest=True)],
@@ -261,6 +263,34 @@ def test_staff_line_own_voice_exception_only_at_phrase_start():
     assert [note.get("lyric") for note in shared] == ["luma", "sela", "nora"]
     assert diagnostics["source_lyric_candidates_count"] == 1
     assert diagnostics["dropped_source_lyrics_count"] == 0
+
+
+def test_staff_line_holds_only_without_a_rest_before():
+    def note(beat, lyric=None, *, voice="2", tie=None, rest=False):
+        item = {"voice": voice, "staff": "1", "measure_number": 1 + int(beat // 4),
+                "offset_beats": beat, "duration_beats": 1.0, "lyric": lyric, "tie_type": tie}
+        if rest:
+            item["is_rest"] = True
+        else:
+            item["pitch_midi"] = 60 if voice == "2" else 64
+        return item
+
+    source = [note(0.0, "luma", voice="1"), note(6.0, "nora", voice="1")]
+    target = [
+        note(0.0),
+        note(1.0),             # directly after the lane's sung note
+        note(2.0, rest=True),
+        note(3.0),             # after a rest
+        note(5.0),             # after a gap with no rest entry
+        note(6.0, tie="start"),
+        note(7.0, tie="stop"),  # tied continuation
+    ]
+    copied, _ = _propagate_lyrics(
+        target_notes=target, source_notes=source, strategy="staff_line", policy="replace_all",
+        verse_number=None, copy_all_verses=False, measure_range=(1, 2),
+    )
+    assert [item.get("lyric") for item in copied] == [
+        "luma", "+", None, None, None, "nora", "+"]
 
 
 def test_source_line_validation_and_legacy_section(tmp_path):

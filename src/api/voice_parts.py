@@ -5024,22 +5024,17 @@ def _propagate_lyrics(
                                     if _staff_scope_key(item["note"]) == staff
                                     and _voice_key(item["note"].get("voice")) ==
                                     _voice_key(copied.get("voice"))), None)
-            elif not tied:
+            phrase_start = False
+            if not tied:
                 source_item = words.get(key)
-                if source_item is None and own_voice_exception and line_voice is not None:
-                    previous_sung = next((earlier_note for earlier_note in
-                                          reversed(target_notes[:note_idx])
-                                          if _is_countable_sung_note(earlier_note)), None)
-                    previous_entry_rest = note_idx > 0 and bool(target_notes[note_idx - 1].get("is_rest"))
-                    phrase_start = (previous_sung is None or previous_entry_rest or
-                                    float(previous_sung.get("offset_beats") or 0.0) +
-                                    float(previous_sung.get("duration_beats") or 0.0) < key - 1e-6)
-                    if phrase_start:
-                        whole_beat = whole_staff_words.get(staff, {}).get(key, [])
-                        if len({str(item["note"].get("lyric") or "").casefold()
-                                for item in whole_beat}) == 1 and whole_beat:
-                            source_item = whole_beat[0]
-            if source_item is None and earlier:
+                phrase_start = source_item is None and _starts_after_rest(target_notes, note_idx)
+                if phrase_start and own_voice_exception and line_voice is not None:
+                    whole_beat = whole_staff_words.get(staff, {}).get(key, [])
+                    if len({str(item["note"].get("lyric") or "").casefold()
+                            for item in whole_beat}) == 1 and whole_beat:
+                        source_item = whole_beat[0]
+            # A rest ends the previous word, so a note after it can't carry it on ("+").
+            if source_item is None and earlier and not phrase_start:
                 copied.pop("lyric", None)
                 copied.pop("syllabic", None)
                 copied.pop("lyric_is_extended", None)
@@ -5388,6 +5383,20 @@ def _detect_phrase_boundaries(target_notes: Sequence[Dict[str, Any]]) -> set[int
             boundaries.add(idx)
         last_note_end = start + duration
     return boundaries
+
+
+def _starts_after_rest(target_notes: Sequence[Dict[str, Any]], note_idx: int) -> bool:
+    """The lane's first sung note, or one with a rest or a gap before it."""
+    if note_idx > 0 and target_notes[note_idx - 1].get("is_rest"):
+        return True
+    for previous_idx in range(note_idx - 1, -1, -1):
+        previous = target_notes[previous_idx]
+        if _is_countable_sung_note(previous):
+            previous_end = (float(previous.get("offset_beats") or 0.0)
+                            + float(previous.get("duration_beats") or 0.0))
+            start = round(float(target_notes[note_idx].get("offset_beats") or 0.0), 6)
+            return previous_end < start - 1e-6
+    return True
 
 
 def _copy_lyric_fields(target_note: Dict[str, Any], source_note: Dict[str, Any]) -> None:
