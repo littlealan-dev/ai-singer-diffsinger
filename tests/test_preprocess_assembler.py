@@ -372,7 +372,11 @@ def test_invalid_choices_freeform_and_forced_roundtrip_failure(monkeypatch, tmp_
     freeform_plan = assembler.assemble_plan(
         freeform_sheet, assembler.first_option_choices(freeform_sheet),
         freeform_sections=supplied, score=score)
-    _assert_schema(freeform_plan, _PREPROCESS_PLAN_REQUEST_SCHEMA)
+    # The MCP v1 schema has no v2 skeleton slot; its remaining fields still match.
+    legacy_shape = deepcopy(freeform_plan)
+    for target in legacy_shape["targets"]:
+        target["output"].pop("slot")
+    _assert_schema(legacy_shape, _PREPROCESS_PLAN_REQUEST_SCHEMA)
     assert parse_voice_part_plan(freeform_plan, score=score)["ok"]
 
     monkeypatch.setattr(assembler, "expand", lambda sections: {})
@@ -396,8 +400,8 @@ def test_update_lane_requires_and_carries_existing_derived_id(tmp_path):
     choices = assembler.first_option_choices(sheet)
     plan = assembler.assemble_plan(sheet, choices, score=score)
     assert [target["output"] for target in plan["targets"]] == [
-        {"mode": "append_new_derived_lane"},
-        {"mode": "update_existing_derived_lane", "derived_lane_id": "dl:test:2"},
+        {"mode": "append_new_derived_lane", "slot": 1},
+        {"mode": "update_existing_derived_lane", "slot": 2, "derived_lane_id": "dl:test:2"},
     ]
     assert parse_voice_part_plan(plan, score=score)["ok"]
     missing_id = replace(sheet, lanes=[sheet.lanes[0], replace(sheet.lanes[1], existing_derived_lane_id=None)])

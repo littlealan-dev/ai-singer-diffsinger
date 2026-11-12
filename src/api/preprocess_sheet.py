@@ -43,6 +43,7 @@ class Lane:
     source_voice_part_id: str
     default_rank: int
     output_mode: str
+    slot: int = 1
     existing_derived_lane_id: str | None = None
 
 
@@ -536,6 +537,7 @@ def build_sheet_skeleton(
     span = indices["part_span"]
     start, end = span["start_measure"], span["end_measure"]
     existing_slots = _existing_lane_slots(score)
+    source_slots: dict[str, int] = {}
     notes_by_scope: dict[str, list[dict]] = {}
     for note in part.get("notes") or []:
         if _is_countable_sung_note(note):
@@ -587,9 +589,11 @@ def build_sheet_skeleton(
         for rank, source in enumerate(sources):
             ordinal = source_ordinal.get(source, 0)
             source_ordinal[source] = ordinal + 1
+            slot = source_slots.get(source, 0) + 1
+            source_slots[source] = slot
             output_mode = (
                 "update_existing_derived_lane"
-                if (part_index, source, ordinal + 1) in existing_slots
+                if (part_index, source, slot) in existing_slots
                 else "append_new_derived_lane"
             )
             scope_lanes.append(Lane(
@@ -600,7 +604,8 @@ def build_sheet_skeleton(
                 source_voice_part_id=source,
                 default_rank=rank,
                 output_mode=output_mode,
-                existing_derived_lane_id=existing_slots.get((part_index, source, ordinal + 1)),
+                slot=slot,
+                existing_derived_lane_id=existing_slots.get((part_index, source, slot)),
             ))
         skeleton.lanes.extend(scope_lanes)
         skeleton.segments.extend(_segments(
