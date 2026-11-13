@@ -173,6 +173,22 @@ ZIPPED_SCORE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
+SYNTHETIC_TWO_VOICE_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<score-partwise version='3.1'>
+  <part-list><score-part id='P1'><part-name>Alto</part-name></score-part></part-list>
+  <part id='P1'><measure number='1'>
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>G</sign><line>2</line></clef></attributes>
+    <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration>
+      <voice>1</voice><type>quarter</type><lyric number='1'><text>Ah</text></lyric></note>
+    <backup><duration>1</duration></backup>
+    <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration>
+      <voice>2</voice><type>quarter</type></note>
+  </measure></part>
+</score-partwise>
+"""
+
+
 def _preprocess_workflow_response(
     *,
     part_index: int = 0,
@@ -3164,7 +3180,7 @@ def test_orchestrator_injects_live_credit_availability_and_estimate_into_prompt(
     assert '"available_credits": 53' in prompt
     assert '"topup_credits_available": 45' in prompt
     assert '"duration_seconds": 169.0877' in prompt
-    assert "Call prepare_synthesis_quote after resolving all render choices." in prompt
+    assert "is_potentially_complex_for_preprocess=true" in prompt
 
 
 @pytest.mark.parametrize("helper_name", [
@@ -3208,7 +3224,7 @@ def test_followup_prompts_receive_request_credit_context(client, helper_name):
     assert '"available_credits": 53' in prompts[0]
     assert '"topup_credits_available": 45' in prompts[0]
     assert '"duration_seconds": 169.0877' in prompts[0]
-    assert "Call prepare_synthesis_quote after resolving all render choices." in prompts[0]
+    assert "is_potentially_complex_for_preprocess=true" in prompts[0]
 
 
 def test_background_action_required_prompt_reads_canonical_credit_context(client, monkeypatch):
@@ -6286,6 +6302,8 @@ def test_followup_preprocess_handoff_starts_background_job(client):
                                 "part_id": "Women",
                                 "verse_number": "1",
                                 "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+                                "language": "en",
+                                "intensity": 0.7,
                                 "solfege_pronunciation_patch": True,
                                 "reason": "The selected line needs preparation.",
                             }
@@ -6353,6 +6371,8 @@ def test_followup_preprocess_handoff_starts_background_job(client):
     }
     assert started["planning_context"]["future_synthesis_request"] == {
         "voicebank": "Qixuan_v2.7.0_DiffSinger_OpenUtau",
+        "language": "en",
+        "intensity": 0.7,
         "solfege_pronunciation_patch": True,
         "require_solfege_lyrics": True,
     }
@@ -11554,6 +11574,328 @@ def test_quote_that_switches_lyric_line_returns_the_new_score(client, monkeypatc
     after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert after["current_score"]["score"]["selected_lyric_selection"] == alto_selection
     assert payload["score_summary"]["performance_midi"] == publication["performance_midi"]
+
+
+@pytest.mark.parametrize(
+    "has_lyric_sources, requested_verse, alternate_selection, expected_reason",
+    [
+        (True, "1", False, "complex_score_multi_voice_without_derived_target"),
+        (True, "1", True, "lyric_selection_requires_reparse_before_preprocess"),
+        (False, "1", False, "complex_part_without_lyric_sources"),
+        (True, "2", False, "verse_change_requires_repreprocess"),
+    ],
+)
+def test_quote_rejects_complex_raw_part_before_reparse_or_billing(
+    client, monkeypatch, has_lyric_sources, requested_verse, alternate_selection,
+    expected_reason
+):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = _create_session(test_client)
+    selected = {"id": "verse-1", "number": "1", "name": "Verse 1"}
+    requested = {"id": "alternate-1" if alternate_selection else f"verse-{requested_verse}",
+                 "number": requested_verse,
+                 "name": f"Verse {requested_verse}"}
+    score = {
+        "parts": [{"part_id": "Alto", "part_name": "Alto", "notes": []}],
+        "score_summary": {"parts": [{"part_id": "Alto"}]},
+        "selected_verse_number": "1",
+        "selected_lyric_selection": selected,
+        "voice_part_signals": {
+            "has_lyric_sources": has_lyric_sources,
+            "parts": [{"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+                       "missing_lyric_voice_parts": []}],
+        },
+    }
+    summary = {"parts": [{"part_id": "Alto", "lyric_selections": [selected, requested]}],
+               "available_verses": ["1", "2"]}
+    side_effects = []
+
+    async def forbidden(*args, **kwargs):
+        side_effects.append("job_or_reparse")
+        raise AssertionError("A rejected quote must not start work or reparse")
+
+    def forbidden_quote(*args, **kwargs):
+        side_effects.append("quote")
+        raise AssertionError("A rejected quote must not be created")
+
+    async def record_metadata(session_id_arg, key, value):
+        side_effects.append((key, value))
+
+    monkeypatch.setattr(orchestrator, "_start_preprocess_job", forbidden)
+    monkeypatch.setattr(orchestrator, "_reparse_score", forbidden)
+    monkeypatch.setattr(orchestrator._sessions, "set_metadata", record_metadata)
+    monkeypatch.setattr("src.backend.credits.create_synthesis_quote", forbidden_quote)
+    result = asyncio.run(orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": "Alto", "voicebank": "Dummy", "language": "en",
+            "lyric_selection": requested,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number=requested_verse,
+        forced_voicebank_id=None, forced_language=None, expand_repeats=False,
+        score_player_takes=None,
+    ))
+
+    assert result.action_required_payload["status"] == "action_required"
+    assert result.action_required_payload["action"] == "preprocessing_required"
+    assert result.action_required_payload["reason"] == expected_reason
+    assert "job_or_reparse" not in side_effects
+    assert "quote" not in side_effects
+    assert ("active_synthesis_quote_id", "") in side_effects
+    if not has_lyric_sources:
+        assert "no lyrics" in result.action_required_payload["message"]
+
+
+def test_quote_rejects_raw_part_when_derived_line_exists(client, monkeypatch):
+    test_client, app = client
+    orchestrator = app.state.orchestrator
+    session_id = _create_session(test_client)
+    score = {
+        "parts": [
+            {"part_id": "Alto", "part_name": "Alto", "notes": []},
+            {"part_id": "P_DERIVED_ALTO", "part_name": "Alto (Derived)", "notes": []},
+        ],
+        "score_summary": {"parts": [{"part_id": "Alto"}]},
+        "voice_part_transforms": {"alto": {
+            "source_part_index": 0,
+            "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_ALTO",
+                                  "part_name": "Alto (Derived)"},
+        }},
+        "voice_part_signals": {"has_lyric_sources": True, "parts": [
+            {"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+             "missing_lyric_voice_parts": []},
+        ]},
+    }
+    summary = {"parts": [{"part_id": "Alto"}, {"part_id": "P_DERIVED_ALTO"}]}
+
+    async def record_metadata(*args):
+        pass
+
+    monkeypatch.setattr(orchestrator._sessions, "set_metadata", record_metadata)
+    result = asyncio.run(orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={"part_id": "Alto"}),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number=None, forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert result.action_required_payload["reason"] == "preprocessed_score_without_derived_target_selection"
+    assert result.action_required_payload["diagnostics"]["suggested_derived_targets_for_input_part"]
+
+
+def test_default_model_quote_attempt_does_not_start_line_preparation(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    score["parts"][0].update(part_id="Alto", part_name="Alto")
+    score["selected_verse_number"] = "1"
+    selection = {"id": "verse-1", "number": "1", "name": "Verse 1"}
+    score["selected_lyric_selection"] = selection
+    score["voice_part_signals"] = {"has_lyric_sources": True, "parts": [
+        {"part_index": 0, "part_id": "Alto", "multi_voice_part": True,
+         "missing_lyric_voice_parts": []},
+    ]}
+    summary = {"parts": [{"part_id": "Alto", "part_index": 0,
+                          "lyric_selections": [selection]}],
+               "available_verses": ["1"]}
+    score["score_summary"] = summary
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+    tool_results = []
+
+    class QuoteAttemptClient:
+        def generate(self, prompt_bundle, history, *, role=None, **kwargs):
+            last = history[-1].get("content", "") if history else ""
+            if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+                tool_results.append(last)
+                return json.dumps({"tool_calls": [],
+                                   "final_message": "This line needs preparation.",
+                                   "include_score": False})
+            return json.dumps({"tool_calls": [{"name": "prepare_synthesis_quote",
+                                               "arguments": {
+                                                   "part_id": "Alto", "voicebank": "Dummy",
+                                                   "language": "en",
+                                                   "lyric_selection": selection,
+                                               }}],
+                               "final_message": "Preparing the quote.",
+                               "include_score": False})
+
+    async def forbidden_job(*args, **kwargs):
+        raise AssertionError("The quote call must not become a handoff")
+
+    def forbidden_quote(*args, **kwargs):
+        raise AssertionError("The complex raw part must not be quoted")
+
+    app.state.llm_client = QuoteAttemptClient()
+    app.state.orchestrator._llm_client = app.state.llm_client
+    monkeypatch.setattr(app.state.orchestrator, "_start_preprocess_job", forbidden_job)
+    monkeypatch.setattr("src.backend.credits.create_synthesis_quote", forbidden_quote)
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "sing Alto verse 1"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert any('"action": "preprocessing_required"' in item for item in tool_results)
+    assert not any('"status": "quote_ready"' in item for item in tool_results)
+
+
+def test_no_lyric_sources_cannot_start_line_preparation_job(client):
+    _, app = client
+    result = asyncio.run(app.state.orchestrator._start_preprocess_job(
+        "session-1",
+        {"voice_part_signals": {"has_lyric_sources": False}},
+        [],
+        initial_message="Preparing the line.", initial_thought_summary="",
+        user_id="test-user", user_email="test@example.com",
+    ))
+    assert result["type"] == "chat_text"
+    assert result["action_required"]["action"] == "lyrics_required_for_line_preparation"
+    assert "progress_url" not in result
+
+
+def test_model_handoff_without_lyric_sources_does_not_queue_job(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    score["voice_part_signals"]["has_lyric_sources"] = False
+    asyncio.run(app.state.sessions.set_score(session_id, score))
+    llm_client = StaticLlmClient(_preprocess_workflow_response(part_id="P1"))
+    app.state.llm_client = llm_client
+    app.state.orchestrator._llm_client = llm_client
+
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "split this part"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_text"
+    assert response.json()["action_required"]["action"] == "lyrics_required_for_line_preparation"
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["current_job_id"] is None
+    assert "no lyrics" in after["history"][-1]["content"]
+
+
+@pytest.mark.parametrize("derived", [False, True])
+def test_quote_allows_simple_or_reviewed_derived_target(client, derived):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id, content=VERSED_SCORE_XML).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    summary = copy.deepcopy(snapshot["score_summary"])
+    target = summary["parts"][0]
+    selection = next(item for item in target["lyric_selections"] if item["number"] == "1")
+    selection = {key: selection[key] for key in ("id", "number", "name")}
+    if derived:
+        derived_part = copy.deepcopy(score["parts"][0])
+        derived_part["part_id"] = "P_DERIVED_SOLO"
+        derived_part["part_name"] = "Solo (Derived)"
+        score["parts"].append(derived_part)
+        derived_summary = copy.deepcopy(target)
+        derived_summary["part_id"] = "P_DERIVED_SOLO"
+        derived_summary["part_index"] = 1
+        summary["parts"].append(derived_summary)
+        score["voice_part_transforms"] = {"solo": {
+            "source_part_index": 0,
+            "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_SOLO",
+                                  "part_name": "Solo (Derived)"},
+        }}
+        target = derived_summary
+    score["selected_lyric_selection"] = selection
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+
+    result = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": target["part_id"], "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert json.loads(result.followup_prompt)["status"] == "quote_ready"
+    assert result.action_required_payload is None
+
+
+def test_synthetic_two_voice_score_requires_handoff_then_quotes_derived_line(
+    client, monkeypatch
+):
+    test_client, app = client
+    _use_real_score_parsing(app)
+    session_id = _create_session(test_client)
+    assert _upload_score(test_client, session_id,
+                         content=SYNTHETIC_TWO_VOICE_XML).status_code == 200
+    snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    score = copy.deepcopy(snapshot["current_score"]["score"])
+    summary = copy.deepcopy(snapshot["score_summary"])
+    target = summary["parts"][0]
+    selection = target["lyric_selections"][0]
+    selection = {key: selection[key] for key in ("id", "number", "name")}
+    assert score["voice_part_signals"]["has_lyric_sources"] is True
+    assert score["voice_part_signals"]["parts"][0]["multi_voice_part"] is True
+
+    started = []
+
+    async def fake_start_job(*args, **kwargs):
+        started.append(kwargs["planning_context"])
+        return {"type": "chat_progress", "message": "Preparing the line.",
+                "progress_url": "/jobs/preprocess-smoke"}
+
+    monkeypatch.setattr(app.state.orchestrator, "_start_preprocess_job", fake_start_job)
+    handoff = StaticLlmClient(_preprocess_workflow_response(
+        part_id=target["part_id"], verse_number="1"
+    ))
+    app.state.llm_client = handoff
+    app.state.orchestrator._llm_client = handoff
+    response = test_client.post(f"/sessions/{session_id}/chat",
+                                json={"message": "sing Alto verse 1"})
+    assert response.status_code == 200
+    assert response.json()["type"] == "chat_progress"
+    assert len(started) == 1
+    assert started[0]["target"]["part_id"] == target["part_id"]
+    assert started[0]["target"]["verse_number"] == "1"
+
+    raw_quote = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": target["part_id"], "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert raw_quote.action_required_payload["action"] == "preprocessing_required"
+    assert len(started) == 1
+
+    derived_part = copy.deepcopy(score["parts"][0])
+    derived_part.update(part_id="P_DERIVED_ALTO", part_name="Alto (Derived)")
+    score["parts"].append(derived_part)
+    derived_summary = copy.deepcopy(target)
+    derived_summary.update(part_id="P_DERIVED_ALTO", part_index=1)
+    summary["parts"].append(derived_summary)
+    score["voice_part_transforms"] = {"alto": {
+        "source_part_index": 0,
+        "appended_part_ref": {"part_index": 1, "part_id": "P_DERIVED_ALTO",
+                              "part_name": "Alto (Derived)"},
+    }}
+    score["selected_lyric_selection"] = selection
+    asyncio.run(app.state.sessions.set_score(session_id, score, summary=summary))
+    derived_quote = asyncio.run(app.state.orchestrator._quote_synthesis(
+        ToolCall(name="prepare_synthesis_quote", arguments={
+            "part_id": "P_DERIVED_ALTO", "voicebank": "Dummy", "language": "en",
+            "lyric_selection": selection,
+        }),
+        session_id=session_id, user_id="test-user", user_email="test@example.com",
+        current_score=score, score_summary=summary,
+        selected_explicit_verse_number="1", forced_voicebank_id=None,
+        forced_language=None, expand_repeats=False, score_player_takes=None,
+    ))
+    assert json.loads(derived_quote.followup_prompt)["status"] == "quote_ready"
 
 
 def test_midi_source_signature_follows_what_the_midi_is_built_from(tmp_path):

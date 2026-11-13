@@ -42,6 +42,25 @@ TEST_XML = ROOT_DIR / "assets/test_data/amazing-grace-satb-verse1.xml"
 
 
 class VoicePartFlowTests(unittest.TestCase):
+    def test_synthesize_preflight_handles_malformed_target_signals(self) -> None:
+        score = {
+            "parts": [{"part_id": "Alto", "part_name": "Alto", "notes": []}],
+            "score_summary": {"parts": [{"part_id": "Alto"}]},
+            "voice_part_signals": {"parts": [
+                {"part_index": "invalid", "part_id": "Alto"},
+            ]},
+        }
+        result = synthesize_preflight_action_required(score, part_index=0)
+        self.assertEqual(result["action"], "preprocessing_required")
+        self.assertEqual(result["reason"], "complexity_signal_unavailable_without_derived_target")
+
+        score["voice_part_signals"]["parts"] = [
+            {"part_index": 0, "part_id": "Soprano", "multi_voice_part": False}
+        ]
+        result = synthesize_preflight_action_required(score, part_index=0)
+        self.assertEqual(result["action"], "preprocessing_required")
+        self.assertEqual(result["reason"], "complexity_signal_inconsistent_with_target")
+
     def test_solfege_requirement_checks_all_eligible_lyric_onsets(self) -> None:
         score = {
             "parts": [

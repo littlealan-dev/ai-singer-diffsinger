@@ -3,12 +3,12 @@ import pytest
 from src.backend.config import Settings
 
 
-def test_default_voicebank_is_liee(monkeypatch):
+def test_default_voicebank_is_qixuan(monkeypatch):
     monkeypatch.delenv("BACKEND_DEFAULT_VOICEBANK", raising=False)
 
     settings = Settings.from_env()
 
-    assert settings.default_voicebank == "Diffsinger LIEE Immortal Idol (JubiLIEE 2025)"
+    assert settings.default_voicebank == "Qixuan_v2.7.0_DiffSinger_OpenUtau"
 
 
 def test_default_voicebank_env_override_is_preserved(monkeypatch):
