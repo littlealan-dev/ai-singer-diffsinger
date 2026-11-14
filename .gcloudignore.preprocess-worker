@@ -2,3 +2,5 @@
 # plus the vocoder model, which only the GPU image needs.
 #!include:.gcloudignore
 bundled_assets/
+# Local-only helper that holds an API key; never upload it.
+scripts/set_gemini_api_key.sh
