@@ -39,11 +39,18 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
             ? `${window.location.pathname}${window.location.search}${window.location.hash}`
             : "/app";
 
+    // A signed-out visitor to a Song's address signs in here and stays on it.
+    const isSongAddress =
+        typeof window !== "undefined" && window.location.pathname.startsWith("/app/song/");
+
     useEffect(() => {
-        if (!loading && !isAuthenticated && !hasAuthLinkParams && !hasStartParam && !hasCheckoutPlan) {
+        if (
+            !loading && !isAuthenticated && !hasAuthLinkParams && !hasStartParam && !hasCheckoutPlan
+            && !isSongAddress
+        ) {
             navigate("/", { replace: true });
         }
-    }, [loading, isAuthenticated, navigate, hasAuthLinkParams, hasStartParam, hasCheckoutPlan]);
+    }, [loading, isAuthenticated, navigate, hasAuthLinkParams, hasStartParam, hasCheckoutPlan, isSongAddress]);
 
     // Show loading while checking auth state
     if (loading) {
@@ -67,6 +74,22 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
                         isOpen={true}
                         onClose={() => { }}
                         onSuccess={() => navigate(hasCheckoutPlan ? `/app?checkoutPlan=${checkoutPlan}` : "/app")}
+                        redirectPath={currentRedirectPath}
+                    />
+                </>
+            );
+        }
+        if (isSongAddress && !hasAuthLinkParams) {
+            return (
+                <>
+                    <div className="protected-route-loading">
+                        <Loader2 className="protected-route-spinner" size={32} />
+                        <p>Sign in to open this song.</p>
+                    </div>
+                    <AuthModal
+                        isOpen={true}
+                        onClose={() => navigate("/", { replace: true })}
+                        onSuccess={() => navigate(currentRedirectPath, { replace: true })}
                         redirectPath={currentRedirectPath}
                     />
                 </>

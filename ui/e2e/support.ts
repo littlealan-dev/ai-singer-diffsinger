@@ -50,6 +50,14 @@ async function e2eRequest(
   });
 }
 
+/** A score added to a Song that already has one asks "New song or replace?". */
+export async function chooseReplace(page: Page) {
+  await page
+    .getByRole("dialog", { name: "New song or replace?" })
+    .getByRole("button", { name: /^Replace/ })
+    .click();
+}
+
 export async function getE2EState(page: Page, request: APIRequestContext, sessionId: string) {
   const response = await e2eRequest(page, request, `/_e2e/sessions/${sessionId}/state`);
   if (!response.ok()) throw new Error(`Unable to read E2E state: ${response.status()}`);

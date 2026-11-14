@@ -16,6 +16,8 @@ interface ImportMetaEnv {
     readonly VITE_STRIPE_PUBLISHABLE_KEY?: string
     readonly VITE_BACKEND_READY_TIMEOUT_SECONDS?: string
     readonly VITE_API_REQUEST_TIMEOUT_SECONDS?: string
+    /** Temporary: "1"/"0" forces the in-browser Songs API stub on or off. */
+    readonly VITE_SONGS_API_STUB?: string
     // more env variables...
 }
 

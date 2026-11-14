@@ -29,7 +29,11 @@ export default function App() {
               </BackendReadinessGate>
             </ProtectedRoute>
           }
-        />
+        >
+          {/* One studio for both addresses, so opening a Song never remounts it. */}
+          <Route index element={null} />
+          <Route path="song/:songId" element={null} />
+        </Route>
         {/* The static demo is retired (DemoApp.tsx is kept); the studio has demo songs. */}
         <Route path="/demo/*" element={<Navigate to="/app" replace />} />
         <Route path="/maintenance" element={<MaintenancePage />} />

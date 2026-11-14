@@ -19,11 +19,12 @@ import {
   register as registerExtendableMediaRecorderEncoder,
 } from "extendable-media-recorder";
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
-import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders } from "lucide-react";
+import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil } from "lucide-react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router-dom";
+import { Link, useMatch, useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
+  ApiError,
   chat,
   createSession,
   exportMix,
@@ -33,7 +34,11 @@ import {
   fetchSynthesisEstimate,
   fetchSolfegeSettings,
   fetchVoicebanks,
+  fetchWorkspace,
   markFeedbackPrompted,
+  recordSongStateForStub,
+  renameSong,
+  savePlayerMix,
   SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY,
   SYNTHESIS_JOB_DETAILS_TIMEOUT_MESSAGE,
   SYNTHESIS_JOB_DETAILS_TIMEOUT_TITLE,
@@ -48,15 +53,23 @@ import {
   type InstrumentalPart,
   type PerformanceMidi,
   type PerformanceMeasureMapEntry,
+  type PlayerMixRequest,
   type ProgressResponse,
   type ScoreSummary,
   type SolfegeMode,
   type SolfegeSystem,
+  type SongInfo,
+  type SongWorkspace,
   type SynthesisCreditEstimate,
   type VoicebankOption,
+  type WorkspaceInstrument,
+  type WorkspaceJob,
+  type WorkspaceMessage,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
 import { UserMenu } from "./components/UserMenu";
+import SongsDrawer from "./components/SongsDrawer";
+import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
 import { logAnalyticsEvent } from "./firebase";
 import { useCredits } from "./hooks/useCredits";
 import { useBillingState } from "./hooks/useBillingState";
@@ -89,6 +102,8 @@ const SCORE_PREVIEW_RENDER_ERROR =
   "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
 const BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60;
 const BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav";
+const STOP_TOO_LATE_NOTICE =
+  "The current job is just finishing and can't be stopped. You can choose again when it ends.";
 const REPEATS_UNAVAILABLE_MESSAGE =
   "Repeats: unavailable. This score's repeat marks can't be followed, so it sings in written order";
 
@@ -2643,6 +2658,104 @@ function FeedbackPrototypeBubble({
   );
 }
 
+type SongLoadState = "idle" | "loading" | "unavailable" | "failed";
+
+// A score the user picked while a Song is open, waiting for "New song or replace?".
+type PendingUpload = {
+  file: File;
+  demoSongId: string | null;
+  // Replace was refused because the job was already finishing; ask again when it ends.
+  waitForWorkToEnd: boolean;
+};
+
+type MixSaveState = {
+  epoch: number;
+  songId: string | null;
+  // Which tracks and rows exist. A change here alone is not a mix change.
+  structure: string;
+  saved: string;
+  pending: { songId: string; epoch: number; signature: string; body: PlayerMixRequest } | null;
+  timer: number | undefined;
+  inFlight: boolean;
+  due: boolean;
+};
+
+const MIX_SAVE_DELAY_MS = 1000;
+
+type RebuiltChat = {
+  messages: Message[];
+  // The queued or running job to keep following, with the bubble that shows it.
+  resume: { messageId: string; job: WorkspaceJob } | null;
+  // A queued or running job with no chat turn: no bubble, but the Song is busy.
+  detachedJob: WorkspaceJob | null;
+};
+
+const isLiveJob = (job: WorkspaceJob) => job.status === "queued" || job.status === "running";
+
+// Rebuilds a reopened Song's chat. A turn is a user message and the assistant
+// messages after it, and its id is the user message's id. Each message gets a
+// bubble. A turn's first job is shown in the turn's last assistant bubble, and
+// any later job in a bubble of its own right after.
+function rebuildChat(messages: WorkspaceMessage[], jobs: WorkspaceJob[]): RebuiltChat {
+  const jobsByTurn = new Map<string, WorkspaceJob[]>();
+  let detachedJob: WorkspaceJob | null = null;
+  [...jobs]
+    .sort((left, right) => left.created_at.localeCompare(right.created_at))
+    .forEach((job) => {
+      if (!job.originating_turn_id) {
+        if (isLiveJob(job)) detachedJob = job;
+        return;
+      }
+      const turnJobs = jobsByTurn.get(job.originating_turn_id) ?? [];
+      turnJobs.push(job);
+      jobsByTurn.set(job.originating_turn_id, turnJobs);
+    });
+
+  const rebuilt: Message[] = [];
+  let resume: RebuiltChat["resume"] = null;
+  const showJob = (bubble: Message, job: WorkspaceJob): Message => {
+    const shown = applyProgressToMessage(
+      { ...bubble, progressUrl: job.progress_url, jobId: job.job_id ?? bubble.jobId },
+      job
+    );
+    if (isLiveJob(job)) resume = { messageId: shown.id, job };
+    return shown;
+  };
+  const closeTurn = (turnId: string | null, firstBubbleIndex: number) => {
+    const turnJobs = turnId ? jobsByTurn.get(turnId) : undefined;
+    if (!turnJobs?.length) return;
+    const [firstJob, ...laterJobs] = turnJobs;
+    let lastAssistantIndex = -1;
+    for (let index = rebuilt.length - 1; index >= firstBubbleIndex; index -= 1) {
+      if (rebuilt[index].role === "assistant") {
+        lastAssistantIndex = index;
+        break;
+      }
+    }
+    if (lastAssistantIndex < 0) {
+      rebuilt.push(showJob({ id: `job-${firstJob.job_id}`, role: "assistant", content: "" }, firstJob));
+    } else {
+      rebuilt[lastAssistantIndex] = showJob(rebuilt[lastAssistantIndex], firstJob);
+    }
+    laterJobs.forEach((job) => {
+      rebuilt.push(showJob({ id: `job-${job.job_id}`, role: "assistant", content: "" }, job));
+    });
+  };
+
+  let turnId: string | null = null;
+  let turnStart = 0;
+  messages.forEach((message) => {
+    if (message.role === "user") {
+      closeTurn(turnId, turnStart);
+      turnId = message.id;
+      turnStart = rebuilt.length;
+    }
+    rebuilt.push({ id: message.id, role: message.role, content: message.content });
+  });
+  closeTurn(turnId, turnStart);
+  return { messages: rebuilt, resume, detachedJob };
+}
+
 export default function MainApp() {
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth();
@@ -2807,6 +2920,50 @@ export default function MainApp() {
   const suppressedMultiTrackMessageIdsRef = useRef<Set<string>>(new Set());
   const activeScoreIdRef = useRef<string | null>(null);
   const workspaceGenerationRef = useRef(0);
+  // Songs: `/app` is the start screen, `/app/song/{id}` shows one Song. A Song
+  // exists once its session has a score, and its id is the session id.
+  const routeSongId = useMatch("/app/song/:songId")?.params.songId ?? null;
+  const [currentSong, setCurrentSong] = useState<SongInfo | null>(null);
+  const [songLoadState, setSongLoadState] = useState<SongLoadState>("idle");
+  // From sending a chat message until the assistant's reply arrives. The Song
+  // can't be left meanwhile; running work alone doesn't keep the user in it.
+  const [awaitingReply, setAwaitingReply] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
+  const [songsDrawerOpen, setSongsDrawerOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState<string | null>(null);
+  const titleEditCancelledRef = useRef(false);
+  // With a Song open, a score can be added while work runs: the popup offers
+  // New song or Replace. Only the wait for the assistant's reply blocks it.
+  const uploadBlocked = currentSong ? awaitingReply : chatTurnInProgress;
+  const uploadBlockedTitle = !uploadBlocked
+    ? undefined
+    : currentSong
+      ? "Wait for the reply first"
+      : "Stop the running work first";
+  // A reply can't be picked up again, so the Song can't be left while one is awaited.
+  const canLeaveSong = !awaitingReply && !uploading;
+  // Goes up whenever the mix on screen is, by definition, the saved one: a
+  // Song was just opened, or its score was just replaced.
+  const [mixBaselineEpoch, setMixBaselineEpoch] = useState(0);
+  const mixSaveRef = useRef<MixSaveState>({
+    epoch: -1,
+    songId: null,
+    structure: "",
+    saved: "",
+    pending: null,
+    timer: undefined,
+    inFlight: false,
+    due: false,
+  });
+  // The Song the page shows or is loading, so a route change to it is not an "open".
+  const shownSongIdRef = useRef<string | null>(null);
+  // Goes up when the workspace is cleared; a session created before that is not adopted.
+  const sessionEpochRef = useRef(0);
+  // A reopened Song's saved instrument choices, until the rows are next built.
+  const savedInstrumentChoicesRef = useRef<WorkspaceInstrument[] | null>(null);
+  const pendingDemoSongRef = useRef<{ songId: string; demoSongId: string | null } | null>(null);
+  // A running job that belongs to no chat turn (an export mix) in a reopened Song.
+  const [detachedJobUrl, setDetachedJobUrl] = useState<string | null>(null);
 
   const browserMixBounceActive = browserMixBouncePhase !== "idle";
 
@@ -3160,11 +3317,34 @@ export default function MainApp() {
       (part, index) =>
         eligible.findIndex((other) => instrumentalTrackKey(other) === instrumentalTrackKey(part)) === index
     );
+    // A reopened Song's saved choices stand in for a row's current values, once.
+    const savedChoices = savedInstrumentChoicesRef.current;
+    savedInstrumentChoicesRef.current = null;
     setInstrumentalTracks((current) => {
       return rowParts.map((part) => {
-        const existing = part.raw_part_id
-          ? current.find((track) => track.rawPartId === part.raw_part_id)
-          : current.find((track) => track.partId === part.part_id);
+        const saved = part.raw_part_id
+          ? savedChoices?.find((choice) => choice.raw_part_id === part.raw_part_id)
+          : undefined;
+        const existing = saved
+          ? {
+              unassigned: saved.unassigned,
+              muted: saved.muted,
+              solo: saved.solo,
+              volume: saved.volume,
+              gmProgram: saved.gm_program ?? part.playback_preset?.program ?? part.midi_program ?? 0,
+              soundfontBank:
+                saved.soundfont_bank ??
+                part.playback_preset?.bank ??
+                part.soundfont_bank ??
+                (part.percussion ? 128 : 0),
+              presetKind:
+                saved.preset_kind ??
+                part.playback_preset?.kind ??
+                (part.percussion ? ("percussion_kit" as const) : ("melodic" as const)),
+            }
+          : part.raw_part_id
+            ? current.find((track) => track.rawPartId === part.raw_part_id)
+            : current.find((track) => track.partId === part.part_id);
         return {
           key: instrumentalTrackKey(part),
           partId: part.part_id,
@@ -3924,6 +4104,9 @@ export default function MainApp() {
     });
     setMultiTrackExportProgress(0);
     let exportMessageId: string | null = null;
+    // The Song may be left, or its score replaced, while the mix is made.
+    const generation = workspaceGenerationRef.current;
+    const workspaceChanged = () => workspaceGenerationRef.current !== generation;
     try {
       const response = await exportMix(
         sessionId,
@@ -3939,6 +4122,7 @@ export default function MainApp() {
         })),
         billingReferenceTrack.jobId
       );
+      if (workspaceChanged()) return;
       exportMessageId = crypto.randomUUID();
       appendMessage({
         id: exportMessageId,
@@ -3952,7 +4136,9 @@ export default function MainApp() {
       let latestProgress = 0;
       for (;;) {
         await wait(1200);
+        if (workspaceChanged()) return;
         const payload = await fetchProgress(response.progress_url);
+        if (workspaceChanged()) return;
         if (typeof payload.progress === "number") {
           latestProgress = Math.max(latestProgress, payload.progress);
           setMultiTrackExportProgress(latestProgress);
@@ -3984,6 +4170,7 @@ export default function MainApp() {
         }
       }
     } catch (err) {
+      if (workspaceChanged()) return;
       if (exportMessageId) {
         setMessages((current) => current.map((message) =>
           message.id === exportMessageId ? { ...message, isProgress: false } : message
@@ -3997,8 +4184,10 @@ export default function MainApp() {
       }
       setMultiTrackExportError(message);
     } finally {
-      setMultiTrackExportProgress(null);
-      if (exportMessageId) setChatTurnBusy(false);
+      if (!workspaceChanged()) {
+        setMultiTrackExportProgress(null);
+        if (exportMessageId) setChatTurnBusy(false);
+      }
     }
   }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
@@ -4171,6 +4360,336 @@ export default function MainApp() {
     };
   }, [scoreMenuOpen, solfegeMenuOpen, voiceMenuOpen]);
 
+  // The mix as it would be saved with the Song: mixer values of the vocal
+  // tracks, the instrument rows' choices, and the instrument bus.
+  const mixSignature = useMemo(
+    () =>
+      JSON.stringify({
+        vocals: multiTrackAudioTracks.map((track) => ({
+          key: track.key,
+          muted: track.muted,
+          solo: track.solo,
+          volume: track.volume,
+        })),
+        instruments: instrumentalTracks
+          .filter((track) => track.rawPartId)
+          .map((track) => ({
+            raw_part_id: track.rawPartId,
+            muted: track.muted,
+            solo: track.solo,
+            volume: track.volume,
+            gm_program: track.gmProgram,
+            soundfont_bank: track.soundfontBank,
+            preset_kind: track.presetKind,
+            unassigned: track.unassigned,
+          })),
+        bus: {
+          muted: instrumentalBus.muted,
+          solo: instrumentalBus.solo,
+          level_db: instrumentalBus.levelDb,
+        },
+      }),
+    [instrumentalBus, instrumentalTracks, multiTrackAudioTracks]
+  );
+
+  // Sends the waiting mix now. One request at a time and the latest wins: a
+  // mix that is due while another is on its way goes out when that one returns.
+  const sendPendingMix = useCallback(() => {
+    const state = mixSaveRef.current;
+    if (state.timer !== undefined) {
+      window.clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    if (state.inFlight) {
+      state.due = true;
+      return;
+    }
+    const pending = state.pending;
+    if (!pending) return;
+    state.pending = null;
+    state.due = false;
+    state.inFlight = true;
+    void savePlayerMix(pending.songId, pending.body)
+      .then(() => {
+        if (state.songId === pending.songId && state.epoch === pending.epoch) {
+          state.saved = pending.signature;
+        }
+      })
+      .catch(() => {
+        // `score_changed`: the mix was for a score that has been replaced, so
+        // it is dropped. Any other failure stays quiet; the next change saves.
+      })
+      .finally(() => {
+        state.inFlight = false;
+        if (state.due) {
+          state.due = false;
+          sendPendingMix();
+        }
+      });
+  }, []);
+
+  useEffect(() => {
+    const state = mixSaveRef.current;
+    const songId = currentSong?.id ?? null;
+    // No Song open, or it is still being restored: nothing to save.
+    if (!songId || songLoadState !== "idle") return;
+    const structure = [
+      mixBaselineEpoch,
+      songId,
+      multiTrackAudioTracks.map((track) => track.key).join(","),
+      instrumentalTracks.map((track) => track.key).join(","),
+    ].join("|");
+    const dropPending = () => {
+      if (state.timer !== undefined) window.clearTimeout(state.timer);
+      state.timer = undefined;
+      state.pending = null;
+      state.due = false;
+    };
+    if (state.epoch !== mixBaselineEpoch || state.songId !== songId) {
+      dropPending();
+      state.epoch = mixBaselineEpoch;
+      state.songId = songId;
+      state.structure = structure;
+      state.saved = mixSignature;
+      return;
+    }
+    if (state.structure !== structure) {
+      // A new take or freshly built instrument rows, not a change by the user.
+      state.structure = structure;
+      if (!state.pending) {
+        state.saved = mixSignature;
+        return;
+      }
+    }
+    if (mixSignature === state.saved && !state.inFlight) {
+      dropPending();
+      return;
+    }
+    const scoreId = activeScoreIdRef.current;
+    if (!scoreId) return;
+    state.pending = {
+      songId,
+      epoch: mixBaselineEpoch,
+      signature: mixSignature,
+      body: { score_id: scoreId, ...JSON.parse(mixSignature) },
+    };
+    if (state.timer !== undefined) window.clearTimeout(state.timer);
+    state.timer = window.setTimeout(sendPendingMix, MIX_SAVE_DELAY_MS);
+  }, [
+    currentSong?.id,
+    instrumentalTracks,
+    mixBaselineEpoch,
+    mixSignature,
+    multiTrackAudioTracks,
+    sendPendingMix,
+    songLoadState,
+  ]);
+
+  // A waiting mix is sent at once when the tab is hidden or closed.
+  useEffect(() => {
+    const flush = () => {
+      if (document.visibilityState === "hidden") sendPendingMix();
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", sendPendingMix);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", sendPendingMix);
+      sendPendingMix();
+    };
+  }, [sendPendingMix]);
+
+  // Empties the page of the Song it shows. Nothing is stopped on the server:
+  // work that is running keeps running, and only this page stops following it.
+  const clearWorkspace = () => {
+    sendPendingMix();
+    workspaceGenerationRef.current += 1;
+    sessionEpochRef.current += 1;
+    sessionInitPromiseRef.current = null;
+    const priorStream = activeSynthesisStreamRef.current;
+    activeSynthesisStreamRef.current = null;
+    if (priorStream) void priorStream.cancel();
+    if (browserMixBouncePhaseRef.current !== "idle") browserMixBounceCancelRef.current("song-closed");
+    handleMultiTrackStop();
+    suppressedMultiTrackMessageIdsRef.current = new Set();
+    savedInstrumentChoicesRef.current = null;
+    activeScoreIdRef.current = null;
+    multiTrackWaveSurferRefs.current = {};
+    setMessages([]);
+    setMultiTrackAudioTracks([]);
+    setInstrumentalTracks([]);
+    setInstrumentalBus(DEFAULT_INSTRUMENTAL_BUS);
+    setInstrumentalTracksExpanded(true);
+    setMultiTrackExportProgress(null);
+    setMultiTrackExportError(null);
+    setAudioUrl(null);
+    setActiveProgress(null);
+    setDetachedJobUrl(null);
+    setStatus(null);
+    setChatTurnBusy(false);
+    setAwaitingReply(false);
+    setScore(null);
+    setScoreSummary(null);
+    setPerformanceMidi(null);
+    setExpandRepeats(false);
+    setActiveDemoSongId(null);
+    setError(null);
+    setNotice(null);
+    setScorePreviewError(null);
+    setExpandedThoughts({});
+    setExpandedDiagnostics({});
+    setFeedbackPrompts({});
+    setPendingUpload(null);
+    setTitleDraft(null);
+    setCurrentSong(null);
+  };
+
+  const openSong = (songId: string) => {
+    clearWorkspace();
+    shownSongIdRef.current = songId;
+    setSessionId(null);
+    setSongLoadState("loading");
+    const generation = workspaceGenerationRef.current;
+    void (async () => {
+      let workspace: SongWorkspace;
+      try {
+        workspace = await fetchWorkspace(songId);
+      } catch (err) {
+        if (workspaceGenerationRef.current !== generation) return;
+        const missing =
+          err instanceof ApiError && (err.status === 404 || err.code === "song_not_found");
+        setSongLoadState(missing ? "unavailable" : "failed");
+        return;
+      }
+      if (workspaceGenerationRef.current !== generation) return;
+
+      const summary = workspace.score.score_summary ?? null;
+      const rebuilt = rebuildChat(workspace.messages, workspace.jobs);
+      // An older take's bubble keeps its audio, but must not push itself into
+      // the player when its audio link is refreshed: the player holds the
+      // latest take of each part, as the workspace lists them.
+      const playerJobIds = new Set(workspace.player.vocals.map((vocal) => vocal.source_job_id));
+      suppressedMultiTrackMessageIdsRef.current = new Set(
+        rebuilt.messages
+          .filter((message) => message.jobId && !message.isProgress && !playerJobIds.has(message.jobId))
+          .map((message) => message.id)
+      );
+      activeScoreIdRef.current = workspace.score.score_id ?? null;
+      savedInstrumentChoicesRef.current = workspace.player.instruments;
+      setSessionId(workspace.session_id);
+      setCurrentSong(workspace.song);
+      const solfege = workspace.score.solfege_settings;
+      if (solfege) {
+        setSolfegeSystem(solfege.system);
+        setSolfegeMode(solfege.mode);
+        setDraftSolfegeSystem(solfege.system);
+        setDraftSolfegeMode(solfege.mode);
+      }
+      setScoreSummary(summary);
+      setPerformanceMidi(summary?.performance_midi ?? null);
+      setMessages(rebuilt.messages);
+      setMultiTrackAudioTracks(
+        workspace.player.vocals.map((vocal) => ({
+          key: vocal.key,
+          label: vocal.label,
+          audioUrl: vocal.audio_url,
+          partId: vocal.part_id ?? null,
+          partIndex: vocal.part_index ?? null,
+          verseNumber: vocal.verse_number ?? null,
+          durationSeconds: vocal.duration_seconds ?? undefined,
+          jobId: vocal.source_job_id,
+          sourceJobId: vocal.source_job_id,
+          expandRepeats: vocal.expand_repeats ?? undefined,
+          takeSignature: vocal.take_signature ?? null,
+          muted: vocal.muted,
+          solo: vocal.solo,
+          volume: vocal.volume,
+        }))
+      );
+      setExpandRepeats(workspace.player.repeats && summary?.repeat_expansion_available !== false);
+      setInstrumentalBus({
+        muted: workspace.player.bus.muted,
+        solo: workspace.player.bus.solo,
+        levelDb: workspace.player.bus.level_db,
+      });
+      setMixBaselineEpoch((current) => current + 1);
+      const demo = pendingDemoSongRef.current;
+      pendingDemoSongRef.current = null;
+      if (demo?.songId === songId) setActiveDemoSongId(demo.demoSongId);
+      if (rebuilt.resume) {
+        setChatTurnBusy(true);
+        setActiveJobKind(rebuilt.resume.job.job_kind ?? null);
+        setActiveProgress({
+          messageId: rebuilt.resume.messageId,
+          url: rebuilt.resume.job.progress_url,
+        });
+      } else if (rebuilt.detachedJob) {
+        setChatTurnBusy(true);
+        setActiveJobKind(rebuilt.detachedJob.job_kind ?? null);
+        setDetachedJobUrl(rebuilt.detachedJob.progress_url);
+      }
+      setSongLoadState("idle");
+      requestChatAutoScroll();
+
+      try {
+        const data = await fetchScoreXml(workspace.session_id);
+        if (workspaceGenerationRef.current !== generation) return;
+        setScore({ name: `${workspace.song.title}.xml`, data });
+      } catch (err) {
+        if (workspaceGenerationRef.current !== generation) return;
+        setError(err instanceof Error ? err.message : "Couldn't load this song's score.");
+      }
+    })();
+  };
+
+  // The address decides which Song is shown. Runs only when the address
+  // changes, so a page that has just uploaded its first score (and is about to
+  // move to that Song's address) is not mistaken for one that left a Song.
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    if (routeSongId) {
+      if (routeSongId !== shownSongIdRef.current) openSong(routeSongId);
+      return;
+    }
+    if (shownSongIdRef.current === null) return;
+    // Back on the start screen: the session effect makes a fresh session.
+    shownSongIdRef.current = null;
+    clearWorkspace();
+    setSongLoadState("idle");
+    setSessionId(null);
+  }, [isAuthenticated, routeSongId, user?.uid]);
+
+  // A running job with no chat turn has no bubble. It only keeps the Song busy
+  // (Stop shown, replies and uploads held) until it ends.
+  useEffect(() => {
+    if (!detachedJobUrl) return;
+    const generation = workspaceGenerationRef.current;
+    let cancelled = false;
+    void (async () => {
+      for (;;) {
+        await wait(1500);
+        if (cancelled) return;
+        let ended = false;
+        try {
+          const payload = await fetchProgress(detachedJobUrl);
+          ended = payload.status !== "queued" && payload.status !== "running";
+        } catch {
+          // Keep asking; a job that can no longer be read ends on the next open.
+        }
+        if (cancelled) return;
+        if (ended) {
+          if (workspaceGenerationRef.current !== generation) return;
+          setDetachedJobUrl(null);
+          setChatTurnBusy(false);
+          return;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [detachedJobUrl]);
+
   const ensureSession = async (): Promise<string> => {
     if (sessionId) {
       return sessionId;
@@ -4183,9 +4702,11 @@ export default function MainApp() {
     }
 
     const requestUserId = user.uid;
+    const sessionEpoch = sessionEpochRef.current;
     const promise = createSession()
       .then((data) => {
-        if (activeUserIdRef.current === requestUserId) {
+        // A Song opened meanwhile has its own session; this one is not adopted.
+        if (activeUserIdRef.current === requestUserId && sessionEpochRef.current === sessionEpoch) {
           setSessionId(data.session_id);
         }
         return data.session_id;
@@ -4215,10 +4736,12 @@ export default function MainApp() {
     if (sessionId || sessionInitPromiseRef.current) {
       return;
     }
+    // A Song address brings its own session, restored by openSong.
+    if (routeSongId) return;
     void ensureSession().catch(() => {
       // Error is stored in component state and retried on the next session-dependent action.
     });
-  }, [ensureSession, isAuthenticated, sessionId, user]);
+  }, [ensureSession, isAuthenticated, routeSongId, sessionId, user]);
 
   useEffect(() => {
     if (!isAuthenticated || billing.loading || !billing.stripeCustomerId) return;
@@ -4554,65 +5077,19 @@ export default function MainApp() {
       if (payload.job_kind && payload.status !== "stopped") {
         setActiveJobKind(payload.job_kind);
       }
-      const nextMessage = payload.message;
-      const nextProgress = payload.progress;
       const nextAudioUrl = payload.audio_url;
-      const appendTerminalPreprocessMessage =
-        payload.job_kind === "preprocess" &&
-        (payload.status === "done" || payload.status === "error");
-      const appendProgressToChatBubble =
-        payload.status !== "error" || payload.job_kind === "preprocess";
-      const isTerminalProgress =
-        payload.status === "done" ||
-        payload.status === "stopped" ||
-        payload.status === "error" ||
-        payload.status === "action_required";
+      const isTerminalProgress = isTerminalProgressStatus(payload.status);
       if (payload.status === "stopped" && payload.job_id) {
         stoppedJobIdsRef.current.add(payload.job_id);
       }
       const refunded = payload.job_id ? stopRefundsRef.current.get(payload.job_id) : undefined;
-      const stoppedMessage = payload.status === "stopped"
-        ? `${nextMessage || "Stopped."}${refunded ? ` Refunded ${refunded} ${refunded === 1 ? "credit" : "credits"}.` : ""}`
-        : nextMessage;
-      const nextAttemptMessages = extractAttemptMessages(payload.details);
       setMessages((prev) => {
         const messageIndex = prev.findIndex((msg) => msg.id === messageId);
         if (messageIndex < 0) return prev;
 
         const message = prev[messageIndex];
-        const nextContent =
-          payload.job_kind === "preprocess" && payload.status === "running"
-            ? message.content
-            : appendTerminalPreprocessMessage
-              ? appendPreprocessTerminalMessage(message.content, nextMessage)
-              : appendProgressToChatBubble
-                ? appendProgressMessage(message.content, stoppedMessage)
-                : message.content;
-        const nextMessageState: Message = {
-          ...message,
-          content: nextContent,
-          details: payload.details ?? message.details,
-          attemptMessages: nextAttemptMessages ?? message.attemptMessages,
-          progressValue: typeof nextProgress === "number" ? nextProgress : message.progressValue,
-          // Each progress payload carries a newly signed URL. Keep the first
-          // one rather than rebuilding the player and re-fetching audio on every update.
-          audioUrl: message.audioUrl || (payload.status !== "stopped" ? nextAudioUrl : undefined),
-          audioTrack: payload.audio_track ?? message.audioTrack,
-          jobId: payload.job_id ?? message.jobId,
-          feedback: payload.feedback ?? message.feedback,
-          isProgress: !isTerminalProgress,
-        };
-        const changed =
-          nextMessageState.content !== message.content ||
-          nextMessageState.progressValue !== message.progressValue ||
-          nextMessageState.audioUrl !== message.audioUrl ||
-          nextMessageState.jobId !== message.jobId ||
-          nextMessageState.isProgress !== message.isProgress ||
-          !sameProgressValue(nextMessageState.details, message.details) ||
-          !sameProgressValue(nextMessageState.attemptMessages, message.attemptMessages) ||
-          !sameProgressValue(nextMessageState.audioTrack, message.audioTrack) ||
-          !sameProgressValue(nextMessageState.feedback, message.feedback);
-        if (!changed) return prev;
+        const nextMessageState = applyProgressToMessage(message, payload, refunded);
+        if (nextMessageState === message) return prev;
 
         const next = [...prev];
         next[messageIndex] = nextMessageState;
@@ -4991,6 +5468,7 @@ export default function MainApp() {
   ): Promise<string | null> => {
     if (!progressUrl) return null;
     const refreshUrl = progressUrlForJob(progressUrl, jobId);
+    const generation = workspaceGenerationRef.current;
     const pending = audioRefreshPromisesRef.current[messageId];
     if (pending) {
       return pending;
@@ -5014,6 +5492,7 @@ export default function MainApp() {
         )
       );
       const belongsToWorkspace = !suppressedMultiTrackMessageIdsRef.current.has(messageId)
+        && generation === workspaceGenerationRef.current
         && (!payload.score_id || payload.score_id === activeScoreIdRef.current);
       if (belongsToWorkspace) {
         setAudioUrl((current) => (current ? nextAudioUrl : current));
@@ -5255,8 +5734,15 @@ export default function MainApp() {
     }
   };
 
-  const handleUpload = async (file: File, demoSongId: string | null = null) => {
-    if (chatTurnInProgressRef.current) return;
+  // Puts a score into the session on screen: the first score of a new Song,
+  // or, with `replace`, a new score for the open Song. Replace stops the
+  // running work itself; any other upload waits for the work to end.
+  const handleUpload = async (
+    file: File,
+    demoSongId: string | null = null,
+    options: { replace?: boolean } = {}
+  ) => {
+    if (chatTurnInProgressRef.current && !options.replace) return;
     if (browserMixBounceActive) {
       setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
       return;
@@ -5268,11 +5754,30 @@ export default function MainApp() {
     setUploading(true);
     setError(null);
     setScorePreviewError(null);
+    const sessionEpoch = sessionEpochRef.current;
     try {
       const activeSessionId = sessionId ?? await ensureSession();
-      const uploadResponse = await uploadScore(activeSessionId, file);
+      const uploadResponse = await uploadScore(
+        activeSessionId,
+        file,
+        options.replace ? { replace: true } : {}
+      );
+      // The page moved to another Song meanwhile; this score is not shown here.
+      if (sessionEpochRef.current !== sessionEpoch) return;
       activeScoreIdRef.current = uploadResponse.score_id ?? null;
       workspaceGenerationRef.current += 1;
+      savedInstrumentChoicesRef.current = null;
+      const uploadedSong = uploadResponse.song;
+      if (uploadedSong) {
+        setCurrentSong(uploadedSong);
+        // The cleared player is this score's saved mix.
+        setMixBaselineEpoch((current) => current + 1);
+        if (shownSongIdRef.current !== uploadedSong.id) {
+          shownSongIdRef.current = uploadedSong.id;
+          navigate(`/app/song/${uploadedSong.id}`, { replace: true });
+        }
+      }
+      if (options.replace) settleInterruptedBubbles(messages);
       const priorStream = activeSynthesisStreamRef.current;
       activeSynthesisStreamRef.current = null;
       if (priorStream) void priorStream.cancel();
@@ -5311,9 +5816,17 @@ export default function MainApp() {
             : current,
       );
       const data = await fetchScoreXml(activeSessionId);
+      if (sessionEpochRef.current !== sessionEpoch) return;
       setScore({ name: file.name, data });
       setActiveDemoSongId(demoSongId);
     } catch (err: any) {
+      if (sessionEpochRef.current !== sessionEpoch) return;
+      if (options.replace && err instanceof ApiError && err.code === "stop_too_late") {
+        // Keep the file; the choice is offered again when the job has ended.
+        setNotice(STOP_TOO_LATE_NOTICE);
+        setPendingUpload({ file, demoSongId, waitForWorkToEnd: true });
+        return;
+      }
       const message = err?.message || "Upload failed.";
       if (isInsufficientCreditError(message)) {
         openPaywall("insufficient_credits", message);
@@ -5324,10 +5837,169 @@ export default function MainApp() {
     }
   };
 
+  // Replace stopped the open Song's work on the server, and this page stopped
+  // following it. Its bubbles are closed here, each with its job's last word.
+  const settleInterruptedBubbles = (shown: Message[]) => {
+    const interrupted = shown.filter((message) => message.isProgress);
+    if (!interrupted.length) return;
+    const interruptedIds = new Set(interrupted.map((message) => message.id));
+    setMessages((prev) =>
+      prev.map((message) =>
+        interruptedIds.has(message.id)
+          ? {
+              ...message,
+              isProgress: false,
+              // An export mix has no progress link to ask; say so here.
+              content: message.progressUrl
+                ? message.content
+                : appendProgressMessage(message.content, "Stopped."),
+            }
+          : message
+      )
+    );
+    interrupted.forEach((bubble) => {
+      if (!bubble.progressUrl) return;
+      void fetchProgress(progressUrlForJob(bubble.progressUrl, bubble.jobId))
+        .then((payload) => {
+          if (!isTerminalProgressStatus(payload.status)) return;
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === bubble.id ? applyProgressToMessage(message, payload) : message
+            )
+          );
+        })
+        .catch(() => {
+          // The bubble is already closed; its last line is simply missing.
+        });
+    });
+  };
+
+  // Every way of adding a score comes through here. With no Song open the
+  // score starts one. With a Song open the user chooses: new Song, or replace.
+  const requestUpload = (file: File, demoSongId: string | null = null) => {
+    if (songLoadState !== "idle") return;
+    if (!currentSong) {
+      void handleUpload(file, demoSongId);
+      return;
+    }
+    if (awaitingReply || uploading) return;
+    if (browserMixBounceActive) {
+      setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
+      return;
+    }
+    if (creditsLocked) {
+      openPaywall("upload_blocked");
+      return;
+    }
+    setPendingUpload({ file, demoSongId, waitForWorkToEnd: false });
+  };
+
+  // "New song" from the popup: the open Song stays as it is, with its work
+  // still running, and the score goes into a Song of its own.
+  const startNewSongWith = async (file: File, demoSongId: string | null) => {
+    setPendingUpload(null);
+    setUploading(true);
+    setError(null);
+    const sessionEpoch = sessionEpochRef.current;
+    try {
+      const created = await createSession();
+      const uploadResponse = await uploadScore(created.session_id, file);
+      if (sessionEpochRef.current !== sessionEpoch) return;
+      const newSongId = uploadResponse.song?.id ?? created.session_id;
+      pendingDemoSongRef.current = { songId: newSongId, demoSongId };
+      navigate(`/app/song/${newSongId}`);
+    } catch (err: any) {
+      if (sessionEpochRef.current !== sessionEpoch) return;
+      const message = err?.message || "Upload failed.";
+      if (isInsufficientCreditError(message)) {
+        openPaywall("insufficient_credits", message);
+      }
+      setError(message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const replaceScoreWith = (file: File, demoSongId: string | null) => {
+    setPendingUpload(null);
+    void handleUpload(file, demoSongId, { replace: true });
+  };
+
+  // Replace was refused because the job was already finishing. Offer the
+  // choice again once that job has ended.
+  useEffect(() => {
+    if (!pendingUpload?.waitForWorkToEnd || chatTurnInProgress) return;
+    setPendingUpload({ ...pendingUpload, waitForWorkToEnd: false });
+  }, [chatTurnInProgress, pendingUpload]);
+
+  // Enter and leaving the field both end up here; Escape marks the edit cancelled first.
+  const commitTitleEdit = async () => {
+    const draft = titleDraft;
+    setTitleDraft(null);
+    if (titleEditCancelledRef.current) {
+      titleEditCancelledRef.current = false;
+      return;
+    }
+    const song = currentSong;
+    const title = draft?.trim() ?? "";
+    if (!song || !title || title === song.title) return;
+    try {
+      const renamed = await renameSong(song.id, title);
+      setCurrentSong((current) =>
+        current && current.id === song.id
+          ? { ...current, title: renamed.title, title_edited: true }
+          : current
+      );
+    } catch (err: any) {
+      setError(err?.message || "Couldn't rename the song.");
+    }
+  };
+
+  // TEMPORARY, stub only (SIG-194): the real server records a Song's chat and
+  // jobs by itself. Until it exists, the page reports what it shows, so that a
+  // reload or My songs can bring it back. Delete with songsStub.ts.
+  const songIdForStub = songLoadState === "idle" ? currentSong?.id ?? null : null;
+  useEffect(() => {
+    if (!songIdForStub) return;
+    const report = () => {
+      const jobs: Parameters<typeof recordSongStateForStub>[1]["jobs"] = [];
+      let turnId: string | null = null;
+      for (const message of messages) {
+        if (message.role === "user") {
+          turnId = message.id;
+        } else if (message.jobId && message.progressUrl) {
+          jobs.push({
+            job_id: message.jobId,
+            job_kind: message.isProgress ? activeJobKind : null,
+            progress_url: message.progressUrl,
+            originating_turn_id: turnId,
+          });
+        }
+      }
+      recordSongStateForStub(songIdForStub, {
+        messages: messages
+          // An export mix's bubble belongs to the page, not to the chat record.
+          .filter((message) => !(message.role === "assistant" && message.jobId && !message.progressUrl))
+          .map((message) => ({ id: message.id, role: message.role, content: message.content })),
+        jobs,
+        score_id: activeScoreIdRef.current,
+        score_summary: scoreSummary,
+        performance_midi: performanceMidi,
+        solfege_settings: { system: solfegeSystem, mode: solfegeMode },
+      });
+    };
+    const timer = window.setTimeout(report, 300);
+    return () => {
+      window.clearTimeout(timer);
+      // The Song is being left: report its last state before it is cleared.
+      if (shownSongIdRef.current !== songIdForStub) report();
+    };
+  }, [activeJobKind, messages, performanceMidi, scoreSummary, solfegeMode, solfegeSystem, songIdForStub]);
+
   // A demo song is a score shipped with the app, loaded exactly like an upload.
   const loadDemoSong = async (song: DemoSong) => {
     setScoreMenuOpen(false);
-    if (chatTurnInProgressRef.current) return;
+    if (uploadBlocked) return;
     if (creditsLocked) {
       openPaywall("upload_blocked");
       return;
@@ -5342,12 +6014,12 @@ export default function MainApp() {
       setError(`Couldn't load the demo song "${song.title}". Please try again.`);
       return;
     }
-    await handleUpload(file, song.id);
+    requestUpload(file, song.id);
   };
 
   const chooseScoreFile = () => {
     setScoreMenuOpen(false);
-    if (chatTurnInProgressRef.current) return;
+    if (uploadBlocked) return;
     if (creditsLocked) {
       openPaywall("upload_blocked");
       return;
@@ -5370,7 +6042,10 @@ export default function MainApp() {
       return;
     }
     let keepTurnBusy = false;
+    // If the Song is left before the reply arrives, the reply is not for this page any more.
+    const generation = workspaceGenerationRef.current;
     setChatTurnBusy(true);
+    setAwaitingReply(true);
     setActiveJobKind(null);
     setJobKindPending(false);
     setStatus("Thinking...");
@@ -5399,6 +6074,11 @@ export default function MainApp() {
               }]
         )
       );
+      if (workspaceGenerationRef.current !== generation) {
+        if (stream) void stream.cancel();
+        return;
+      }
+      setAwaitingReply(false);
       if (response.type === "chat_error") {
         setError(response.message || "LLM request failed. Please try again.");
         return;
@@ -5475,15 +6155,19 @@ export default function MainApp() {
         await refreshScorePreview();
       }
     } catch (err: any) {
+      if (workspaceGenerationRef.current !== generation) return;
       const message = err?.message || "Failed to send message.";
       if (isInsufficientCreditError(message)) {
         openPaywall("insufficient_credits", message);
       }
       setError(message);
     } finally {
-      setStatus(null);
-      if (!keepTurnBusy) {
-        setChatTurnBusy(false);
+      if (workspaceGenerationRef.current === generation) {
+        setAwaitingReply(false);
+        setStatus(null);
+        if (!keepTurnBusy) {
+          setChatTurnBusy(false);
+        }
       }
     }
   };
@@ -5537,7 +6221,7 @@ export default function MainApp() {
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (creditsLocked || browserMixBounceActive || chatTurnInProgress) return;
+    if (creditsLocked || browserMixBounceActive || uploadBlocked) return;
     if (!isDragging) setIsDragging(true);
   };
 
@@ -5548,7 +6232,7 @@ export default function MainApp() {
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (chatTurnInProgressRef.current) return;
+    if (uploadBlocked) return;
     if (browserMixBounceActive) {
       setBrowserMixBounceError("Cancel the real-time mix download before replacing the score.");
       return;
@@ -5559,7 +6243,7 @@ export default function MainApp() {
     }
     setIsDragging(false);
     const file = event.dataTransfer.files?.[0];
-    if (file) handleUpload(file);
+    if (file) requestUpload(file);
   };
 
   const handleResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -5624,7 +6308,65 @@ export default function MainApp() {
             />
           </span>
         </div>
+        {currentSong ? (
+          <div className="song-title-slot">
+            {titleDraft !== null ? (
+              <input
+                className="song-title-input"
+                aria-label="Song title"
+                value={titleDraft}
+                maxLength={120}
+                autoFocus
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onBlur={() => void commitTitleEdit()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.currentTarget.blur();
+                  } else if (event.key === "Escape") {
+                    titleEditCancelledRef.current = true;
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                className="song-title-button"
+                data-testid="song-title"
+                title="Rename this song"
+                onClick={() => setTitleDraft(currentSong.title)}
+              >
+                <span className="song-title-text">{currentSong.title}</span>
+                <Pencil size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        ) : null}
         <div className="header-actions">
+          {currentSong ? (
+            <button
+              type="button"
+              className="btn-secondary-inline song-nav-button"
+              data-testid="new-song"
+              disabled={!canLeaveSong}
+              title={canLeaveSong ? "Start a new song" : "Wait for the reply first"}
+              onClick={() => navigate("/app")}
+            >
+              <FilePlus size={15} aria-hidden="true" />
+              <span className="song-nav-label">New song</span>
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn-secondary-inline song-nav-button"
+            data-testid="my-songs"
+            title="My songs"
+            onClick={() => setSongsDrawerOpen(true)}
+          >
+            <ListMusic size={15} aria-hidden="true" />
+            <span className="song-nav-label">My songs</span>
+          </button>
           <CreditsHeader
             available={available}
             subscriptionAvailable={billing.subscriptionCredits}
@@ -5776,8 +6518,8 @@ export default function MainApp() {
                       <button
                         type="button"
                         className="demo-song-link"
-                        disabled={uploading || browserMixBounceActive || chatTurnInProgress}
-                        title={chatTurnInProgress ? "Stop the running work first" : undefined}
+                        disabled={uploading || browserMixBounceActive || uploadBlocked}
+                        title={uploadBlockedTitle}
                         onClick={() => void loadDemoSong(song)}
                       >
                         {song.title}
@@ -6024,7 +6766,7 @@ export default function MainApp() {
               <div className="score-picker" ref={scorePickerRef}>
                 {scoreMenuOpen ? (
                   <div className="voice-picker-menu score-picker-menu" role="menu" aria-label="Add a score">
-                    <button type="button" role="menuitem" className="voice-picker-option" disabled={chatTurnInProgress} title={chatTurnInProgress ? "Stop the running work first" : undefined} onClick={chooseScoreFile}>
+                    <button type="button" role="menuitem" className="voice-picker-option" disabled={uploadBlocked} title={uploadBlockedTitle} onClick={chooseScoreFile}>
                       <span className="voice-picker-option-avatar recommended" aria-hidden="true">
                         <Upload size={14} />
                       </span>
@@ -6040,8 +6782,8 @@ export default function MainApp() {
                         type="button"
                         role="menuitem"
                         className="voice-picker-option"
-                        disabled={chatTurnInProgress}
-                        title={chatTurnInProgress ? "Stop the running work first" : undefined}
+                        disabled={uploadBlocked}
+                        title={uploadBlockedTitle}
                         onClick={() => void loadDemoSong(song)}
                       >
                         <span className="voice-picker-option-avatar recommended" aria-hidden="true">
@@ -6061,9 +6803,9 @@ export default function MainApp() {
                   aria-haspopup="menu"
                   aria-expanded={scoreMenuOpen}
                   aria-label={uploading ? "Uploading score" : "Add a score"}
-                  data-tooltip={chatTurnInProgress ? "Stop the running work first" : uploading ? "Uploading score…" : "Upload a score or load a demo song"}
-                  title={chatTurnInProgress ? "Stop the running work first" : undefined}
-                  disabled={uploading || browserMixBounceActive || chatTurnInProgress}
+                  data-tooltip={uploadBlockedTitle ?? (uploading ? "Uploading score…" : "Upload a score or load a demo song")}
+                  title={uploadBlockedTitle}
+                  disabled={uploading || browserMixBounceActive || uploadBlocked}
                   onClick={() => {
                     setScoreMenuOpen((open) => !open);
                     setVoiceMenuOpen(false);
@@ -6078,10 +6820,12 @@ export default function MainApp() {
                   hidden
                   data-testid="score-upload-input"
                   accept=".musicxml,.xml,.mxl"
-                  disabled={uploading || creditsLocked || browserMixBounceActive || chatTurnInProgress}
+                  disabled={uploading || creditsLocked || browserMixBounceActive || uploadBlocked}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
-                    if (file) handleUpload(file);
+                    // Cleared so that choosing the same file again is still a change.
+                    event.target.value = "";
+                    if (file) requestUpload(file);
                   }}
                 />
               </div>
@@ -6622,8 +7366,8 @@ export default function MainApp() {
                           key={song.id}
                           type="button"
                           className="demo-song-card"
-                          disabled={uploading || browserMixBounceActive || chatTurnInProgress}
-                          title={chatTurnInProgress ? "Stop the running work first" : undefined}
+                          disabled={uploading || browserMixBounceActive || uploadBlocked}
+                          title={uploadBlockedTitle}
                           onClick={() => void loadDemoSong(song)}
                         >
                           <Music2 size={18} aria-hidden="true" />
@@ -6652,6 +7396,62 @@ export default function MainApp() {
         </section>
         </div>
       </main>
+      {songLoadState !== "idle" ? (
+        <div className="song-load-overlay" role={songLoadState === "loading" ? "status" : "alert"}>
+          {songLoadState === "loading" ? (
+            <>
+              <span className="score-loading-spinner" aria-hidden="true" />
+              <span>Opening your song…</span>
+            </>
+          ) : (
+            <>
+              <p className="song-load-message">
+                {songLoadState === "unavailable"
+                  ? "This song isn't available"
+                  : "This song couldn't be opened. Please try again."}
+              </p>
+              <div className="song-load-actions">
+                {songLoadState === "failed" && routeSongId ? (
+                  <button
+                    type="button"
+                    className="btn-secondary-inline"
+                    onClick={() => void openSong(routeSongId)}
+                  >
+                    Try again
+                  </button>
+                ) : null}
+                <Link className="btn-secondary-inline" to="/app">
+                  Start a new song
+                </Link>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+      <SongsDrawer
+        open={songsDrawerOpen}
+        onClose={() => setSongsDrawerOpen(false)}
+        currentSongId={currentSong?.id ?? null}
+        canOpen={canLeaveSong}
+        onOpen={(songId) => {
+          setSongsDrawerOpen(false);
+          navigate(`/app/song/${songId}`);
+        }}
+        onDeleted={(songId) => {
+          if (songId !== shownSongIdRef.current) return;
+          setSongsDrawerOpen(false);
+          navigate("/app");
+        }}
+      />
+      {pendingUpload && !pendingUpload.waitForWorkToEnd ? (
+        <NewSongOrReplaceModal
+          scoreName={pendingUpload.file.name}
+          working={chatTurnInProgress}
+          onNewSong={() => void startNewSongWith(pendingUpload.file, pendingUpload.demoSongId)}
+          onReplace={() => replaceScoreWith(pendingUpload.file, pendingUpload.demoSongId)}
+          onCancel={() => setPendingUpload(null)}
+        />
+      ) : null}
       {showAnnouncement && currentAnnouncement ? (
         <AnnouncementModal 
           announcement={currentAnnouncement} 
@@ -6698,6 +7498,70 @@ function formatDuration(totalSeconds: number): string {
 // existing message object when its user-visible and expandable fields are the
 // same; otherwise every update makes the chat auto-scroll effect read
 // scrollHeight and synchronously lay out the score preview.
+function isTerminalProgressStatus(status: ProgressResponse["status"]): boolean {
+  return (
+    status === "done" ||
+    status === "stopped" ||
+    status === "error" ||
+    status === "action_required"
+  );
+}
+
+// What one progress payload does to its chat bubble. A live poll result and a
+// job restored with a reopened Song both go through here, so they show the same.
+// Returns the same message when nothing changed.
+function applyProgressToMessage(
+  message: Message,
+  payload: ProgressResponse,
+  refundedCredits?: number
+): Message {
+  const nextMessage = payload.message;
+  const nextProgress = payload.progress;
+  const nextAudioUrl = payload.audio_url;
+  const appendTerminalPreprocessMessage =
+    payload.job_kind === "preprocess" &&
+    (payload.status === "done" || payload.status === "error");
+  const appendProgressToChatBubble =
+    payload.status !== "error" || payload.job_kind === "preprocess";
+  const stoppedMessage = payload.status === "stopped"
+    ? `${nextMessage || "Stopped."}${refundedCredits ? ` Refunded ${refundedCredits} ${refundedCredits === 1 ? "credit" : "credits"}.` : ""}`
+    : nextMessage;
+  const nextAttemptMessages = extractAttemptMessages(payload.details);
+  const nextContent =
+    payload.job_kind === "preprocess" && payload.status === "running"
+      ? message.content
+      : appendTerminalPreprocessMessage
+        ? appendPreprocessTerminalMessage(message.content, nextMessage)
+        : appendProgressToChatBubble
+          ? appendProgressMessage(message.content, stoppedMessage)
+          : message.content;
+  const nextMessageState: Message = {
+    ...message,
+    content: nextContent,
+    details: payload.details ?? message.details,
+    attemptMessages: nextAttemptMessages ?? message.attemptMessages,
+    progressValue: typeof nextProgress === "number" ? nextProgress : message.progressValue,
+    // Each progress payload carries a newly signed URL. Keep the first
+    // one rather than rebuilding the player and re-fetching audio on every update.
+    audioUrl: message.audioUrl || (payload.status !== "stopped" ? nextAudioUrl : undefined),
+    audioTrack: payload.audio_track ?? message.audioTrack,
+    jobId: payload.job_id ?? message.jobId,
+    feedback: payload.feedback ?? message.feedback,
+    isProgress: !isTerminalProgressStatus(payload.status),
+  };
+  const changed =
+    nextMessageState.content !== message.content ||
+    nextMessageState.progressValue !== message.progressValue ||
+    nextMessageState.audioUrl !== message.audioUrl ||
+    nextMessageState.jobId !== message.jobId ||
+    nextMessageState.isProgress !== message.isProgress ||
+    !sameProgressValue(nextMessageState.details, message.details) ||
+    !sameProgressValue(nextMessageState.attemptMessages, message.attemptMessages) ||
+    !sameProgressValue(nextMessageState.audioTrack, message.audioTrack) ||
+    !sameProgressValue(nextMessageState.feedback, message.feedback);
+  return changed ? nextMessageState : message;
+}
+
 function sameProgressValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (!left || !right || typeof left !== "object" || typeof right !== "object") {

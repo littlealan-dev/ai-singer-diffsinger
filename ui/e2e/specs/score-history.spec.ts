@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { signInAsE2EUser } from "../auth";
+import { chooseReplace } from "../support";
 import { LATEST_ANNOUNCEMENT_ID } from "../../src/announcements";
 
 // Auth/Firestore are local emulators; render responses and media are deterministic.
@@ -186,10 +187,12 @@ test("re-upload preserves chat playback without restoring old mixer tracks", asy
   currentScoreRecovery = false;
   rejectUpload = true;
   await upload();
+  await chooseReplace(page);
   await expect(page.getByText("Invalid score", { exact: true })).toBeVisible();
   await expect(page.locator(".multitrack-lanes")).toContainText("Solo");
   rejectUpload = false;
   await upload();
+  await chooseReplace(page);
   await expect(page.locator(".multitrack-lanes")).toContainText("No tracks yet");
   await expect(audio).toHaveCount(1);
   expired = true;

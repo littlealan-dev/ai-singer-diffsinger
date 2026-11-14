@@ -1,0 +1,99 @@
+.song-choice-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(13, 11, 24, 0.6);
+    backdrop-filter: blur(12px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 10000;
+}
+
+.song-choice-modal {
+    background: linear-gradient(160deg, var(--bg-1) 0%, var(--bg-0) 100%);
+    color: var(--text-strong);
+    padding: 1.75rem;
+    border-radius: 24px;
+    width: 100%;
+    max-width: 460px;
+    box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7),
+                inset 0 0 0 1px var(--glass-border);
+}
+
+.song-choice-modal h2 {
+    margin: 0;
+    font-size: 1.25rem;
+}
+
+.song-choice-file {
+    margin: 0.35rem 0 1.1rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+}
+
+.song-choice-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.song-choice-option {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    padding: 0.85rem 1rem;
+    text-align: left;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-strong);
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.song-choice-option:hover {
+    background: rgba(255, 255, 255, 0.09);
+}
+
+.song-choice-option.primary {
+    border-color: var(--accent-cool);
+    background: rgba(155, 134, 255, 0.16);
+}
+
+.song-choice-option.primary:hover {
+    background: rgba(155, 134, 255, 0.24);
+}
+
+.song-choice-option:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+}
+
+.song-choice-option-name {
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.song-choice-option-detail {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    line-height: 1.35;
+}
+
+.song-choice-cancel {
+    display: block;
+    margin: 1rem auto 0;
+    padding: 0.4rem 1rem;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.song-choice-cancel:hover {
+    color: var(--text-strong);
+}
