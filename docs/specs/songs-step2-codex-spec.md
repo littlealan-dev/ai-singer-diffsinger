@@ -90,7 +90,7 @@ Accepted by Alan, 2026-11-13.
 | `expandRepeats` | job `expandRepeats` | The take's repeat order |
 | `durationSeconds` | job `actualDurationSeconds` | |
 | `voiceName` | job `voicebankName` | For display |
-| `muted`, `solo`, `volume` | the owner's mixer | Defaults for a new entry: not muted, not solo, the player's default volume |
+| `muted`, `solo`, `volume` | the owner's mixer | Defaults for a new entry: not muted, not solo, the player's default volume. `volume` is 0..1.2: the vocal sliders go up to 1.2 |
 
 `instruments[]` entry: `rawPartId`, `muted`, `solo`, `volume` (0..1), `gmProgram` (0..127 or null), `soundfontBank` (0..16383 or null), `presetKind` (str or null), `unassigned` (bool). The label and the percussion flag are not stored: they come from the score summary, as today.
 
@@ -239,7 +239,7 @@ def save_mix(session, body):                       # one transaction on the play
     return {"revision": p.revision}
 ```
 
-Last write wins; there is no revision check. Validation (400 `invalid_mix`): volumes 0..1, `level_db` -48..6, `gm_program` 0..127 or null, `soundfont_bank` 0..16383 or null, strings at most 200 characters, each list at most 64 entries.
+Last write wins; there is no revision check. Validation (400 `invalid_mix`): vocal volumes 0..1.2, instrument volumes 0..1, `level_db` -48..6, `gm_program` 0..127 or null, `soundfont_bank` 0..16383 or null, strings at most 200 characters, each list at most 64 entries.
 
 ### `POST /sessions/{id}/upload`, changed
 
