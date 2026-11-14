@@ -15,12 +15,12 @@ import tempfile
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from google.api_core.exceptions import InvalidArgument
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, EmailStr, Field, TypeAdapter
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 import logging
 
 from src.backend.config import Settings
@@ -40,7 +40,9 @@ from src.backend.orchestrator import (
     INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY,
     Orchestrator,
     SynthesisChatResponse,
+    _job_progress_url,
 )
+from src.backend import songs
 from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, render_mix_to_wav
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.job_dispatch import (
@@ -161,16 +163,20 @@ def _build_signed_progress_payload(
     user_id: str,
 ) -> Dict[str, Any]:
     """Build the canonical signed progress payload for polling and streaming."""
-    return _sign_audio_payload_urls(
-        request,
-        build_progress_payload(job_id, data),
-        user_id=user_id,
-        resource_path=(
-            data.get("outputPath")
-            if isinstance(data.get("outputPath"), str)
-            else None
-        ),
-    )
+    payload = build_progress_payload(job_id, data)
+    resource_path = data.get("outputPath") if isinstance(data.get("outputPath"), str) else None
+    if request.app.state.settings.backend_use_storage and resource_path is not None:
+        resource_path = songs.owned_job_path(
+            resource_path,
+            user_id=data.get("userId"),
+            session_id=data.get("sessionId"),
+            job_id=job_id,
+        )
+        if resource_path is None:
+            get_logger("backend.api").warning("job_audio_path_rejected job_id=%s", job_id)
+            payload.pop("audio_url", None)
+            return payload
+    return _sign_audio_payload_urls(request, payload, user_id=user_id, resource_path=resource_path)
 
 
 async def _stream_synthesis_events(
@@ -692,6 +698,7 @@ def create_app() -> FastAPI:
             "current_score": current_score,
             "score_summary": snapshot.get("score_summary"),
             "synthesis": record,
+            "player": await request.app.state.sessions.get_player(session_id, user_id),
             "job": (
                 {
                     "id": latest_job[0],
@@ -775,20 +782,146 @@ def create_app() -> FastAPI:
         session = await request.app.state.sessions.create_session(user_id=user_id)
         return {"session_id": session.id}
 
+    @app.get("/songs")
+    async def list_my_songs(request: Request, limit: int = 50) -> Dict[str, Any]:
+        """My songs: the caller's Songs, newest activity first."""
+        sessions: SessionStore = request.app.state.sessions
+        user_id = await _get_user_id_or_401(request)
+        rows = await sessions.list_songs(user_id, max(1, min(int(limit), 200)))
+        return {"songs": await _with_song_status(request.app.state.job_store, rows)}
+
+    @app.get("/songs/{session_id}/workspace")
+    async def get_song_workspace(session_id: str, request: Request) -> Any:
+        """Everything needed to open a Song: chat, score, jobs and player."""
+        sessions: SessionStore = request.app.state.sessions
+        job_store: JobStore = request.app.state.job_store
+        user_id = await _get_user_id_or_401(request)
+        try:
+            # The session, not its snapshot: opening a Song never downloads the score.
+            state = await sessions.get_session(session_id, user_id)
+            player = await sessions.get_player(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        song = state.song()
+        if song is None:
+            return _song_error(404, "song_not_found", "song.not_found")
+        session_jobs = await asyncio.to_thread(
+            job_store.list_session_jobs, user_id=user_id, session_id=session_id
+        )
+        jobs = [
+            {
+                **_build_signed_progress_payload(request, job_id=job_id, data=data, user_id=user_id),
+                "originating_turn_id": data.get("originatingTurnId"),
+                "created_at": songs.iso_time(data.get("createdAt")),
+                "progress_url": _job_progress_url(session_id, job_id),
+            }
+            for job_id, data in songs.workspace_jobs(session_jobs)
+        ]
+        player_payload = songs.player_response(player, score_id=state.score_id)
+        tracks = songs.usable_vocals(
+            player,
+            score_id=state.score_id,
+            score_summary=state.score_summary,
+            jobs_by_id=dict(session_jobs),
+        )
+        for track, job in tracks:
+            job_id = str(track.get("sourceJobId"))
+            # The same signing, and the same audio path check, as the job's own progress.
+            signed = _build_signed_progress_payload(request, job_id=job_id, data=job, user_id=user_id)
+            if not signed.get("audio_url"):
+                continue
+            player_payload["vocals"].append({
+                **songs.vocal_response(track),
+                "audio_url": signed["audio_url"],
+                "progress_url": _job_progress_url(session_id, job_id),
+            })
+        return {
+            "session_id": session_id,
+            "song": song,
+            "score": {
+                "score_id": state.score_id,
+                "current_score": {"version": state.current_score_version},
+                "score_summary": state.score_summary,
+                "solfege_settings": dict(state.solfege_settings),
+            },
+            "messages": [dict(entry) for entry in state.history],
+            "jobs": jobs,
+            "player": player_payload,
+        }
+
+    @app.patch("/songs/{session_id}")
+    async def rename_song(session_id: str, request: Request) -> Any:
+        sessions: SessionStore = request.app.state.sessions
+        user_id = await _get_user_id_or_401(request)
+        body = await _json_body_or_none(request)
+        title = songs.normalize_song_title(body.get("title") if isinstance(body, dict) else None)
+        if title is None:
+            return _song_error(400, "invalid_title", "song.invalid_title")
+        try:
+            row = await sessions.rename_song(session_id, user_id, title)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        return (await _with_song_status(request.app.state.job_store, [row]))[0]
+
+    @app.delete("/songs/{session_id}")
+    async def delete_song(session_id: str, request: Request) -> Any:
+        """Take a Song off the list. Its files, jobs and billing records stay."""
+        sessions: SessionStore = request.app.state.sessions
+        job_store: JobStore = request.app.state.job_store
+        user_id = await _get_user_id_or_401(request)
+        try:
+            await sessions.get_song_row(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
+            return _song_error(409, "work_running", "song.work_running")
+        try:
+            await sessions.delete_song(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        return {"deleted": True}
+
+    @app.put("/songs/{session_id}/player/mix")
+    async def save_player_mix(session_id: str, request: Request) -> Any:
+        """Save the owner's mixer and instrument choices. Last write wins."""
+        sessions: SessionStore = request.app.state.sessions
+        user_id = await _get_user_id_or_401(request)
+        try:
+            mix = songs.PlayerMix.model_validate(await _json_body_or_none(request))
+        except ValidationError:
+            return _song_error(400, "invalid_mix", "player.invalid_mix")
+        try:
+            revision = await sessions.save_mix(session_id, user_id, mix)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        except songs.SongScoreChangedError:
+            # A late save from before a Replace.
+            return _song_error(409, "score_changed", "player.score_changed")
+        return {"revision": revision}
+
     @app.post("/sessions/{session_id}/upload")
     async def upload_musicxml(
         session_id: str,
         request: Request,
         file: UploadFile = File(...),
+        replace: Optional[str] = Form(default=None),
     ) -> Dict[str, Any]:
-        """Upload a MusicXML file, parse it, and attach to a session."""
+        """Upload a MusicXML file, parse it, and attach to a session.
+
+        With replace="true" (the user chose Replace), running work is stopped
+        once the file has parsed, so a bad file stops nothing.
+        """
         sessions: SessionStore = request.app.state.sessions
         settings: Settings = request.app.state.settings
         job_store: JobStore = request.app.state.job_store
         user_id, user_email = await _get_user_context_or_401(request)
         await _require_active_credits(user_id, user_email)
-        await _get_session_or_404(sessions, session_id, user_id)
-        if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
+        state = await _get_session_or_404(sessions, session_id, user_id)
+        replace_requested = (replace or "").strip().lower() == "true"
+        work_running = bool(
+            await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id)
+        )
+        if work_running and not replace_requested:
             return JSONResponse(
                 status_code=409,
                 content={"code": "work_running", "message": backend_message("upload.work_running")},
@@ -906,6 +1039,25 @@ def create_app() -> FastAPI:
                 parse_score_ms,
                 uploaded_bytes,
             )
+            if work_running:
+                # Replace: the file is good, so stop the work. Anything that
+                # could not be stopped finishes as normal, and the score stays.
+                stop = await _stop_song_work(
+                    request, session_id=session_id, user_id=user_id, state=state
+                )
+                if any(job["result"] != "stopped" for job in stop["jobs"]):
+                    logger.info(
+                        "upload_replace_stop_too_late session_id=%s results=%s",
+                        session_id,
+                        [job["result"] for job in stop["jobs"]],
+                    )
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "code": "stop_too_late",
+                            "message": backend_message("upload.stop_too_late"),
+                        },
+                    )
 
             score_id = uuid.uuid4().hex
             session_dir = sessions.session_dir(session_id) / "scores" / score_id / "upload"
@@ -968,7 +1120,8 @@ def create_app() -> FastAPI:
             score.pop("score_summary", None)
         try:
             version = await sessions.commit_uploaded_score(
-                session_id, score_id=score_id, score=score, summary=score_summary, files=files
+                session_id, score_id=score_id, score=score, summary=score_summary, files=files,
+                file_name=original_name,
             )
         except InvalidArgument as exc:
             # Firestore rejected the parsed score. Its error does not say which
@@ -1001,6 +1154,7 @@ def create_app() -> FastAPI:
             # successful synthesis request, not while parsing an upload.
             "performance_midi": None,
             "solfege_settings": _default_solfege_settings_response(),
+            "song": _upload_song_block((await _get_session_or_404(sessions, session_id, user_id)).song()),
         }
 
     @app.get("/sessions/{session_id}/synthesis-estimate")
@@ -1046,12 +1200,19 @@ def create_app() -> FastAPI:
     async def stop_session_work(session_id: str, request: Request) -> Dict[str, Any]:
         """Stop active work owned by this song before each job's stop point."""
         sessions: SessionStore = request.app.state.sessions
-        job_store: JobStore = request.app.state.job_store
         user_id = await _get_user_id_or_401(request)
         try:
             state = await sessions.get_session(session_id, user_id)
         except (KeyError, PermissionError) as exc:
             raise HTTPException(status_code=404, detail="Session not found.") from exc
+        return await _stop_song_work(request, session_id=session_id, user_id=user_id, state=state)
+
+    async def _stop_song_work(
+        request: Request, *, session_id: str, user_id: str, state: Any
+    ) -> Dict[str, Any]:
+        """Stop the Song's active work before each job's stop point: the Stop button and Replace."""
+        sessions: SessionStore = request.app.state.sessions
+        job_store: JobStore = request.app.state.job_store
         history = state.history
         latest_user_id = next(
             (
@@ -2406,8 +2567,9 @@ async def _resolve_export_mix_source_path(
         raise ValueError(f"Source job is missing losslessOutputPath/outputPath: {source_job_id}")
     output_path = output_path.strip()
     if settings.backend_use_storage:
-        expected_prefix = f"sessions/{user_id}/{session_id}/jobs/{source_job_id}/"
-        if not output_path.startswith(expected_prefix):
+        if songs.owned_job_path(
+            output_path, user_id=user_id, session_id=session_id, job_id=source_job_id
+        ) is None:
             raise ValueError(f"Source job output path is not in the expected storage prefix.")
         suffix = Path(output_path).suffix or ".wav"
         local_path = work_dir / f"source-{source_job_id}{suffix}"
@@ -2447,6 +2609,40 @@ def _validate_export_mix_source_job(
             f"Source job part_id mismatch for {source_job_id}: "
             f"{job_part_id or '<missing>'} != {requested_part_id}"
         )
+
+
+def _song_error(status_code: int, code: str, message_key: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"code": code, "message": backend_message(message_key)},
+    )
+
+
+async def _json_body_or_none(request: Request) -> Any:
+    try:
+        return await request.json()
+    except ValueError:
+        return None
+
+
+def _upload_song_block(song: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if song is None:
+        return None
+    return {key: song[key] for key in ("id", "title", "title_edited", "created_at")}
+
+
+async def _with_song_status(job_store: JobStore, rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Add each row's status from its current job, in one batched read. For display only."""
+    jobs = await asyncio.to_thread(
+        job_store.get_jobs, [str(row.get("current_job_id") or "") for row in rows]
+    )
+    result = []
+    for row in rows:
+        current = jobs.get(str(row.get("current_job_id") or "")) or {}
+        working = current.get("status") in {"queued", "running"}
+        public = {key: value for key, value in row.items() if key != "current_job_id"}
+        result.append({**public, "status": "working" if working else "idle"})
+    return result
 
 
 async def _get_session_or_404(
@@ -2836,6 +3032,27 @@ def _sign_audio_payload_urls(
     audio_url = payload.get("audio_url")
     if not isinstance(audio_url, str) or not audio_url:
         return payload
+    own_path = _playback_resource_path(payload)
+    url_session_id = _audio_url_session_id(audio_url)
+    if (
+        resource_path is None
+        and own_path is not None
+        and url_session_id is not None
+        and request.app.state.settings.backend_use_storage
+    ):
+        # A chat response carries its own stored path: it must be a job's file in this session.
+        job_id = str(payload.get("job_id") or "") or songs.job_folder_id(
+            own_path, user_id=user_id, session_id=url_session_id
+        )
+        if songs.owned_job_path(
+            own_path, user_id=user_id, session_id=url_session_id, job_id=job_id
+        ) is None:
+            get_logger("backend.api").warning(
+                "job_audio_path_rejected job_id=%s", job_id or "unknown"
+            )
+            updated = dict(payload)
+            updated.pop("audio_url", None)
+            return updated
     signed = _build_signed_audio_url(
         request.app.state.settings,
         payload,
@@ -2848,6 +3065,14 @@ def _sign_audio_payload_urls(
     updated = dict(payload)
     updated["audio_url"] = signed
     return updated
+
+
+def _audio_url_session_id(audio_url: str) -> str | None:
+    """The session of a backend audio URL (/sessions/{id}/audio), else None."""
+    path_parts = [part for part in urlsplit(audio_url).path.split("/") if part]
+    if len(path_parts) == 3 and path_parts[0] == "sessions" and path_parts[2] == "audio":
+        return path_parts[1]
+    return None
 
 
 def _build_signed_audio_url(

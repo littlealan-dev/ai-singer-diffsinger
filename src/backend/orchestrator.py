@@ -2187,6 +2187,8 @@ class Orchestrator:
         midi_paths: Optional[Dict[str, Any]] = None
         midi_committed = False
         midi_session_published = False
+        # Set once the take is completed and settled: the Song's player then records it.
+        take_settled = False
         try:
             set_log_context(
                 session_id=session_id,
@@ -2317,6 +2319,7 @@ class Orchestrator:
                     completedAt=datetime.now(timezone.utc),
                 )
                 midi_committed = True
+                take_settled = True
                 return
             # Publish before settlement so the UI can never observe a successful
             # completion whose MIDI asset is not yet fetchable. A failure here is
@@ -2349,6 +2352,7 @@ class Orchestrator:
                 "already_completed_and_settled",
             }:
                 midi_committed = True
+                take_settled = True
                 return
             self._logger.error(
                 "credit_settlement_unresolved session=%s job=%s status=%s",
@@ -2592,7 +2596,23 @@ class Orchestrator:
             finalizer = self._billing_finalization_tasks.get(job_id)
             if finalizer is not None and finalizer.done():
                 self._billing_finalization_tasks.pop(job_id, None)
+            if take_settled:
+                # Every take route ends here: in-process, the synthesis worker
+                # and the premium worker. It runs whether or not a page still
+                # follows the take.
+                await self._record_take_in_player(session_id, job_id)
             clear_log_context()
+
+    async def _record_take_in_player(self, session_id: str, job_id: str) -> None:
+        """Put a settled take in its Song's player record; a failure never fails the take."""
+        try:
+            job = await asyncio.to_thread(self._job_store.get_job, job_id)
+            if job is not None:
+                await self._sessions.record_take(session_id, job_id, job)
+        except Exception:
+            self._logger.exception(
+                "player_record_update_failed session=%s job=%s", session_id, job_id
+            )
 
     async def _run_preprocess_job(
         self,

@@ -215,8 +215,8 @@ class JobStore:
 
         return _pass(transaction)
 
-    def list_active_jobs(self, *, user_id: str, session_id: str) -> list[Tuple[str, Dict[str, Any]]]:
-        """Return queued and running jobs owned by one session."""
+    def list_session_jobs(self, *, user_id: str, session_id: str) -> list[Tuple[str, Dict[str, Any]]]:
+        """Return every job owned by one session, oldest first."""
         self._ensure_client()
         assert self._client is not None
         docs = (
@@ -225,11 +225,32 @@ class JobStore:
             .where("sessionId", "==", session_id)
             .stream()
         )
+        jobs = [(doc.id, doc.to_dict() or {}) for doc in docs]
+        # Sorted here: ordering in the query would need a composite index.
+        jobs.sort(key=lambda item: _created_sort_key(item[1]))
+        return jobs
+
+    def list_active_jobs(self, *, user_id: str, session_id: str) -> list[Tuple[str, Dict[str, Any]]]:
+        """Return queued and running jobs owned by one session."""
         return [
-            (doc.id, data)
-            for doc in docs
-            if (data := doc.to_dict() or {}).get("status") in _MUTABLE_PROGRESS_STATUSES
+            (job_id, data)
+            for job_id, data in self.list_session_jobs(user_id=user_id, session_id=session_id)
+            if data.get("status") in _MUTABLE_PROGRESS_STATUSES
         ]
+
+    def get_jobs(self, job_ids: list[str]) -> Dict[str, Dict[str, Any]]:
+        """Read several jobs by ID in one batch; missing ones are left out."""
+        unique_ids = list(dict.fromkeys(job_id for job_id in job_ids if job_id))
+        if not unique_ids:
+            return {}
+        self._ensure_client()
+        assert self._client is not None
+        refs = [self._client.collection(self.collection).document(job_id) for job_id in unique_ids]
+        return {
+            snapshot.id: snapshot.to_dict() or {}
+            for snapshot in self._client.get_all(refs)
+            if snapshot.exists
+        }
 
     def claim_dispatched_job(
         self,
@@ -436,6 +457,18 @@ class JobStore:
     claim_preprocess_job = claim_dispatched_job
     renew_preprocess_lease = renew_job_lease
     release_preprocess_job_for_retry = release_job_for_retry
+
+
+def _created_sort_key(data: Dict[str, Any]) -> float:
+    created = data.get("createdAt")
+    if isinstance(created, datetime):
+        return created.timestamp()
+    if isinstance(created, str):
+        try:
+            return datetime.fromisoformat(created).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def build_progress_payload(job_id: str, data: Dict[str, Any]) -> Dict[str, Any]:

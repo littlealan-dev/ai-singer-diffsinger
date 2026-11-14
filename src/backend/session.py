@@ -16,6 +16,7 @@ import hashlib
 
 from firebase_admin import firestore
 
+from src.backend import songs
 from src.backend.firebase_app import get_firestore_client
 from src.backend.storage_client import download_bytes, upload_bytes
 
@@ -75,6 +76,26 @@ class SessionState:
     score_id: Optional[str] = None
     current_job_id: Optional[str] = None
     job_history_schema_version: int = 2
+    # A session becomes a Song at its first score upload.
+    title: Optional[str] = None
+    title_edited: bool = False
+    song_created_at: Optional[datetime] = None
+    song_listed: bool = False
+    deleted_at: Optional[datetime] = None
+    # The memory store's player record; Firestore keeps it in a subcollection.
+    player: Optional[Dict[str, Any]] = None
+
+    def song(self) -> Optional[Dict[str, Any]]:
+        """The Song's identity, or None before the first upload."""
+        if self.song_created_at is None:
+            return None
+        return {
+            "id": self.id,
+            "title": self.title or songs.UNTITLED_SONG,
+            "title_edited": bool(self.title_edited),
+            "created_at": songs.iso_time(self.song_created_at),
+            "last_active_at": songs.iso_time(self.last_active_at),
+        }
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a JSON-serializable snapshot of session state."""
@@ -101,6 +122,7 @@ class SessionState:
             "score_summary": dict(self.score_summary) if self.score_summary else None,
             "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
+            "song": self.song(),
         }
 
     def _score_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -144,13 +166,17 @@ class WorkspacePersistence:
                              storage_path.rsplit("/", 1)[0] + "/input.xml", "application/xml")
         return storage_path
 
-    async def commit_uploaded_score(self, session_id, *, score_id, score, summary, files):
+    async def commit_uploaded_score(self, session_id, *, score_id, score, summary, files,
+                                    file_name=None):
         snapshot = await self.get_snapshot(session_id, None)
         path = await asyncio.to_thread(
             self._stage_score, session_id, snapshot["user_id"], score_id, 1, score
         )
         def commit(data):
+            song = songs.song_fields_at_upload(data, summary, file_name, self._now_value())
+            player = songs.empty_player(snapshot["user_id"], score_id)
             return {
+                **song,
                 "jobHistorySchemaVersion": 2,
                 "scoreId": score_id, "currentScoreVersion": 1,
                 "currentScore": copy.deepcopy(score), "currentScorePath": path,
@@ -160,7 +186,7 @@ class WorkspacePersistence:
                 "preprocessPlanHistory": [], "preprocessAttemptHistory": [],
                 "lastPreprocessPlan": None, "lastSuccessfulPreprocessPlan": None,
                 "solfegeSettings": _default_solfege_settings(),
-            }, None
+            }, ("player", player)
         await self._change_workspace(session_id, commit)
         return 1
 
@@ -215,6 +241,8 @@ _WORKSPACE_FIELDS = {
     "files": "files", "currentAudio": "current_audio", "scoreContextUpdated": "score_context_updated",
     "preprocessPlanHistory": "preprocess_plan_history", "preprocessAttemptHistory": "preprocess_attempt_history",
     "lastPreprocessPlan": "last_preprocess_plan", "solfegeSettings": "solfege_settings",
+    "title": "title", "titleEdited": "title_edited", "songCreatedAt": "song_created_at",
+    "songListed": "song_listed", "deletedAt": "deleted_at",
 }
 
 
@@ -247,6 +275,8 @@ class SessionStore(WorkspacePersistence):
             updates, job = change(data)
             if job and job[0] == "create":
                 job[1].create_job(**job[2])
+            if job and job[0] == "player":
+                state.player = self._stamped_player(job[1])
             for key, value in updates.items():
                 if key in _WORKSPACE_FIELDS:
                     setattr(state, _WORKSPACE_FIELDS[key], value)
@@ -286,7 +316,7 @@ class SessionStore(WorkspacePersistence):
         """Fetch a session, enforcing ownership and TTL."""
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None:
+            if state is None or state.deleted_at is not None:
                 raise KeyError(session_id)
             if user_id and state.user_id and state.user_id != user_id:
                 raise PermissionError(session_id)
@@ -300,7 +330,7 @@ class SessionStore(WorkspacePersistence):
         """Return a snapshot of a session for API responses."""
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None:
+            if state is None or state.deleted_at is not None:
                 raise KeyError(session_id)
             if user_id and state.user_id and state.user_id != user_id:
                 raise PermissionError(session_id)
@@ -349,7 +379,7 @@ class SessionStore(WorkspacePersistence):
         """Return the active MusicXML file, restoring it from storage when needed."""
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None:
+            if state is None or state.deleted_at is not None:
                 raise KeyError(session_id)
             if user_id and state.user_id and state.user_id != user_id:
                 raise PermissionError(session_id)
@@ -480,6 +510,98 @@ class SessionStore(WorkspacePersistence):
             if storage_path:
                 state.current_audio["storage_path"] = storage_path
             state.last_active_at = _utcnow()
+
+    def _now_value(self) -> datetime:
+        return _utcnow()
+
+    def _stamped_player(self, player: Dict[str, Any]) -> Dict[str, Any]:
+        return {**copy.deepcopy(player), "updatedAt": _utcnow()}
+
+    def _song_locked(self, session_id: str, user_id: Optional[str]) -> SessionState:
+        """The caller's undeleted Song (caller holds the lock)."""
+        state = self._sessions.get(session_id)
+        if state is None or state.deleted_at is not None or state.song_created_at is None:
+            raise KeyError(session_id)
+        if user_id and state.user_id != user_id:
+            raise PermissionError(session_id)
+        return state
+
+    @staticmethod
+    def _state_song_fields(state: SessionState) -> Dict[str, Any]:
+        return {
+            "title": state.title, "songCreatedAt": state.song_created_at,
+            "lastActiveAt": state.last_active_at, "currentJobId": state.current_job_id,
+            "scoreId": state.score_id,
+        }
+
+    async def get_player(self, session_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The session's player record, or None before its first upload."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.deleted_at is not None:
+                raise KeyError(session_id)
+            if user_id and state.user_id and state.user_id != user_id:
+                raise PermissionError(session_id)
+            return copy.deepcopy(state.player)
+
+    async def record_take(self, session_id: str, job_id: str, job: Dict[str, Any]) -> None:
+        """Put a settled take in the Song's player record."""
+        if not songs.is_take_job(job):
+            return
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            player = copy.deepcopy(state.player) or songs.empty_player(state.user_id, state.score_id)
+            if songs.apply_take(player, job_id, job):
+                player["revision"] = int(player.get("revision") or 0) + 1
+                state.player = self._stamped_player(player)
+
+    async def save_mix(self, session_id: str, user_id: str, mix: "songs.PlayerMix") -> int:
+        """Save the owner's mixer and instrument choices; returns the new revision."""
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            if mix.score_id != state.score_id:
+                raise songs.SongScoreChangedError(session_id)
+            player = copy.deepcopy(state.player)
+            if not player or player.get("scoreId") != state.score_id:
+                player = songs.empty_player(state.user_id, state.score_id)
+            songs.apply_mix(player, mix)
+            player["revision"] = int(player.get("revision") or 0) + 1
+            state.player = self._stamped_player(player)
+            return player["revision"]
+
+    async def rename_song(self, session_id: str, user_id: str, title: str) -> Dict[str, Any]:
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            state.title = title
+            state.title_edited = True
+            return _song_row(session_id, self._state_song_fields(state), state.player)
+
+    async def delete_song(self, session_id: str, user_id: str) -> None:
+        """Take the Song off the list. Its files, jobs and billing records stay."""
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            state.song_listed = False
+            state.deleted_at = _utcnow()
+
+    async def get_song_row(self, session_id: str, user_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            return _song_row(session_id, self._state_song_fields(state), state.player)
+
+    async def list_songs(self, user_id: str, limit: int) -> List[Dict[str, Any]]:
+        """The user's listed Songs, newest activity first."""
+        async with self._lock:
+            listed = [
+                state for state in self._sessions.values()
+                if state.user_id == user_id and state.song_listed and state.deleted_at is None
+            ]
+            listed.sort(key=lambda state: state.last_active_at, reverse=True)
+            return [
+                _song_row(state.id, self._state_song_fields(state), state.player)
+                for state in listed[:limit]
+            ]
 
     async def evict_expired(self) -> None:
         """Evict any sessions that have expired in memory."""
@@ -627,6 +749,8 @@ class FirestoreSessionStore(WorkspacePersistence):
                     txn.update(doc_ref, {**updates, "lastActiveAt": firestore.SERVER_TIMESTAMP})
                 if job and job[0] == "create":
                     txn.set(job_ref, job[1].build_job_payload(**job[2]))
+                if job and job[0] == "player":
+                    txn.set(self._player_ref(session_id), self._stamped_player(job[1]))
             commit(self._client.transaction())
         await asyncio.to_thread(run)
 
@@ -668,6 +792,13 @@ class FirestoreSessionStore(WorkspacePersistence):
             score_id=data.get("scoreId"),
             current_job_id=data.get("currentJobId"),
             job_history_schema_version=int(data.get("jobHistorySchemaVersion") or 1),
+            title=data.get("title"),
+            title_edited=bool(data.get("titleEdited", False)),
+            song_created_at=(
+                data.get("songCreatedAt") if isinstance(data.get("songCreatedAt"), datetime) else None
+            ),
+            song_listed=bool(data.get("songListed", False)),
+            deleted_at=data.get("deletedAt") if isinstance(data.get("deletedAt"), datetime) else None,
         )
 
     async def _run_session_io(self, session_id: str, work: Callable[[], _T]) -> _T:
@@ -690,9 +821,9 @@ class FirestoreSessionStore(WorkspacePersistence):
     def _read_owned(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
         """Read a session document, enforcing ownership, and mark it active."""
         doc = self._doc_ref(session_id).get()
-        if not doc.exists:
+        data = (doc.to_dict() or {}) if doc.exists else {}
+        if not doc.exists or data.get("deletedAt"):
             raise KeyError(session_id)
-        data = doc.to_dict() or {}
         if user_id and data.get("userId") and data.get("userId") != user_id:
             raise PermissionError(session_id)
         self._update(session_id, {})
@@ -791,9 +922,9 @@ class FirestoreSessionStore(WorkspacePersistence):
         """Return the active MusicXML file, restoring it from storage when needed."""
         def run() -> Path:
             doc = self._doc_ref(session_id).get()
-            if not doc.exists:
+            data = (doc.to_dict() or {}) if doc.exists else {}
+            if not doc.exists or data.get("deletedAt"):
                 raise KeyError(session_id)
-            data = doc.to_dict() or {}
             if user_id and data.get("userId") and data.get("userId") != user_id:
                 raise PermissionError(session_id)
             files = dict(data.get("files") or {})
@@ -940,6 +1071,153 @@ class FirestoreSessionStore(WorkspacePersistence):
             session_id, lambda: self._update(session_id, {"currentAudio": payload})
         )
 
+    def _now_value(self) -> Any:
+        return firestore.SERVER_TIMESTAMP
+
+    def _stamped_player(self, player: Dict[str, Any]) -> Dict[str, Any]:
+        return {**player, "updatedAt": firestore.SERVER_TIMESTAMP}
+
+    def _player_ref(self, session_id: str):
+        """The Song's player record: sessions/{id}/player/current."""
+        return self._doc_ref(session_id).collection("player").document("current")
+
+    @staticmethod
+    def _owned_song(snapshot, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
+        """The caller's undeleted Song's data, from a session snapshot."""
+        data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+        if not snapshot.exists or data.get("deletedAt") or not data.get("songCreatedAt"):
+            raise KeyError(session_id)
+        if user_id and data.get("userId") != user_id:
+            raise PermissionError(session_id)
+        return data
+
+    async def get_player(self, session_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The session's player record, or None before its first upload."""
+        def run() -> Optional[Dict[str, Any]]:
+            doc = self._doc_ref(session_id).get()
+            data = (doc.to_dict() or {}) if doc.exists else {}
+            if not doc.exists or data.get("deletedAt"):
+                raise KeyError(session_id)
+            if user_id and data.get("userId") and data.get("userId") != user_id:
+                raise PermissionError(session_id)
+            player = self._player_ref(session_id).get()
+            return (player.to_dict() or {}) if player.exists else None
+
+        return await self._run_session_io(session_id, run)
+
+    async def record_take(self, session_id: str, job_id: str, job: Dict[str, Any]) -> None:
+        """Put a settled take in the Song's player record, in one transaction."""
+        if not songs.is_take_job(job):
+            return
+
+        def run() -> None:
+            session_ref, player_ref = self._doc_ref(session_id), self._player_ref(session_id)
+
+            @firestore.transactional
+            def commit(txn):
+                session = session_ref.get(transaction=txn)
+                if not session.exists:
+                    raise KeyError(session_id)
+                data = session.to_dict() or {}
+                current = player_ref.get(transaction=txn)
+                player = (current.to_dict() or {}) if current.exists else songs.empty_player(
+                    data.get("userId"), data.get("scoreId")
+                )
+                if songs.apply_take(player, job_id, job):
+                    player["revision"] = int(player.get("revision") or 0) + 1
+                    txn.set(player_ref, self._stamped_player(player))
+
+            commit(self._client.transaction())
+
+        await self._run_session_io(session_id, run)
+
+    async def save_mix(self, session_id: str, user_id: str, mix: "songs.PlayerMix") -> int:
+        """Save the owner's mixer and instrument choices; returns the new revision."""
+        def run() -> int:
+            session_ref, player_ref = self._doc_ref(session_id), self._player_ref(session_id)
+
+            @firestore.transactional
+            def commit(txn) -> int:
+                data = self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
+                if mix.score_id != data.get("scoreId"):
+                    raise songs.SongScoreChangedError(session_id)
+                current = player_ref.get(transaction=txn)
+                player = (current.to_dict() or {}) if current.exists else None
+                if not player or player.get("scoreId") != data.get("scoreId"):
+                    player = songs.empty_player(data.get("userId"), data.get("scoreId"))
+                songs.apply_mix(player, mix)
+                player["revision"] = int(player.get("revision") or 0) + 1
+                txn.set(player_ref, self._stamped_player(player))
+                return player["revision"]
+
+            return commit(self._client.transaction())
+
+        return await self._run_session_io(session_id, run)
+
+    async def rename_song(self, session_id: str, user_id: str, title: str) -> Dict[str, Any]:
+        def run() -> Dict[str, Any]:
+            session_ref, player_ref = self._doc_ref(session_id), self._player_ref(session_id)
+
+            @firestore.transactional
+            def commit(txn) -> Dict[str, Any]:
+                data = self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
+                player = player_ref.get(transaction=txn)
+                txn.update(session_ref, {"title": title, "titleEdited": True})
+                return _song_row(
+                    session_id, {**data, "title": title},
+                    (player.to_dict() or {}) if player.exists else None,
+                )
+
+            return commit(self._client.transaction())
+
+        return await self._run_session_io(session_id, run)
+
+    async def delete_song(self, session_id: str, user_id: str) -> None:
+        """Take the Song off the list. Its files, jobs and billing records stay."""
+        def run() -> None:
+            session_ref = self._doc_ref(session_id)
+
+            @firestore.transactional
+            def commit(txn) -> None:
+                self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
+                txn.update(session_ref, {"songListed": False, "deletedAt": firestore.SERVER_TIMESTAMP})
+
+            commit(self._client.transaction())
+
+        await self._run_session_io(session_id, run)
+
+    async def get_song_row(self, session_id: str, user_id: str) -> Dict[str, Any]:
+        def run() -> Dict[str, Any]:
+            data = self._owned_song(self._doc_ref(session_id).get(), session_id, user_id)
+            player = self._player_ref(session_id).get()
+            return _song_row(session_id, data, (player.to_dict() or {}) if player.exists else None)
+
+        return await self._run_session_io(session_id, run)
+
+    async def list_songs(self, user_id: str, limit: int) -> List[Dict[str, Any]]:
+        """The user's listed Songs, newest activity first, without loading any history or score."""
+        def run() -> List[Dict[str, Any]]:
+            # Two equality filters need no composite index.
+            query = (
+                self._client.collection(self._collection)
+                .where("userId", "==", user_id)
+                .where("songListed", "==", True)
+                .select(["title", "songCreatedAt", "lastActiveAt", "currentJobId", "scoreId", "deletedAt"])
+            )
+            listed = [(doc.id, doc.to_dict() or {}) for doc in query.stream()]
+            listed = [(sid, data) for sid, data in listed if not data.get("deletedAt")]
+            listed.sort(key=lambda item: _time_sort_key(item[1].get("lastActiveAt")), reverse=True)
+            listed = listed[:limit]
+            players: Dict[str, Dict[str, Any]] = {}
+            if listed:
+                refs = [self._player_ref(sid) for sid, _ in listed]
+                for snapshot in self._client.get_all(refs, field_paths=["scoreId", "vocals"]):
+                    if snapshot.exists:
+                        players[snapshot.reference.parent.parent.id] = snapshot.to_dict() or {}
+            return [_song_row(sid, data, players.get(sid)) for sid, data in listed]
+
+        return await asyncio.to_thread(run)
+
     async def evict_expired(self) -> None:
         """Firestore-backed sessions rely on TTL policies; no-op here."""
         return
@@ -954,6 +1232,24 @@ class FirestoreSessionStore(WorkspacePersistence):
         if not isinstance(user_id, str) or not user_id.strip():
             raise ValueError(f"Missing userId for storage-backed session {session_id}.")
         return user_id
+
+
+def _time_sort_key(value: Any) -> float:
+    return value.timestamp() if isinstance(value, datetime) else 0.0
+
+
+def _song_row(session_id: str, data: Dict[str, Any], player: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A My songs row, before its status: {id, title, created_at, last_active_at, current_job_id, track_count}."""
+    tracks = (player or {}).get("vocals") or []
+    holds_this_score = bool(player) and player.get("scoreId") == data.get("scoreId")
+    return {
+        "id": session_id,
+        "title": data.get("title") or songs.UNTITLED_SONG,
+        "created_at": songs.iso_time(data.get("songCreatedAt")),
+        "last_active_at": songs.iso_time(data.get("lastActiveAt")),
+        "current_job_id": data.get("currentJobId"),
+        "track_count": len(tracks) if holds_this_score else 0,
+    }
 
 
 def _serialize_score(score: Dict[str, Any]) -> bytes:
