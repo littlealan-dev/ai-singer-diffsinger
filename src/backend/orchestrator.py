@@ -2797,13 +2797,7 @@ class Orchestrator:
             )
         response_message = initial_response_message
         thought_block_for_response = initial_thought_block
-        require_solfege_lyrics = self._message_requests_sung_solfege(
-            workflow_user_message or ""
-        )
-        pending_calls = self._enforce_solfege_synthesis_requirement(
-            tool_calls,
-            require_solfege_lyrics=require_solfege_lyrics,
-        )
+        pending_calls = list(tool_calls)
         working_score = current_score
         score_summary = snapshot.get("score_summary") if isinstance(snapshot, dict) else None
         # A tool round that saves a new score, such as adding a solfege line,
@@ -3478,10 +3472,7 @@ class Orchestrator:
                         response["review_required"] = True
                 break
 
-            pending_calls = self._enforce_solfege_synthesis_requirement(
-                followup_response.tool_calls,
-                require_solfege_lyrics=require_solfege_lyrics,
-            )
+            pending_calls = list(followup_response.tool_calls)
             pending_thought_summary = followup_response.thought_summary or ""
 
         response = self._attach_attempt_messages(response, attempt_messages)
@@ -5349,9 +5340,6 @@ class Orchestrator:
                 request = copy.deepcopy(call.arguments)
             break
 
-        if self._message_requests_sung_solfege(user_message):
-            request["require_solfege_lyrics"] = True
-
         target_keys = ("part_id", "voice_id", "voice_part_id", "verse_number")
         synthesis_keys = (
             "voicebank",
@@ -6030,35 +6018,6 @@ class Orchestrator:
                 "voice this",
             )
         )
-
-    def _message_requests_sung_solfege(self, message: str) -> bool:
-        """Return True when the user explicitly requests sung solfege/solfa."""
-        lowered = message.casefold()
-        return self._message_requests_render(message) and (
-            "solfege" in lowered or "solfa" in lowered
-        )
-
-    def _enforce_solfege_synthesis_requirement(
-        self,
-        tool_calls: List[ToolCall],
-        *,
-        require_solfege_lyrics: bool,
-    ) -> List[ToolCall]:
-        """Carry an explicit sung-solfege request into every synthesis handoff."""
-        if not require_solfege_lyrics:
-            return list(tool_calls)
-        updated_calls: List[ToolCall] = []
-        for call in tool_calls:
-            arguments = dict(call.arguments)
-            if call.name in {TOOL_PREPARE_SYNTHESIS_QUOTE, TOOL_SYNTHESIZE}:
-                arguments["require_solfege_lyrics"] = True
-            elif call.name == TOOL_START_PREPROCESS_WORKFLOW:
-                request = arguments.get("request")
-                normalized_request = dict(request) if isinstance(request, dict) else {}
-                normalized_request["require_solfege_lyrics"] = True
-                arguments["request"] = normalized_request
-            updated_calls.append(replace(call, arguments=arguments))
-        return updated_calls
 
     def _resolve_selection_part_index(
         self,

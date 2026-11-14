@@ -4226,13 +4226,9 @@ def _message_only_payload(tool_result: str) -> dict:
     return json.loads(tool_result.split("Message-only payload:\n", 1)[1])
 
 
-def _alto_quote_session(test_client, app, monkeypatch):
-    """The Happy Birthday demo, a client that quotes the Alto and then confirms it."""
+def _alto_verse_1_client(test_client, app, **extra_arguments):
+    """The Happy Birthday demo, a client that quotes the Alto's verse 1 and then confirms it."""
     session_id, summary = _upload_demo_with_real_parsing(test_client, app)
-    monkeypatch.setattr(
-        "src.backend.orchestrator.synthesize_preflight_action_required",
-        lambda score, part_index: None,
-    )
     alto_verse_1 = next(
         selection
         for part in summary["parts"]
@@ -4244,6 +4240,7 @@ def _alto_quote_session(test_client, app, monkeypatch):
         "part_id": "Alto",
         "voicebank": "Dummy",
         "lyric_selection": {key: alto_verse_1[key] for key in ("id", "number", "name")},
+        **extra_arguments,
     })
     app.state.llm_client = llm_client
     app.state.orchestrator._llm_client = llm_client
@@ -4254,6 +4251,16 @@ def _alto_quote_session(test_client, app, monkeypatch):
         return {"type": "chat_text", "message": "Starting synthesis."}
 
     app.state.orchestrator._start_synthesis_job = fake_start_synthesis_job
+    return session_id, llm_client, started
+
+
+def _alto_quote_session(test_client, app, monkeypatch):
+    """The Happy Birthday demo, a client that quotes the Alto and then confirms it."""
+    monkeypatch.setattr(
+        "src.backend.orchestrator.synthesize_preflight_action_required",
+        lambda score, part_index: None,
+    )
+    session_id, llm_client, started = _alto_verse_1_client(test_client, app)
     quote = test_client.post(f"/sessions/{session_id}/chat", json={"message": "sing the alto part"})
     assert quote.status_code == 200
     first_quote = _message_only_payload(llm_client.tool_results[-1])
@@ -5230,7 +5237,47 @@ def test_synthesize_does_not_auto_enable_patch_for_user_solfege_like_lyrics(
     assert "solfege_pronunciation_patch" not in started["arguments"]
 
 
-def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
+def test_message_mentioning_solfege_keeps_the_models_quote_choices(client):
+    """The model left the flag out, so the quote is for the written words (SIG-193)."""
+    test_client, app = client
+    session_id, llm_client, _ = _alto_verse_1_client(test_client, app)
+
+    response = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={
+            "message": "Render the alto with the written lyrics, no accompaniment, "
+            "harmony or solfege"
+        },
+    )
+
+    assert response.status_code == 200
+    quote = _message_only_payload(llm_client.tool_results[-1])
+    assert quote["status"] == "quote_ready"
+    assert quote["render_choices"]["require_solfege_lyrics"] is False
+    assert quote["render_choices"]["solfege_pronunciation_patch"] is False
+
+
+def test_model_choosing_words_over_solfege_starts_the_word_take(client):
+    """The model sent require_solfege_lyrics=false, so that value runs (SIG-193)."""
+    test_client, app = client
+    session_id, llm_client, started = _alto_verse_1_client(
+        test_client, app, require_solfege_lyrics=False
+    )
+
+    quoted = test_client.post(
+        f"/sessions/{session_id}/chat",
+        json={"message": "Sing the alto with the written lyrics, not solfege"},
+    )
+    assert quoted.status_code == 200
+    assert "arguments" not in started
+    confirmed = test_client.post(f"/sessions/{session_id}/chat", json={"message": "yes"})
+
+    assert confirmed.status_code == 200
+    assert started["arguments"].get("require_solfege_lyrics") is not True
+    assert not any("solfege_lyrics_required" in result for result in llm_client.tool_results)
+
+
+def test_model_solfege_flag_drives_solfege_lyrics_required_followup(client):
     test_client, app = client
     session_id = _create_session(test_client)
     current_score = {
@@ -5311,6 +5358,7 @@ def test_sung_solfege_request_forces_requirement_and_uses_llm_followup(client):
                                     "number": "1",
                                     "name": "",
                                 },
+                                "require_solfege_lyrics": True,
                             },
                         }
                     ],
@@ -5778,7 +5826,8 @@ def test_workflow_returns_best_valid_candidate_when_followup_step_fails(client):
     assert response["current_score"] == {"score": {"title": "Derived"}, "version": 2}
 
 
-def test_followup_preprocess_handoff_starts_background_job(client):
+@pytest.mark.parametrize("model_flag", [{}, {"require_solfege_lyrics": True}])
+def test_followup_preprocess_handoff_starts_background_job(client, model_flag):
     _, app = client
     orchestrator = app.state.orchestrator
     score = {
@@ -5826,6 +5875,7 @@ def test_followup_preprocess_handoff_starts_background_job(client):
                                 "intensity": 0.7,
                                 "solfege_pronunciation_patch": True,
                                 "reason": "The selected line needs preparation.",
+                                **model_flag,
                             }
                         },
                     )
@@ -5894,7 +5944,7 @@ def test_followup_preprocess_handoff_starts_background_job(client):
         "language": "en",
         "intensity": 0.7,
         "solfege_pronunciation_patch": True,
-        "require_solfege_lyrics": True,
+        **model_flag,
     }
     assert started["planning_context"]["user_request"] == "sing women in solfege"
 
