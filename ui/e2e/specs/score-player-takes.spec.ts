@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
-import { chooseReplace } from "../support";
+import { chooseReplace, uploadedSong } from "../support";
 
 // The score player gets each take's audio when that take's job completes: it
 // is downloaded and decoded once, and replaces the previous take of its part.
@@ -85,6 +85,7 @@ async function mockBackend(page: Page): Promise<Backend> {
     if (route_.endsWith("/upload")) {
       return json({
         session_id: SESSION_ID,
+        song: uploadedSong(SESSION_ID, "Practice Tune"),
         score_id: `score-${Date.now()}`,
         parsed: true,
         current_score: { version: 1 },

@@ -1,5 +1,4 @@
-import { getAppCheckToken, getCurrentUser, getIdToken } from "./firebase";
-import { createSongsStub, type SongsStub } from "./songsStub";
+import { getAppCheckToken, getIdToken } from "./firebase";
 
 export type ScoreSummaryPart = {
   part_id?: string;
@@ -526,37 +525,6 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * TEMPORARY, until the Songs backend (SIG-194) is deployed: the Songs endpoints
- * are answered in the browser by `songsStub.ts`. On in dev and e2e builds, off
- * in production builds; `VITE_SONGS_API_STUB=0` or `=1` forces it either way.
- */
-const SONGS_API_STUBBED =
-  import.meta.env.VITE_SONGS_API_STUB === "1" ||
-  (import.meta.env.DEV && import.meta.env.VITE_SONGS_API_STUB !== "0");
-
-let songsStubInstance: SongsStub | null = null;
-
-function songsStub(): SongsStub {
-  songsStubInstance ??= createSongsStub({
-    userId: () => getCurrentUser()?.uid ?? null,
-    uploadScore: uploadScoreToBackend,
-    fetchProgress,
-    stopSessionWork,
-    makeError: (message, status, code) => new ApiError(message, status, code),
-    errorCode: (error) => (error instanceof ApiError ? error.code : undefined),
-  });
-  return songsStubInstance;
-}
-
-/** Stub only: what the server would have recorded by itself. See songsStub.ts. */
-export function recordSongStateForStub(
-  songId: string,
-  state: Parameters<SongsStub["recordState"]>[1]
-): void {
-  if (SONGS_API_STUBBED) songsStub().recordState(songId, state);
-}
-
 class BackendStartingError extends Error {
   constructor(message = BACKEND_STARTING_MESSAGE) {
     super(message);
@@ -906,15 +874,6 @@ export async function uploadScore(
   file: File,
   options: UploadScoreOptions = {}
 ): Promise<UploadResponse> {
-  if (SONGS_API_STUBBED) return songsStub().uploadScore(sessionId, file, options);
-  return uploadScoreToBackend(sessionId, file, options);
-}
-
-async function uploadScoreToBackend(
-  sessionId: string,
-  file: File,
-  options: UploadScoreOptions = {}
-): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
   if (options.replace) form.append("replace", "true");
@@ -952,7 +911,6 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
 }
 
 export async function fetchWorkspace(songId: string): Promise<SongWorkspace> {
-  if (SONGS_API_STUBBED) return songsStub().fetchWorkspace(songId);
   const workspace = await request<SongWorkspace>(`/songs/${songId}/workspace`, { method: "GET" });
   return {
     ...workspace,
@@ -968,13 +926,11 @@ export async function fetchWorkspace(songId: string): Promise<SongWorkspace> {
 }
 
 export async function listSongs(limit = 50): Promise<SongRow[]> {
-  if (SONGS_API_STUBBED) return songsStub().listSongs(limit);
   const response = await request<{ songs: SongRow[] }>(`/songs?limit=${limit}`, { method: "GET" });
   return response.songs;
 }
 
 export async function renameSong(songId: string, title: string): Promise<SongRow> {
-  if (SONGS_API_STUBBED) return songsStub().renameSong(songId, title);
   return request<SongRow>(`/songs/${songId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -983,7 +939,6 @@ export async function renameSong(songId: string, title: string): Promise<SongRow
 }
 
 export async function deleteSong(songId: string): Promise<void> {
-  if (SONGS_API_STUBBED) return songsStub().deleteSong(songId);
   await request<{ deleted: boolean }>(`/songs/${songId}`, { method: "DELETE" });
 }
 
@@ -991,7 +946,6 @@ export async function savePlayerMix(
   songId: string,
   mix: PlayerMixRequest
 ): Promise<{ revision: number }> {
-  if (SONGS_API_STUBBED) return songsStub().savePlayerMix(songId, mix);
   return request<{ revision: number }>(`/songs/${songId}/player/mix`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

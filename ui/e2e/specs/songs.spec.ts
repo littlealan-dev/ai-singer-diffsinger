@@ -8,16 +8,36 @@ import { signInAsE2EUser } from "../auth";
 // (/app/song/{id}). These tests cover reopening one, the "New song or
 // replace?" choice, My songs, and leaving a Song while it works.
 //
-// The Songs backend (SIG-194) is not built yet, so the page answers the Songs
-// endpoints itself from this browser's storage (src/songsStub.ts). Sessions,
-// uploads, chat, takes and Stop are mocked here as in the other specs. Once the
-// backend exists, this mock gains the Songs endpoints and the tests stay.
+// The backend is mocked as a small Songs server: like the real one, it saves
+// the chat, follows each job, and records a finished take in the Song's player
+// by itself, whether or not a page is watching.
 
 type Take = { jobId: string; part: string; seconds: number };
 // What the next chat turn answers. A held text reply waits for `releaseReply`;
 // a held take keeps running until `finishJob`.
 type Reply = { text: string; hold?: boolean } | { take: Take; hold?: boolean };
-type Job = Take & { sessionId: string; scoreId: string; status: "running" | "done" | "stopped" };
+type Job = Take & {
+  sessionId: string;
+  scoreId: string;
+  turnId: string;
+  createdAt: string;
+  status: "running" | "done" | "stopped";
+};
+type Turn = { id: string; role: "user" | "assistant"; content: string; timestamp: string };
+type Vocal = { key: string; part: string; jobId: string; seconds: number; muted: boolean; solo: boolean; volume: number };
+type Song = {
+  id: string;
+  isSong: boolean;
+  deleted: boolean;
+  title: string;
+  titleEdited: boolean;
+  createdAt: string;
+  lastActive: number;
+  scoreId: string | null;
+  currentJobId: string | null;
+  history: Turn[];
+  player: { scoreId: string | null; revision: number; vocals: Vocal[]; instruments: unknown[]; bus: unknown };
+};
 
 function silentWav(seconds: number): Buffer {
   const sampleRate = 8_000;
@@ -91,7 +111,7 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   const replies: Reply[] = [];
   const jobs = new Map<string, Job>();
-  const scoreIds = new Map<string, string>();
+  const songs = new Map<string, Song>();
   const uploads: string[] = [];
   let sessionsCreated = 0;
   let stopRequests = 0;
@@ -99,8 +119,21 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
   let releaseReply: () => void = () => {};
   let replyGate = new Promise<void>((resolve) => { releaseReply = resolve; });
   const performanceMidi = instruments ? PERFORMANCE_MIDI : null;
+  let clock = Date.parse("2026-01-01T10:00:00Z");
+  const now = () => new Date((clock += 1_000)).toISOString();
+  let turns = 0;
+  const emptyBus = { muted: false, solo: false, level_db: 0 };
+  const scoreSummary = {
+    duration_seconds: 8,
+    parts: [
+      { part_id: "Voice", part_index: 0, part_name: "Voice", has_lyrics: true },
+      { part_id: "Voice 2", part_index: 1, part_name: "Voice 2", has_lyrics: true },
+    ],
+    performance_midi: performanceMidi,
+  };
 
   const progressUrl = (job: Job) => `/sessions/${job.sessionId}/progress?job_id=${job.jobId}`;
+  const audioUrl = (job: Job) => `/sessions/${job.sessionId}/audio?file=${job.jobId}.wav`;
   const progress = (job: Job) => {
     const base = { job_id: job.jobId, job_kind: "synthesis", score_id: job.scoreId };
     if (job.status === "running") return { ...base, status: "running", message: "Singing the take.", progress: 0.4 };
@@ -111,52 +144,181 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
       step: "done",
       message: "Here is the rendered audio.",
       progress: 1,
-      audio_url: `/sessions/${job.sessionId}/audio?file=${job.jobId}.wav`,
+      audio_url: audioUrl(job),
       audio_track: { key: `id:${job.part}`, label: job.part, part_id: job.part, verse_number: "1" },
       actual_duration_seconds: job.seconds,
       performance_midi: performanceMidi,
       performance_midi_published: instruments,
     };
   };
+  const say = (song: Song, role: Turn["role"], content: string) => {
+    const turn = { id: `turn-${(turns += 1)}`, role, content, timestamp: now() };
+    song.history.push(turn);
+    return turn;
+  };
+  const running = (sessionId: string) =>
+    [...jobs.values()].filter((job) => job.sessionId === sessionId && job.status === "running");
+  // The server puts a finished take in its Song's player: one track per part.
+  const finish = (job: Job) => {
+    job.status = "done";
+    const player = songs.get(job.sessionId)?.player;
+    if (!player || player.scoreId !== job.scoreId) return;
+    const key = `id:${job.part}`;
+    const old = player.vocals.find((vocal) => vocal.key === key);
+    const vocal: Vocal = {
+      key, part: job.part, jobId: job.jobId, seconds: job.seconds,
+      muted: old?.muted ?? false, solo: old?.solo ?? false, volume: old?.volume ?? 1,
+    };
+    player.vocals = old ? player.vocals.map((entry) => (entry === old ? vocal : entry)) : [...player.vocals, vocal];
+    player.revision += 1;
+  };
+  const stopWork = (song: Song) => {
+    stopRequests += 1;
+    const active = running(song.id);
+    if (stopResult === "stopped") {
+      active.forEach((job) => {
+        job.status = "stopped";
+        say(song, "assistant", "Stopped the take. Refunded 0 credits.");
+      });
+    }
+    return active;
+  };
+  const songRow = (song: Song) => ({
+    id: song.id,
+    title: song.title,
+    created_at: song.createdAt,
+    last_active_at: new Date(song.lastActive).toISOString(),
+    status: song.currentJobId && jobs.get(song.currentJobId)?.status === "running" ? "working" : "idle",
+    track_count: song.player.scoreId === song.scoreId ? song.player.vocals.length : 0,
+  });
+  const workspace = (song: Song) => ({
+    session_id: song.id,
+    song: { id: song.id, title: song.title, title_edited: song.titleEdited, created_at: song.createdAt },
+    score: {
+      score_id: song.scoreId,
+      current_score: { version: 1 },
+      score_summary: scoreSummary,
+      solfege_settings: { system: "movable_do", mode: "major", revision: 1 },
+    },
+    messages: song.history,
+    // A running job, and each take asked for in the chat; a stopped take is in the chat text.
+    jobs: [...jobs.values()]
+      .filter((job) => job.sessionId === song.id && job.status !== "stopped")
+      .map((job) => ({
+        ...progress(job), originating_turn_id: job.turnId, created_at: job.createdAt, progress_url: progressUrl(job),
+      })),
+    player: {
+      score_id: song.player.scoreId,
+      revision: song.player.revision,
+      repeats: false,
+      vocals: song.player.vocals.map((vocal) => {
+        const job = jobs.get(vocal.jobId)!;
+        return {
+          key: vocal.key, part_id: vocal.part, part_index: vocal.part === "Voice" ? 0 : 1, label: vocal.part,
+          verse_number: "1", take_signature: null, source_job_id: vocal.jobId, expand_repeats: false,
+          duration_seconds: vocal.seconds, voice_name: "Test Voice",
+          muted: vocal.muted, solo: vocal.solo, volume: vocal.volume,
+          audio_url: audioUrl(job), progress_url: progressUrl(job),
+        };
+      }),
+      instruments: song.player.instruments,
+      bus: song.player.bus,
+    },
+  });
+  const notFound = { code: "song_not_found", message: "This song isn't available." };
 
   // The fallback synth is enough here; the 148 MB SoundFont would only slow the test.
   await page.route("**/soundfonts/FluidR3_GM.sf2", (route) => route.fulfill({ status: 404 }));
   await page.route("http://127.0.0.1:8000/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const json = (body: unknown) => route.fulfill({ json: body });
+    const json = (body: unknown, status = 200) => route.fulfill({ status, json: body });
     if (request.method() === "OPTIONS") return route.fulfill({ status: 204 });
     const route_ = url.pathname;
-    const sessionId = /^\/sessions\/([^/]+)\//.exec(route_)?.[1] ?? "";
     if (route_ === "/credits") {
       return json({ balance: 100, reserved: 0, available: 100, is_expired: false, overdrafted: false });
     }
     if (route_ === "/readyz") return json({ ready: true, status: "ready" });
     if (route_ === "/maintenance/status") return json({ enabled: false, allowed: true });
     if (route_ === "/api/voicebanks") return json({ voicebanks: [{ id: "test", name: "Test Voice" }] });
-    if (route_ === "/sessions") {
+    if (route_ === "/sessions" && request.method() === "POST") {
       sessionsCreated += 1;
-      return json({ session_id: `song-${sessionsCreated}` });
+      const id = `song-${sessionsCreated}`;
+      songs.set(id, {
+        id, isSong: false, deleted: false, title: "", titleEdited: false, createdAt: "", lastActive: clock,
+        scoreId: null, currentJobId: null, history: [],
+        player: { scoreId: null, revision: 0, vocals: [], instruments: [], bus: emptyBus },
+      });
+      return json({ session_id: id });
     }
+    if (route_ === "/songs") {
+      const listed = [...songs.values()].filter((song) => song.isSong && !song.deleted);
+      listed.sort((left, right) => right.lastActive - left.lastActive);
+      return json({ songs: listed.map(songRow) });
+    }
+
+    const songId = /^\/(?:sessions|songs)\/([^/]+)/.exec(route_)?.[1] ?? "";
+    const song = songs.get(songId);
+    const isSongRoute = route_.startsWith("/songs/");
+    if (!song || song.deleted || (isSongRoute && !song.isSong)) {
+      return json(isSongRoute ? notFound : { detail: "Session not found." }, 404);
+    }
+    // Like the real server, any request about a Song marks it active.
+    song.lastActive = (clock += 1_000);
+
+    if (isSongRoute) {
+      if (route_.endsWith("/workspace")) return json(workspace(song));
+      if (route_.endsWith("/player/mix")) {
+        const mix = request.postDataJSON();
+        if (mix.score_id !== song.scoreId) return json({ code: "score_changed", message: "The score changed." }, 409);
+        for (const saved of mix.vocals) {
+          const vocal = song.player.vocals.find((entry) => entry.key === saved.key);
+          if (vocal) Object.assign(vocal, { muted: saved.muted, solo: saved.solo, volume: saved.volume });
+        }
+        song.player.instruments = mix.instruments;
+        song.player.bus = mix.bus;
+        song.player.revision += 1;
+        return json({ revision: song.player.revision });
+      }
+      if (request.method() === "PATCH") {
+        song.title = String(request.postDataJSON().title).trim();
+        song.titleEdited = true;
+        return json(songRow(song));
+      }
+      if (request.method() === "DELETE") {
+        if (running(song.id).length) return json({ code: "work_running", message: "Still working." }, 409);
+        song.deleted = true;
+        return json({ deleted: true });
+      }
+      return json({});
+    }
+
     if (route_.endsWith("/solfege-settings")) return json({ system: "movable_do", mode: "major", revision: 1 });
     if (route_.endsWith("/upload")) {
       const body = request.postDataBuffer()?.toString("utf-8") ?? "";
-      uploads.push(/filename="([^"]+)"/.exec(body)?.[1] ?? "");
+      const name = /filename="([^"]+)"/.exec(body)?.[1] ?? "";
+      const replace = /name="replace"\r\n\r\ntrue/.test(body);
+      if (running(song.id).length) {
+        if (!replace) return json({ code: "work_running", message: "Something is still running." }, 409);
+        // The file is good; stop the work first. A job too late to stop keeps the score.
+        if (stopWork(song).some((job) => job.status === "running")) {
+          return json({ code: "stop_too_late", message: "Too late to stop." }, 409);
+        }
+      }
+      uploads.push(name);
       const scoreId = `score-${uploads.length}`;
-      scoreIds.set(sessionId, scoreId);
+      if (!song.isSong) Object.assign(song, { isSong: true, createdAt: now() });
+      if (!song.titleEdited) song.title = name.replace(/\.xml$/, "");
+      song.scoreId = scoreId;
+      song.player = { scoreId, revision: 0, vocals: [], instruments: [], bus: emptyBus };
       return json({
-        session_id: sessionId,
+        session_id: song.id,
         score_id: scoreId,
         parsed: true,
         current_score: { version: 1 },
-        score_summary: {
-          duration_seconds: 8,
-          parts: [
-            { part_id: "Voice", part_index: 0, part_name: "Voice", has_lyrics: true },
-            { part_id: "Voice 2", part_index: 1, part_name: "Voice 2", has_lyrics: true },
-          ],
-        },
+        score_summary: scoreSummary,
         performance_midi: null,
+        song: { id: song.id, title: song.title, title_edited: song.titleEdited, created_at: song.createdAt },
       });
     }
     if (route_.endsWith("/score")) return route.fulfill({ contentType: "application/xml", body: xml });
@@ -169,18 +331,17 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
       return route.fulfill({ contentType: "audio/wav", body: silentWav(seconds) });
     }
     if (route_.endsWith("/stop")) {
-      stopRequests += 1;
-      const running = [...jobs.values()].filter((job) => job.sessionId === sessionId && job.status === "running");
-      if (running.length === 0) return json({ result: "nothing_running", jobs: [] });
-      if (stopResult === "stopped") running.forEach((job) => { job.status = "stopped"; });
+      const active = stopWork(song);
+      if (active.length === 0) return json({ result: "nothing_running", jobs: [] });
       return json({
         result: stopResult,
-        jobs: running.map((job) => ({
+        jobs: active.map((job) => ({
           jobId: job.jobId, jobKind: "synthesis", result: stopResult, refundedCredits: 0,
         })),
       });
     }
     if (route_.endsWith("/chat")) {
+      const turn = say(song, "user", String(request.postDataJSON()?.message ?? ""));
       const next = replies.shift();
       if (!next) throw new Error("No reply queued for this chat turn.");
       if ("text" in next) {
@@ -188,23 +349,29 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
           await replyGate;
           replyGate = new Promise<void>((resolve) => { releaseReply = resolve; });
         }
+        say(song, "assistant", next.text);
         return json({ type: "chat_text", message: next.text });
       }
       const job: Job = {
         ...next.take,
-        sessionId,
-        scoreId: scoreIds.get(sessionId) ?? "",
-        status: next.hold ? "running" : "done",
+        sessionId: song.id,
+        scoreId: song.scoreId ?? "",
+        turnId: turn.id,
+        createdAt: now(),
+        status: "running",
       };
       jobs.set(job.jobId, job);
+      song.currentJobId = job.jobId;
       const accepted = {
         type: "chat_progress",
         message: "Starting the take.",
         job_id: job.jobId,
         progress_url: progressUrl(job),
       };
+      say(song, "assistant", accepted.message);
       // A held take is followed by polling its progress; the others finish in the stream.
       if (next.hold) return json(accepted);
+      finish(job);
       const body = [
         `event: accepted\ndata: ${JSON.stringify(accepted)}\n`,
         `event: completed\ndata: ${JSON.stringify(progress(job))}\n`,
@@ -223,7 +390,7 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
     finishJob: (jobId) => {
       const job = jobs.get(jobId);
       if (!job) throw new Error(`Unknown job ${jobId}.`);
-      job.status = "done";
+      finish(job);
     },
     setStopResult: (result) => { stopResult = result; },
     stopRequests: () => stopRequests,
@@ -291,10 +458,6 @@ async function newSong(page: Page) {
   await expect(songTitle(page)).toHaveCount(0);
 }
 
-// The stand-in saves the chat a moment after it changes, where the real
-// backend records it by itself. Wait for that before leaving the page.
-const letStandInSave = (page: Page) => page.waitForTimeout(600);
-
 const scorePreview = (page: Page) => page.getByTestId("score-preview-surface").locator("svg").first();
 const songTitle = (page: Page) => page.getByTestId("song-title");
 const chat = (page: Page) => page.getByTestId("chat-stream");
@@ -317,7 +480,6 @@ test("a reloaded Song comes back with its chat, score, track and title", async (
   await expect(chat(page)).toContainText("Hello from the studio.");
   await sing(page, backend, { jobId: "job-a-3s", part: "Voice", seconds: 3 });
   await expect(timeline(page)).toHaveText("0:00 / 0:03");
-  await letStandInSave(page);
 
   const address = page.url();
   const sessionsBefore = backend.sessionsCreated();
@@ -373,7 +535,6 @@ test("New song from the popup opens a second Song and leaves the first as it was
   const backend = await openStudio(page, "songs-new-from-popup");
   await startSong(page, "first-tune.xml");
   await sing(page, backend, { jobId: "job-a-3s", part: "Voice", seconds: 3 });
-  await letStandInSave(page);
   const firstAddress = page.url();
 
   // Cancel leaves everything alone.
@@ -440,7 +601,6 @@ test("Replace keeps the chat, clears the player and follows the new score's titl
   await expect.poll(() => backend.uploads()).toHaveLength(3);
   await expect(chat(page)).toContainText("Hello from the studio.");
   await expect(songTitle(page)).toHaveText("My own title");
-  await letStandInSave(page);
   await page.reload();
   await expect(songTitle(page)).toHaveText("My own title");
   await expect(chat(page)).toContainText("Hello from the studio.");
@@ -500,7 +660,6 @@ test("a take keeps running while another Song is open, and shows when you come b
   const secondAddress = page.url();
 
   await startLongTake(page, backend, { jobId: "job-a-3s", part: "Voice", seconds: 3 });
-  await letStandInSave(page);
 
   // A working Song says so in My songs, and can't be deleted.
   await openMySongs(page);
@@ -537,7 +696,6 @@ test("a take that finished while its Song was closed is there when it is reopene
   await newSong(page);
   await startSong(page, "second-tune.xml");
   await startLongTake(page, backend, { jobId: "job-a-3s", part: "Voice", seconds: 3 });
-  await letStandInSave(page);
 
   await openMySongs(page);
   await songRow(page, "first-tune").getByRole("button", { name: "Open" }).click();
@@ -596,7 +754,6 @@ test("a reopened Song with two sung parts shows exactly two vocal tracks", async
   // A second take of the first part replaces its track.
   await sing(page, backend, { jobId: "job-c-5s", part: "Voice", seconds: 5 });
   await expect(vocalRows(page)).toHaveCount(2);
-  await letStandInSave(page);
 
   await page.reload();
   await expect(timeline(page)).toHaveText("0:00 / 0:05");

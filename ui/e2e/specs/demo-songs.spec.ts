@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
-import { chooseReplace } from "../support";
+import { chooseReplace, uploadedSong } from "../support";
 
 // A demo song is a score shipped with the app (ui/public/demo-scores), loaded
 // through the same upload request as a user's file. While it is the current
@@ -40,6 +40,7 @@ async function mockBackend(page: Page): Promise<Backend> {
       uploads.push({ name, body: currentScore });
       return json({
         session_id: SESSION_ID,
+        song: uploadedSong(SESSION_ID, name.replace(/\.xml$/, "")),
         score_id: `score-${uploads.length}`,
         parsed: true,
         current_score: { version: 1 },

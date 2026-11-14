@@ -36,7 +36,6 @@ import {
   fetchVoicebanks,
   fetchWorkspace,
   markFeedbackPrompted,
-  recordSongStateForStub,
   renameSong,
   savePlayerMix,
   SYNTHESIS_JOB_DETAILS_TIMEOUT_BODY,
@@ -5954,47 +5953,6 @@ export default function MainApp() {
       setError(err?.message || "Couldn't rename the song.");
     }
   };
-
-  // TEMPORARY, stub only (SIG-194): the real server records a Song's chat and
-  // jobs by itself. Until it exists, the page reports what it shows, so that a
-  // reload or My songs can bring it back. Delete with songsStub.ts.
-  const songIdForStub = songLoadState === "idle" ? currentSong?.id ?? null : null;
-  useEffect(() => {
-    if (!songIdForStub) return;
-    const report = () => {
-      const jobs: Parameters<typeof recordSongStateForStub>[1]["jobs"] = [];
-      let turnId: string | null = null;
-      for (const message of messages) {
-        if (message.role === "user") {
-          turnId = message.id;
-        } else if (message.jobId && message.progressUrl) {
-          jobs.push({
-            job_id: message.jobId,
-            job_kind: message.isProgress ? activeJobKind : null,
-            progress_url: message.progressUrl,
-            originating_turn_id: turnId,
-          });
-        }
-      }
-      recordSongStateForStub(songIdForStub, {
-        messages: messages
-          // An export mix's bubble belongs to the page, not to the chat record.
-          .filter((message) => !(message.role === "assistant" && message.jobId && !message.progressUrl))
-          .map((message) => ({ id: message.id, role: message.role, content: message.content })),
-        jobs,
-        score_id: activeScoreIdRef.current,
-        score_summary: scoreSummary,
-        performance_midi: performanceMidi,
-        solfege_settings: { system: solfegeSystem, mode: solfegeMode },
-      });
-    };
-    const timer = window.setTimeout(report, 300);
-    return () => {
-      window.clearTimeout(timer);
-      // The Song is being left: report its last state before it is cleared.
-      if (shownSongIdRef.current !== songIdForStub) report();
-    };
-  }, [activeJobKind, messages, performanceMidi, scoreSummary, solfegeMode, solfegeSystem, songIdForStub]);
 
   // A demo song is a score shipped with the app, loaded exactly like an upload.
   const loadDemoSong = async (song: DemoSong) => {
