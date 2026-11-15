@@ -4,7 +4,7 @@
 
 Design: `docs/specs/sing-all-process-backend-hld.md` §3 to §8, §15, §16 row 3, §17, on branch `docs/sing-all-process-hld`. Step 1 (Stop) and step 2 (Songs) are built.
 
-Step 3 makes the "Sing All" button real for allowlisted users. The user taps it, sees which parts will be sung and what it costs, and presses "Sing it". The backend then splits the parts that need it, adds solfège if asked, sings every part, and puts each finished take in the Song's player. The user can leave and come back; the progress is on the server.
+Step 3 makes the "Sing All" button real for every signed-in user; a free plan sees "Upgrade to sing" in place of "Sing it". There is no Sing All allowlist: for the smoke test Alan turns maintenance mode on, so only the maintenance allowlist can sign in, then turns it off and Sing All is live for everyone on the same code (Alan, 2026-11-15). The user taps it, sees which parts will be sung and what it costs, and presses "Sing it". The backend then splits the parts that need it, adds solfège if asked, sings every part, and puts each finished take in the Song's player. The user can leave and come back; the progress is on the server.
 
 Step 3 has no mix files, no zip, no email, no pause for a decision and no retry. Those are steps 4, 5 and 6.
 
@@ -142,7 +142,7 @@ Alan accepted rows 1 to 17 on 2026-11-15, and decided row 18 the same day. Rows 
 
 ## API
 
-All need sign-in. All answer 404 to a user who is not on the allowlist, except `GET /sing-all/active`, which answers `{"enabled": false}`.
+All need sign-in.
 
 | Method and path | Purpose | Task |
 |---|---|---|
@@ -156,7 +156,6 @@ All need sign-in. All answer 404 to a user who is not on the allowlist, except `
 
 `GET /sing-all/jobs` (the list) is left for step 5, with the job link.
 
-The allowlist is `app_config/maintenance.allowedUids` and `allowedEmails`, read whether or not maintenance is on, the way premium routing reads them.
 
 ---
 
@@ -640,8 +639,7 @@ The numbers come from today's functions (`estimate_synthesis_credits`, `selected
 
 #### 6. Endpoint, `src/backend/main.py`
 
-- `POST /sing-all/quote`. Checks the allowlist and that the Song is the caller's.
-- The allowlist check is one shared helper in `src/backend/premium_routing.py`, used by premium routing and by Sing All.
+- `POST /sing-all/quote`. Checks that the Song is the caller's.
 
 #### 7. Chat: a part split to sing is a voice part, `src/musicxml/instrument_programs.py` and `src/backend/orchestrator.py`
 
@@ -688,10 +686,10 @@ build_instrumental_performance_midis: a user_assignable part keeps its own percu
 
 #### 9. Chat: the language first, then the card, `src/backend/config/system_prompt.txt`, `src/mcp/tools.py`, `src/backend/orchestrator.py`
 
-The "Sing All" button sends the visible chat message "Sing All". A typed request to sing every part works the same way. The chat model decides the language before the card opens, as it does before a take (Alan, 2026-11-15).
+The "Sing All" button sends the visible chat message "Sing All". A typed request to sing every part, or more than one part, works the same way; the chat line that answered "one part at a time" is removed (Alan, 2026-11-15). The chat model decides the language before the card opens, as it does before a take (Alan, 2026-11-15).
 
 ```python
-tool open_sing_all {language, solfegeOnly = false}      # listed only for an allowlisted user whose Song has a score
+tool open_sing_all {language, solfegeOnly = false}      # listed only when the user's Song has a score
 handler (code only, no LLM):
     language = normalize_language_code(args.language)                 # today's function in language_selection.py
     supported = the union of every enabled voicebank's languages      # an empty list counts as "en", as today
@@ -710,9 +708,10 @@ New lines in `system_prompt.txt`, a section of its own that refers to the existi
 
 ```text
 - Sing All (only when the open_sing_all tool is listed):
-  - When the user asks to sing every part of the score ("Sing All"), resolve the singing language as
-    "Language selection for synthesis" says, checking it against every available voicebank instead of
-    one selected voicebank.
+  - When the user asks to sing every part of the score ("Sing All"), or more than one part, resolve the
+    singing language as "Language selection for synthesis" says, checking it against every available
+    voicebank instead of one selected voicebank. Don't pass which parts were asked for: the card lists
+    every part, and the user ticks or unticks them there.
   - If a voicebank can sing it, call open_sing_all with that language. Do not prepare a quote: the card
     does that.
   - If none can, return no tool call; explain it and offer a score in a supported language or solfège,
@@ -745,7 +744,7 @@ May change: the files above, `src/api/voice_parts.py` only to share `needs_split
   - Language: the request always carries the given language and never asks it; the reply's voices must sing it (a voice that can't causes one re-ask); `solfegeOnly` gives language en, mode solfège only, and the take requests carry `require_solfege_lyrics` and `solfege_pronunciation_patch`; a language no enabled voicebank sings gives `no_voice_for_language` with no call; changing the language asks only the voices and keeps a voice the user picked that can sing it; switching back makes no call; the dropdown is the union of the enabled voicebanks' languages, with "en" for an empty list.
   - A voice picked by the user is kept; an answer's voice outside the row's range sets the row's note.
 - Tests for rule I: lyrics, solfège and both; a row without words in each mode; instrumentals already paid for; an instrument whose sound the call chose (the item is there); a part answered instrument and unticked (the item is there); a part answered unsure and left unticked (not sung, the item is there); an instrument with a null sound (the item is there).
-- An endpoint test for each `blocked` value, for `already_running` making no call, and for a user off the allowlist (404, no call).
+- An endpoint test for each `blocked` value, for `already_running` making no call.
 - Tests for rule S, with a stubbed LLM: a quote without a note makes no style call; a note makes one, and the same note and voices again make none; a changed note or a changed voice makes one; the reply schema lists each row with its voicebank's colours and each control's range and description from the synthesize tool's schema; a colour not in the row's voicebank, a value out of range (intensity included) and a missing row each cause one re-ask, and a second bad answer gives `style_unavailable`; a cleared note uses the defaults; the summary values are the differences from each voice's defaults.
 - In `tests/test_llm_gemini.py` and `tests/test_llm_openai.py`: the new role reads its own settings and falls back to the default role's.
 - The test log prints the estimated range beside the real range for each made-up split score.
@@ -926,7 +925,23 @@ A worker refuses a child whose parent doesn't list it, or whose parent is not `r
 
 #### 2. Credits, `src/backend/credits.py`
 
-- `reserve_credits_for_items(uid, items, *, guard)`: the body of `reserve_credits` moved into a function that takes a transaction, called once per item inside one transaction, with one balance check for the total. `reserve_credits` calls the same body, so its behaviour and its tests don't change. The instrumentals' item is reserved with the billing component `instrumental` only.
+- Built by Claude (5c5a37d on `feature/sing-all-core`); call it as it is:
+
+  ```python
+  ReservationItem(job_id, estimated_credits, billing_components=("vocal",), job_kind=None, pricing=None,
+                  pricing_unit_seconds=None, billable_duration_seconds=None, instrumental_charge_scope_value=None)
+  class ReservationGuard(Protocol):
+      def read(self, transaction) -> Optional[str]   # reads only; a refusal reason, or None
+      def write(self, transaction) -> None           # writes the job and users.activeSingAllJobId
+  reserve_credits_for_items(uid, items, *, guard, session_id=None, score_id=None, score_version_no=None,
+                            parent_job_id=None, reservation_ttl_seconds=None) -> ReserveCreditsResult
+      # status "reserved" | "refused" (result.reason = the guard's) | "insufficient_balance" | "overdrafted"
+      #        | "expired" | "infra_error"; all or nothing; every read happens before any write
+  settle_instrumental_reservation(uid, reservation_id) -> SettleCreditsResult
+      # "settled" | "already_settled" | "already_released" | "reservation_missing" | "reconciliation_required" | "infra_error"
+  ```
+
+  The instrumentals' item has `billing_components=("instrumental",)` and its charge scope (`instrumental_charge_scope(uid, session_id, score_id)`); its job id is `{jobId}-instrumentals`. A take's reservation is settled by today's `settle_credits_and_complete_job` and released by `release_credits`, both keyed by the child's job id.
 - `settle_instrumental_reservation(uid, reservation_id)`, new: in one transaction, a pending instrumentals-only reservation is charged its reserved credits, and the score's instrumental charge record goes from pending to paid, as `settle_credits_and_complete_job` does for a take that carries them. A reservation already settled or released is a no-op. It has no job to complete, like `settle_export_mix_credits_and_complete_job` has its own path. `release_credits` already returns a pending instrumental charge to unpaid, so release needs no change.
 - A reservation made here has no take quote bound to it, so releasing it expires nothing else. It carries `parentJobId`.
 
@@ -1005,9 +1020,8 @@ May change: the files above, `src/backend/session.py` and `src/backend/job_store
 `GET /sing-all/active`:
 
 ```python
-if not allowlisted: return {"enabled": False}
 job = singAllJobs[users.activeSingAllJobId] if set and not ended
-return {"enabled": True, "job": progress(job) or None}
+return {"job": progress(job) or None}
 ```
 
 `progress(job)`, also returned by `GET /sing-all/jobs/{id}`:
@@ -1029,7 +1043,7 @@ cancelRequested
 
 | Where | What it shows |
 |---|---|
-| Starters under the chat input | One "Sing All" button, when the user is allowlisted and the Song has a score. The three prototype buttons are removed |
+| Starters under the chat input | One "Sing All" button, when the Song has a score. The three prototype buttons are removed |
 | Tapping it | Sends the visible chat message "Sing All". The chat model checks the language (S1 change 9); its reply opens a card in that bubble, filled from `POST /sing-all/quote` with the language it gave. It is not saved until "Sing it" |
 | Card, while the quote is made | "Reading the score…" in place of the voices and the price. The first quote for a score waits for the quote call; later ones don't |
 | Card, the quote couldn't be made | "The quote couldn't be made." with "Try again", which asks for the quote again. No "Sing it" |
@@ -1065,7 +1079,7 @@ May change: the files above, `ui/e2e`, tests. Must not change: the Songs pages' 
 
 ### Done when
 
-- Backend tests: `GET /sing-all/active` for a user off the allowlist, on it with no job, and with a job at each stage; `GET /sing-all/jobs/{id}` for the owner and for another user.
+- Backend tests: `GET /sing-all/active` with no job and with a job at each stage; `GET /sing-all/jobs/{id}` for the owner and for another user.
 - Playwright, mocked API: the card with the defaults; "Reading the score…" while the quote is pending; a failed quote with "Try again" working on the second attempt; `quote_changed` at "Sing it" showing the new quote; a change under Customise asks for a new quote and updates the total; "Upgrade to sing" on a free plan; "Top up" without enough credits; the running card through each stage; the ended card for each status; the pill from another Song; a reload showing the card again; the mode switch.
 - Playwright on the real local backend (`ui/e2e/run.mjs`, regression LLM): a made-up 2-part score that needs no split goes from the button to two tracks in the player, and the receipt matches the credits taken. The harness has one voice installed and the score has no staff to decide and no undecided part, so this run makes no quote call and the regression LLM is unchanged.
 - Checked at phone width.
@@ -1212,7 +1226,7 @@ Known baseline: 12 failures in `tests/test_backend_api.py`. The planner and LLM 
 - **Planner code is touched** (S2, change 4). `choose` and `choose_repair` take the quote's lane answer and fix that question. The prompt, the rules and every split started in chat are unchanged, and the planner's own tests must pass unchanged. This is the Part Splitting thread's code, so it needs your OK.
 - **Two new prompts that refer to the current ones** (S1; your call, 2026-11-15). Each new file holds only Sing All's task, reply format and differences, and names the sections to follow. The chat prompt's fixed text (about 42 KB) and, for the quote, the planner's prompt (about 6 KB) are sent after it as references. A change to a rule reaches Sing All with no second edit, and changes the input hash, so saved answers are asked again. The cost: each quote call sends about 48 KB of prompt, most of it not about Sing All, so the model must keep to the named sections. It is once per score.
 - **The lane answer on the normal model is untested.** Tests use a stubbed LLM. No comparison with the planner's model now (your call, 2026-11-15): if quoted line counts are often wrong in testing, `GEMINI_SING_ALL_QUOTE_MODEL` moves the call to another model.
-- **The quote now costs an LLM call**, once per score and again after each score change. It is not charged to the user. Fine for the allowlist; worth pricing before public launch.
+- **The quote now costs an LLM call**, once per score and again after each score change. It is not charged to the user; worth pricing before launch.
 - **The call now has four questions** (2026-11-15): voice part or instrument, an instrument's sound, shared or separate, and the voice. The first is asked only for a part with no words and no declared instrument that the chat model hasn't ruled on. The sound is asked for each instrument the score gives no usable sound, and for each such part answered instrument.
 - **No existing code asks again.** "Sing it" saves the roles and sounds into the score summary with the function the chat's `synthesize` uses, so the chat model's quote finds nothing waiting. The two places that ask the chat model (`prepare_synthesis_quote` and `synthesize`) are not on Sing All's path.
 - **Chat changes too** (S1, change 7; your call, 2026-11-15). A part with no words and no declared instrument that is split in chat becomes a voice part in code, so the chat model isn't asked about it again and it is never played under its own sung lines. It ships with this spec, not as a separate fix on main.
