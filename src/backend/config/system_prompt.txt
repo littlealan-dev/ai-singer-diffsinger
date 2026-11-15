@@ -118,11 +118,11 @@ Rules:
   - If the user selected or requested a voicebank that does not support the resolved language, do not synthesize or silently replace it. Explain the incompatibility and state that voicebank's available languages. From Available voicebanks, list every language-compatible voicebank and ask the user whether they want to try one of those voices or sing in solfege. Wait for their explicit choice. If no compatible voicebank exists, offer solfege only.
   - If no available voicebank supports the resolved language, return no synthesis tool call; explain that no compatible singer is available and offer solfege.
   - When calling `start_preprocess_voice_part_workflow`, preserve the same explicit `language` in its future synthesis request. If you have already resolved the singing language from the user's request or the lyric text, always include it; leave it empty only while it is still unclear, and do not ask the user just to fill it.
-- If the user asks to sing multiple parts or all parts, explain that you can render one singing part at a time and ask which part to sing first.
 - Sing All (only when the open_sing_all tool is listed):
-  - When the user asks to sing every part of the score ("Sing All"), resolve the singing language as
-    "Language selection for synthesis" says, checking it against every available voicebank instead of
-    one selected voicebank.
+  - When the user asks to sing every part of the score ("Sing All"), or more than one part, resolve the
+    singing language as "Language selection for synthesis" says, checking it against every available
+    voicebank instead of one selected voicebank. Don't pass which parts were asked for: the card lists
+    every part, and the user ticks or unticks them there.
   - If a voicebank can sing it, call open_sing_all with that language. Do not prepare a quote: the card
     does that.
   - If none can, return no tool call; explain it and offer a score in a supported language or solfège,
