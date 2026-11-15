@@ -66,6 +66,7 @@ import {
   type WorkspaceMessage,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
+import SingAllPrototypeCard from "./components/SingAllPrototypeCard";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
@@ -121,6 +122,8 @@ const ensureExtendableWavRecorderRegistered = (): Promise<void> => {
   return extendableWavRegistration;
 };
 
+// The Sing All hint's chat message (UI prototype: the chat reply that opens the card is faked).
+const SING_ALL_PROMPT = "Sing All";
 const STARTING_CONVERSATIONS = [
   "sing the vocal part, verse 1",
   "sing the soprano part",
@@ -214,6 +217,8 @@ type Message = {
   progressValue?: number;
   jobId?: string;
   feedback?: FeedbackPromptState;
+  // UI prototype: the bubble renders the fake Sing All card.
+  singAllPrototype?: boolean;
 };
 
 type AttemptMessage = {
@@ -6140,6 +6145,23 @@ export default function MainApp() {
     const content = input.trim();
     const voicebankId = selectedVoicebankId;
     setInput("");
+    if (content === SING_ALL_PROMPT) {
+      // UI prototype: stands in for the chat model's reply, which will check the language
+      // and open the card (open_sing_all). Nothing is sent to the backend.
+      setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", content }]);
+      window.setTimeout(() => {
+        setMessages((current) => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: "Here's the quote for singing the whole song. Tap Customise to change anything.",
+            singAllPrototype: true,
+          },
+        ]);
+      }, 600);
+      return;
+    }
     await sendMessage(content, voicebankId);
   };
 
@@ -6495,6 +6517,7 @@ export default function MainApp() {
                   msg.role,
                   msg.isProgress && "progress-bubble",
                   msg.audioUrl && "audio-bubble",
+                  msg.singAllPrototype && "sing-all-inline-bubble",
                   "reveal"
                 )}
                 style={{ animationDelay: `${index * 40}ms` }}
@@ -6595,6 +6618,7 @@ export default function MainApp() {
                 ) : (
                   <p>{msg.content}</p>
                 )}
+                {msg.singAllPrototype && <SingAllPrototypeCard />}
                 {msg.isProgress && !msg.audioUrl && (
                   <div className="thinking-dots" aria-label="Processing">
                     <span />
@@ -6661,6 +6685,19 @@ export default function MainApp() {
           </div>
           <div className="chat-input">
             <div className="starting-conversations" aria-label="Suggested starting conversations">
+              <button
+                type="button"
+                className="starting-conversation-button sing-all-trigger"
+                data-testid="sing-all-button"
+                disabled={creditsLocked || browserMixBounceActive}
+                onClick={() => {
+                  setInput(SING_ALL_PROMPT);
+                  composerInputRef.current?.focus();
+                }}
+              >
+                <Sparkles size={15} aria-hidden="true" />
+                <span>Sing All</span>
+              </button>
               {starterPrompts.map((suggestion) => (
                 <button
                   key={suggestion}
