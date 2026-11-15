@@ -87,6 +87,101 @@ export type UploadResponse = {
   score_summary?: ScoreSummary | null;
   performance_midi?: PerformanceMidi | null;
   solfege_settings?: SolfegeSettings;
+  /** The Song this upload made or updated. Absent on a backend without Songs. */
+  song?: SongInfo;
+};
+
+export type SongInfo = {
+  id: string;
+  title: string;
+  title_edited: boolean;
+  created_at: string;
+  last_active_at?: string;
+};
+
+/** A row of the My songs list. */
+export type SongRow = {
+  id: string;
+  title: string;
+  created_at: string;
+  last_active_at: string;
+  status: "idle" | "working";
+  track_count: number;
+};
+
+export type WorkspaceMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+};
+
+/** A job's progress payload, plus what places it in the rebuilt chat. */
+export type WorkspaceJob = ProgressResponse & {
+  originating_turn_id: string | null;
+  created_at: string;
+  progress_url: string;
+};
+
+export type WorkspaceVocal = {
+  key: string;
+  part_id?: string | null;
+  part_index?: number | null;
+  label: string;
+  verse_number?: string | number | null;
+  take_signature?: string | null;
+  source_job_id: string;
+  expand_repeats?: boolean | null;
+  duration_seconds?: number | null;
+  voice_name?: string | null;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  audio_url: string;
+  progress_url: string;
+};
+
+export type WorkspaceInstrument = {
+  raw_part_id: string;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  gm_program: number | null;
+  soundfont_bank: number | null;
+  preset_kind: "melodic" | "percussion_kit" | null;
+  unassigned: boolean;
+};
+
+export type WorkspaceBus = { muted: boolean; solo: boolean; level_db: number };
+
+export type WorkspacePlayer = {
+  score_id: string | null;
+  revision: number;
+  repeats: boolean;
+  vocals: WorkspaceVocal[];
+  instruments: WorkspaceInstrument[];
+  bus: WorkspaceBus;
+};
+
+export type SongWorkspace = {
+  session_id: string;
+  song: SongInfo;
+  score: {
+    score_id: string | null;
+    current_score?: unknown;
+    score_summary?: ScoreSummary | null;
+    solfege_settings?: SolfegeSettings;
+  };
+  messages: WorkspaceMessage[];
+  jobs: WorkspaceJob[];
+  player: WorkspacePlayer;
+};
+
+export type PlayerMixRequest = {
+  score_id: string | null;
+  vocals: Array<{ key: string; muted: boolean; solo: boolean; volume: number }>;
+  instruments: WorkspaceInstrument[];
+  bus: WorkspaceBus;
 };
 
 export type SolfegeSystem = "movable_do" | "fixed_do";
@@ -414,6 +509,22 @@ const API_REQUEST_TIMEOUT_SECONDS = parsePositiveNumber(
   300
 );
 
+/**
+ * A failed request whose body named a code, e.g. `song_not_found` or
+ * `stop_too_late`. Callers branch on `code`, never on the message text.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 class BackendStartingError extends Error {
   constructor(message = BACKEND_STARTING_MESSAGE) {
     super(message);
@@ -573,7 +684,21 @@ async function errorFromResponse(response: Response, fallback: string): Promise<
   if (startupMessage || response.status === 503 || localProxyBackendDown) {
     return new BackendStartingError(startupMessage || BACKEND_STARTING_MESSAGE);
   }
-  return new Error(errorMessageFromBody(text) || fallback);
+  return new ApiError(
+    errorMessageFromBody(text) || fallback,
+    response.status,
+    errorCodeFromBody(text) ?? undefined
+  );
+}
+
+function errorCodeFromBody(text: string): string | null {
+  try {
+    const payload = JSON.parse(text);
+    const code = payload?.code ?? payload?.detail?.code;
+    return typeof code === "string" && code ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 function errorMessageFromBody(text: string): string | null {
@@ -739,9 +864,19 @@ export async function requestMarketingOptIn(
   });
 }
 
-export async function uploadScore(sessionId: string, file: File): Promise<UploadResponse> {
+export type UploadScoreOptions = {
+  /** The user chose Replace: stop the Song's running work, then upload. */
+  replace?: boolean;
+};
+
+export async function uploadScore(
+  sessionId: string,
+  file: File,
+  options: UploadScoreOptions = {}
+): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
+  if (options.replace) form.append("replace", "true");
   let headers = await withAppCheckHeaders();
   headers = await withAuthHeaders(headers);
   const response = await fetchWithTimeout(
@@ -773,6 +908,51 @@ export async function fetchScoreXml(sessionId: string): Promise<string> {
     throw await errorFromResponse(response, "Failed to load score.");
   }
   return response.text();
+}
+
+export async function fetchWorkspace(songId: string): Promise<SongWorkspace> {
+  const workspace = await request<SongWorkspace>(`/songs/${songId}/workspace`, { method: "GET" });
+  return {
+    ...workspace,
+    jobs: workspace.jobs.map((job) => ({ ...job, ...normalizeProgressResponse(job) })),
+    player: {
+      ...workspace.player,
+      vocals: workspace.player.vocals.map((vocal) => ({
+        ...vocal,
+        audio_url: withApiBase(vocal.audio_url),
+      })),
+    },
+  };
+}
+
+export async function listSongs(limit = 50): Promise<SongRow[]> {
+  const response = await request<{ songs: SongRow[] }>(`/songs?limit=${limit}`, { method: "GET" });
+  return response.songs;
+}
+
+export async function renameSong(songId: string, title: string): Promise<SongRow> {
+  return request<SongRow>(`/songs/${songId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteSong(songId: string): Promise<void> {
+  await request<{ deleted: boolean }>(`/songs/${songId}`, { method: "DELETE" });
+}
+
+export async function savePlayerMix(
+  songId: string,
+  mix: PlayerMixRequest
+): Promise<{ revision: number }> {
+  return request<{ revision: number }>(`/songs/${songId}/player/mix`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mix),
+    // The last save is sent as the tab is hidden or closed; let it outlive the page.
+    keepalive: true,
+  });
 }
 
 export async function fetchInstrumentalMidi(

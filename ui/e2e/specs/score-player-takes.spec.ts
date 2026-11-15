@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
+import { chooseReplace, uploadedSong } from "../support";
 
 // The score player gets each take's audio when that take's job completes: it
 // is downloaded and decoded once, and replaces the previous take of its part.
@@ -84,6 +85,7 @@ async function mockBackend(page: Page): Promise<Backend> {
     if (route_.endsWith("/upload")) {
       return json({
         session_id: SESSION_ID,
+        song: uploadedSong(SESSION_ID, "Practice Tune"),
         score_id: `score-${Date.now()}`,
         parsed: true,
         current_score: { version: 1 },
@@ -186,6 +188,7 @@ test("takes replace, append and clear in the score player without mixing up thei
 
   // A new score clears every take from the player.
   await uploadScore(page, "second-score.xml");
+  await chooseReplace(page);
   await expect(vocalRows(page)).toHaveCount(0);
 
   // A take on the new score is the only track, with its own audio.

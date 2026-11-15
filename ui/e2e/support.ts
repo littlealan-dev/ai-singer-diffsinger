@@ -50,6 +50,19 @@ async function e2eRequest(
   });
 }
 
+/** The Song an upload answers with: the backend makes every upload's session a Song. */
+export function uploadedSong(sessionId: string, title: string) {
+  return { id: sessionId, title, title_edited: false, created_at: "2026-01-01T00:00:00Z" };
+}
+
+/** A score added to a Song that already has one asks "New song or replace?". */
+export async function chooseReplace(page: Page) {
+  await page
+    .getByRole("dialog", { name: "New song or replace?" })
+    .getByRole("button", { name: /^Replace/ })
+    .click();
+}
+
 export async function getE2EState(page: Page, request: APIRequestContext, sessionId: string) {
   const response = await e2eRequest(page, request, `/_e2e/sessions/${sessionId}/state`);
   if (!response.ok()) throw new Error(`Unable to read E2E state: ${response.status()}`);

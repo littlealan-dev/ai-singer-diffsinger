@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
+import { chooseReplace, uploadedSong } from "../support";
 
 // A demo song is a score shipped with the app (ui/public/demo-scores), loaded
 // through the same upload request as a user's file. While it is the current
@@ -39,6 +40,7 @@ async function mockBackend(page: Page): Promise<Backend> {
       uploads.push({ name, body: currentScore });
       return json({
         session_id: SESSION_ID,
+        song: uploadedSong(SESSION_ID, name.replace(/\.xml$/, "")),
         score_id: `score-${uploads.length}`,
         parsed: true,
         current_score: { version: 1 },
@@ -92,6 +94,7 @@ test("demo songs load like an upload and bring their own starter prompts", async
   await expect(menu.getByRole("menuitem")).toHaveCount(3);
   await menu.getByRole("menuitem", { name: /Happy Birthday/ }).click();
   await expect(menu).toHaveCount(0);
+  await chooseReplace(page);
   await expect.poll(() => backend.uploads().map((upload) => upload.name)).toEqual([
     "amazing-grace.xml",
     "happy-birthday.xml",
@@ -110,6 +113,7 @@ test("demo songs load like an upload and bring their own starter prompts", async
     mimeType: "application/xml",
     buffer: xml,
   });
+  await chooseReplace(page);
   await expect.poll(() => backend.uploads().map((upload) => upload.name)).toEqual([
     "amazing-grace.xml",
     "happy-birthday.xml",

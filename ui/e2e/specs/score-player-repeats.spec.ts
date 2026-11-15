@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
+import { chooseReplace, uploadedSong } from "../support";
 
 // "With Repeats" chooses how the next take is rendered; it does not change
 // what the score player plays. The player plays the instrumental MIDI in the
@@ -129,6 +130,7 @@ async function mockBackend(page: Page): Promise<Backend> {
     if (route_.endsWith("/upload")) {
       return json({
         session_id: SESSION_ID,
+        song: uploadedSong(SESSION_ID, "Practice Tune"),
         score_id: `score-${Date.now()}`,
         parsed: true,
         current_score: { version: 1 },
@@ -258,6 +260,7 @@ test("the instrumental MIDI follows the takes' repeat order, not the toggle", as
   // A new score clears every track, MIDI included, and resets the toggle to
   // written order.
   await uploadScore(page, "second-score.xml");
+  await chooseReplace(page);
   await expect(vocalRows(page)).toHaveCount(0);
   await expect(page.locator(".score-player-seek-time")).toHaveCount(0);
   await expect(repeatsToggle(page)).not.toBeChecked();

@@ -793,6 +793,22 @@ def _prepare_app(monkeypatch, overrides=None):
     )
     monkeypatch.setattr("src.backend.job_store.JobStore.get_job_by_id", _fake_get_job_by_id)
     monkeypatch.setattr("src.backend.job_store.JobStore.list_active_jobs", _fake_list_active_jobs)
+
+    def _fake_list_session_jobs(self, *, user_id: str, session_id: str):
+        # Insertion order is creation order, so this is oldest first.
+        return [
+            (job_id, dict(payload))
+            for job_id, payload in fake_jobs.items()
+            if payload.get("userId") == user_id and payload.get("sessionId") == session_id
+        ]
+
+    monkeypatch.setattr("src.backend.job_store.JobStore.list_session_jobs", _fake_list_session_jobs)
+    monkeypatch.setattr(
+        "src.backend.job_store.JobStore.get_jobs",
+        lambda self, job_ids: {
+            job_id: dict(fake_jobs[job_id]) for job_id in job_ids if job_id in fake_jobs
+        },
+    )
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_job",
         lambda self, job_id: dict(fake_jobs[job_id]) if job_id in fake_jobs else None,
