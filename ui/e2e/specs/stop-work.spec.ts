@@ -70,7 +70,8 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
       releaseChat();
       if (scenario === "chat") return json({ result: "nothing_running", jobs: [] });
       const result = scenario === "too-late" ? "too_late" : "stopped";
-      return json({ result, jobs: [{ jobId: JOB_ID, jobKind: "synthesis", result, refundedCredits: result === "stopped" ? 3 : 0 }] });
+      const refundedCredits = result === "stopped" && scenario !== "split" ? 3 : 0;
+      return json({ result, jobs: [{ jobId: JOB_ID, jobKind: progressKind, result, refundedCredits }] });
     }
     if (url.pathname.endsWith("/chat")) {
       chatRequests += 1;
@@ -84,7 +85,7 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
     if (url.pathname.endsWith("/progress")) {
       progressRequests += 1;
       const kind = progressKind;
-      if (stopped && scenario === "take") {
+      if (stopped && (scenario === "take" || scenario === "split")) {
         return json({ status: "stopped", job_id: JOB_ID, job_kind: kind, ...(uploadInitial ? { score_id: SCORE_ID } : {}), message: "Stopped." });
       }
       if (stopped && scenario === "too-late") {
@@ -117,7 +118,6 @@ async function mockBackend(page: Page, scenario: Scenario, uploadInitial = true)
     xml,
     stopRequests: () => stopRequests,
     progressRequests: () => progressRequests,
-    advanceSplitToSynthesis: () => { progressKind = "synthesis"; },
     setUploadConflict: () => { uploadConflict = true; },
   };
 }
@@ -162,14 +162,17 @@ test("Too late to stop shows a notice and lets the take finish", async ({ page }
   await expect(page.locator('[data-testid^="score-vocal-track-"]')).toHaveCount(1);
 });
 
-test("a running split never shows Stop", async ({ page }) => {
+test("Stop during a split stops it, shows Stopped. and unlocks Send", async ({ page }) => {
   const backend = await mockBackend(page, "split");
   await sendSyntheticRequest(page);
   await expect.poll(backend.progressRequests).toBeGreaterThan(0);
-  await expect(page.getByTestId("stop-work")).toHaveCount(0);
-  backend.advanceSplitToSynthesis();
-  await expect.poll(backend.progressRequests).toBeGreaterThan(1);
   await expect(page.getByTestId("stop-work")).toBeVisible();
+  await page.getByTestId("stop-work").click();
+  await expect.poll(backend.stopRequests).toBe(1);
+  await expect(page.getByTestId("chat-stream")).toContainText("Stopped.");
+  await expect(page.getByTestId("chat-stream")).not.toContainText("Refunded");
+  await page.getByTestId("chat-input").fill("A second synthetic line");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
 });
 
 test("upload and demo controls stay disabled during work, and 409 appears in chat", async ({ page }) => {

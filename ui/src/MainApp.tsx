@@ -6741,7 +6741,7 @@ export default function MainApp() {
               >
                 <Send size={18} />
               </button>
-              {chatTurnInProgress && !jobKindPending && activeJobKind !== "preprocess" && (
+              {chatTurnInProgress && !jobKindPending && (
                 <button
                   type="button"
                   className="stop-work-button"
