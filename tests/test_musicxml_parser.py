@@ -638,16 +638,41 @@ class MusicXmlParserTests(unittest.TestCase):
                 self.assertEqual([part.raw_part_id for part in parsed.parts], ["P1", "P2"])
                 self.assertEqual([part["raw_part_id"] for part in summary["parts"]], ["P1", "P2"])
                 self.assertEqual([len(part["lyric_selections"]) for part in summary["parts"]], [1, 1])
-                # Named as the score viewer labels them, not after the instrument.
-                self.assertEqual([part.part_name for part in parsed.parts], ["Instr. P1", "Instr. P2"])
-                self.assertEqual(
-                    [part["part_name"] for part in summary["parts"]], ["Instr. P1", "Instr. P2"]
-                )
-                if with_instrument:
-                    # music21 still gives an unnamed part its instrument's name as its ID.
-                    self.assertEqual(
-                        [part.part_id for part in parsed.parts], ["Piano", "Piano (2)"]
-                    )
+                # Named and identified as the score viewer labels them, not after
+                # the instrument or by a per-run music21 object ID.
+                for parts in (
+                    [(part.part_id, part.part_name) for part in parsed.parts],
+                    [(part["part_id"], part["part_name"]) for part in summary["parts"]],
+                ):
+                    self.assertEqual(parts, [("Instr. P1", "Instr. P1"), ("Instr. P2", "Instr. P2")])
+
+    def test_unnamed_two_staff_part_keeps_its_staff_ids(self) -> None:
+        def staff_note(step: str, octave: int, staff: int) -> str:
+            return (
+                f"<note><pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+                f"<duration>4</duration><voice>{staff}</voice><type>whole</type>"
+                f"<staff>{staff}</staff></note>"
+            )
+
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list>'
+            '<score-part id="P1"><part-name/></score-part></part-list><part id="P1">'
+            '<measure number="1"><attributes><divisions>1</divisions>'
+            "<time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves>"
+            '<clef number="1"><sign>G</sign><line>2</line></clef>'
+            '<clef number="2"><sign>F</sign><line>4</line></clef></attributes>'
+            f'{staff_note("C", 5, 1)}<backup><duration>4</duration></backup>{staff_note("C", 3, 2)}'
+            "</measure></part></score-partwise>"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "unnamed-two-staff.xml"
+            path.write_text(xml, encoding="utf-8")
+            parsed = parse_musicxml(path, lyrics_only=False)
+
+        self.assertEqual(
+            [(part.part_id, part.raw_part_id, part.part_name) for part in parsed.parts],
+            [("P1-Staff1", "P1", "Instr. P1"), ("P1-Staff2", "P1", "Instr. P1")],
+        )
 
 
 def unnamed_parts_xml(*, with_instrument: bool) -> str:
