@@ -213,6 +213,18 @@ def _map_score_parts_to_raw_part_ids(
         parser_part_name = _normalize_part_name(part.partName)
         raw_part_id = parser_part_id if parser_part_id in raw_part_names else ""
         if not raw_part_id:
+            # music21 replaces the ID of a part with no name by its instrument
+            # name or an object ID, but records the <part> element's ID as a
+            # group. Split staffs have no group; the prefix match covers them.
+            raw_part_id = next(
+                (
+                    group
+                    for group in part.groups
+                    if group in raw_part_names and group not in used_raw_part_ids
+                ),
+                "",
+            )
+        if not raw_part_id:
             candidates = raw_ids_by_name.get(parser_part_name, [])
             if candidates:
                 unused_candidates = [
