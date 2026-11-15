@@ -638,8 +638,13 @@ class MusicXmlParserTests(unittest.TestCase):
                 self.assertEqual([part.raw_part_id for part in parsed.parts], ["P1", "P2"])
                 self.assertEqual([part["raw_part_id"] for part in summary["parts"]], ["P1", "P2"])
                 self.assertEqual([len(part["lyric_selections"]) for part in summary["parts"]], [1, 1])
+                # Named as the score viewer labels them, not after the instrument.
+                self.assertEqual([part.part_name for part in parsed.parts], ["Instr. P1", "Instr. P2"])
+                self.assertEqual(
+                    [part["part_name"] for part in summary["parts"]], ["Instr. P1", "Instr. P2"]
+                )
                 if with_instrument:
-                    # music21 names an unnamed part after its instrument.
+                    # music21 still gives an unnamed part its instrument's name as its ID.
                     self.assertEqual(
                         [part.part_id for part in parsed.parts], ["Piano", "Piano (2)"]
                     )

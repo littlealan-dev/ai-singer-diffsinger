@@ -39,8 +39,25 @@ def load_musicxml_score(path: str | Path) -> stream.Score:
     else:
         score = converter.parseData(read_musicxml_content(source_path), format="musicxml")
     _make_part_ids_unique(score)
+    _name_unnamed_parts(score, source_path)
     normalize_score_tempo_map(score)
     return score
+
+
+def _name_unnamed_parts(score: stream.Score, path: Path) -> None:
+    """Label a part the MusicXML leaves unnamed as the score viewer does.
+
+    OpenSheetMusicDisplay shows such a part as "Instr. <part id>". music21
+    would otherwise name it after its instrument or not at all, so the chat
+    and derived part names would not match what the user sees.
+    """
+    raw_parts = _raw_musicxml_parts(path)
+    unnamed = {raw_part.part_id for raw_part in raw_parts if not raw_part.part_name}
+    if not unnamed:
+        return
+    for index, raw_part_id in _map_score_parts_to_raw_part_ids(score, raw_parts).items():
+        if raw_part_id in unnamed:
+            score.parts[index].partName = f"Instr. {raw_part_id}"
 
 
 def _make_part_ids_unique(score: stream.Score) -> None:
