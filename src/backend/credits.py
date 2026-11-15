@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Literal, Mapping, Optional
+from typing import Any, Dict, Literal, Mapping, Optional, Protocol, Sequence
 import hashlib
 import json
 import logging
@@ -123,9 +123,12 @@ class ReserveCreditsResult:
         "overdrafted",
         "expired",
         "reservation_exists",
+        "refused",
         "infra_error",
     ]
     estimated_credits: int
+    # For "refused": the reservation guard's reason (reserve_credits_for_items).
+    reason: Optional[str] = None
 
 
 def instrumental_charge_scope(uid: str, session_id: str, score_id: str) -> str:
@@ -623,6 +626,75 @@ def _settle_credit_accounting_in_transaction(
     )
 
 
+def _reservation_doc(
+    *,
+    job_id: str,
+    uid: str,
+    estimated_credits: int,
+    reserved_monthly_credits: int,
+    reserved_topup_credits: int,
+    reserved_topup_packs: list[dict[str, Any]],
+    now: datetime,
+    ttl_seconds: int,
+    quote_id: Optional[str],
+    render_choices_hash: Optional[str],
+    components: Dict[str, Any],
+    billing_components: Sequence[str],
+    metadata_fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The credit_reservations document for one reserved job."""
+    return {
+        "jobId": job_id,
+        "userId": uid,
+        "estimatedCredits": estimated_credits,
+        "reservedMonthlyCredits": reserved_monthly_credits,
+        "reservedTopupCredits": reserved_topup_credits,
+        "reservedTopupPacks": reserved_topup_packs,
+        "createdAt": now,
+        "expiresAt": now + timedelta(seconds=ttl_seconds),
+        "status": "pending",
+        "quoteId": quote_id,
+        "renderChoicesHash": render_choices_hash,
+        "billingComponents": list(billing_components),
+        "components": components,
+        **metadata_fields,
+    }
+
+
+def _reserve_ledger_doc(
+    *,
+    uid: str,
+    job_id: str,
+    estimated_credits: int,
+    reserved_monthly_credits: int,
+    reserved_topup_credits: int,
+    reserved_topup_packs: list[dict[str, Any]],
+    reserved_after: int,
+    topup_reserved_after: int,
+    balance: int,
+    now: datetime,
+    metadata_fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The credit_ledger entry for one reserved job."""
+    return {
+        "userId": uid,
+        "type": "reserve",
+        "jobId": job_id,
+        "amount": 0,
+        "reservedDelta": reserved_monthly_credits,
+        "reservedAfter": reserved_after,
+        "monthlyReservedDelta": reserved_monthly_credits,
+        "monthlyReservedAfter": reserved_after,
+        "topupReservedDelta": reserved_topup_credits,
+        "topupReservedAfter": topup_reserved_after,
+        "totalReservedDelta": estimated_credits,
+        "reservedTopupPacks": reserved_topup_packs,
+        "balanceAfter": balance,
+        "createdAt": now,
+        **metadata_fields,
+    }
+
+
 def reserve_credits(
     uid: str,
     job_id: str,
@@ -823,20 +895,20 @@ def reserve_credits(
             billable_duration_seconds=billable_duration_seconds,
             billing_reference_job_id=billing_reference_job_id,
         )
-        transaction.set(res_ref, {
-            "jobId": job_id,
-            "userId": uid,
-            "estimatedCredits": estimated_credits,
-            "reservedMonthlyCredits": reserved_monthly_credits,
-            "reservedTopupCredits": reserved_topup_credits,
-            "reservedTopupPacks": reserved_topup_packs,
-            "createdAt": now,
-            "expiresAt": now + timedelta(seconds=ttl_seconds),
-            "status": "pending",
-            "quoteId": quote_id,
-            "renderChoicesHash": render_choices_hash,
-            "billingComponents": list(requested_components),
-            "components": {
+        transaction.set(res_ref, _reservation_doc(
+            job_id=job_id,
+            uid=uid,
+            estimated_credits=estimated_credits,
+            reserved_monthly_credits=reserved_monthly_credits,
+            reserved_topup_credits=reserved_topup_credits,
+            reserved_topup_packs=reserved_topup_packs,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            quote_id=quote_id,
+            render_choices_hash=render_choices_hash,
+            billing_components=requested_components,
+            metadata_fields=metadata_fields,
+            components={
                 "vocal": {
                     "status": "pending",
                     "estimatedCredits": int(
@@ -857,8 +929,7 @@ def reserve_credits(
                     else {}
                 ),
             },
-            **metadata_fields,
-        })
+        ))
 
         logger.info(
             "synthesis_billing_reserved job=%s user=%s quote=%s components=%s "
@@ -899,23 +970,19 @@ def reserve_credits(
 
         # Log to ledger for audit trail.
         ledger_ref = db.collection("credit_ledger").document(f"reserve_{job_id}")
-        transaction.set(ledger_ref, {
-            "userId": uid,
-            "type": "reserve",
-            "jobId": job_id,
-            "amount": 0,
-            "reservedDelta": reserved_monthly_credits,
-            "reservedAfter": reserved + reserved_monthly_credits,
-            "monthlyReservedDelta": reserved_monthly_credits,
-            "monthlyReservedAfter": reserved + reserved_monthly_credits,
-            "topupReservedDelta": reserved_topup_credits,
-            "topupReservedAfter": sum(pack.credits_reserved for pack in active_topup_after),
-            "totalReservedDelta": estimated_credits,
-            "reservedTopupPacks": reserved_topup_packs,
-            "balanceAfter": balance,
-            "createdAt": now,
-            **metadata_fields,
-        })
+        transaction.set(ledger_ref, _reserve_ledger_doc(
+            uid=uid,
+            job_id=job_id,
+            estimated_credits=estimated_credits,
+            reserved_monthly_credits=reserved_monthly_credits,
+            reserved_topup_credits=reserved_topup_credits,
+            reserved_topup_packs=reserved_topup_packs,
+            reserved_after=reserved + reserved_monthly_credits,
+            topup_reserved_after=sum(pack.credits_reserved for pack in active_topup_after),
+            balance=balance,
+            now=now,
+            metadata_fields=metadata_fields,
+        ))
         
         return ReserveCreditsResult(
             status="reserved",
@@ -931,6 +998,356 @@ def reserve_credits(
             status="infra_error",
             estimated_credits=estimated_credits,
         )
+
+@dataclass(frozen=True)
+class ReservationItem:
+    """One job of a multi-job reservation: a Sing All take, or its instrumentals."""
+
+    job_id: str
+    estimated_credits: int
+    billing_components: tuple[str, ...] = ("vocal",)
+    job_kind: Optional[str] = None
+    pricing: Optional[str] = None
+    pricing_unit_seconds: Optional[int] = None
+    billable_duration_seconds: Optional[float] = None
+    instrumental_charge_scope_value: Optional[str] = None
+
+
+class ReservationGuard(Protocol):
+    """Work done in the same transaction as the reservations, such as the one-active check."""
+
+    def read(self, transaction: Any) -> Optional[str]:
+        """Read what the guard needs; return a refusal status, or None to go on."""
+
+    def write(self, transaction: Any) -> None:
+        """Write the guard's own records once every reservation is written."""
+
+
+def reserve_credits_for_items(
+    uid: str,
+    items: Sequence[ReservationItem],
+    *,
+    guard: ReservationGuard,
+    session_id: Optional[str] = None,
+    score_id: Optional[str] = None,
+    score_version_no: Optional[int] = None,
+    parent_job_id: Optional[str] = None,
+    reservation_ttl_seconds: Optional[int] = None,
+) -> ReserveCreditsResult:
+    """Reserve one reservation per item, all or none, with one balance check for the total.
+
+    Each item gets its own credit_reservations document under its job id, so each
+    settles or is released on its own with today's functions. A Firestore transaction
+    cannot read after it writes, so every read happens first.
+    """
+    total = sum(int(item.estimated_credits) for item in items)
+    db = get_firestore_client()
+    user_ref = db.collection("users").document(uid)
+    res_refs = [db.collection("credit_reservations").document(item.job_id) for item in items]
+    charge_refs = [
+        db.collection("instrumental_generation_charges").document(
+            _instrumental_charge_doc_id(item.instrumental_charge_scope_value)
+        )
+        if "instrumental" in item.billing_components and item.instrumental_charge_scope_value
+        else None
+        for item in items
+    ]
+
+    @firestore.transactional
+    def _transactional_reserve_items(transaction):
+        refusal = guard.read(transaction)
+        if refusal is not None:
+            return ReserveCreditsResult(status="refused", estimated_credits=total, reason=refusal)
+        for res_ref in res_refs:
+            if res_ref.get(transaction=transaction).exists:
+                logger.error("Reservation conflict for user %s, job %s", uid, res_ref.id)
+                return ReserveCreditsResult(status="infra_error", estimated_credits=total)
+        for charge_ref in charge_refs:
+            if charge_ref is None:
+                continue
+            charge_snapshot = charge_ref.get(transaction=transaction)
+            charge_data = charge_snapshot.to_dict() if charge_snapshot.exists else {}
+            if str((charge_data or {}).get("status") or "unpaid") != "unpaid":
+                return ReserveCreditsResult(status="infra_error", estimated_credits=total)
+
+        snapshot = user_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return ReserveCreditsResult(status="infra_error", estimated_credits=total)
+        credits = (snapshot.to_dict() or {}).get("credits", {})
+        if credits.get("overdrafted", False):
+            logger.warning("Reservation rejected: user %s is overdrafted", uid)
+            return ReserveCreditsResult(status="overdrafted", estimated_credits=total)
+        expires_at = credits.get("expiresAt")
+        if expires_at and datetime.now(timezone.utc) > expires_at:
+            logger.warning("Reservation rejected: user %s credits expired", uid)
+            return ReserveCreditsResult(status="expired", estimated_credits=total)
+
+        balance = int(credits.get("balance", 0) or 0)
+        reserved = int(credits.get("reserved", 0) or 0)
+        now = datetime.now(timezone.utc)
+        topup_state = refresh_topup_pack_state_in_transaction(
+            transaction,
+            db,
+            uid,
+            now,
+            expire_stale=True,
+        )
+        if balance - reserved + topup_state.total_available < total:
+            logger.warning(
+                "Reservation rejected: user %s insufficient balance for %d items (%d requested)",
+                uid,
+                len(items),
+                total,
+            )
+            return ReserveCreditsResult(status="insufficient_balance", estimated_credits=total)
+
+        # Writes only from here on. Monthly credits are used first, then top-up packs,
+        # item by item, as reserve_credits splits one job.
+        ttl_seconds = reservation_ttl_seconds or DEFAULT_RESERVATION_TTL_SECONDS
+        monthly_left = max(0, balance - reserved)
+        reserved_after = reserved
+        active_packs = topup_state.active_packs
+        for item, res_ref, charge_ref in zip(items, res_refs, charge_refs):
+            estimated = int(item.estimated_credits)
+            reserved_monthly = min(estimated, monthly_left)
+            monthly_left -= reserved_monthly
+            reserved_topup, reserved_packs, active_packs = reserve_topup_credits_in_transaction(
+                transaction,
+                estimated - reserved_monthly,
+                active_packs,
+            )
+            if reserved_monthly + reserved_topup < estimated:
+                raise RuntimeError(f"Reservation split failed for job {item.job_id}")
+            reserved_after += reserved_monthly
+            metadata_fields = _billing_metadata_fields(
+                session_id=session_id,
+                job_kind=item.job_kind,
+                score_id=score_id,
+                score_version_no=score_version_no,
+                pricing=item.pricing,
+                pricing_unit_seconds=item.pricing_unit_seconds,
+                billable_duration_seconds=item.billable_duration_seconds,
+            )
+            if parent_job_id:
+                metadata_fields["parentJobId"] = parent_job_id
+            components: Dict[str, Any] = {}
+            if "vocal" in item.billing_components:
+                components["vocal"] = {"status": "pending", "estimatedCredits": estimated}
+            if "instrumental" in item.billing_components:
+                components["instrumental"] = {
+                    "status": "pending",
+                    "estimatedCredits": estimated,
+                    "chargeScope": item.instrumental_charge_scope_value,
+                }
+            transaction.set(res_ref, _reservation_doc(
+                job_id=item.job_id,
+                uid=uid,
+                estimated_credits=estimated,
+                reserved_monthly_credits=reserved_monthly,
+                reserved_topup_credits=reserved_topup,
+                reserved_topup_packs=reserved_packs,
+                now=now,
+                ttl_seconds=ttl_seconds,
+                quote_id=None,
+                render_choices_hash=None,
+                components=components,
+                billing_components=item.billing_components,
+                metadata_fields=metadata_fields,
+            ))
+            if charge_ref is not None:
+                transaction.set(
+                    charge_ref,
+                    {
+                        "status": "pending",
+                        "scope": item.instrumental_charge_scope_value,
+                        "userId": uid,
+                        "sessionId": session_id,
+                        "scoreId": score_id,
+                        "jobId": item.job_id,
+                        "quoteId": None,
+                        "estimatedCredits": estimated,
+                        "updatedAt": now,
+                    },
+                )
+            transaction.set(
+                db.collection("credit_ledger").document(f"reserve_{item.job_id}"),
+                _reserve_ledger_doc(
+                    uid=uid,
+                    job_id=item.job_id,
+                    estimated_credits=estimated,
+                    reserved_monthly_credits=reserved_monthly,
+                    reserved_topup_credits=reserved_topup,
+                    reserved_topup_packs=reserved_packs,
+                    reserved_after=reserved_after,
+                    topup_reserved_after=sum(pack.credits_reserved for pack in active_packs),
+                    balance=balance,
+                    now=now,
+                    metadata_fields=metadata_fields,
+                ),
+            )
+        transaction.update(
+            user_ref,
+            {"credits.reserved": reserved_after, **topup_aggregate_fields(active_packs)},
+        )
+        guard.write(transaction)
+        logger.info(
+            "multi_item_billing_reserved parent=%s user=%s items=%d total=%d",
+            parent_job_id,
+            uid,
+            len(items),
+            total,
+        )
+        return ReserveCreditsResult(status="reserved", estimated_credits=total)
+
+    transaction = db.transaction()
+    try:
+        return _transactional_reserve_items(transaction)
+    except Exception:
+        logger.exception("Error reserving %d items for user %s, parent %s", len(items), uid, parent_job_id)
+        return ReserveCreditsResult(status="infra_error", estimated_credits=total)
+
+
+def settle_instrumental_reservation(uid: str, reservation_id: str) -> SettleCreditsResult:
+    """Charge an instrumentals-only reservation in full and mark its score's instrumentals paid.
+
+    A Sing All holds its instrumentals' credit in a reservation of its own, settled
+    when the first take is made. It has no job to complete. Settled or released
+    already: a no-op.
+    """
+    db = get_firestore_client()
+    user_ref = db.collection("users").document(uid)
+    res_ref = db.collection("credit_reservations").document(reservation_id)
+
+    @firestore.transactional
+    def _transactional_settle_instrumental(transaction):
+        res_snapshot = res_ref.get(transaction=transaction)
+        if not res_snapshot.exists:
+            return SettleCreditsResult(status="reservation_missing", actual_credits=0, overdrafted=False)
+        res_data = res_snapshot.to_dict() or {}
+        estimated_credits = int(res_data.get("estimatedCredits", 0) or 0)
+        status = str(res_data.get("status") or "")
+        if status == "settled":
+            return SettleCreditsResult(status="already_settled", actual_credits=estimated_credits, overdrafted=False)
+        if status == "released":
+            return SettleCreditsResult(status="already_released", actual_credits=0, overdrafted=False)
+        components = dict(res_data.get("components") or {})
+        instrumental_component = components.get("instrumental")
+        charge_scope = (
+            instrumental_component.get("chargeScope") if isinstance(instrumental_component, dict) else None
+        )
+        if (
+            status != "pending"
+            or res_data.get("userId") != uid
+            or set(components) != {"instrumental"}
+            or not isinstance(charge_scope, str)
+            or not charge_scope
+        ):
+            return SettleCreditsResult(
+                status="reconciliation_required", actual_credits=estimated_credits, overdrafted=False
+            )
+        charge_ref = db.collection("instrumental_generation_charges").document(
+            _instrumental_charge_doc_id(charge_scope)
+        )
+        charge_snapshot = charge_ref.get(transaction=transaction)
+        charge_data = charge_snapshot.to_dict() if charge_snapshot.exists else {}
+        if (
+            str((charge_data or {}).get("status") or "") != "pending"
+            or charge_data.get("jobId") != reservation_id
+        ):
+            return SettleCreditsResult(
+                status="reconciliation_required", actual_credits=estimated_credits, overdrafted=False
+            )
+        user_snapshot = user_ref.get(transaction=transaction)
+        if not user_snapshot.exists:
+            return SettleCreditsResult(status="infra_error", actual_credits=estimated_credits, overdrafted=False)
+
+        now = datetime.now(timezone.utc)
+        accounting = _settle_credit_accounting_in_transaction(
+            transaction=transaction,
+            db=db,
+            uid=uid,
+            job_id=reservation_id,
+            user_data=user_snapshot.to_dict() or {},
+            res_data=res_data,
+            actual_credits=estimated_credits,
+            now=now,
+        )
+        transaction.update(
+            user_ref,
+            {
+                "credits.balance": accounting.new_balance,
+                "credits.reserved": accounting.new_reserved,
+                "credits.overdrafted": accounting.overdrafted,
+                **topup_aggregate_fields(accounting.active_topup_after),
+            },
+        )
+        components["instrumental"] = {
+            **instrumental_component,
+            "status": "settled",
+            "actualCredits": estimated_credits,
+        }
+        transaction.update(
+            res_ref,
+            {
+                "status": "settled",
+                "actualCredits": estimated_credits,
+                "components": components,
+                "settledAt": now,
+            },
+        )
+        transaction.set(
+            charge_ref,
+            {
+                **charge_data,
+                "status": "paid",
+                "actualCredits": estimated_credits,
+                "paidAt": now,
+                "updatedAt": now,
+            },
+        )
+        transaction.set(
+            db.collection("credit_ledger").document(f"settle_{reservation_id}"),
+            {
+                "userId": uid,
+                "sessionId": res_data.get("sessionId"),
+                "type": "settle",
+                "jobId": reservation_id,
+                **_billing_metadata_fields(
+                    job_kind=res_data.get("jobKind"),
+                    score_id=res_data.get("scoreId"),
+                    score_version_no=res_data.get("scoreVersionNo"),
+                ),
+                "amount": -estimated_credits,
+                "reservedDelta": -estimated_credits,
+                "reservedAfter": accounting.new_reserved,
+                "monthlyReservedDelta": -int(res_data.get("reservedMonthlyCredits", estimated_credits) or 0),
+                "monthlyReservedAfter": accounting.new_reserved,
+                "topupReservedDelta": -int(res_data.get("reservedTopupCredits", 0) or 0),
+                "topupReservedAfter": sum(pack.credits_reserved for pack in accounting.active_topup_after),
+                "balanceAfter": accounting.new_balance,
+                "subscriptionCreditsConsumed": accounting.subscription_consumed,
+                "topupCreditsConsumed": accounting.topup_consumed,
+                "createdAt": now,
+            },
+        )
+        logger.info(
+            "instrumental_billing_settled reservation=%s user=%s credits=%s scope_paid=%s",
+            reservation_id,
+            uid,
+            estimated_credits,
+            True,
+        )
+        return SettleCreditsResult(
+            status="settled", actual_credits=estimated_credits, overdrafted=accounting.overdrafted
+        )
+
+    transaction = db.transaction()
+    try:
+        return _transactional_settle_instrumental(transaction)
+    except Exception:
+        logger.exception("Error settling instrumental reservation %s for user %s", reservation_id, uid)
+        return SettleCreditsResult(status="infra_error", actual_credits=0, overdrafted=False)
+
 
 def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> SettleCreditsResult:
     """
