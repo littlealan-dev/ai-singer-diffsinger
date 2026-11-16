@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 
 from src.backend import sing_all_store
+from src.backend.message_catalog import backend_message
+from src.backend.session import _new_history_entry
 
 
 class _Snapshot:
@@ -98,3 +100,14 @@ def test_parent_guard_refuses_running_job_and_replaces_finished_pointer():
         ("set", "singAllJobs/fake-parent", job),
         ("update", "users/fake-user", {"activeSingAllJobId": "fake-parent"}),
     ]
+
+
+def test_sing_all_history_has_link_and_factual_counts():
+    started = backend_message("sing_all.started_history", takes=4, credits=8)
+    ended = backend_message("sing_all.ended_history", status="completed",
+                            done=4, takes=4, credits=8)
+    assert "4 takes" in started and "8 credits" in started
+    assert "4 of 4" in ended and "8 credits" in ended
+    assert _new_history_entry("assistant", started, sing_all_job_id="fake-parent")[
+        "singAllJobId"] == "fake-parent"
+    assert "singAllJobId" not in _new_history_entry("assistant", "Ordinary message")

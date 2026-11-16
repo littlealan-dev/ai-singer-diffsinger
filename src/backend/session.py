@@ -42,14 +42,17 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _new_history_entry(role: str, content: str) -> Dict[str, str]:
+def _new_history_entry(role: str, content: str, *, sing_all_job_id: str | None = None) -> Dict[str, str]:
     # Distinct turns must remain distinct under Firestore ArrayUnion equality.
-    return {
+    entry = {
         "id": uuid.uuid4().hex,
         "role": role,
         "content": content,
         "timestamp": _utcnow().isoformat(),
     }
+    if sing_all_job_id:
+        entry["singAllJobId"] = sing_all_job_id
+    return entry
 
 
 @dataclass
@@ -343,14 +346,14 @@ class SessionStore(WorkspacePersistence):
             return state.snapshot()
 
     async def append_history(
-        self, session_id: str, role: str, content: str
+        self, session_id: str, role: str, content: str, *, sing_all_job_id: str | None = None
     ) -> Dict[str, str]:
         """Append a chat message to the session history."""
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 raise KeyError(session_id)
-            entry = _new_history_entry(role, content)
+            entry = _new_history_entry(role, content, sing_all_job_id=sing_all_job_id)
             state.history.append(entry)
             state.last_active_at = _utcnow()
             return dict(entry)
@@ -893,10 +896,10 @@ class FirestoreSessionStore(WorkspacePersistence):
         return await self._run_session_io(session_id, run)
 
     async def append_history(
-        self, session_id: str, role: str, content: str
+        self, session_id: str, role: str, content: str, *, sing_all_job_id: str | None = None
     ) -> Dict[str, str]:
         """Append a chat entry to Firestore history."""
-        entry = _new_history_entry(role, content)
+        entry = _new_history_entry(role, content, sing_all_job_id=sing_all_job_id)
         await self._run_session_io(
             session_id,
             lambda: self._update(session_id, {"history": firestore.ArrayUnion([entry])}),
