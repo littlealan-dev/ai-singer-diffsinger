@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from src.backend.sing_all import decide
+from src.backend.sing_all import decide, job_from_quote
 
 
 def _job(stage="reading", *, instrumental=False):
@@ -31,6 +31,22 @@ def _job(stage="reading", *, instrumental=False):
 
 def _score(job):
     return {"scoreId": "fake-score", "verse": "1", "rows": job["rows"]}
+
+
+def test_quote_becomes_parent_with_fixed_child_and_reservation_ids():
+    source = _job()
+    quote = {"quoteId": "fake-quote", "uid": source["uid"],
+             "sessionId": "fake-song", "scoreId": source["scoreId"],
+             "scoreVersion": 2, "choicesHash": "fake-hash", "total": 4,
+             "choices": source["choices"], "judgment": {"roles": {}},
+             "rows": source["rows"], "items": source["items"]}
+    parent = job_from_quote(quote, title="Example tune", job_id="fake-parent")
+    assert parent["status"] == "running" and parent["stage"] == "reading"
+    assert parent["quote"]["scoreVersion"] == 2
+    ids = [item["childJobId"] for item in parent["items"]]
+    assert len(ids) == len(set(ids))
+    assert all(row["partId"] is None for row in parent["rows"])
+    assert quote["items"][0]["childJobId"] == "split-child"
 
 
 def test_reading_checks_score_and_saves_assignments_before_splitting():

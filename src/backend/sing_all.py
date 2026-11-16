@@ -4,7 +4,9 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
+from uuid import uuid4
 
 from music21 import pitch
 
@@ -67,6 +69,33 @@ def choices_hash(choices: Mapping[str, Any], style: Mapping[str, Any] | None) ->
     payload = {"choices": choices, "style": style or {}}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict[str, Any]:
+    """Freeze one quote into a parent with fixed child and reservation ids."""
+    now = datetime.now(timezone.utc)
+    items = deepcopy(quote["items"])
+    for item in items:
+        if item["type"] in {"split", "take"}:
+            item["childJobId"] = uuid4().hex
+        elif item["type"] == "instrumental":
+            item["reservationId"] = f"{job_id}-instrumentals"
+    rows = deepcopy(quote["rows"])
+    for row in rows:
+        row["partId"] = None if row.get("split") else row.get("sourcePartId")
+        row["name"] = row.get("partName") or row.get("name") or row.get("sourcePartId")
+    return {
+        "jobId": job_id, "uid": quote["uid"], "sessionId": quote["sessionId"],
+        "scoreId": quote["scoreId"], "title": title, "kind": "full",
+        "status": "running", "stage": "reading", "revision": 0,
+        "choices": deepcopy(quote["choices"]), "style": deepcopy(quote.get("style") or {}),
+        "quote": {"quoteId": quote["quoteId"], "total": quote["total"],
+                  "choicesHash": quote["choicesHash"], "scoreVersion": quote["scoreVersion"]},
+        "judgment": deepcopy(quote["judgment"]), "rows": rows, "items": items,
+        "cancelRequested": False, "endReason": None, "notes": [],
+        "render": {"state": "none"}, "createdAt": now, "updatedAt": now,
+        "lastProgressAt": now, "endedAt": None, "finalScoreVersion": None,
+    }
 
 
 def available_balance_from_user(user: Mapping[str, Any]) -> int:
@@ -235,8 +264,9 @@ def summary_with_judged_instruments(
     }
     assignments = []
     for route_id in unresolved:
-        role = roles.get(routes.get(route_id))
-        if role == "voice":
+        part_id = routes.get(route_id)
+        role = roles.get(part_id)
+        if role == "voice" or (part_id in roles and part_id in (sung_source_ids or set())):
             assignments.append({"score_instrument_id": route_id, "source": "llm_inferred",
                                 "role": "not_instrumental", "evidence": []})
             continue
@@ -251,18 +281,6 @@ def summary_with_judged_instruments(
         summary, assignments, allow_user_choice=True)
     if problem:
         raise ValueError("The quote's instrument answers do not fit the score.")
-    if sung_source_ids:
-        # An undecided part the user ticks is a vocal choice, not a parallel
-        # instrumental track. This copy is used only to price the quote.
-        sung_route_ids = {
-            route_id for route_id, part_id in routes.items()
-            if part_id in sung_source_ids and part_id in roles
-        }
-        amended_resolution = amended.get("instrument_program_resolution") or {}
-        amended_resolution["instrumental_score_instrument_ids"] = [
-            route_id for route_id in amended_resolution.get("instrumental_score_instrument_ids") or []
-            if route_id not in sung_route_ids
-        ]
     return amended
 
 

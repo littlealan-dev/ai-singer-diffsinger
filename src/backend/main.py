@@ -47,6 +47,7 @@ from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, re
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.job_dispatch import (
     PREPROCESS_JOB_KIND,
+    SING_ALL_RECONCILE_KIND,
     SYNTHESIS_JOB_KIND,
     JobRoute,
     job_route,
@@ -64,7 +65,7 @@ from src.backend.synthesis_pricing import (
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
-    materialize_rows, quote_lines,
+    job_from_quote, materialize_rows, quote_lines,
     style_changes, summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
@@ -73,9 +74,11 @@ from src.backend.sing_all_judgment import (
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
-    active_job_for_song, latest_judgment, read_judgment, read_style,
+    active_job_for_song, create_job_with_reservations, latest_judgment,
+    read_judgment, read_quote, read_style,
     save_judgment, save_quote, save_style,
 )
+from src.backend.sing_all_runner import SingAllRunner
 from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
@@ -405,6 +408,14 @@ class SingAllQuoteRequest(BaseModel):
     choices: dict[str, Any] = Field(default_factory=dict)
 
 
+class SingAllJobRequest(BaseModel):
+    quoteId: str = Field(min_length=1, max_length=200)
+
+
+class SingAllReconcileRequest(BaseModel):
+    jobId: str = Field(min_length=1, max_length=200)
+
+
 class SolfegeSettingsPayload(BaseModel):
     """Canonical user-selectable solfege settings."""
     system: Literal["movable_do", "fixed_do"]
@@ -648,6 +659,14 @@ def create_app() -> FastAPI:
             job_id, claim.job, attempt=claim.attempt, worker_id=worker_id
         )
         return JSONResponse(content={"status": "done", "attempt": claim.attempt})
+
+    @app.post("/internal/sing-all/reconcile")
+    async def reconcile_sing_all(payload: SingAllReconcileRequest, request: Request) -> JSONResponse:
+        """Retryable wake for one parent, accepted only from the configured worker."""
+        route = job_route(settings, SING_ALL_RECONCILE_KIND)
+        await _require_worker_caller(request, route)
+        await SingAllRunner(request.app.state.orchestrator).reconcile(payload.jobId)
+        return JSONResponse(content={"status": "done"})
 
     @app.post("/internal/synthesis-jobs/{job_id}")
     async def run_synthesis_job(job_id: str, request: Request) -> JSONResponse:
@@ -1333,6 +1352,94 @@ def create_app() -> FastAPI:
             "notes": facts.get("notes") or [], "style": style,
             "choicesHash": quote_record["choicesHash"],
         }
+
+    @app.post("/sing-all/jobs")
+    async def start_sing_all(payload: SingAllJobRequest, request: Request) -> Dict[str, Any]:
+        """Start only the caller's still-current quote; no LLM is called here."""
+        user_id = await _get_user_id_or_401(request)
+        db = get_firestore_client()
+        quote = await asyncio.to_thread(read_quote, db, payload.quoteId, uid=user_id)
+        if quote is None:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        session_id = quote["sessionId"]
+        snapshot = await _get_snapshot_or_404(request.app.state.sessions, session_id, user_id)
+        current = snapshot.get("current_score") or {}
+        score, summary = current.get("score"), snapshot.get("score_summary")
+        score_id, version = snapshot.get("score_id"), current.get("version")
+        if not isinstance(score, dict) or not isinstance(summary, dict) or not isinstance(version, int):
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        if score_id != quote["scoreId"] or version != quote["scoreVersion"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        choices = quote["choices"]
+        style = quote.get("style") or {}
+        if choices_hash(choices, style) != quote["choicesHash"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        voicebanks = await orchestrator._get_voicebank_details()
+        settings: Settings = request.app.state.settings
+        facts = quote_facts(
+            score, summary, voicebanks, verse_number=choices["verse"],
+            evidence_max_chars=settings.preprocess_chooser_evidence_max_chars)
+        model = (settings.gemini_sing_all_quote.model if settings.llm_provider == "gemini"
+                 else settings.openai_default.model)
+        expected_hash = input_hash(
+            {"facts": facts, "language": choices["language"], "voicebanks": voicebanks,
+             "score": f"{score_id}:{version}"},
+            quote_prompt(synthesis_max_duration_seconds=settings.synthesis_max_duration_seconds),
+            model,
+        )
+        if expected_hash != quote["judgment"].get("inputHash"):
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        try:
+            rows = materialize_rows(facts, quote["judgment"], choices["rows"])
+            source_names = {str(part.get("part_id")): part.get("part_name")
+                            for part in summary.get("parts") or [] if isinstance(part, dict)}
+            for row in rows:
+                row["partName"] = source_names.get(row["sourcePartId"]) or row["sourcePartId"]
+            mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
+            priced_summary = summary_with_judged_instruments(
+                summary, quote["judgment"],
+                sung_source_ids={row["sourcePartId"] for row in rows if row["include"]})
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"}) from exc
+        if rows != quote["rows"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
+        instrumental_required = (score_has_instrumental_parts(priced_summary)
+                                 and await asyncio.to_thread(
+                                     get_instrumental_charge_state, charge_scope) != "paid")
+        duration = selected_score_duration(summary, expand_repeats=choices["repeats"])
+        items = build_items(rows, mode=choices["mode"], duration_seconds=duration,
+                            instrumental_charge_required=instrumental_required)
+        total = sum(int(item["creditsReserved"]) for item in items)
+        if items != quote["items"] or total != quote["total"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        if not any(row["include"] for row in rows):
+            raise HTTPException(status_code=409, detail={"code": "nothing_to_sing"})
+        user_record = await asyncio.to_thread(
+            lambda: db.collection("users").document(user_id).get().to_dict() or {})
+        if (user_record.get("billing") or {}).get("activePlanKey") == "free":
+            raise HTTPException(status_code=409, detail={"code": "free_plan"})
+        if style.get("note") and not style.get("controls"):
+            raise HTTPException(status_code=409, detail={"code": "style_unavailable"})
+        job_id = uuid.uuid4().hex
+        title = (snapshot.get("song") or {}).get("title") or summary.get("title") or "Song"
+        job = job_from_quote(quote, title=title, job_id=job_id)
+        result = await asyncio.to_thread(
+            create_job_with_reservations, job,
+            instrumental_scope=charge_scope if instrumental_required else None)
+        if result.status != "reserved":
+            code = (result.reason if result.status == "refused" else
+                    "not_enough_credits" if result.status == "insufficient_balance" else result.status)
+            raise HTTPException(status_code=409, detail={"code": code})
+        takes = sum(item["type"] == "take" for item in job["items"])
+        await request.app.state.sessions.append_history(
+            session_id, "assistant",
+            backend_message("sing_all.started_history", takes=takes, credits=total),
+            sing_all_job_id=job_id,
+        )
+        await orchestrator._enqueue_sing_all_reconcile(job_id)
+        return job
 
     @app.get("/sessions/{session_id}/synthesis-estimate")
     async def get_synthesis_estimate(
@@ -3105,7 +3212,8 @@ def _should_require_app_check(request: Request) -> bool:
     path = request.url.path
     if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
         return False
-    if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/")):
+    if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/",
+                        "/internal/sing-all/reconcile")):
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 
