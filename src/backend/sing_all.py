@@ -2,12 +2,16 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
 from src.backend.language_selection import normalize_language_code
 from src.backend.synthesis_pricing import (
     INSTRUMENTAL_CREDIT_DURATION_SECONDS, VOCAL_CREDIT_DURATION_SECONDS,
     credits_for_duration,
+)
+from src.musicxml.instrument_programs import (
+    FLUIDR3_SOUNDFONT_ID, apply_llm_program_assignments,
 )
 
 
@@ -127,3 +131,67 @@ def quote_lines(items: Sequence[Mapping[str, Any]], *,
     lines.extend([{"kind": "total", "credits": total},
                   {"kind": "balance", "before": balance, "after": balance - total}])
     return lines
+
+
+def materialize_rows(
+    facts: Mapping[str, Any], judgment: Mapping[str, Any],
+    selected: Sequence[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Keep only the chosen layout and fold user ticks and voice picks onto it."""
+    choices = {str(item.get("rowId")): item for item in selected}
+    rows = [deepcopy(row) for row in facts.get("rows") or []]
+    for staff in facts.get("open_staffs") or []:
+        layout = judgment.get("layouts", {}).get(staff["key"])
+        if layout not in {"shared", "separate"}:
+            raise ValueError("A staff layout is missing from the quote judgment.")
+        rows.extend(deepcopy(row) for row in staff["rows_if"][layout])
+    roles = judgment.get("roles") or {}
+    voices = judgment.get("voices") or {}
+    for row in rows:
+        row_id = str(row["rowId"])
+        role = roles.get(row["sourcePartId"])
+        if role in {"instrument", "unsure"}:
+            row["note"] = "likely_instrument" if role == "instrument" else "undecided"
+        row["include"] = role not in {"instrument", "unsure"}
+        row["voice"] = voices[row_id]
+        chosen = choices.get(row_id)
+        if chosen:
+            row["include"] = bool(chosen.get("include", row["include"]))
+            if chosen.get("voicePicked") == "user" and chosen.get("voice"):
+                row["voice"] = chosen["voice"]
+                row["voicePicked"] = "user"
+    return rows
+
+
+def summary_with_judged_instruments(
+    summary: Mapping[str, Any], judgment: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Price a copy of the score as if Sing it saved the quote's roles and sounds."""
+    resolution = summary.get("instrument_program_resolution") or {}
+    unresolved = resolution.get("unresolved_score_instrument_ids") or []
+    roles = judgment.get("roles") or {}
+    sounds = judgment.get("sounds") or {}
+    routes = {
+        route.get("score_instrument_id"): part.get("part_id")
+        for part in summary.get("parts") or []
+        for route in part.get("instruments") or []
+    }
+    assignments = []
+    for route_id in unresolved:
+        role = roles.get(routes.get(route_id))
+        if role == "voice":
+            assignments.append({"score_instrument_id": route_id, "source": "llm_inferred",
+                                "role": "not_instrumental", "evidence": []})
+            continue
+        sound = sounds.get(route_id)
+        assignments.append({
+            "score_instrument_id": route_id, "source": "llm_inferred",
+            "role": "instrumental", "evidence": (sound or {}).get("evidence") or [],
+            "playback_preset": ({**sound, "soundfont_id": FLUIDR3_SOUNDFONT_ID}
+                                if sound is not None else None),
+        })
+    amended, problem = apply_llm_program_assignments(
+        summary, assignments, allow_user_choice=True)
+    if problem:
+        raise ValueError("The quote's instrument answers do not fit the score.")
+    return amended

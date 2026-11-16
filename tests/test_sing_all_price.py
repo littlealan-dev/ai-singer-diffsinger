@@ -2,7 +2,10 @@
 
 import pytest
 
-from src.backend.sing_all import build_items, choices_hash, quote_lines
+from src.backend.sing_all import (
+    build_items, choices_hash, materialize_rows, quote_lines,
+    summary_with_judged_instruments,
+)
 
 
 def _rows():
@@ -61,3 +64,54 @@ def test_choices_hash_covers_style_note_and_controls():
     assert key == choices_hash(dict(reversed(list(choices.items()))), style)
     assert key != choices_hash(choices, {**style, "note": "bright"})
     assert key != choices_hash(choices, {**style, "controls": {"a": {"airiness": 11}}})
+
+
+@pytest.mark.parametrize("role,note,ticked", [
+    ("voice", "no_words", True),
+    ("instrument", "likely_instrument", False),
+    ("unsure", "undecided", False),
+])
+def test_undecided_part_role_sets_default_tick_and_note(role, note, ticked):
+    facts = {"rows": [{"rowId": "a", "sourcePartId": "P1", "note": "no_words"}],
+             "open_staffs": []}
+    judgment = {"roles": {"P1": role}, "voices": {"a": "voice_a"}}
+    row = materialize_rows(facts, judgment)[0]
+    assert (row["include"], row["note"]) == (ticked, note)
+    selected = [{"rowId": "a", "include": True, "voicePicked": "user", "voice": "voice_b"}]
+    assert materialize_rows(facts, judgment, selected)[0]["voice"] == "voice_b"
+
+
+def test_only_chosen_staff_layout_is_shown_and_split_is_priced_once():
+    facts = {"rows": [], "open_staffs": [{"key": "P1|1", "rows_if": {
+        "shared": [dict(_rows()[0])], "separate": [dict(_rows()[0]), dict(_rows()[1])],
+    }}]}
+    judgment = {"layouts": {"P1|1": "separate"},
+                "voices": {"a": "voice_a", "b": "voice_a"}}
+    rows = materialize_rows(facts, judgment)
+    assert [row["rowId"] for row in rows] == ["a", "b"]
+    assert [item["itemId"] for item in build_items(
+        rows, mode="lyrics", duration_seconds=59,
+        instrumental_charge_required=False)] == [
+            "take:a:lyrics", "take:b:solfege", "split:P1"]
+
+
+@pytest.mark.parametrize("role,sound,expected", [
+    ("voice", None, False),
+    ("instrument", None, True),
+    ("unsure", None, True),
+    ("instrument", {"bank": 0, "kind": "melodic", "program": 0,
+                    "evidence": ["keyboard staff"]}, True),
+])
+def test_undecided_part_counts_as_instrumental_unless_judged_voice(role, sound, expected):
+    summary = {"parts": [{"part_id": "P1", "instruments": [{
+        "score_instrument_id": "P1-I1", "instrumental_candidate": True,
+        "is_percussion": False, "playback_preset": None,
+        "eligible_for_instrumental_midi": False,
+    }]}], "instrument_program_resolution": {
+        "unresolved_score_instrument_ids": ["P1-I1"],
+        "instrumental_score_instrument_ids": [], "unresolved_reasons": {"P1-I1": "undeclared"},
+    }}
+    amended = summary_with_judged_instruments(
+        summary, {"roles": {"P1": role}, "sounds": {"P1-I1": sound}})
+    assert bool(amended["instrument_program_resolution"]["instrumental_score_instrument_ids"]) is expected
+    assert summary["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
