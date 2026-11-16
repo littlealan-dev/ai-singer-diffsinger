@@ -7865,6 +7865,14 @@ def _collect_derived_target_candidates(score: Dict[str, Any]) -> List[Dict[str, 
     return candidates
 
 
+def part_needs_split_signal(signal: Dict[str, Any], has_lyric_sources: bool) -> bool:
+    """Use the synthesizer's complexity signals for a raw singing part."""
+    missing = signal.get("missing_lyric_voice_parts")
+    return bool(signal.get("multi_voice_part")) or (
+        bool(has_lyric_sources) and isinstance(missing, list) and bool(missing)
+    )
+
+
 def synthesize_preflight_action_required(
     score: Dict[str, Any],
     *,
@@ -8009,7 +8017,7 @@ def synthesize_preflight_action_required(
     has_lyric_sources = bool(signals.get("has_lyric_sources", True))
     diagnostics["has_lyric_sources_signal"] = has_lyric_sources
     has_missing_lyric_voice_parts = has_missing_lyric_voice_parts and has_lyric_sources
-    preprocess_required = has_multi_voice or has_missing_lyric_voice_parts
+    preprocess_required = part_needs_split_signal(signal, has_lyric_sources)
     preprocessed_score_detected = bool(
         (isinstance(transforms, dict) and len(transforms) > 0)
         or len(parts) > int(original_part_count)
