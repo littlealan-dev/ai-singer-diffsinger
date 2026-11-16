@@ -128,6 +128,17 @@ def load(job_id: str) -> dict[str, Any] | None:
     return get_firestore_client().collection("singAllJobs").document(job_id).get().to_dict()
 
 
+def active_job_for_song(uid: str, session_id: str) -> dict[str, Any] | None:
+    """Return this Song's running parent, ignoring a stale active pointer."""
+    db = get_firestore_client()
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    job_id = user.get("activeSingAllJobId")
+    if not job_id:
+        return None
+    job = db.collection("singAllJobs").document(job_id).get().to_dict() or {}
+    return job if job.get("status") == "running" and job.get("sessionId") == session_id else None
+
+
 def apply(
     job_id: str, fields: Mapping[str, Any], *,
     expected_stage: str | None = None, expected_revision: int | None = None,

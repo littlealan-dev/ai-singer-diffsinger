@@ -111,3 +111,14 @@ def test_sing_all_history_has_link_and_factual_counts():
     assert _new_history_entry("assistant", started, sing_all_job_id="fake-parent")[
         "singAllJobId"] == "fake-parent"
     assert "singAllJobId" not in _new_history_entry("assistant", "Ordinary message")
+
+
+def test_running_parent_is_scoped_to_its_song(monkeypatch):
+    records = {"users/fake-user": {"activeSingAllJobId": "fake-parent"},
+               "singAllJobs/fake-parent": {"status": "running", "sessionId": "fake-song"}}
+    monkeypatch.setattr(sing_all_store, "get_firestore_client", lambda: _Db(records))
+    assert sing_all_store.active_job_for_song("fake-user", "fake-song") == records[
+        "singAllJobs/fake-parent"]
+    assert sing_all_store.active_job_for_song("fake-user", "other-song") is None
+    records["singAllJobs/fake-parent"]["status"] = "completed"
+    assert sing_all_store.active_job_for_song("fake-user", "fake-song") is None

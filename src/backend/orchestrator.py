@@ -52,6 +52,7 @@ from src.backend.gpu_errors import (
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all import open_sing_all_result
+from src.backend.sing_all_store import active_job_for_song
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.job_dispatch import (
@@ -8665,6 +8666,20 @@ class Orchestrator:
             }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name in {
+                TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_PREPARE_SYNTHESIS_QUOTE,
+                TOOL_SYNTHESIZE, TOOL_ADD_SOLFEGE_VERSE, TOOL_MODIFY_SOLFEGE_SETTINGS,
+                TOOL_REPLACE_BIRTHDAY_NAME,
+            } and self._settings.session_store == "firestore" and await asyncio.to_thread(
+                active_job_for_song, user_id, session_id):
+                refusal = {"status": "action_required", "reason": "sing_all_already_running"}
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(refusal, sort_keys=True),
+                    action_required_payload=refusal,
+                    explicit_verse_number=selected_explicit_verse_number,
+                )
             if call.name == TOOL_OPEN_SING_ALL:
                 if not isinstance(score_summary, dict) or not score_summary.get("parts"):
                     self._logger.warning("sing_all_without_score")

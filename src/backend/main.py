@@ -73,7 +73,8 @@ from src.backend.sing_all_judgment import (
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
-    latest_judgment, read_judgment, read_style, save_judgment, save_quote, save_style,
+    active_job_for_song, latest_judgment, read_judgment, read_style,
+    save_judgment, save_quote, save_style,
 )
 from src.backend.session import (
     FirestoreSessionStore,
@@ -892,6 +893,9 @@ def create_app() -> FastAPI:
             await sessions.get_song_row(session_id, user_id)
         except (KeyError, PermissionError):
             return _song_error(404, "song_not_found", "song.not_found")
+        if (request.app.state.settings.session_store == "firestore"
+                and await asyncio.to_thread(active_job_for_song, user_id, session_id)):
+            return _song_error(409, "work_running", "song.work_running")
         if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
             return _song_error(409, "work_running", "song.work_running")
         try:
@@ -1514,6 +1518,9 @@ def create_app() -> FastAPI:
         orchestrator: Orchestrator = request.app.state.orchestrator
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
+        if (request.app.state.settings.session_store == "firestore"
+                and await asyncio.to_thread(active_job_for_song, user_id, session_id)):
+            raise HTTPException(status_code=409, detail={"code": "sing_all_already_running"})
         try:
             result = await orchestrator.update_solfege_settings(
                 session_id,
