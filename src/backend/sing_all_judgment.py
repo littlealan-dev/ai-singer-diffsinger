@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
 import json
@@ -292,3 +293,153 @@ def check_style_reply(reply: Any, schema: Mapping[str, Any]) -> list[str]:
                   or not control["minimum"] <= value <= control["maximum"]):
                 errors.append(f"{row_id}: invalid {name}")
     return errors
+
+
+class QuoteUnavailable(RuntimeError):
+    """The model could not make a valid Sing All quote."""
+
+
+class StyleUnavailable(RuntimeError):
+    """The model could not apply a Sing All style note."""
+
+
+def _parse_reply(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sound_value(value: Any) -> dict[str, Any] | None:
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+async def quote_judgment(
+    facts: Mapping[str, Any], language: str,
+    voicebanks: Sequence[Mapping[str, Any]], *,
+    prompt: str, model: str, score_fingerprint: str,
+    call: Any,
+    cached: Mapping[str, Any] | None = None,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call once for the unresolved decisions, with one invalid-answer re-ask."""
+    facts_hash = input_hash({"facts": facts, "score": score_fingerprint,
+                             "voicebanks": list(voicebanks)}, prompt, model)
+    prior = previous if previous and previous.get("factsHash") == facts_hash else {}
+    questions = build_request(facts, language, voicebanks, previous=prior)
+    cache_key = input_hash({"facts": facts, "language": language,
+                      "voicebanks": list(voicebanks), "score": score_fingerprint},
+                     prompt, model)
+    if cached and cached.get("inputHash") == cache_key:
+        return dict(cached)
+    compatible = compatible_voicebanks(voicebanks, language)
+    if not compatible:
+        raise QuoteUnavailable("no_voice_for_language")
+    reply: dict[str, Any] = {}
+    if questions.has_questions:
+        schema = quote_reply_schema(questions, compatible)
+        errors: list[str] = []
+        sound_errors: set[str] = set()
+        for attempt in range(2):
+            asked = dict(questions.request)
+            if attempt:
+                asked["previous_errors"] = errors
+                asked["instruction"] = "Your previous answer was invalid. Answer every key with one listed value."
+            try:
+                candidate = _parse_reply(await call(asked, response_schema=schema))
+            except Exception as exc:
+                raise QuoteUnavailable("quote_call_failed") from exc
+            errors, sound_errors = check_reply(questions, candidate, compatible)
+            if not errors:
+                reply = dict(candidate)
+                break
+            if attempt == 1:
+                if len(errors) != len(sound_errors):
+                    raise QuoteUnavailable("invalid_quote_reply")
+                reply = dict(candidate) if isinstance(candidate, Mapping) else {}
+                sounds = reply.get("sounds")
+                sounds = dict(sounds) if isinstance(sounds, Mapping) else {}
+                for sound_key in sound_errors:
+                    sounds[sound_key] = None
+                reply["sounds"] = sounds
+                if check_reply(questions, reply, compatible)[0]:
+                    raise QuoteUnavailable("invalid_quote_reply")
+
+    roles = dict(prior.get("roles") or {})
+    sounds = dict(prior.get("sounds") or {})
+    layouts = dict(prior.get("layouts") or {})
+    for key, item in questions.parts.items():
+        role = reply["roles"][key]
+        roles[str(item["partId"])] = role
+        route = (item["part"].get("instruments") or [{}])[0]
+        route_id = str(route.get("score_instrument_id") or "")
+        if route_id:
+            sounds[route_id] = _sound_value(reply["sounds"][key]) if role == "instrument" else None
+    for key, item in questions.instruments.items():
+        route_id = str(item["route"].get("score_instrument_id") or "")
+        if route_id:
+            sounds[route_id] = _sound_value(reply["sounds"][key])
+    for key, item in questions.staffs.items():
+        layouts[str(item["key"])] = reply["layouts"][key]
+
+    answers = dict(questions.automatic_voices)
+    for key, item in questions.rows.items():
+        answers[item["identity"]] = reply["voices"][key]
+    voices: dict[str, str] = {}
+    for row in facts.get("rows") or []:
+        identity = f"||{row['rowId']}"
+        voices[str(row["rowId"])] = answers[identity]
+    for staff in facts.get("open_staffs") or []:
+        layout = layouts.get(staff["key"])
+        if layout not in {"shared", "separate"}:
+            raise QuoteUnavailable("missing_layout")
+        for row in staff["rows_if"][layout]:
+            identity = f"{staff['key']}|{layout}|{row['rowId']}"
+            voices[str(row["rowId"])] = answers[identity]
+    return {
+        "inputHash": cache_key, "factsHash": facts_hash,
+        "roles": roles, "sounds": sounds, "layouts": layouts, "voices": voices,
+        "model": model, "createdAt": datetime.now(timezone.utc),
+    }
+
+
+async def style_judgment(
+    note: str, rows: Sequence[Mapping[str, Any]],
+    voicebanks_by_id: Mapping[str, Mapping[str, Any]], *,
+    prompt: str, model: str, call: Any,
+    cached: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Apply one note to all rows; the same note and voices reuse its answer."""
+    if not note.strip():
+        return None
+    request = {
+        "note": note,
+        "rows": [{
+            "key": row["rowId"], "part_name": row.get("sourcePartId"),
+            "row_name": row.get("name"), "voicebank_id": row["voice"],
+            "voice_colors": voicebanks_by_id[row["voice"]].get("voice_colors") or [],
+            "default_voice_color": voicebanks_by_id[row["voice"]].get("default_voice_color"),
+            "defaults": voicebanks_by_id[row["voice"]].get("synthesis_control_defaults") or {},
+        } for row in rows],
+    }
+    key = input_hash(request, prompt, model)
+    if cached and cached.get("inputHash") == key:
+        return dict(cached)
+    schema = style_reply_schema(rows, voicebanks_by_id)
+    errors: list[str] = []
+    for attempt in range(2):
+        asked = dict(request)
+        if attempt:
+            asked["previous_errors"] = errors
+            asked["instruction"] = "Your previous answer was invalid. Answer every row and control."
+        try:
+            reply = _parse_reply(await call(asked, response_schema=schema, style=True))
+        except Exception as exc:
+            raise StyleUnavailable("style_call_failed") from exc
+        errors = check_style_reply(reply, schema)
+        if not errors:
+            return {
+                "inputHash": key, "controls": dict(reply["rows"]), "model": model,
+                "createdAt": datetime.now(timezone.utc),
+            }
+    raise StyleUnavailable("invalid_style_reply")

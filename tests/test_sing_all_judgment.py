@@ -1,12 +1,15 @@
 """The Sing All call asks only unresolved questions and checks every reply."""
 
 from copy import deepcopy
+import asyncio
+import json
 
 import pytest
 
 from src.backend.sing_all_judgment import (
     build_request, check_reply, check_style_reply, compatible_voicebanks,
     input_hash, quote_reply_schema, style_reply_schema,
+    quote_judgment, style_judgment, QuoteUnavailable, StyleUnavailable,
 )
 from src.musicxml.instrument_programs import FLUIDR3_MELODIC_BANK, FLUIDR3_PERCUSSION_BANK
 
@@ -161,3 +164,147 @@ def test_style_schema_and_control_validation() -> None:
         bad["rows"]["lead"][field] = value
         assert check_style_reply(bad, schema)
     assert check_style_reply({"rows": {}}, schema)
+
+
+def test_quote_call_reasks_invalid_sound_then_keeps_null_and_reuses_cache() -> None:
+    calls = []
+    invalid = _valid_reply()
+    invalid["sounds"]["i1"] = {"bank": 0, "kind": "melodic", "program": 0,
+                                 "evidence": []}
+
+    async def call(request, *, response_schema):
+        calls.append(request)
+        return json.dumps(invalid)
+
+    facts = _facts()
+    result = asyncio.run(quote_judgment(
+        facts, "en", _VOICES, prompt="quote task", model="model",
+        score_fingerprint="made-up-score", call=call,
+    ))
+    assert len(calls) == 2
+    assert calls[1]["previous_errors"]
+    assert result["roles"] == {"P1": "voice"}
+    assert result["sounds"]["P2-I1"] is None
+    assert result["layouts"] == {"P1|1": "shared"}
+    assert result["voices"]["shared-1"] == "voice_a"
+    assert "separate-2" not in result["voices"]
+
+    async def fail_if_called(request, *, response_schema):
+        raise AssertionError("cached quote must not call the model")
+
+    repeated = asyncio.run(quote_judgment(
+        facts, "en", _VOICES, prompt="quote task", model="model",
+        score_fingerprint="made-up-score", call=fail_if_called, cached=result,
+    ))
+    assert repeated == result
+
+
+def test_quote_call_reasks_invalid_role_once_then_fails() -> None:
+    reply = _valid_reply()
+    reply["roles"]["p1"] = "other"
+    count = 0
+
+    async def call(request, *, response_schema):
+        nonlocal count
+        count += 1
+        return json.dumps(reply)
+
+    with pytest.raises(QuoteUnavailable):
+        asyncio.run(quote_judgment(
+            _facts(), "en", _VOICES, prompt="task", model="model",
+            score_fingerprint="made-up-score", call=call,
+        ))
+    assert count == 2
+
+
+def test_language_change_reuses_roles_and_layouts_and_switching_back_is_cached() -> None:
+    voices = [dict(bank, languages=["en", "ja"]) for bank in _VOICES]
+    calls = []
+
+    async def call(request, *, response_schema):
+        calls.append(request)
+        if request["parts"]:
+            return json.dumps(_valid_reply())
+        return json.dumps({"voices": {f"r{index}": "voice_b" for index in range(1, 5)}})
+
+    facts = _facts()
+    english = asyncio.run(quote_judgment(
+        facts, "en", voices, prompt="task", model="model",
+        score_fingerprint="made-up-score", call=call,
+    ))
+    japanese = asyncio.run(quote_judgment(
+        facts, "ja", voices, prompt="task", model="model",
+        score_fingerprint="made-up-score", call=call, previous=english,
+    ))
+    assert len(calls) == 2
+    assert calls[1]["parts"] == calls[1]["instruments"] == calls[1]["staffs"] == []
+    assert japanese["roles"] == english["roles"]
+    assert japanese["layouts"] == english["layouts"]
+    assert japanese["voices"]["lead"] == "voice_b"
+    assert asyncio.run(quote_judgment(
+        facts, "en", voices, prompt="task", model="model",
+        score_fingerprint="made-up-score", call=call,
+        cached=english, previous=japanese,
+    )) == english
+    assert len(calls) == 2
+
+
+def test_no_voice_for_language_returns_before_call() -> None:
+    async def fail_if_called(request, *, response_schema):
+        raise AssertionError("unsupported language must not call the model")
+
+    with pytest.raises(QuoteUnavailable, match="no_voice_for_language"):
+        asyncio.run(quote_judgment(
+            _facts(), "fr", _VOICES, prompt="task", model="model",
+            score_fingerprint="made-up-score", call=fail_if_called,
+        ))
+
+
+def test_style_call_reasks_bad_intensity_and_reuses_answer() -> None:
+    rows = [{"rowId": "lead", "voice": "voice_a", "sourcePartId": "P1", "name": "Lead"}]
+    banks = {"voice_a": {"voice_colors": [{"name": "Warm"}],
+                         "default_voice_color": None,
+                         "synthesis_control_defaults": {"airiness": 0, "clarity": 100,
+                                                         "gender": 0, "intensity": 0.5}}}
+    bad = {"rows": {"lead": {"voiceColor": "Warm", "airiness": 10,
+                             "clarity": 100, "gender": 0, "intensity": 2}}}
+    good = deepcopy(bad)
+    good["rows"]["lead"]["intensity"] = 0.7
+    calls = []
+
+    async def call(request, *, response_schema, style):
+        calls.append(request)
+        assert style is True
+        return json.dumps(bad if len(calls) == 1 else good)
+
+    result = asyncio.run(style_judgment(
+        "warmer lead", rows, banks, prompt="style task", model="model", call=call,
+    ))
+    assert len(calls) == 2
+    assert result["controls"]["lead"]["intensity"] == 0.7
+    assert asyncio.run(style_judgment(
+        "warmer lead", rows, banks, prompt="style task", model="model",
+        call=call, cached=result,
+    )) == result
+    assert len(calls) == 2
+    assert asyncio.run(style_judgment(
+        "", rows, banks, prompt="style task", model="model", call=call,
+    )) is None
+    assert len(calls) == 2
+
+
+def test_style_call_fails_after_second_bad_answer() -> None:
+    rows = [{"rowId": "lead", "voice": "voice_a"}]
+    banks = {"voice_a": {"voice_colors": []}}
+    count = 0
+
+    async def call(request, *, response_schema, style):
+        nonlocal count
+        count += 1
+        return json.dumps({"rows": {"lead": {"voiceColor": "unknown"}}})
+
+    with pytest.raises(StyleUnavailable):
+        asyncio.run(style_judgment(
+            "brighter", rows, banks, prompt="task", model="model", call=call,
+        ))
+    assert count == 2

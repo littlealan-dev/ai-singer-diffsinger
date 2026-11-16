@@ -52,6 +52,7 @@ from src.backend.gpu_errors import (
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all import open_sing_all_result
+from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.job_dispatch import (
     SYNTHESIS_JOB_KIND,
@@ -6822,6 +6823,36 @@ class Orchestrator:
             "planner_v2_chooser_reply slots=%s reply=%s", len(request.key_to_slot), reply
         )
         return reply
+
+    async def _call_sing_all_quote(
+        self, request: Dict[str, Any], *, response_schema: Dict[str, Any],
+        style: bool = False,
+    ) -> str:
+        """Ask one constrained Sing All question without chat history or turn budget."""
+        started = time.monotonic()
+        prompt = (style_prompt if style else quote_prompt)(
+            synthesis_max_duration_seconds=self._settings.synthesis_max_duration_seconds
+        )
+        bundle = PromptBundle(
+            static_prompt_text=prompt,
+            dynamic_prompt_text=json.dumps(request, ensure_ascii=False, sort_keys=True),
+        )
+        reply = await asyncio.to_thread(
+            self._call_llm_client_generate, bundle, [], LlmRole.SING_ALL_QUOTE,
+            response_schema, count_against_turn_budget=False,
+        )
+        model = (
+            self._settings.gemini_sing_all_quote.model
+            if self._settings.llm_provider == "gemini"
+            else self._settings.openai_default.model
+        )
+        self._logger.info(
+            "sing_all_call wall_seconds=%.2f staffs=%s rows=%s model=%s style=%s",
+            time.monotonic() - started,
+            len(request.get("staffs") or []), len(request.get("rows") or []),
+            model, style,
+        )
+        return _without_thought_summary(reply)
 
     def _preprocess_planning_context_for_attempt(
         self,
