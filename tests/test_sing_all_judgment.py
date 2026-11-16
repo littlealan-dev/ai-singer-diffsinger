@@ -261,7 +261,8 @@ def test_no_voice_for_language_returns_before_call() -> None:
 
 
 def test_style_call_reasks_bad_intensity_and_reuses_answer() -> None:
-    rows = [{"rowId": "lead", "voice": "voice_a", "sourcePartId": "P1", "name": "Lead"}]
+    rows = [{"rowId": "lead", "voice": "voice_a", "sourcePartId": "P1",
+             "partName": "Made-up choir", "name": "Lead"}]
     banks = {"voice_a": {"voice_colors": [{"name": "Warm"}],
                          "default_voice_color": None,
                          "synthesis_control_defaults": {"airiness": 0, "clarity": 100,
@@ -281,6 +282,7 @@ def test_style_call_reasks_bad_intensity_and_reuses_answer() -> None:
         "warmer lead", rows, banks, prompt="style task", model="model", call=call,
     ))
     assert len(calls) == 2
+    assert calls[0]["rows"][0]["part_name"] == "Made-up choir"
     assert result["controls"]["lead"]["intensity"] == 0.7
     assert asyncio.run(style_judgment(
         "warmer lead", rows, banks, prompt="style task", model="model",

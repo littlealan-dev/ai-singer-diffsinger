@@ -70,6 +70,7 @@ from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
 )
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
+from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
     latest_judgment, read_judgment, read_style, save_judgment, save_quote, save_style,
 )
@@ -1199,7 +1200,7 @@ def create_app() -> FastAPI:
         voicebanks = await orchestrator._get_voicebank_details()
         choices = dict(payload.choices)
         solfege_only = choices.get("solfegeOnly") is True
-        language = "en" if solfege_only else str(choices.get("language") or "en")
+        language = "en" if solfege_only else normalize_language_code(choices.get("language") or "en")
         supported = supported_singing_languages(voicebanks)
         if language not in supported:
             return {"blocked": "no_voice_for_language", "language": language,
@@ -1224,7 +1225,10 @@ def create_app() -> FastAPI:
              "score": fingerprint}, quote_text, model)
         cached = await asyncio.to_thread(read_judgment, db, session_id, cache_key)
         previous = await asyncio.to_thread(latest_judgment, db, session_id)
+        quote_call_count = 0
         async def call_quote(question: dict[str, Any], *, response_schema: dict[str, Any]) -> str:
+            nonlocal quote_call_count
+            quote_call_count += 1
             return await orchestrator._call_sing_all_quote(
                 question, response_schema=response_schema)
         try:
@@ -1234,13 +1238,19 @@ def create_app() -> FastAPI:
                 cached=cached, previous=previous)
         except QuoteUnavailable as exc:
             raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
-        if not cached or cached.get("inputHash") != judgment["inputHash"]:
+        if quote_call_count:
             await asyncio.to_thread(save_judgment, db, session_id, judgment)
 
         selected = choices.get("rows") or []
         if not isinstance(selected, list):
             raise HTTPException(status_code=422, detail={"code": "invalid_rows"})
         rows = materialize_rows(facts, judgment, selected)
+        source_names = {
+            str(part.get("part_id")): part.get("part_name")
+            for part in summary.get("parts") or [] if isinstance(part, dict)
+        }
+        for row in rows:
+            row["partName"] = source_names.get(row["sourcePartId"]) or row["sourcePartId"]
         compatible_ids = {
             bank["id"] for bank in voicebanks
             if language in supported_singing_languages([bank])

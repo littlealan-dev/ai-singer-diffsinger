@@ -415,7 +415,7 @@ async def style_judgment(
     request = {
         "note": note,
         "rows": [{
-            "key": row["rowId"], "part_name": row.get("sourcePartId"),
+            "key": row["rowId"], "part_name": row.get("partName") or row.get("sourcePartId"),
             "row_name": row.get("name"), "voicebank_id": row["voice"],
             "voice_colors": voicebanks_by_id[row["voice"]].get("voice_colors") or [],
             "default_voice_color": voicebanks_by_id[row["voice"]].get("default_voice_color"),
