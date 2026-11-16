@@ -1154,7 +1154,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
-                parent_job_id_hint=parent["jobId"] if parent is not None else None,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
@@ -1267,7 +1267,7 @@ class Orchestrator:
                 if isinstance(planning_context, dict)
                 else None,
                 originating_turn_id=originating_turn_id,
-                parent_job_id_hint=parent["jobId"] if parent is not None else None,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -1526,7 +1526,8 @@ class Orchestrator:
                 else None,
                 originating_turn_id=originating_turn_id,
                 on_interrupt=release_for_retry,
-                parent_job_id_hint=job.get("parentJobId"),
+                **({"parent_job_id_hint": job["parentJobId"]}
+                   if job.get("parentJobId") else {}),
             )
         finally:
             heartbeat.cancel()
@@ -1775,7 +1776,8 @@ class Orchestrator:
                 billing_components=list(spec.get("billingComponents") or []),
                 originating_turn_id=str(spec.get("originatingTurnId") or "") or None,
                 on_interrupt=release_for_retry,
-                parent_job_id_hint=job.get("parentJobId"),
+                **({"parent_job_id_hint": job["parentJobId"]}
+                   if job.get("parentJobId") else {}),
             )
         finally:
             heartbeat.cancel()
