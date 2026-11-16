@@ -10,6 +10,7 @@ from src.api.score import parse_score
 from src.backend.synthesis_pricing import score_has_instrumental_parts
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    carry_resolved_instrument_programs,
     drop_resolved_program_assignments,
     instrumental_programs_by_part,
     llm_program_assignments_from_summary,
@@ -573,6 +574,25 @@ def test_llm_role_decision_makes_the_piano_a_midi_track_and_keeps_the_tenor_sing
     assert eligible.get("P2") is not True
     assert result["has_instrumental_parts"] is True
     assert (tmp_path / "written.mid").is_file()
+
+
+def test_selection_reparse_keeps_saved_vocal_role_and_muted_instrument(tmp_path: Path) -> None:
+    source, original = _undeclared_accompaniment(tmp_path)
+    saved, action = apply_llm_program_assignments(original, [
+        {"score_instrument_id": "P2:default", "role": "not_instrumental",
+         "source": "llm_inferred"},
+        {"score_instrument_id": "P3:default", "playback_preset": None,
+         "source": "llm_inferred"},
+    ], allow_user_choice=True)
+    assert action is None
+    reparsed = parse_score(source, verse_number="1")["score_summary"]
+    carried = carry_resolved_instrument_programs(saved, reparsed)
+    instruments = _instruments_by_id(carried)
+    assert instruments["P2:default"]["instrumental_role"] == "not_instrumental"
+    assert instruments["P3:default"]["user_assignable"] is True
+    assert carried["instrument_program_resolution"]["unresolved_score_instrument_ids"] == []
+    assert carried["instrument_program_resolution"]["instrumental_score_instrument_ids"] == [
+        "P3:default"]
 
 
 def test_an_undeclared_part_the_llm_calls_vocal_gets_no_midi_or_charge(tmp_path: Path) -> None:

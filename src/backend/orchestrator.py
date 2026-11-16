@@ -91,6 +91,7 @@ from src.musicxml.performance_midi import (
 )
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    carry_resolved_instrument_programs,
     settle_split_sources,
     drop_resolved_program_assignments,
     llm_program_assignments_from_summary,
@@ -6032,10 +6033,17 @@ class Orchestrator:
         result = await asyncio.to_thread(self._router.call_tool, "parse_score", parse_args)
         if not isinstance(result, dict):
             return None
+        prior_score = (previous.get("current_score") or {}).get("score")
+        if isinstance(prior_score, dict):
+            self._carry_preprocess_active_metadata(prior_score, result)
         score_summary = result.get("score_summary") if isinstance(result, dict) else None
         score = dict(result)
         score.pop("score_summary", None)
         if isinstance(score_summary, dict):
+            prior_summary = previous.get("score_summary")
+            if isinstance(prior_summary, dict):
+                score_summary = carry_resolved_instrument_programs(
+                    prior_summary, score_summary)
             score_summary = await self._carry_published_performance_midi(
                 session_id,
                 previous,

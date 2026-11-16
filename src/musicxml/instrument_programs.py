@@ -78,6 +78,47 @@ def settle_split_sources(
     return summary
 
 
+def carry_resolved_instrument_programs(
+    previous_summary: Mapping[str, Any], new_summary: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Keep a saved role or sound across a selection-only reparse of one score."""
+    summary = copy.deepcopy(dict(new_summary))
+    old_index = _summary_instrument_index(previous_summary)
+    new_index = _summary_instrument_index(summary)
+    old_resolution = previous_summary.get("instrument_program_resolution") or {}
+    resolution = summary.get("instrument_program_resolution")
+    if not isinstance(resolution, dict):
+        return summary
+    unresolved = set(old_resolution.get("unresolved_score_instrument_ids") or [])
+    new_unresolved = list(resolution.get("unresolved_score_instrument_ids") or [])
+    instrumental = list(resolution.get("instrumental_score_instrument_ids") or [])
+    reasons = dict(resolution.get("unresolved_reasons") or {})
+    copied_fields = (
+        "playback_preset", "resolved_gm_program", "user_assignable",
+        "instrumental_role", "eligible_for_instrumental_midi",
+        "program_source", "program_evidence",
+    )
+    for instrument_id, old_routes in old_index.items():
+        if instrument_id in unresolved or instrument_id not in new_index:
+            continue
+        saved = old_routes[0]
+        for route in new_index[instrument_id]:
+            for key in copied_fields:
+                if key in saved:
+                    route[key] = copy.deepcopy(saved[key])
+        new_unresolved = [value for value in new_unresolved if value != instrument_id]
+        reasons.pop(instrument_id, None)
+        if saved.get("eligible_for_instrumental_midi"):
+            if instrument_id not in instrumental:
+                instrumental.append(instrument_id)
+        else:
+            instrumental = [value for value in instrumental if value != instrument_id]
+    resolution["unresolved_score_instrument_ids"] = new_unresolved
+    resolution["instrumental_score_instrument_ids"] = instrumental
+    resolution["unresolved_reasons"] = reasons
+    return summary
+
+
 def build_instrument_program_summary(
     source_path: Path,
     parts: List[Dict[str, Any]],
