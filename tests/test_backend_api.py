@@ -787,6 +787,14 @@ def _prepare_app(monkeypatch, overrides=None):
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.update_job_progress", _fake_update_job_progress
     )
+    def _fake_pass_stop_point(self, job_id: str) -> bool:
+        job = fake_jobs.get(job_id)
+        if job is None or job.get("status") == "cancelled":
+            return False
+        job["pastStopPoint"] = True
+        return True
+
+    monkeypatch.setattr("src.backend.job_store.JobStore.pass_stop_point", _fake_pass_stop_point)
     monkeypatch.setattr(
         "src.backend.job_store.JobStore.get_latest_job_by_session",
         _fake_get_latest_job_by_session,
@@ -1864,6 +1872,181 @@ def test_inline_preprocess_does_not_inherit_chat_stop_marker(client, monkeypatch
     asyncio.run(scenario())
     assert calls == ["llm"]
     assert app.state.job_store.get_job(job_id)["status"] == "completed"
+
+
+@pytest.mark.parametrize("action", ["stop_before", "stop_after", "replace_before"])
+def test_preprocess_stop_point_controls_score_publication(client, monkeypatch, action):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    first_score_id = _upload_score(test_client, session_id).json()["score_id"]
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    job_id = f"split-{action}"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id,
+        status="queued", provenance={"scoreId": first_score_id},
+    )
+    app.state.job_store.update_job(job_id, jobKind="preprocess")
+    def stop_job(active_job_id):
+        job = app.state.job_store.get_job(active_job_id)
+        if job.get("pastStopPoint") or job.get("status") not in {"queued", "running"}:
+            return "too_late"
+        app.state.job_store.update_job(active_job_id, status="cancelled", cancelledBy="user")
+        return "stopped"
+
+    monkeypatch.setattr(app.state.job_store, "stop_job", stop_job)
+    orchestrator = app.state.orchestrator
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def workflow(*args, **kwargs):
+        if action == "stop_after":
+            await orchestrator._activate_preprocessed_score(
+                session_id, dict(before["current_score"]["score"]),
+                modified_musicxml_path=None,
+            )
+        entered.set()
+        await release.wait()
+        if action != "stop_after":
+            await orchestrator._activate_preprocessed_score(
+                session_id, dict(before["current_score"]["score"]),
+                modified_musicxml_path=None,
+            )
+        return {"type": "chat_text", "message": "Split complete."}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_tool_workflow", workflow)
+
+    async def scenario():
+        task = asyncio.create_task(orchestrator._run_preprocess_job(
+            session_id, before["current_score"]["score"],
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            job_id, "test-user", "synthetic@example.invalid",
+            initial_message="Preparing the split.", initial_thought_summary="",
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            if action == "replace_before":
+                response = await asyncio.to_thread(
+                    test_client.post, f"/sessions/{session_id}/upload",
+                    files={"file": ("replacement.xml", b"<score-partwise version='3.1'/>", "application/xml")},
+                    data={"replace": "true"},
+                )
+            else:
+                response = await asyncio.to_thread(
+                    test_client.post, f"/sessions/{session_id}/stop"
+                )
+            return response
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 5)
+
+    response = asyncio.run(scenario())
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    job = app.state.job_store.get_job(job_id)
+    assert response.status_code == 200
+    if action == "stop_after":
+        assert response.json()["result"] == "too_late"
+        assert job["status"] == "completed"
+        assert after["current_score"]["version"] == before["current_score"]["version"] + 1
+        assert after["history"][-1]["content"] == "Split complete."
+    else:
+        if action == "replace_before":
+            assert after["score_id"] != first_score_id
+            assert after["current_score"]["version"] == 1
+        else:
+            assert response.json()["result"] == "stopped"
+            assert after["score_id"] == first_score_id
+            assert after["current_score"]["version"] == before["current_score"]["version"]
+        assert job["status"] == "cancelled"
+        assert after["history"][-1]["content"] == backend_message("job.stop_split_history")
+        assert not any(entry.get("content") == "Split complete." for entry in after["history"])
+
+
+def test_stopped_split_starts_no_more_planning_or_repair(client, monkeypatch):
+    import src.backend.orchestrator as orchestrator_module
+
+    _test_client, app = client
+    session_id = _create_session(_test_client)
+    job_id = "stopped-planning"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id, status="running",
+    )
+    calls = []
+
+    async def plan_response(*args, **kwargs):
+        calls.append("plan")
+        app.state.job_store.update_job(job_id, status="cancelled", cancelledBy="user")
+        return None, None
+
+    orchestrator = app.state.orchestrator
+    monkeypatch.setattr(orchestrator, "_decide_followup_with_llm", plan_response)
+    monkeypatch.setattr(
+        orchestrator, "_planner_v2_failures",
+        lambda *args: pytest.fail("a stopped split must not start a repair"),
+    )
+
+    async def scenario():
+        token = orchestrator_module._preprocess_job_context.set((job_id, "test-user"))
+        try:
+            with pytest.raises(orchestrator_module.PreprocessStopped):
+                await orchestrator._plan_preprocess_with_llm({}, {}, {})
+            with pytest.raises(orchestrator_module.PreprocessStopped):
+                await orchestrator._plan_preprocess_v2_repair(SimpleNamespace(), {})
+        finally:
+            orchestrator_module._preprocess_job_context.reset(token)
+
+    asyncio.run(scenario())
+    assert calls == ["plan"]
+
+
+def test_split_drops_result_when_the_score_id_changed(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    first_score_id = _upload_score(test_client, session_id).json()["score_id"]
+    before = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    job_id = "stale-split"
+    app.state.job_store.create_job(
+        job_id=job_id, user_id="test-user", session_id=session_id,
+        status="queued", provenance={"scoreId": first_score_id},
+    )
+    orchestrator = app.state.orchestrator
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def workflow(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        await orchestrator._activate_preprocessed_score(
+            session_id, dict(before["current_score"]["score"]),
+            modified_musicxml_path=None,
+        )
+        return {"type": "chat_text", "message": "Stale split complete."}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_tool_workflow", workflow)
+
+    async def scenario():
+        task = asyncio.create_task(orchestrator._run_preprocess_job(
+            session_id, before["current_score"]["score"],
+            [ToolCall(name="preprocess_voice_parts", arguments={})],
+            job_id, "test-user", "synthetic@example.invalid",
+            initial_message="Preparing the split.", initial_thought_summary="",
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await app.state.sessions.commit_uploaded_score(
+                session_id, score_id="replacement-score",
+                score=dict(before["current_score"]["score"]),
+                summary=before["score_summary"], files=before["files"],
+            )
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+    after = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
+    assert after["score_id"] == "replacement-score"
+    assert after["current_score"]["version"] == 1
+    assert app.state.job_store.get_job(job_id)["status"] == "cancelled"
+    assert not any(entry.get("content") == "Stale split complete." for entry in after["history"])
 
 
 def test_upload_all_zero_xml_stores_numbered_canonical_score(client, caplog):
