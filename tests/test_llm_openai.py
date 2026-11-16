@@ -199,6 +199,29 @@ def test_openai_generate_uses_role_specific_models_and_reasoning(
     assert payload["reasoning"] == {"effort": "medium"}
 
 
+def test_sing_all_quote_role_uses_default_openai_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-quote-default")
+    monkeypatch.setenv("OPENAI_DEFAULT_REASONING_EFFORT", "low")
+    monkeypatch.setenv("OPENAI_DEFAULT_TIMEOUT_SECONDS", "76")
+    monkeypatch.setenv("OPENAI_PREPROCESS_MODEL", "gpt-preprocess")
+    client = OpenAIRestClient(_settings(), api_key="dummy")
+    captured: dict[str, object] = {}
+
+    def _fake_urlopen(request, timeout=None):  # type: ignore[no-untyped-def]
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return _Response({"output_text": "{}"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    client.generate("STATIC", [], role=LlmRole.SING_ALL_QUOTE)
+    payload = json.loads(captured["body"].decode("utf-8"))
+    assert payload["model"] == "gpt-quote-default"
+    assert payload["reasoning"] == {"effort": "low"}
+    assert captured["timeout"] == 76
+
+
 def test_openai_generate_uses_a_given_response_schema_as_json_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
