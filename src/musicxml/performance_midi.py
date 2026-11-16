@@ -42,6 +42,7 @@ def build_instrumental_performance_midis(
     original_output_path: Path,
     expanded_output_path: Path,
     instrument_program_assignments: Dict[str, Dict[str, Any]] | None = None,
+    score_summary: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Write written- and played-order instrumental MIDI files for one score.
 
@@ -51,7 +52,8 @@ def build_instrumental_performance_midis(
     original_score = load_musicxml_score(source_path)
     raw_part_ids = map_parser_part_indices_to_raw_part_ids(source_path, score=original_score)
     programs_by_part = instrumental_programs_by_part(
-        source_path, assignments=instrument_program_assignments, include_ineligible=True
+        source_path, assignments=instrument_program_assignments,
+        score_summary=score_summary, include_ineligible=True
     )
     parts = _instrumental_part_metadata(original_score, raw_part_ids, programs_by_part)
     eligible_indices = {part["part_index"] for part in parts if part["eligible"]}
@@ -120,7 +122,13 @@ def _instrumental_part_metadata(
         has_lyrics = raw_part_id in raw_part_ids_with_lyrics
         channel = getattr(score_instrument, "midiChannel", None)
         source_eligible = not is_explicit_vocal and bool(part.recurse().notes) and not has_lyrics
-        percussion = channel == 9 or isinstance(score_instrument, instrument.UnpitchedPercussion)
+        percussion_flag = (
+            bool(program_facts.get("is_percussion"))
+            or channel == 9
+            or isinstance(score_instrument, instrument.UnpitchedPercussion)
+            or any(isinstance(item, (note.Unpitched, percussion.PercussionChord))
+                   for item in part.recurse().notes)
+        )
         resolved_program = program_facts.get("resolved_gm_program")
         playback_preset = program_facts.get("playback_preset")
         user_assignable = bool(program_facts.get("user_assignable"))
@@ -148,13 +156,15 @@ def _instrumental_part_metadata(
                 "score_instrument_id": score_instrument_id,
                 "program_source": "user_assignable" if user_assignable else program_facts.get("program_source", "unresolved"),
                 "midi_channel": int(channel) if isinstance(channel, int) else None,
-                "percussion": True if user_assignable else percussion,
+                "percussion": percussion_flag,
                 "diagnostic": (
                     "MusicXML instrument-sound explicitly declares a vocal part."
                     if is_explicit_vocal
                     else "Part has lyrics, so it is sung, not played."
                     if has_lyrics
                     else "The score gives this drum part no drum sounds. Choose a kit to hear it."
+                    if user_assignable and percussion_flag
+                    else "This part has no instrument yet. Choose an instrument to hear it."
                     if user_assignable
                     else "Part has no resolved General MIDI program."
                     if source_eligible and not isinstance(resolved_program, int)

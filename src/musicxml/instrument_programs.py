@@ -87,6 +87,7 @@ def instrumental_programs_by_part(
     source_path: Path,
     *,
     assignments: Mapping[str, Any] | None = None,
+    score_summary: Mapping[str, Any] | None = None,
     include_ineligible: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the program choice or user-assignable drum route for each playable part.
@@ -96,6 +97,9 @@ def instrumental_programs_by_part(
     metadata can include ineligible routes to retain their exclusion evidence.
     """
     declarations = _read_part_declarations(source_path)
+    summary_instruments = (
+        _summary_instrument_index(score_summary) if score_summary is not None else {}
+    )
     result: Dict[str, Dict[str, Any]] = {}
     for raw_part_id, declaration in declarations.items():
         instruments = _part_instruments(
@@ -105,6 +109,11 @@ def instrumental_programs_by_part(
             note_count=1,
         )
         for item in instruments:
+            saved = summary_instruments.get(item["score_instrument_id"], [])
+            if any(entry.get("user_assignable") for entry in saved):
+                item["user_assignable"] = True
+                item["eligible_for_instrumental_midi"] = True
+                item["program_source"] = "user_assignable"
             # A part declaring no instrument plays only once the LLM gave it a preset.
             if item["instrumental_candidate"] and assignments and _normalise_preset(
                 assignments.get(item["score_instrument_id"])
@@ -173,7 +182,7 @@ def drop_resolved_program_assignments(
 
 
 def apply_llm_program_assignments(
-    score_summary: Mapping[str, Any], assignments: Any
+    score_summary: Mapping[str, Any], assignments: Any, *, allow_user_choice: bool = False
 ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
     """Validate and persist LLM-selected FluidR3 playback presets."""
     summary = copy.deepcopy(dict(score_summary))
@@ -239,6 +248,9 @@ def apply_llm_program_assignments(
         if role != "instrumental":
             invalid.append(f"{instrument_id} role must be instrumental or not_instrumental.")
             continue
+        if item.get("playback_preset") is None and allow_user_choice:
+            supplied[instrument_id] = {"playback_preset": None, "evidence": list(evidence)}
+            continue
         preset = _normalise_preset(item.get("playback_preset"))
         matching_instruments = instrument_index.get(instrument_id, [])
         if not preset or not matching_instruments:
@@ -276,6 +288,14 @@ def apply_llm_program_assignments(
             if assignment.get("role") == NOT_INSTRUMENTAL_ROLE:
                 instrument["instrumental_role"] = NOT_INSTRUMENTAL_ROLE
                 instrument["program_source"] = "llm_not_instrumental"
+                continue
+            if assignment["playback_preset"] is None:
+                instrument["playback_preset"] = None
+                instrument["resolved_gm_program"] = None
+                instrument["user_assignable"] = True
+                instrument["program_source"] = "user_assignable"
+                instrument["instrumental_role"] = "instrumental"
+                instrument["eligible_for_instrumental_midi"] = True
                 continue
             instrument["playback_preset"] = assignment["playback_preset"]
             instrument["resolved_gm_program"] = assignment["playback_preset"]["program"]

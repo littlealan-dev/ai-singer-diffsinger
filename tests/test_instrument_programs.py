@@ -601,6 +601,73 @@ def test_a_declared_instrument_cannot_be_marked_not_instrumental() -> None:
     assert "needs a playback_preset" in action["message"]
 
 
+def test_sing_all_can_leave_a_melodic_instrument_for_user_choice(tmp_path: Path) -> None:
+    source = tmp_path / "missing-program.musicxml"
+    source.write_text(MISSING_PROGRAM_XML, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+    assignment = {
+        "score_instrument_id": "P1-I1",
+        "role": "instrumental",
+        "playback_preset": None,
+        "source": "llm_inferred",
+        "evidence": [],
+    }
+    assert apply_llm_program_assignments(summary, [assignment])[1] is not None
+    resolved, action = apply_llm_program_assignments(
+        summary, [assignment], allow_user_choice=True
+    )
+    assert action is None
+    route = _instruments_by_id(resolved)["P1-I1"]
+    assert route["user_assignable"] is True
+    assert route["eligible_for_instrumental_midi"] is True
+    assert route["program_source"] == "user_assignable"
+    assert score_has_instrumental_parts(resolved) is True
+
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        score_summary=resolved,
+    )
+    part = next(p for p in result["instrumental_parts"] if p["raw_part_id"] == "P1")
+    assert part["eligible"] is True
+    assert part["midi_program"] is None
+    assert part["percussion"] is False
+    assert "Choose an instrument" in part["diagnostic"]
+
+
+def test_sing_all_can_leave_an_undeclared_instrument_for_user_choice(tmp_path: Path) -> None:
+    source, summary = _undeclared_accompaniment(tmp_path)
+    resolved, action = apply_llm_program_assignments(
+        summary,
+        [
+            {
+                "score_instrument_id": "P2:default",
+                "role": "not_instrumental",
+                "source": "llm_inferred",
+            },
+            {
+                "score_instrument_id": "P3:default",
+                "role": "instrumental",
+                "playback_preset": None,
+                "source": "llm_inferred",
+            },
+        ],
+        allow_user_choice=True,
+    )
+    assert action is None
+    assert _instruments_by_id(resolved)["P3:default"]["user_assignable"] is True
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        score_summary=resolved,
+    )
+    eligible = {part["raw_part_id"]: part["eligible"] for part in result["instrumental_parts"]}
+    assert eligible["P3"] is True
+    assert eligible.get("P2") is not True
+
+
 HAPPY_BIRTHDAY_DEMO = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
 
 

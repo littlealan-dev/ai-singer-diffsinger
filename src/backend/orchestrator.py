@@ -9770,6 +9770,7 @@ class Orchestrator:
                 original_output_path=written_staging_path,
                 expanded_output_path=expanded_staging_path,
                 instrument_program_assignments=llm_program_assignments_from_summary(summary),
+                score_summary=summary,
             )
         except Exception as exc:
             self._logger.exception(
