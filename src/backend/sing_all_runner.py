@@ -105,6 +105,7 @@ class SingAllRunner:
         state: dict[str, Any] = {
             "scoreId": snapshot.get("score_id"),
             "verse": score.get("selected_verse_number"),
+            "now": datetime.now(timezone.utc),
         }
         if job["stage"] != "reading":
             return state

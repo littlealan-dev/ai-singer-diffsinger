@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -335,7 +335,14 @@ def decide(
             child_id = item["childJobId"]
             child = children.get(child_id)
             if child is None:
+                now = score_state.get("now")
+                lease = item.get("startLeaseUntil")
+                if (item.get("status") == "running" and isinstance(now, datetime)
+                        and isinstance(lease, datetime) and lease > now):
+                    return {}, []
                 item["status"] = "running"
+                if isinstance(now, datetime):
+                    item["startLeaseUntil"] = now + timedelta(seconds=60)
                 return {"items": items}, [{"kind": "start_split", "itemId": item["itemId"]}]
             if child.get("status") in {"queued", "running"}:
                 return {}, []
@@ -378,7 +385,14 @@ def decide(
                 continue
             child = children.get(item["childJobId"])
             if child is None:
+                now = score_state.get("now")
+                lease = item.get("startLeaseUntil")
+                if (item.get("status") == "running" and isinstance(now, datetime)
+                        and isinstance(lease, datetime) and lease > now):
+                    continue
                 item["status"] = "running"
+                if isinstance(now, datetime):
+                    item["startLeaseUntil"] = now + timedelta(seconds=60)
                 return {"items": items}, [{"kind": "start_take", "itemId": item["itemId"]}]
             if child.get("status") in {"queued", "running"}:
                 continue

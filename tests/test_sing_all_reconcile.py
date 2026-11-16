@@ -1,8 +1,9 @@
 """The Sing All state machine decides without Firestore or worker calls."""
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
-from src.backend.sing_all import decide, job_from_quote
+from src.backend.sing_all import decide, job_from_quote, summary_with_judged_instruments
 
 
 def _job(stage="reading", *, instrumental=False):
@@ -84,6 +85,34 @@ def test_splitting_uses_fixed_child_and_keeps_quoted_voices():
         ("new-a", "voice-a"), ("new-b", "voice-b")]
     job.update(fields)
     assert decide(job, {"split-child": child}, _score(job)) == ({"stage": "solfege"}, [])
+
+
+def test_split_start_lease_prevents_a_second_simultaneous_start():
+    job = _job("splitting")
+    now = datetime.now(timezone.utc)
+    state = {**_score(job), "now": now}
+    fields, actions = decide(job, {}, state)
+    assert actions == [{"kind": "start_split", "itemId": "split:part-a"}]
+    job.update(fields)
+    assert decide(job, {}, state) == ({}, [])
+    expired = {**state, "now": now + timedelta(seconds=61)}
+    assert decide(job, {}, expired)[1] == actions
+
+
+def test_ticked_undeclared_part_is_saved_as_vocal_not_midi():
+    route = {"score_instrument_id": "P2:default", "instrumental_candidate": True,
+             "eligible_for_instrumental_midi": False, "instrumental_role": "undecided"}
+    summary = {"parts": [{"part_id": "P2", "instruments": [route]}],
+               "instrument_program_resolution": {
+                   "unresolved_score_instrument_ids": ["P2:default"],
+                   "instrumental_score_instrument_ids": [],
+                   "unresolved_reasons": {"P2:default": "undeclared_instrument_role"}}}
+    answer = {"roles": {"P2": "unsure"}, "sounds": {"P2:default": None}}
+    vocal = summary_with_judged_instruments(summary, answer, sung_source_ids={"P2"})
+    assert vocal["parts"][0]["instruments"][0]["instrumental_role"] == "not_instrumental"
+    assert vocal["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
+    accompaniment = summary_with_judged_instruments(summary, answer, sung_source_ids=set())
+    assert accompaniment["parts"][0]["instruments"][0]["user_assignable"] is True
 
 
 def test_split_failure_and_wrong_lanes_refund_every_take():

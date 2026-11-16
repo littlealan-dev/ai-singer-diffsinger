@@ -1,8 +1,11 @@
 """Sing All parent creation uses the existing all-or-nothing credit transaction."""
 
+import asyncio
 from types import SimpleNamespace
 
-from src.backend import sing_all_store
+import pytest
+
+from src.backend import main, sing_all_store
 from src.backend.message_catalog import backend_message
 from src.backend.session import _new_history_entry
 
@@ -133,3 +136,75 @@ def test_child_worker_requires_running_parent_and_listed_child(monkeypatch):
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "another-child")
     parent["status"] = "failed"
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "fake-child")
+
+
+def _start_route(monkeypatch, *, changed=False, reserve_status="reserved"):
+    row = {"rowId": "a", "sourcePartId": "P1", "partId": "P1",
+           "partName": "Made-up lead", "name": "Made-up lead", "split": False,
+           "hasWords": True, "include": True, "voice": "voice_a",
+           "voicePicked": "recommended", "note": None}
+    choices = {"language": "en", "verse": "1", "mode": "lyrics",
+               "repeats": True, "rows": []}
+    quote = {"quoteId": "quote-a", "uid": "owner", "sessionId": "song-a",
+             "scoreId": "score-a", "scoreVersion": 2, "choices": choices,
+             "choicesHash": main.choices_hash(choices, {}),
+             "judgment": {"inputHash": "facts-a", "voices": {"a": "voice_a"}},
+             "style": {}, "rows": [row],
+             "items": main.build_items([row], mode="lyrics", duration_seconds=59,
+                                       instrumental_charge_required=False), "total": 2}
+    snapshot = {"song": {"title": "Made-up song"}, "score_id": "score-a",
+                "current_score": {"score": {"selected_verse_number": "1"},
+                                  "version": 3 if changed else 2},
+                "score_summary": {"parts": [{"part_id": "P1", "part_name": "Made-up lead"}],
+                                  "duration_seconds": 59}}
+    events = []
+    async def auth(request):
+        return "owner"
+    async def owned(sessions, session_id, uid):
+        return snapshot
+    async def voices():
+        return [{"id": "voice_a", "languages": ["en"]}]
+    async def history(*args, **kwargs):
+        events.append(("history", kwargs["sing_all_job_id"]))
+    async def enqueue(job_id):
+        events.append(("enqueue", job_id))
+    monkeypatch.setattr(main, "_get_user_id_or_401", auth)
+    monkeypatch.setattr(main, "_get_snapshot_or_404", owned)
+    monkeypatch.setattr(main, "read_quote", lambda db, quote_id, uid: quote)
+    monkeypatch.setattr(main, "get_firestore_client", lambda: _Db({"billing": {"activePlanKey": "plus"}}))
+    monkeypatch.setattr(main, "quote_facts", lambda *args, **kwargs: {})
+    monkeypatch.setattr(main, "input_hash", lambda *args, **kwargs: "facts-a")
+    monkeypatch.setattr(main, "materialize_rows", lambda *args, **kwargs: [dict(row)])
+    monkeypatch.setattr(main, "mark_voice_ranges", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main, "summary_with_judged_instruments", lambda summary, *args, **kwargs: summary)
+    monkeypatch.setattr(main, "score_has_instrumental_parts", lambda summary: False)
+    monkeypatch.setattr(main, "selected_score_duration", lambda *args, **kwargs: 59)
+    monkeypatch.setattr(main, "create_job_with_reservations",
+                        lambda job, **kwargs: (events.append(("reserve", job["jobId"]))
+                                               or SimpleNamespace(status=reserve_status,
+                                                                  reason="not_enough_credits")))
+    orchestrator = SimpleNamespace(_get_voicebank_details=voices,
+                                   _enqueue_sing_all_reconcile=enqueue)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        sessions=SimpleNamespace(append_history=history), orchestrator=orchestrator,
+        settings=main.app.state.settings)))
+    endpoint = next(route.endpoint for route in main.app.routes
+                    if getattr(route, "path", None) == "/sing-all/jobs")
+    return endpoint, request, events
+
+
+def test_sing_it_reserves_then_starts_one_parent_without_model(monkeypatch):
+    endpoint, request, events = _start_route(monkeypatch)
+    result = asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
+    assert result["kind"] == "full"
+    assert result["items"][0]["childJobId"]
+    assert [event[0] for event in events] == ["reserve", "history", "enqueue"]
+
+
+def test_sing_it_rejects_changed_score_before_reservation(monkeypatch):
+    endpoint, request, events = _start_route(monkeypatch, changed=True)
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": "quote_changed"}
+    assert events == []
