@@ -2273,7 +2273,7 @@ class Orchestrator:
             # render/error-finalization path for an ordinary take.
             self._logger.warning("synthesis_parent_lookup_failed job=%s", job_id, exc_info=True)
             job_record = {}
-        parent_job_id = job_record.get("parentJobId")
+        parent_job_id = parent_job_id_hint or job_record.get("parentJobId")
         if parent_job_id and not await asyncio.to_thread(
             child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
         ):
@@ -2748,7 +2748,7 @@ class Orchestrator:
                 raise
             self._logger.warning("preprocess_parent_lookup_failed job=%s", job_id, exc_info=True)
             job_record = {}
-        parent_job_id = job_record.get("parentJobId")
+        parent_job_id = parent_job_id_hint or job_record.get("parentJobId")
         if parent_job_id and not await asyncio.to_thread(
             child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
         ):
