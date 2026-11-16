@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Sequence
 
 from music21 import pitch
 
+from src.api.preprocess_chooser import _evidence_bars
 from src.api.preprocess_evidence import trim_musicxml
 from src.api.preprocess_sheet import _lane_layout_evidence, build_sheet_skeleton
 from src.api.voice_parts import part_needs_split_signal, sheet_lane_counts
@@ -115,10 +117,21 @@ def _lane_rows(score: Mapping[str, Any], part: Mapping[str, Any],
         rank = pool_rank.get(pool, 0)
         pool_rank[pool] = rank + 1
         voice_id = voice_ids.get(lane.source_voice_part_id)
-        name = f"{part.get('part_name') or part.get('part_id')} · staff {scope} · line {len(rows) + 1}"
+        part_name = str(part.get("part_name") or part.get("part_id") or "")
+        named_lines = tuple(
+            name for name in ("Soprano", "Alto", "Tenor", "Bass")
+            if re.search(rf"\b{name}\b", part_name, re.IGNORECASE)
+        )
+        if not named_lines:
+            named_lines = (("Soprano", "Alto") if part_name.casefold() == "women"
+                           else ("Tenor", "Bass") if part_name.casefold() == "men"
+                           else ())
+        name = (named_lines[len(rows)] if len(rows) < len(named_lines)
+                else f"{part_name} · voice {len(rows) + 1}")
         rows.append(_row(
             part, source_part_id=str(part.get("part_id") or ""), split=True,
-            row_id=lane.lane_id, name=name,
+            row_id=(f"{lane.part_id}:staff{scope}:"
+                    f"{lane.source_voice_part_id}:slot{lane.slot}"), name=name,
             estimated_range=_range_for_lane(
                 score, part_index, scope, lane, rank, shared=shared,
                 rows_in_pool=len(lanes), voice_id=voice_id,
@@ -180,6 +193,8 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
         context = {"target": {"part_id": score_part.get("part_id"), "verse_number": target_verse}}
         shared_skeleton = build_sheet_skeleton(score, context)
         separate_layouts: dict[tuple[int, str], str] = {}
+        part_row_start = len(rows)
+        part_staff_start = len(open_staffs)
         scopes = sorted({_staff(note) for note in score_part.get("notes") or []
                          if isinstance(note, dict) and not note.get("is_rest")})
         for scope in scopes:
@@ -196,13 +211,16 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
             }
             evidence = _lane_layout_evidence(score, index, scope, counts.peak,
                                              shared, counts.most)
-            bars = {int(note.get("measure_number") or 0) for note in score_part.get("notes") or []
-                    if isinstance(note, dict) and _staff(note) == scope}
+            segments = [segment for segment in shared_skeleton.segments
+                        if (segment.part_index, segment.scope_key) == (index, scope)]
+            bars = _evidence_bars(score, segments)
             xml = trim_musicxml(score, [str(score_part.get("raw_part_id") or score_part.get("part_id"))],
-                                set(sorted(bars)[:4])) if bars else ""
+                                bars) if bars else ""
             if len(xml) > evidence_max_chars:
                 notes.append(f"{source_id}:cannot_split_evidence_too_large")
-                continue
+                del rows[part_row_start:]
+                del open_staffs[part_staff_start:]
+                break
             open_staffs.append({
                 "key": f"{source_id}|{scope}", "sourcePartId": source_id,
                 "staff": scope, "evidence": {**evidence, "score_xml": xml},

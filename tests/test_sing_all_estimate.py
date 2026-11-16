@@ -32,6 +32,8 @@ def test_split_rows_use_planner_lanes_and_estimate_ranges(capsys, tmp_path) -> N
     assert facts["open_staffs"] == []
     assert all(row["split"] and row["partId"] is None for row in facts["rows"])
     assert len({row["rowId"] for row in facts["rows"]}) == 2
+    assert [row["name"] for row in facts["rows"]] == ["Soprano", "Alto"]
+    assert all(":staff1:voice part 1:slot" in row["rowId"] for row in facts["rows"])
     sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
     plan = assemble_plan(sheet, first_option_choices(sheet), score=score)
     result = preprocess_voice_parts(score, request={"plan": plan})
@@ -169,6 +171,24 @@ def test_open_staff_lists_both_planner_layouts_once(monkeypatch) -> None:
                for option in staff["rows_if"].values() for row in option)
 
 
+def test_open_staff_evidence_includes_late_bars(monkeypatch) -> None:
+    monkeypatch.setattr("src.api.sing_all_estimate.sheet_lane_counts",
+                        lambda *args, **kwargs: LaneCounts(peak=2, real_voices=2, most=4))
+    score = _score()
+    late_note = deepcopy(next(note for note in score["parts"][0]["notes"]
+                              if not note.get("is_rest")))
+    late_note["measure_number"] = 6
+    score["parts"][0]["notes"].append(late_note)
+    seen = []
+    def capture_xml(_score, _parts, bars):
+        seen.append(bars)
+        return "made-up evidence"
+    monkeypatch.setattr("src.api.sing_all_estimate.trim_musicxml", capture_xml)
+    facts = _facts(score)
+    assert facts["open_staffs"]
+    assert seen and 6 in seen[0]
+
+
 def test_open_staff_over_planner_evidence_limit_has_no_rows(monkeypatch) -> None:
     monkeypatch.setattr("src.api.sing_all_estimate.sheet_lane_counts",
                         lambda *args, **kwargs: LaneCounts(peak=2, real_voices=2, most=4))
@@ -223,6 +243,11 @@ def test_two_chorded_voices_in_separate_bars_offer_two_or_four_rows() -> None:
     assert len(facts["open_staffs"]) == 1
     assert {layout: len(rows) for layout, rows in facts["open_staffs"][0]["rows_if"].items()} == {
         "shared": 2, "separate": 4}
+    variants = facts["open_staffs"][0]["rows_if"]
+    shared_keys = {row["rowId"] for row in variants["shared"]}
+    separate_keys = {row["rowId"] for row in variants["separate"]}
+    assert shared_keys <= separate_keys
+    assert any(key.endswith(":slot2") for key in separate_keys - shared_keys)
 
 
 def test_two_staves_one_line_each_still_need_two_split_rows() -> None:
@@ -242,3 +267,27 @@ def test_two_staves_one_line_each_still_need_two_split_rows() -> None:
     facts = _facts(score)
     assert len(facts["rows"]) == 2
     assert all(row["split"] for row in facts["rows"])
+
+
+def test_oversize_open_staff_discards_earlier_rows_of_same_part(monkeypatch) -> None:
+    score = parse_score(_SATB)
+    combined = deepcopy(score["parts"][0])
+    combined["part_id"] = "P1-Combined"
+    combined["notes"] = [
+        {**note, "staff": str(staff)}
+        for staff, part in enumerate(score["parts"], start=1)
+        for note in part["notes"] if str(note.get("voice")) in {"1", "5"}
+    ]
+    score["parts"] = [combined]
+    score["score_summary"]["parts"] = score["score_summary"]["parts"][:1]
+    score["score_summary"]["parts"][0]["part_id"] = "P1-Combined"
+    score["voice_part_signals"]["parts"] = score["voice_part_signals"]["parts"][:1]
+    score["voice_part_signals"]["parts"][0]["multi_voice_part"] = True
+    monkeypatch.setattr("src.api.sing_all_estimate.sheet_lane_counts",
+                        lambda *args, **kwargs: (LaneCounts(1, 1, 1) if kwargs["staff_scope"] == "1"
+                                                 else LaneCounts(2, 2, 4)))
+    monkeypatch.setattr("src.api.sing_all_estimate.trim_musicxml",
+                        lambda *_args, **_kwargs: "oversize evidence")
+    facts = quote_facts(score, score["score_summary"], [], evidence_max_chars=1)
+    assert facts["rows"] == facts["open_staffs"] == []
+    assert facts["notes"] == ["P1-Combined:cannot_split_evidence_too_large"]
