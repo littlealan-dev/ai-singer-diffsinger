@@ -1211,8 +1211,10 @@ def create_app() -> FastAPI:
         repeats = bool(choices.get("repeats", True))
         verses = summary.get("available_verses") or []
         verse = str(choices.get("verse") or (verses[0] if verses else "1"))
-        facts = quote_facts(score, summary, voicebanks, verse_number=verse)
         settings: Settings = request.app.state.settings
+        facts = quote_facts(
+            score, summary, voicebanks, verse_number=verse,
+            evidence_max_chars=settings.preprocess_chooser_evidence_max_chars)
         quote_text = quote_prompt(
             synthesis_max_duration_seconds=settings.synthesis_max_duration_seconds)
         style_text = style_prompt(

@@ -35,14 +35,15 @@ def _row(part: Mapping[str, Any], *, source_part_id: str, split: bool = False,
          row_id: str | None = None, name: str | None = None,
          part_id: str | None = None, estimated_range: Mapping[str, Any] | None = None) -> dict[str, Any]:
     key = row_id or str(part.get("part_id") or "")
+    has_words = split or _has_words(part)
     return {
         "rowId": key,
         "sourcePartId": source_part_id,
         "partId": part_id if split else (part_id or key),
         "name": name or str(part.get("part_name") or key),
         "split": split,
-        "hasWords": _has_words(part),
-        "note": None if _has_words(part) else "no_words",
+        "hasWords": has_words,
+        "note": None if has_words else "no_words",
         "voice": None,
         "voicePicked": "recommended",
         "pitchRange": dict(estimated_range or part.get("pitch_range") or {}),
@@ -126,7 +127,8 @@ def _lane_rows(score: Mapping[str, Any], part: Mapping[str, Any],
 
 def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
                 voicebanks: Sequence[Mapping[str, Any]], *,
-                verse_number: str | None = None) -> dict[str, Any]:
+                verse_number: str | None = None,
+                evidence_max_chars: int = 400000) -> dict[str, Any]:
     """Build deterministic rows and the questions the quote call must answer."""
     del voicebanks  # voice compatibility belongs to the judgment stage.
     score_parts = score.get("parts") or []
@@ -195,6 +197,9 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
                     if isinstance(note, dict) and _staff(note) == scope}
             xml = trim_musicxml(score, [str(score_part.get("raw_part_id") or score_part.get("part_id"))],
                                 set(sorted(bars)[:4])) if bars else ""
+            if len(xml) > evidence_max_chars:
+                notes.append(f"{source_id}:cannot_split_evidence_too_large")
+                continue
             open_staffs.append({
                 "key": f"{source_id}|{scope}", "sourcePartId": source_id,
                 "staff": scope, "evidence": {**evidence, "score_xml": xml},

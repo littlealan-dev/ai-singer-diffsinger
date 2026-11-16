@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.api.score import parse_score
 from src.api.sing_all_estimate import quote_facts
+from src.api.voice_parts import LaneCounts
 
 
 _SCORE = Path(__file__).parent / "fixtures" / "sa_chord_gaps_two_bars.xml"
@@ -123,3 +124,27 @@ def test_visible_split_rows_are_reused_only_for_the_loaded_verse() -> None:
     other = _facts(score, verse="2")
     assert len(other["rows"]) == 2
     assert all(row["split"] for row in other["rows"])
+
+
+def test_open_staff_lists_both_planner_layouts_once(monkeypatch) -> None:
+    # Force a genuine ambiguity in the lane evidence while keeping the notes
+    # and the planner's two candidate skeletons from the made-up score.
+    monkeypatch.setattr("src.api.sing_all_estimate.sheet_lane_counts",
+                        lambda *args, **kwargs: LaneCounts(peak=2, real_voices=2, most=4))
+    facts = _facts(_score())
+    assert facts["rows"] == []
+    assert len(facts["open_staffs"]) == 1
+    staff = facts["open_staffs"][0]
+    assert set(staff["rows_if"]) == {"shared", "separate"}
+    assert all(row["split"] and row["hasWords"]
+               for option in staff["rows_if"].values() for row in option)
+
+
+def test_open_staff_over_planner_evidence_limit_has_no_rows(monkeypatch) -> None:
+    monkeypatch.setattr("src.api.sing_all_estimate.sheet_lane_counts",
+                        lambda *args, **kwargs: LaneCounts(peak=2, real_voices=2, most=4))
+    score = _score()
+    facts = quote_facts(score, score["score_summary"], [], evidence_max_chars=1)
+    assert facts["rows"] == facts["open_staffs"] == []
+    assert facts["notes"] == [
+        f"{score['score_summary']['parts'][0]['part_id']}:cannot_split_evidence_too_large"]
