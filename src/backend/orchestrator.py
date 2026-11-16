@@ -6594,6 +6594,7 @@ class Orchestrator:
             sheet, choices, stats = await choose(
                 score,
                 planning_context,
+                lane_layouts=planning_context.get("lane_layouts"),
                 call=self._call_preprocess_chooser,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
                 evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
@@ -6749,6 +6750,7 @@ class Orchestrator:
             sheet, choices, stats = await choose_repair(
                 state.score,
                 state.planning_context,
+                lane_layouts=state.planning_context.get("lane_layouts"),
                 sheet=state.sheet,
                 choices=state.choices,
                 failing=failing,
