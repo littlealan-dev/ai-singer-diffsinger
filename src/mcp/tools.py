@@ -1970,6 +1970,23 @@ TOOLS: List[Tool] = [
         output_schema=_SAVE_AUDIO_OUTPUT_SCHEMA,
     ),
     Tool(
+        name="open_sing_all",
+        description=(
+            "Open the Sing All card after resolving the score's singing language against "
+            "all available voicebanks. Use solfegeOnly only after the user chooses solfege."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*$"},
+                "solfegeOnly": {"type": "boolean", "default": False},
+            },
+            "required": ["language"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object", "additionalProperties": True},
+    ),
+    Tool(
         name="prepare_synthesis_quote",
         description=(
             "Check whether part_id names an original part in voice_part_signals.parts[] "

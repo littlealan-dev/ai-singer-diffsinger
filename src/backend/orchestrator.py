@@ -50,6 +50,8 @@ from src.backend.gpu_errors import (
     format_gpu_resource_error_message,
 )
 from src.backend.job_store import JobStore
+from src.backend.firebase_app import get_firestore_client
+from src.backend.sing_all import open_sing_all_result
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.job_dispatch import (
     SYNTHESIS_JOB_KIND,
@@ -244,6 +246,7 @@ TOOL_ADD_SOLFEGE_VERSE = "add_solfege_lyric_verse"
 TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
 TOOL_PREPROCESS_VOICE_PARTS = "preprocess_voice_parts"
 TOOL_START_PREPROCESS_WORKFLOW = "start_preprocess_voice_part_workflow"
+TOOL_OPEN_SING_ALL = "open_sing_all"
 DEFAULT_LLM_TOOL_ALLOWLIST = {
     TOOL_REPARSE,
     TOOL_PREPARE_SYNTHESIS_QUOTE,
@@ -262,6 +265,7 @@ TOOL_REPLACE_BIRTHDAY_NAME = "replace_birthday_name"
 # Their specs go in the per-request context, not the cached static prompt.
 SCORE_LLM_TOOLS: Dict[str, Callable[[Dict[str, Any]], bool]] = {
     TOOL_REPLACE_BIRTHDAY_NAME: lambda summary: summary.get("demo_song") == "happy-birthday",
+    TOOL_OPEN_SING_ALL: lambda summary: bool(summary.get("parts")),
 }
 
 
@@ -8622,9 +8626,35 @@ class Orchestrator:
                 TOOL_ADD_SOLFEGE_VERSE,
                 TOOL_MODIFY_SOLFEGE_SETTINGS,
                 TOOL_REPLACE_BIRTHDAY_NAME,
+                TOOL_OPEN_SING_ALL,
             }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name == TOOL_OPEN_SING_ALL:
+                if not isinstance(score_summary, dict) or not score_summary.get("parts"):
+                    self._logger.warning("sing_all_without_score")
+                    continue
+                user_record = await asyncio.to_thread(
+                    lambda: get_firestore_client().collection("users").document(user_id).get().to_dict() or {}
+                )
+                result = open_sing_all_result(
+                    call.arguments,
+                    voicebanks=await self._get_voicebank_details(),
+                    active_job_id=user_record.get("activeSingAllJobId"),
+                )
+                if result["status"] == "action_required":
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(result, sort_keys=True),
+                        action_required_payload=result,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": "", "singAll": result["singAll"]},
+                    explicit_verse_number=selected_explicit_verse_number,
+                )
             if call.name == TOOL_REPLACE_BIRTHDAY_NAME:
                 # Offered only for the Happy Birthday demo; the tool also checks the
                 # score itself. It edits the score only: the LLM then presents a quote.
