@@ -6,7 +6,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import uuid4
 
-from src.backend.credits import DEFAULT_RESERVATION_TTL_SECONDS
+from google.cloud import firestore
+
+from src.backend.credits import (
+    DEFAULT_RESERVATION_TTL_SECONDS, ReservationItem, ReserveCreditsResult,
+    reserve_credits_for_items,
+)
+from src.backend.firebase_app import get_firestore_client
 
 
 def _answer_ref(db: Any, session_id: str, kind: str) -> Any:
@@ -62,3 +68,100 @@ def read_quote(db: Any, quote_id: str, *, uid: str) -> dict[str, Any] | None:
     if isinstance(expiry, datetime) and expiry <= datetime.now(timezone.utc):
         return None
     return record
+
+
+class _JobReservationGuard:
+    """Create the parent and set the one-active pointer in the reservation transaction."""
+
+    def __init__(self, db: Any, job: Mapping[str, Any]) -> None:
+        self._db = db
+        self._job = dict(job)
+        self._job_ref = db.collection("singAllJobs").document(job["jobId"])
+        self._user_ref = db.collection("users").document(job["uid"])
+
+    def read(self, transaction: Any) -> str | None:
+        if self._job_ref.get(transaction=transaction).exists:
+            return "sing_all_already_running"
+        user = self._user_ref.get(transaction=transaction).to_dict() or {}
+        active = user.get("activeSingAllJobId")
+        if active:
+            active_ref = self._db.collection("singAllJobs").document(active)
+            active_job = active_ref.get(transaction=transaction).to_dict() or {}
+            if active_job.get("status") == "running":
+                return "sing_all_already_running"
+        return None
+
+    def write(self, transaction: Any) -> None:
+        transaction.set(self._job_ref, self._job)
+        transaction.update(self._user_ref, {"activeSingAllJobId": self._job["jobId"]})
+
+
+def create_job_with_reservations(
+    job: Mapping[str, Any], *, instrumental_scope: str | None = None,
+) -> ReserveCreditsResult:
+    """Create a parent and reserve every priced item in one credit transaction."""
+    reservations: list[ReservationItem] = []
+    for item in job.get("items") or []:
+        kind = item.get("type")
+        if kind not in {"take", "instrumental"}:
+            continue
+        instrumental = kind == "instrumental"
+        reservations.append(ReservationItem(
+            job_id=item["reservationId"] if instrumental else item["childJobId"],
+            estimated_credits=int(item["creditsReserved"]),
+            billing_components=("instrumental",) if instrumental else ("vocal",),
+            job_kind="sing_all_instrumental" if instrumental else "synthesis",
+            pricing_unit_seconds=item.get("unitSeconds"),
+            billable_duration_seconds=item.get("estimatedSeconds"),
+            instrumental_charge_scope_value=instrumental_scope if instrumental else None,
+        ))
+    return reserve_credits_for_items(
+        job["uid"], reservations,
+        guard=_JobReservationGuard(get_firestore_client(), job),
+        session_id=job["sessionId"], score_id=job["scoreId"],
+        score_version_no=job["quote"]["scoreVersion"],
+        parent_job_id=job["jobId"],
+    )
+
+
+def load(job_id: str) -> dict[str, Any] | None:
+    return get_firestore_client().collection("singAllJobs").document(job_id).get().to_dict()
+
+
+def apply(
+    job_id: str, fields: Mapping[str, Any], *,
+    expected_stage: str | None = None, expected_revision: int | None = None,
+) -> bool:
+    """Apply one reconciler decision only against its observed job revision."""
+    db = get_firestore_client()
+    ref = db.collection("singAllJobs").document(job_id)
+
+    @firestore.transactional
+    def _apply(transaction: Any) -> bool:
+        current = ref.get(transaction=transaction).to_dict() or {}
+        if current.get("status") != "running":
+            return False
+        if expected_stage is not None and current.get("stage") != expected_stage:
+            return False
+        revision = int(current.get("revision", 0))
+        if expected_revision is not None and revision != expected_revision:
+            return False
+        transaction.update(ref, {**fields, "revision": revision + 1,
+                                 "updatedAt": datetime.now(timezone.utc)})
+        return True
+
+    return _apply(db.transaction())
+
+
+def clear_active(uid: str, job_id: str) -> None:
+    """Clear the guard only if it still names this parent job."""
+    db = get_firestore_client()
+    ref = db.collection("users").document(uid)
+
+    @firestore.transactional
+    def _clear(transaction: Any) -> None:
+        user = ref.get(transaction=transaction).to_dict() or {}
+        if user.get("activeSingAllJobId") == job_id:
+            transaction.update(ref, {"activeSingAllJobId": firestore.DELETE_FIELD})
+
+    _clear(db.transaction())
