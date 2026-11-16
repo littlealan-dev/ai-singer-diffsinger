@@ -1,0 +1,63 @@
+"""Sing All prices made-up rows at the existing take and instrumental rates."""
+
+import pytest
+
+from src.backend.sing_all import build_items, choices_hash, quote_lines
+
+
+def _rows():
+    return [
+        {"rowId": "a", "sourcePartId": "P1", "split": True,
+         "hasWords": True, "include": True},
+        {"rowId": "b", "sourcePartId": "P1", "split": True,
+         "hasWords": False, "include": True},
+        {"rowId": "c", "sourcePartId": "P2", "split": False,
+         "hasWords": False, "include": False},
+    ]
+
+
+@pytest.mark.parametrize("mode,takes", [
+    ("lyrics", ["take:a:lyrics", "take:b:solfege"]),
+    ("solfege", ["take:a:solfege", "take:b:solfege"]),
+    ("both", ["take:a:lyrics", "take:a:solfege", "take:b:solfege"]),
+])
+def test_items_mode_and_wordless_row(mode, takes):
+    items = build_items(_rows(), mode=mode, duration_seconds=59,
+                        instrumental_charge_required=False)
+    assert [item["itemId"] for item in items] == takes + ["split:P1"]
+    assert [item["creditsReserved"] for item in items] == [2] * len(takes) + [0]
+
+
+def test_one_instrumental_charge_and_quote_lines():
+    items = build_items(_rows(), mode="both", duration_seconds=59,
+                        instrumental_charge_required=True)
+    assert [item["itemId"] for item in items].count("instrumental") == 1
+    assert items[-1]["creditsReserved"] == 1
+    lines = quote_lines(items, duration_seconds=59, balance=42)
+    assert lines == [
+        {"kind": "singing", "parts": 2, "takes": 3, "secondsEach": 59,
+         "credits": 6},
+        {"kind": "preparing", "credits": 0},
+        {"kind": "instrumentals", "credits": 1},
+        {"kind": "total", "credits": 7},
+        {"kind": "balance", "before": 42, "after": 35},
+    ]
+
+
+def test_instrumentals_already_paid_and_empty_singing():
+    items = build_items([dict(_rows()[0], include=False)], mode="lyrics",
+                        duration_seconds=121, instrumental_charge_required=False)
+    assert items == []
+    assert quote_lines(items, duration_seconds=121, balance=9)[-2:] == [
+        {"kind": "total", "credits": 0},
+        {"kind": "balance", "before": 9, "after": 9},
+    ]
+
+
+def test_choices_hash_covers_style_note_and_controls():
+    choices = {"language": "en", "rows": [{"rowId": "a", "voice": "voice_a"}]}
+    style = {"note": "warm", "controls": {"a": {"airiness": 10}}}
+    key = choices_hash(choices, style)
+    assert key == choices_hash(dict(reversed(list(choices.items()))), style)
+    assert key != choices_hash(choices, {**style, "note": "bright"})
+    assert key != choices_hash(choices, {**style, "controls": {"a": {"airiness": 11}}})
