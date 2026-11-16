@@ -61,6 +61,20 @@ from src.backend.synthesis_pricing import (
     score_has_instrumental_parts,
     selected_score_duration,
 )
+from src.api.sing_all_estimate import quote_facts
+from src.backend.sing_all import (
+    available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
+    materialize_rows, quote_lines,
+    style_changes, summary_with_judged_instruments, supported_singing_languages,
+)
+from src.backend.sing_all_judgment import (
+    QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
+)
+from src.backend.sing_all_prompts import quote_prompt, style_prompt
+from src.backend.language_selection import normalize_language_code
+from src.backend.sing_all_store import (
+    latest_judgment, read_judgment, read_style, save_judgment, save_quote, save_style,
+)
 from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
@@ -383,6 +397,11 @@ class ChatRequest(BaseModel):
         default=None,
         pattern=r"^[a-z]{2,3}(?:-[a-z0-9]+)*$",
     )
+
+
+class SingAllQuoteRequest(BaseModel):
+    songId: str = Field(min_length=1, max_length=200)
+    choices: dict[str, Any] = Field(default_factory=dict)
 
 
 class SolfegeSettingsPayload(BaseModel):
@@ -1155,6 +1174,160 @@ def create_app() -> FastAPI:
             "performance_midi": None,
             "solfege_settings": _default_solfege_settings_response(),
             "song": _upload_song_block((await _get_session_or_404(sessions, session_id, user_id)).song()),
+        }
+
+    @app.post("/sing-all/quote")
+    async def get_sing_all_quote(payload: SingAllQuoteRequest, request: Request) -> Dict[str, Any]:
+        """Quote the caller's Song without changing its score or reserving credits."""
+        user_id = await _get_user_id_or_401(request)
+        session_id = payload.songId
+        snapshot = await _get_snapshot_or_404(request.app.state.sessions, session_id, user_id)
+        if not snapshot.get("song"):
+            raise HTTPException(status_code=404, detail={"code": "song_not_found"})
+        current = snapshot.get("current_score") or {}
+        score = current.get("score")
+        summary = snapshot.get("score_summary")
+        score_id = snapshot.get("score_id")
+        version = current.get("version")
+        if not isinstance(score, dict) or not isinstance(summary, dict) or not score_id or not isinstance(version, int):
+            raise HTTPException(status_code=409, detail={"code": "score_unavailable"})
+        db = get_firestore_client()
+        user_record = await asyncio.to_thread(
+            lambda: db.collection("users").document(user_id).get().to_dict() or {})
+        if user_record.get("activeSingAllJobId"):
+            return {"blocked": "already_running", "activeJobId": user_record["activeSingAllJobId"]}
+
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        voicebanks = await orchestrator._get_voicebank_details()
+        choices = dict(payload.choices)
+        solfege_only = choices.get("solfegeOnly") is True
+        language = "en" if solfege_only else normalize_language_code(choices.get("language") or "en")
+        supported = supported_singing_languages(voicebanks)
+        if language not in supported:
+            return {"blocked": "no_voice_for_language", "language": language,
+                    "supported": supported}
+        mode = "solfege" if solfege_only else str(choices.get("mode") or "lyrics")
+        if mode not in {"lyrics", "solfege", "both"}:
+            raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
+        repeats = bool(choices.get("repeats", True))
+        verses = summary.get("available_verses") or []
+        verse = str(choices.get("verse") or (verses[0] if verses else "1"))
+        settings: Settings = request.app.state.settings
+        facts = quote_facts(
+            score, summary, voicebanks, verse_number=verse,
+            evidence_max_chars=settings.preprocess_chooser_evidence_max_chars)
+        quote_text = quote_prompt(
+            synthesis_max_duration_seconds=settings.synthesis_max_duration_seconds)
+        style_text = style_prompt(
+            synthesis_max_duration_seconds=settings.synthesis_max_duration_seconds)
+        model = (settings.gemini_sing_all_quote.model if settings.llm_provider == "gemini"
+                 else settings.openai_default.model)
+        fingerprint = f"{score_id}:{version}"
+        cache_key = input_hash(
+            {"facts": facts, "language": language, "voicebanks": voicebanks,
+             "score": fingerprint}, quote_text, model)
+        cached = await asyncio.to_thread(read_judgment, db, session_id, cache_key)
+        previous = await asyncio.to_thread(latest_judgment, db, session_id)
+        quote_call_count = 0
+        async def call_quote(question: dict[str, Any], *, response_schema: dict[str, Any]) -> str:
+            nonlocal quote_call_count
+            quote_call_count += 1
+            return await orchestrator._call_sing_all_quote(
+                question, response_schema=response_schema)
+        try:
+            judgment = await quote_judgment(
+                facts, language, voicebanks, prompt=quote_text, model=model,
+                score_fingerprint=fingerprint, call=call_quote,
+                cached=cached, previous=previous)
+        except QuoteUnavailable as exc:
+            raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
+        if quote_call_count:
+            await asyncio.to_thread(save_judgment, db, session_id, judgment)
+
+        selected = choices.get("rows") or []
+        if not isinstance(selected, list):
+            raise HTTPException(status_code=422, detail={"code": "invalid_rows"})
+        rows = materialize_rows(facts, judgment, selected)
+        source_names = {
+            str(part.get("part_id")): part.get("part_name")
+            for part in summary.get("parts") or [] if isinstance(part, dict)
+        }
+        for row in rows:
+            row["partName"] = source_names.get(row["sourcePartId"]) or row["sourcePartId"]
+        compatible_ids = {
+            bank["id"] for bank in voicebanks
+            if language in supported_singing_languages([bank])
+        }
+        for row in rows:
+            if row["voice"] not in compatible_ids:
+                row["voice"] = judgment["voices"][row["rowId"]]
+                row["voicePicked"] = "recommended"
+        mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
+        note = str(choices.get("styleNote") or "").strip()
+        style: dict[str, Any] = {"note": note, "controls": {}}
+        style_blocked = False
+        if note:
+            banks_by_id = {bank["id"]: bank for bank in voicebanks}
+            prior_style = await asyncio.to_thread(read_style, db, session_id)
+            async def call_style(question: dict[str, Any], *,
+                                 response_schema: dict[str, Any], style: bool) -> str:
+                return await orchestrator._call_sing_all_quote(
+                    question, response_schema=response_schema, style=style)
+            try:
+                style_answer = await style_judgment(
+                    note, rows, banks_by_id, prompt=style_text, model=model,
+                    call=call_style, cached=prior_style)
+            except StyleUnavailable:
+                style_answer = None
+                style_blocked = True
+            if style_answer is not None:
+                style["controls"] = style_answer["controls"]
+                style["changes"] = style_changes(
+                    rows, style_answer["controls"], banks_by_id)
+                if not prior_style or prior_style.get("inputHash") != style_answer["inputHash"]:
+                    await asyncio.to_thread(save_style, db, session_id, style_answer)
+
+        try:
+            priced_summary = summary_with_judged_instruments(
+                summary, judgment,
+                sung_source_ids={row["sourcePartId"] for row in rows if row["include"]},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
+        has_instrumentals = score_has_instrumental_parts(priced_summary)
+        charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
+        charge_required = (has_instrumentals and await asyncio.to_thread(
+            get_instrumental_charge_state, charge_scope) != "paid")
+        duration = selected_score_duration(summary, expand_repeats=repeats)
+        items = build_items(rows, mode=mode, duration_seconds=duration,
+                            instrumental_charge_required=charge_required)
+        total = sum(int(item["creditsReserved"]) for item in items)
+        balance = available_balance_from_user(user_record)
+        blocked = ("free_plan" if (user_record.get("billing") or {}).get("activePlanKey") == "free"
+                   else "nothing_to_sing" if not any(row["include"] for row in rows)
+                   else "not_enough_credits" if total > balance
+                   else "style_unavailable" if style_blocked else None)
+        normalized_choices = {
+            "rows": [{"rowId": row["rowId"], "include": row["include"],
+                      "voice": row["voice"], "voicePicked": row["voicePicked"]}
+                     for row in rows],
+            "language": language, "solfegeOnly": solfege_only, "mode": mode,
+            "verse": verse, "repeats": repeats,
+        }
+        quote_record = await asyncio.to_thread(save_quote, db, {
+            "uid": user_id, "sessionId": session_id, "scoreId": score_id,
+            "scoreVersion": version, "choicesHash": choices_hash(normalized_choices, style),
+            "choices": normalized_choices, "rows": rows, "items": items,
+            "total": total, "judgment": judgment, "style": style,
+        })
+        return {
+            "quoteId": quote_record["quoteId"], "rows": rows,
+            "options": {"languages": supported, "mode": mode, "verse": verse,
+                        "repeats": repeats, "solfegeOnly": solfege_only},
+            "lines": quote_lines(items, duration_seconds=duration, balance=balance),
+            "total": total, "balance": balance, "blocked": blocked,
+            "notes": facts.get("notes") or [], "style": style,
+            "choicesHash": quote_record["choicesHash"],
         }
 
     @app.get("/sessions/{session_id}/synthesis-estimate")

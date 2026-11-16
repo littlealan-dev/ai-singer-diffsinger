@@ -24,6 +24,60 @@ UNDECLARED_INSTRUMENT_ROLE = "undeclared_instrument_role"
 NOT_INSTRUMENTAL_ROLE = "not_instrumental"
 
 
+def settle_split_sources(
+    score_summary: Mapping[str, Any], voice_part_transforms: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Mark undeclared sources of visible singing lanes as vocal."""
+    summary = copy.deepcopy(dict(score_summary))
+    parts = summary.get("parts")
+    resolution = summary.get("instrument_program_resolution")
+    if not isinstance(parts, list) or not isinstance(resolution, dict):
+        return summary
+    sources: set[int] = set()
+    for transform in voice_part_transforms.values():
+        if not isinstance(transform, Mapping):
+            continue
+        appended = transform.get("appended_part_ref")
+        lane = transform.get("derived_lane")
+        if not isinstance(appended, Mapping) or not isinstance(lane, Mapping):
+            continue
+        appended_index = appended.get("part_index")
+        if (
+            appended.get("hidden_default_lane")
+            or not isinstance(appended_index, int)
+            or appended_index < 0
+            or appended_index >= len(parts)
+        ):
+            continue
+        source = lane.get("source")
+        if isinstance(source, Mapping) and isinstance(source.get("part_index"), int):
+            sources.add(source["part_index"])
+
+    settled_ids: set[str] = set()
+    for index in sources:
+        if index < 0 or index >= len(parts) or not isinstance(parts[index], dict):
+            continue
+        for route in parts[index].get("instruments") or []:
+            if not isinstance(route, dict) or not route.get("instrumental_candidate"):
+                continue
+            route["instrumental_role"] = NOT_INSTRUMENTAL_ROLE
+            route["program_source"] = "split_for_singing"
+            route["eligible_for_instrumental_midi"] = False
+            route["user_assignable"] = False
+            route["playback_preset"] = None
+            route["resolved_gm_program"] = None
+            settled_ids.add(str(route.get("score_instrument_id") or ""))
+    for key in ("unresolved_score_instrument_ids", "instrumental_score_instrument_ids"):
+        values = resolution.get(key)
+        if isinstance(values, list):
+            resolution[key] = [value for value in values if value not in settled_ids]
+    reasons = resolution.get("unresolved_reasons")
+    if isinstance(reasons, dict):
+        for instrument_id in settled_ids:
+            reasons.pop(instrument_id, None)
+    return summary
+
+
 def build_instrument_program_summary(
     source_path: Path,
     parts: List[Dict[str, Any]],
@@ -87,6 +141,7 @@ def instrumental_programs_by_part(
     source_path: Path,
     *,
     assignments: Mapping[str, Any] | None = None,
+    score_summary: Mapping[str, Any] | None = None,
     include_ineligible: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the program choice or user-assignable drum route for each playable part.
@@ -96,6 +151,9 @@ def instrumental_programs_by_part(
     metadata can include ineligible routes to retain their exclusion evidence.
     """
     declarations = _read_part_declarations(source_path)
+    summary_instruments = (
+        _summary_instrument_index(score_summary) if score_summary is not None else {}
+    )
     result: Dict[str, Dict[str, Any]] = {}
     for raw_part_id, declaration in declarations.items():
         instruments = _part_instruments(
@@ -105,6 +163,11 @@ def instrumental_programs_by_part(
             note_count=1,
         )
         for item in instruments:
+            saved = summary_instruments.get(item["score_instrument_id"], [])
+            if any(entry.get("user_assignable") for entry in saved):
+                item["user_assignable"] = True
+                item["eligible_for_instrumental_midi"] = True
+                item["program_source"] = "user_assignable"
             # A part declaring no instrument plays only once the LLM gave it a preset.
             if item["instrumental_candidate"] and assignments and _normalise_preset(
                 assignments.get(item["score_instrument_id"])
@@ -173,7 +236,7 @@ def drop_resolved_program_assignments(
 
 
 def apply_llm_program_assignments(
-    score_summary: Mapping[str, Any], assignments: Any
+    score_summary: Mapping[str, Any], assignments: Any, *, allow_user_choice: bool = False
 ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
     """Validate and persist LLM-selected FluidR3 playback presets."""
     summary = copy.deepcopy(dict(score_summary))
@@ -239,6 +302,9 @@ def apply_llm_program_assignments(
         if role != "instrumental":
             invalid.append(f"{instrument_id} role must be instrumental or not_instrumental.")
             continue
+        if item.get("playback_preset") is None and allow_user_choice:
+            supplied[instrument_id] = {"playback_preset": None, "evidence": list(evidence)}
+            continue
         preset = _normalise_preset(item.get("playback_preset"))
         matching_instruments = instrument_index.get(instrument_id, [])
         if not preset or not matching_instruments:
@@ -276,6 +342,14 @@ def apply_llm_program_assignments(
             if assignment.get("role") == NOT_INSTRUMENTAL_ROLE:
                 instrument["instrumental_role"] = NOT_INSTRUMENTAL_ROLE
                 instrument["program_source"] = "llm_not_instrumental"
+                continue
+            if assignment["playback_preset"] is None:
+                instrument["playback_preset"] = None
+                instrument["resolved_gm_program"] = None
+                instrument["user_assignable"] = True
+                instrument["program_source"] = "user_assignable"
+                instrument["instrumental_role"] = "instrumental"
+                instrument["eligible_for_instrumental_midi"] = True
                 continue
             instrument["playback_preset"] = assignment["playback_preset"]
             instrument["resolved_gm_program"] = assignment["playback_preset"]["program"]

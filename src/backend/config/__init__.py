@@ -151,6 +151,7 @@ class Settings:
     gemini_default: GeminiModelRoleConfig
     gemini_preprocess: GeminiModelRoleConfig
     gemini_preprocess_chooser: GeminiModelRoleConfig
+    gemini_sing_all_quote: GeminiModelRoleConfig
     gemini_include_thought_summary: bool
     openai_api_key: str
     openai_api_key_secret: str
@@ -350,6 +351,16 @@ class Settings:
             or gemini_preprocess.model,
             thinking_level=os.getenv("GEMINI_PREPROCESS_CHOOSER_THINKING_LEVEL", "medium").strip(),
             timeout_seconds=_env_float("GEMINI_PREPROCESS_CHOOSER_TIMEOUT_SECONDS", 120.0),
+        )
+        gemini_sing_all_quote = GeminiModelRoleConfig(
+            model=os.getenv("GEMINI_SING_ALL_QUOTE_MODEL", gemini_default.model).strip()
+            or gemini_default.model,
+            thinking_level=os.getenv(
+                "GEMINI_SING_ALL_QUOTE_THINKING_LEVEL", gemini_default.thinking_level,
+            ).strip(),
+            timeout_seconds=_env_float(
+                "GEMINI_SING_ALL_QUOTE_TIMEOUT_SECONDS", gemini_default.timeout_seconds,
+            ),
         )
         gemini_include_thought_summary = _env_bool("GEMINI_INCLUDE_THOUGHT_SUMMARY", False)
         openai_api_key = os.getenv("OPENAI_API_KEY", "")
@@ -698,6 +709,7 @@ class Settings:
             gemini_default=gemini_default,
             gemini_preprocess=gemini_preprocess,
             gemini_preprocess_chooser=gemini_preprocess_chooser,
+            gemini_sing_all_quote=gemini_sing_all_quote,
             gemini_include_thought_summary=gemini_include_thought_summary,
             openai_api_key=openai_api_key,
             openai_api_key_secret=openai_api_key_secret,

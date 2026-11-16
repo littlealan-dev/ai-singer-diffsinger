@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from music21 import midi
+from music21 import instrument, midi, note, stream
 
 from src.api.score import parse_score
 from src.backend.synthesis_pricing import score_has_instrumental_parts
@@ -13,8 +13,24 @@ from src.musicxml.instrument_programs import (
     drop_resolved_program_assignments,
     instrumental_programs_by_part,
     llm_program_assignments_from_summary,
+    settle_split_sources,
 )
-from src.musicxml.performance_midi import build_instrumental_performance_midis
+from src.musicxml.performance_midi import (
+    _instrumental_part_metadata, build_instrumental_performance_midis,
+)
+
+
+def test_new_unpitched_detection_only_changes_user_assignable_parts() -> None:
+    score = stream.Score()
+    part = stream.Part(id="P1")
+    part.insert(0, instrument.Piano())
+    part.append(note.Unpitched())
+    score.insert(0, part)
+    ordinary = {"P1": {"resolved_gm_program": 0,
+                       "eligible_for_instrumental_midi": True}}
+    assert _instrumental_part_metadata(score, {0: "P1"}, ordinary)[0]["percussion"] is False
+    assignable = {"P1": {**ordinary["P1"], "user_assignable": True}}
+    assert _instrumental_part_metadata(score, {0: "P1"}, assignable)[0]["percussion"] is True
 from src.backend.orchestrator import _part_feeds_instrumental_midi
 
 
@@ -599,6 +615,117 @@ def test_a_declared_instrument_cannot_be_marked_not_instrumental() -> None:
     )
     assert action is not None
     assert "needs a playback_preset" in action["message"]
+
+
+def test_sing_all_can_leave_a_melodic_instrument_for_user_choice(tmp_path: Path) -> None:
+    source = tmp_path / "missing-program.musicxml"
+    source.write_text(MISSING_PROGRAM_XML, encoding="utf-8")
+    summary = parse_score(source)["score_summary"]
+    assignment = {
+        "score_instrument_id": "P1-I1",
+        "role": "instrumental",
+        "playback_preset": None,
+        "source": "llm_inferred",
+        "evidence": [],
+    }
+    assert apply_llm_program_assignments(summary, [assignment])[1] is not None
+    resolved, action = apply_llm_program_assignments(
+        summary, [assignment], allow_user_choice=True
+    )
+    assert action is None
+    route = _instruments_by_id(resolved)["P1-I1"]
+    assert route["user_assignable"] is True
+    assert route["eligible_for_instrumental_midi"] is True
+    assert route["program_source"] == "user_assignable"
+    assert score_has_instrumental_parts(resolved) is True
+
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        score_summary=resolved,
+    )
+    part = next(p for p in result["instrumental_parts"] if p["raw_part_id"] == "P1")
+    assert part["eligible"] is True
+    assert part["midi_program"] is None
+    assert part["percussion"] is False
+    assert "Choose an instrument" in part["diagnostic"]
+
+
+def test_sing_all_can_leave_an_undeclared_instrument_for_user_choice(tmp_path: Path) -> None:
+    source, summary = _undeclared_accompaniment(tmp_path)
+    resolved, action = apply_llm_program_assignments(
+        summary,
+        [
+            {
+                "score_instrument_id": "P2:default",
+                "role": "not_instrumental",
+                "source": "llm_inferred",
+            },
+            {
+                "score_instrument_id": "P3:default",
+                "role": "instrumental",
+                "playback_preset": None,
+                "source": "llm_inferred",
+            },
+        ],
+        allow_user_choice=True,
+    )
+    assert action is None
+    assert _instruments_by_id(resolved)["P3:default"]["user_assignable"] is True
+    result = build_instrumental_performance_midis(
+        source,
+        original_output_path=tmp_path / "written.mid",
+        expanded_output_path=tmp_path / "expanded.mid",
+        score_summary=resolved,
+    )
+    eligible = {part["raw_part_id"]: part["eligible"] for part in result["instrumental_parts"]}
+    assert eligible["P3"] is True
+    assert eligible.get("P2") is not True
+
+
+def test_visible_singing_split_settles_only_its_undeclared_source(tmp_path: Path) -> None:
+    _source, summary = _undeclared_accompaniment(tmp_path)
+    answered, action = apply_llm_program_assignments(
+        summary,
+        [
+            {
+                "score_instrument_id": instrument_id,
+                "role": "instrumental",
+                "playback_preset": fluidr3_preset(program=0),
+                "source": "llm_inferred",
+            }
+            for instrument_id in ("P2:default", "P3:default")
+        ],
+    )
+    assert action is None
+    answered["parts"].append({"part_id": "P_DERIVED_TEST", "instruments": []})
+    transform = {
+        "line": {
+            "derived_lane": {"source": {"part_index": 1}},
+            "appended_part_ref": {"part_index": 3},
+        }
+    }
+    settled = settle_split_sources(answered, transform)
+    routes = _instruments_by_id(settled)
+    assert routes["P2:default"]["instrumental_role"] == "not_instrumental"
+    assert routes["P2:default"]["program_source"] == "split_for_singing"
+    assert routes["P2:default"]["playback_preset"] is None
+    assert "P2:default" not in llm_program_assignments_from_summary(settled)
+    assert "P2:default" not in settled["instrument_program_resolution"]["instrumental_score_instrument_ids"]
+    assert "P3:default" in settled["instrument_program_resolution"]["instrumental_score_instrument_ids"]
+    assert apply_llm_program_assignments(
+        settled,
+        [{"score_instrument_id": "P2:default", "playback_preset": fluidr3_preset(program=0),
+          "source": "llm_inferred"}],
+    )[1] is not None
+
+    hidden = {"line": {**transform["line"], "appended_part_ref": {
+        "part_index": 3, "hidden_default_lane": True,
+    }}}
+    assert _instruments_by_id(settle_split_sources(answered, hidden))["P2:default"][
+        "instrumental_role"
+    ] == "instrumental"
 
 
 HAPPY_BIRTHDAY_DEMO = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"

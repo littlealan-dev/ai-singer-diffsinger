@@ -53,6 +53,7 @@ class GeminiRestClient:
         role_config = {
             LlmRole.PREPROCESS: self._settings.gemini_preprocess,
             LlmRole.PREPROCESS_CHOOSER: self._settings.gemini_preprocess_chooser,
+            LlmRole.SING_ALL_QUOTE: self._settings.gemini_sing_all_quote,
         }.get(role, self._settings.gemini_default)
         model = role_config.model
         timeout = role_config.timeout_seconds

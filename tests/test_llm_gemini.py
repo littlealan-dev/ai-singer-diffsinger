@@ -505,6 +505,47 @@ def test_gemini_generate_uses_preprocess_role_model_and_cache(
     }
 
 
+def test_sing_all_quote_role_uses_own_gemini_settings_and_default_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_DEFAULT_MODEL", "gemini-chat")
+    monkeypatch.setenv("GEMINI_DEFAULT_THINKING_LEVEL", "low")
+    monkeypatch.setenv("GEMINI_DEFAULT_TIMEOUT_SECONDS", "40")
+    for name in (
+        "GEMINI_SING_ALL_QUOTE_MODEL",
+        "GEMINI_SING_ALL_QUOTE_THINKING_LEVEL",
+        "GEMINI_SING_ALL_QUOTE_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    defaults = _settings()
+    assert defaults.gemini_sing_all_quote == defaults.gemini_default
+
+    monkeypatch.setenv("GEMINI_SING_ALL_QUOTE_MODEL", "gemini-quote")
+    monkeypatch.setenv("GEMINI_SING_ALL_QUOTE_THINKING_LEVEL", "medium")
+    monkeypatch.setenv("GEMINI_SING_ALL_QUOTE_TIMEOUT_SECONDS", "95")
+    settings = _settings()
+
+    class _NoCache:
+        def ensure_prompt_cache(self, **kwargs):  # type: ignore[no-untyped-def]
+            return None
+
+    client = GeminiRestClient(settings, api_key="dummy", cache_manager=_NoCache())
+    captured: dict[str, object] = {}
+
+    def _generate(payload, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        captured["payload"] = payload
+        return "{}"
+
+    monkeypatch.setattr(client, "_generate_with_payload", _generate)
+    assert client.generate("STATIC", [], role=LlmRole.SING_ALL_QUOTE) == "{}"
+    assert captured["model"] == "gemini-quote"
+    assert captured["timeout"] == 95
+    assert captured["payload"]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "medium"
+    }
+
+
 def test_gemini_generate_retries_uncached_when_cached_content_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

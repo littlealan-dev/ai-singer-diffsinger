@@ -18,6 +18,7 @@ class LlmRole(str, Enum):
     DEFAULT = "default"
     PREPROCESS = "preprocess"
     PREPROCESS_CHOOSER = "preprocess_chooser"
+    SING_ALL_QUOTE = "sing_all_quote"
 
 
 class LlmClient(Protocol):
