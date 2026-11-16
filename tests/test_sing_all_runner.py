@@ -95,7 +95,8 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
         return {}
     orchestrator = SimpleNamespace(
         _sessions=SimpleNamespace(get_snapshot=snapshot),
-        _job_store=SimpleNamespace(get_job=lambda job_id: {"status": "completed"}),
+        _job_store=SimpleNamespace(get_job=lambda job_id: {
+            "status": "completed", "reviewRequired": True, "actionRequired": None}),
     )
     runner = sing_all_runner.SingAllRunner(orchestrator)
     job = _job([{"itemId": "split:P1", "type": "split", "sourcePartId": "P1",
@@ -116,3 +117,4 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     children = asyncio.run(runner._children(job, state))
     assert children["split-a"]["parts"] == [
         {"laneKey": "P1:staff1:V1:slot1", "partId": "P2", "name": "Made-up harmony"}]
+    assert children["split-a"]["reviewRequired"] is False

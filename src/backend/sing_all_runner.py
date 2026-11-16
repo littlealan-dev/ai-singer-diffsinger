@@ -30,6 +30,16 @@ class SingAllRunner:
                 return
             snapshot = await self.orchestrator._sessions.get_snapshot(
                 job["sessionId"], job["uid"])
+            if (job["stage"] == "splitting"
+                    and any(item["type"] == "split" and item["status"] == "done"
+                            for item in job.get("items") or [])
+                    and self.orchestrator._score_has_review_pending(
+                        (snapshot.get("current_score") or {}).get("score") or {})):
+                accepted = self.orchestrator._clear_review_pending(
+                    snapshot["current_score"]["score"])
+                await self.orchestrator._sessions.set_score(job["sessionId"], accepted)
+                snapshot = await self.orchestrator._sessions.get_snapshot(
+                    job["sessionId"], job["uid"])
             children = await self._children(job, snapshot)
             score_state = await self._score_state(job, snapshot)
             fields, actions = decide(job, children, score_state)
@@ -99,6 +109,15 @@ class SingAllRunner:
                                              "partId": (derived or appended).get("part_id"),
                                              "name": (derived or appended).get("part_name")})
                         child["parts"] = produced
+                        expected = {row["rowId"] for row in job["rows"]
+                                    if row.get("split")
+                                    and row.get("sourcePartId") == item["sourcePartId"]}
+                        if (child.get("reviewRequired") and not child.get("actionRequired")
+                                and {part["laneKey"] for part in produced} == expected):
+                            # The chat workflow asks for human review after a
+                            # valid split. Sing All already has the user's
+                            # quoted lane choices and checks every produced lane.
+                            child["reviewRequired"] = False
                     children[child_id] = child
         return children
 
