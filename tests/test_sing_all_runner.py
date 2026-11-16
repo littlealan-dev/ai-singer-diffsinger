@@ -24,6 +24,14 @@ def _run_job(monkeypatch, job, children):
 
     monkeypatch.setattr(sing_all_runner.sing_all_store, "load", load)
     monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
+    def finish(job_id, fields, *, expected_stage, expected_revision):
+        assert (record["stage"], record["revision"]) == (expected_stage, expected_revision)
+        events.append(("finish", fields["status"], fields["stage"]))
+        record.update(deepcopy(fields))
+        record["revision"] += 1
+        events.extend([("clear", job_id), ("history", job_id)])
+        return True
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "finish", finish)
     monkeypatch.setattr(sing_all_runner.sing_all_store, "clear_active",
                         lambda uid, job_id: events.append(("clear", job_id)))
     monkeypatch.setattr(sing_all_runner, "release_credits",
@@ -64,7 +72,7 @@ def test_cancel_releases_every_hold_before_terminal_state_and_writes_one_history
     assert record["status"] == "cancelled"
     assert events[:3] == [
         ("release", "take-a"), ("release", "parent-a-instrumentals"),
-        ("apply", "cancelled", "done"),
+        ("finish", "cancelled", "done"),
     ]
     assert events.count(("history", "parent-a")) == 1
     assert events.count(("clear", "parent-a")) == 1
@@ -80,3 +88,31 @@ def test_completed_child_is_counted_once_then_parent_finishes(monkeypatch):
     assert record["items"][0]["creditsCharged"] == 2
     assert events.count(("history", "parent-a")) == 1
     assert not any(event[0] == "release" for event in events)
+
+
+def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
+    async def snapshot(*args):
+        return {}
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _job_store=SimpleNamespace(get_job=lambda job_id: {"status": "completed"}),
+    )
+    runner = sing_all_runner.SingAllRunner(orchestrator)
+    job = _job([{"itemId": "split:P1", "type": "split", "sourcePartId": "P1",
+                "childJobId": "split-a", "status": "running"}])
+    job["rows"] = [{"rowId": "P1:staff1:V1:slot1", "sourcePartId": "P1",
+                    "split": True, "voice": "voice_a"}]
+    state = {"current_score": {"score": {
+        "parts": [{"part_id": "P1"}, {"part_id": "P2"}],
+        "voice_part_transforms": {"a": {
+            "source_part_index": 0, "source_voice_part_id": "V1",
+            "derived_lane": {"slot": 1},
+            "appended_part_ref": {"part_index": 1, "part_id": "P2"},
+        }},
+    }}, "score_summary": {"parts": [
+        {"part_index": 0, "part_id": "P1"},
+        {"part_index": 1, "part_id": "P2", "part_name": "Made-up harmony"},
+    ]}}
+    children = asyncio.run(runner._children(job, state))
+    assert children["split-a"]["parts"] == [
+        {"laneKey": "P1:staff1:V1:slot1", "partId": "P2", "name": "Made-up harmony"}]

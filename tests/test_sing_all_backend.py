@@ -34,9 +34,14 @@ class _Document:
 class _Db:
     def __init__(self, records):
         self.records = records
+        self.last_transaction = None
 
     def collection(self, name):
         return _Document(self.records, name)
+
+    def transaction(self):
+        self.last_transaction = _Transaction()
+        return self.last_transaction
 
 
 class _Transaction:
@@ -99,10 +104,12 @@ def test_parent_guard_refuses_running_job_and_replaces_finished_pointer():
     records["singAllJobs/old-parent"]["status"] = "completed"
     assert guard.read(transaction) is None
     guard.write(transaction)
-    assert transaction.writes == [
+    assert transaction.writes[:2] == [
         ("set", "singAllJobs/fake-parent", job),
         ("update", "users/fake-user", {"activeSingAllJobId": "fake-parent"}),
     ]
+    assert transaction.writes[2][1] == "sessions/fake-song"
+    assert transaction.writes[2][2]["history"]._values[0]["singAllJobId"] == "fake-parent"
 
 
 def test_sing_all_history_has_link_and_factual_counts():
@@ -136,6 +143,24 @@ def test_child_worker_requires_running_parent_and_listed_child(monkeypatch):
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "another-child")
     parent["status"] = "failed"
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "fake-child")
+
+
+def test_finish_updates_parent_guard_and_receipt_together(monkeypatch):
+    db = _Db({"singAllJobs/fake-parent": {
+        "uid": "fake-user", "sessionId": "fake-song", "status": "running",
+        "stage": "singing", "revision": 4,
+    }, "users/fake-user": {"activeSingAllJobId": "fake-parent"}})
+    monkeypatch.setattr(sing_all_store, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(sing_all_store.firestore, "transactional", lambda function: function)
+    assert sing_all_store.finish(
+        "fake-parent", {"status": "completed", "stage": "done", "items": [
+            {"type": "take", "status": "done", "creditsCharged": 2}]},
+        expected_stage="singing", expected_revision=4)
+    writes = db.last_transaction.writes
+    assert [value[1] for value in writes] == [
+        "singAllJobs/fake-parent", "users/fake-user", "sessions/fake-song"]
+    assert writes[0][2]["revision"] == 5
+    assert writes[2][2]["history"]._values[0]["singAllJobId"] == "fake-parent"
 
 
 def _start_route(monkeypatch, *, changed=False, reserve_status="reserved"):
@@ -198,7 +223,7 @@ def test_sing_it_reserves_then_starts_one_parent_without_model(monkeypatch):
     result = asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
     assert result["kind"] == "full"
     assert result["items"][0]["childJobId"]
-    assert [event[0] for event in events] == ["reserve", "history", "enqueue"]
+    assert [event[0] for event in events] == ["reserve", "enqueue"]
 
 
 def test_sing_it_rejects_changed_score_before_reservation(monkeypatch):

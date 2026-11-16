@@ -1432,12 +1432,6 @@ def create_app() -> FastAPI:
             code = (result.reason if result.status == "refused" else
                     "not_enough_credits" if result.status == "insufficient_balance" else result.status)
             raise HTTPException(status_code=409, detail={"code": code})
-        takes = sum(item["type"] == "take" for item in job["items"])
-        await request.app.state.sessions.append_history(
-            session_id, "assistant",
-            backend_message("sing_all.started_history", takes=takes, credits=total),
-            sing_all_job_id=job_id,
-        )
         await orchestrator._enqueue_sing_all_reconcile(job_id)
         return job
 

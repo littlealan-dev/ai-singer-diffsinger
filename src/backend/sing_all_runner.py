@@ -43,17 +43,19 @@ class SingAllRunner:
             for action in before:
                 await self._action(job, action, snapshot)
             if fields:
-                if fields.get("stage") == "done":
-                    fields = {**fields, "endedAt": datetime.now(timezone.utc),
-                              "finalScoreVersion": (snapshot.get("current_score") or {}).get("version")}
+                terminal = fields.get("stage") == "done"
+                if terminal:
+                    fields = {**fields, "finalScoreVersion":
+                              (snapshot.get("current_score") or {}).get("version")}
+                write = sing_all_store.finish if terminal else sing_all_store.apply
                 if not await asyncio.to_thread(
-                    sing_all_store.apply, job_id, fields,
-                    expected_stage=job["stage"], expected_revision=job.get("revision", 0),
-                ):
+                    write, job_id, fields, expected_stage=job["stage"],
+                    expected_revision=job.get("revision", 0)):
                     continue
                 job = {**job, **fields, "revision": int(job.get("revision", 0)) + 1}
             for action in actions:
-                if action not in before:
+                if action not in before and not (fields and fields.get("stage") == "done"
+                                                 and action["kind"] in {"clear_active", "append_end_history"}):
                     await self._action(job, action, snapshot)
             if job.get("status") != "running":
                 return

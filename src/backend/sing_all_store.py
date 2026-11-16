@@ -13,6 +13,8 @@ from src.backend.credits import (
     reserve_credits_for_items,
 )
 from src.backend.firebase_app import get_firestore_client
+from src.backend.message_catalog import backend_message
+from src.backend.session import _new_history_entry
 
 
 def _answer_ref(db: Any, session_id: str, kind: str) -> Any:
@@ -94,6 +96,15 @@ class _JobReservationGuard:
     def write(self, transaction: Any) -> None:
         transaction.set(self._job_ref, self._job)
         transaction.update(self._user_ref, {"activeSingAllJobId": self._job["jobId"]})
+        takes = sum(item["type"] == "take" for item in self._job.get("items") or [])
+        message = backend_message(
+            "sing_all.started_history", takes=takes,
+            credits=int((self._job.get("quote") or {}).get("total") or 0),
+        )
+        entry = _new_history_entry("assistant", message,
+                                   sing_all_job_id=self._job["jobId"])
+        session_ref = self._db.collection("sessions").document(self._job["sessionId"])
+        transaction.update(session_ref, {"history": firestore.ArrayUnion([entry])})
 
 
 def create_job_with_reservations(
@@ -171,6 +182,50 @@ def apply(
         return True
 
     return _apply(db.transaction())
+
+
+def finish(
+    job_id: str, fields: Mapping[str, Any], *,
+    expected_stage: str, expected_revision: int,
+) -> bool:
+    """End the parent, clear its guard and append its receipt in one transaction."""
+    if fields.get("status") not in {"completed", "partial", "failed", "cancelled"}:
+        raise ValueError("A terminal status is required.")
+    db = get_firestore_client()
+    job_ref = db.collection("singAllJobs").document(job_id)
+    entry_id = uuid4().hex
+
+    @firestore.transactional
+    def _finish(transaction: Any) -> bool:
+        current = job_ref.get(transaction=transaction).to_dict() or {}
+        if (current.get("status") != "running"
+                or current.get("stage") != expected_stage
+                or int(current.get("revision", 0)) != expected_revision):
+            return False
+        uid, session_id = current["uid"], current["sessionId"]
+        user_ref = db.collection("users").document(uid)
+        session_ref = db.collection("sessions").document(session_id)
+        user = user_ref.get(transaction=transaction).to_dict() or {}
+        takes = [item for item in fields["items"] if item["type"] == "take"]
+        message = backend_message(
+            "sing_all.ended_history", status=fields["status"],
+            done=sum(item["status"] == "done" for item in takes),
+            takes=len(takes),
+            credits=sum(int(item.get("creditsCharged") or 0) for item in fields["items"]),
+        )
+        entry = _new_history_entry("assistant", message, sing_all_job_id=job_id)
+        entry["id"] = entry_id
+        ended_at = datetime.now(timezone.utc)
+        transaction.update(job_ref, {
+            **fields, "revision": expected_revision + 1,
+            "updatedAt": ended_at, "endedAt": ended_at,
+        })
+        if user.get("activeSingAllJobId") == job_id:
+            transaction.update(user_ref, {"activeSingAllJobId": firestore.DELETE_FIELD})
+        transaction.update(session_ref, {"history": firestore.ArrayUnion([entry])})
+        return True
+
+    return _finish(db.transaction())
 
 
 def clear_active(uid: str, job_id: str) -> None:
