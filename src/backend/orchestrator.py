@@ -52,10 +52,11 @@ from src.backend.gpu_errors import (
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all import open_sing_all_result
-from src.backend.sing_all_store import active_job_for_song
+from src.backend.sing_all_store import active_job_for_song, child_allowed
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.job_dispatch import (
+    SING_ALL_RECONCILE_KIND,
     SYNTHESIS_JOB_KIND,
     JobDispatchError,
     JobDispatcher,
@@ -1083,13 +1084,19 @@ class Orchestrator:
         job_id: Optional[str] = None,
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
+        parent: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a Firestore job and start it: here, or on the synthesis worker.
 
         A job already running in the session keeps running; the newer job
         becomes the session's current one.
         """
-        if job_id is None:
+        if parent is not None:
+            job_id = parent["childJobId"]
+            existing = await asyncio.to_thread(self._job_store.get_job, job_id)
+            if existing is not None:
+                return SynthesisChatResponse({"type": "chat_progress", "job_id": job_id}, None)
+        elif job_id is None:
             job_id = uuid.uuid4().hex
         render_type = arguments.get("render_type")
         output_storage_path = None
@@ -1105,19 +1112,19 @@ class Orchestrator:
         input_path, job_input_storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
-        await self._sessions.create_current_job(
-            session_id, self._job_store,
-            job_id=job_id,
-            user_id=user_id,
-            status="queued",
+        create_fields = dict(
+            job_id=job_id, user_id=user_id, status="queued",
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
             originating_turn_id=originating_turn_id,
-            voicebank_metadata=voicebank_metadata,
-            audio_track=audio_track,
+            voicebank_metadata=voicebank_metadata, audio_track=audio_track,
             expand_repeats=bool(arguments.get("expand_repeats", False)),
             provenance=provenance,
         )
+        if parent is None:
+            await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
+        else:
+            await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
@@ -1125,6 +1132,8 @@ class Orchestrator:
             step="queued",
             message="Got it, getting ready to sing...",
             progress=0.0,
+            **({"parentJobId": parent["jobId"], "parentItemId": parent["itemId"]}
+               if parent is not None else {}),
         )
         accepted = {
             "type": "chat_progress",
@@ -1181,6 +1190,7 @@ class Orchestrator:
         user_email: str,
         planning_context: Optional[Dict[str, Any]] = None,
         originating_turn_id: Optional[str] = None,
+        parent: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
         signals = score.get("voice_part_signals")
@@ -1200,23 +1210,25 @@ class Orchestrator:
                 "message": action_required["message"],
                 "action_required": action_required,
             }
-        busy = await self._preprocess_busy_response(session_id, user_id)
-        if busy is not None:
-            return busy
-        job_id = uuid.uuid4().hex
+        if parent is None:
+            busy = await self._preprocess_busy_response(session_id, user_id)
+            if busy is not None:
+                return busy
+        job_id = parent["childJobId"] if parent is not None else uuid.uuid4().hex
+        if parent is not None and await asyncio.to_thread(self._job_store.get_job, job_id):
+            return {"type": "chat_progress", "job_id": job_id}
         input_path, storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
-        await self._sessions.create_current_job(
-            session_id, self._job_store,
-            job_id=job_id,
-            user_id=user_id,
-            status="queued",
-            render_type="preprocess",
-            input_path=storage_path or input_path,
-            provenance=provenance,
-            originating_turn_id=originating_turn_id,
+        create_fields = dict(
+            job_id=job_id, user_id=user_id, status="queued",
+            render_type="preprocess", input_path=storage_path or input_path,
+            provenance=provenance, originating_turn_id=originating_turn_id,
         )
+        if parent is None:
+            await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
+        else:
+            await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
@@ -1225,6 +1237,8 @@ class Orchestrator:
             message=initial_message,
             progress=0.0,
             jobKind="preprocess",
+            **({"parentJobId": parent["jobId"], "parentItemId": parent["itemId"]}
+               if parent is not None else {}),
         )
         if self._preprocess_dispatcher.mode != "inline":
             return await self._dispatch_preprocess_job(
@@ -2244,6 +2258,12 @@ class Orchestrator:
         midi_session_published = False
         # Set once the take is completed and settled: the Song's player then records it.
         take_settled = False
+        job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        parent_job_id = job_record.get("parentJobId")
+        if parent_job_id and not await asyncio.to_thread(
+            child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
+        ):
+            return
         try:
             set_log_context(
                 session_id=session_id,
@@ -2656,6 +2676,8 @@ class Orchestrator:
                 # and the premium worker. It runs whether or not a page still
                 # follows the take.
                 await self._record_take_in_player(session_id, job_id)
+            if parent_job_id:
+                await self._enqueue_sing_all_reconcile(parent_job_id)
             clear_log_context()
 
     async def _record_take_in_player(self, session_id: str, job_id: str) -> None:
@@ -2668,6 +2690,21 @@ class Orchestrator:
             self._logger.exception(
                 "player_record_update_failed session=%s job=%s", session_id, job_id
             )
+
+    async def _enqueue_sing_all_reconcile(self, job_id: str) -> None:
+        """Wake the parent after a child ends, using the configured reconcile route."""
+        from src.backend.sing_all_runner import SingAllRunner
+
+        route = job_route(self._settings, SING_ALL_RECONCILE_KIND)
+        if route.mode == "inline":
+            task = asyncio.create_task(SingAllRunner(self).reconcile(job_id))
+            task.add_done_callback(
+                lambda done: self._logger.error("sing_all_reconcile_failed job=%s error=%s",
+                                                job_id, done.exception())
+                if not done.cancelled() and done.exception() else None
+            )
+            return
+        await JobDispatcher(route).dispatch(job_id)
 
     async def _run_preprocess_job(
         self,
@@ -2689,6 +2726,12 @@ class Orchestrator:
         on_interrupt runs when the job is cancelled; returning True means it put
         the job back for another attempt, so the job is not marked failed.
         """
+        job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        parent_job_id = job_record.get("parentJobId")
+        if parent_job_id and not await asyncio.to_thread(
+            child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
+        ):
+            return
         inherited_budget = _llm_turn_budget.get()
         if inherited_budget is not None and inherited_budget.stop_turn_id:
             _llm_turn_budget.set(replace(
@@ -2771,7 +2814,8 @@ class Orchestrator:
             )
             await self._pass_preprocess_stop_point(session_id)
             message = str(response.get("message") or "").strip() or "Preprocess finished."
-            await self._sessions.append_history(session_id, "assistant", message)
+            if not parent_job_id:
+                await self._sessions.append_history(session_id, "assistant", message)
             if response.get("type") == "chat_error":
                 await asyncio.to_thread(
                     self._job_store.update_job,
@@ -2898,6 +2942,8 @@ class Orchestrator:
             )
         finally:
             _preprocess_job_context.reset(context_token)
+            if parent_job_id:
+                await self._enqueue_sing_all_reconcile(parent_job_id)
             clear_log_context()
 
     async def _render_synthesis_action_required_message(

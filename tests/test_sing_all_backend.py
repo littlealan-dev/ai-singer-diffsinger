@@ -122,3 +122,14 @@ def test_running_parent_is_scoped_to_its_song(monkeypatch):
     assert sing_all_store.active_job_for_song("fake-user", "other-song") is None
     records["singAllJobs/fake-parent"]["status"] = "completed"
     assert sing_all_store.active_job_for_song("fake-user", "fake-song") is None
+
+
+def test_child_worker_requires_running_parent_and_listed_child(monkeypatch):
+    parent = {"status": "running", "items": [
+        {"itemId": "take:a:lyrics", "childJobId": "fake-child"}]}
+    monkeypatch.setattr(sing_all_store, "load", lambda job_id: parent)
+    assert sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "fake-child")
+    assert not sing_all_store.child_allowed("fake-parent", "take:b:lyrics", "fake-child")
+    assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "another-child")
+    parent["status"] = "failed"
+    assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "fake-child")

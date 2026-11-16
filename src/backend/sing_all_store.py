@@ -139,6 +139,15 @@ def active_job_for_song(uid: str, session_id: str) -> dict[str, Any] | None:
     return job if job.get("status") == "running" and job.get("sessionId") == session_id else None
 
 
+def child_allowed(parent_job_id: str, item_id: str, child_job_id: str) -> bool:
+    """Workers accept a child only while its parent still lists and runs it."""
+    parent = load(parent_job_id) or {}
+    return parent.get("status") == "running" and any(
+        item.get("itemId") == item_id and item.get("childJobId") == child_job_id
+        for item in parent.get("items") or []
+    )
+
+
 def apply(
     job_id: str, fields: Mapping[str, Any], *,
     expected_stage: str | None = None, expected_revision: int | None = None,
