@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 from pathlib import Path
+import shutil
 
+from src.api.preprocess_assembler import assemble_plan, first_option_choices
+from src.api.preprocess_sheet import build_sheet
 from src.api.score import parse_score
 from src.api.sing_all_estimate import quote_facts
-from src.api.voice_parts import LaneCounts
+from src.api.voice_parts import LaneCounts, preprocess_voice_parts
 
 
 _SCORE = Path(__file__).parent / "fixtures" / "sa_chord_gaps_two_bars.xml"
@@ -19,19 +22,32 @@ def _facts(score, *, verse=None):
     return quote_facts(score, score["score_summary"], [], verse_number=verse)
 
 
-def test_split_rows_use_planner_lanes_and_estimate_ranges(capsys) -> None:
-    score = _score()
+def test_split_rows_use_planner_lanes_and_estimate_ranges(capsys, tmp_path) -> None:
+    source = tmp_path / "made-up-choir.xml"
+    shutil.copyfile(_SCORE, source)
+    score = parse_score(source)
     facts = _facts(score)
     assert len(facts["rows"]) == 2
     assert facts["open_staffs"] == []
     assert all(row["split"] and row["partId"] is None for row in facts["rows"])
     assert len({row["rowId"] for row in facts["rows"]}) == 2
-    for row in facts["rows"]:
+    sheet = build_sheet(score, {"target": {"part_id": score["parts"][0]["part_id"]}})
+    plan = assemble_plan(sheet, first_option_choices(sheet), score=score)
+    result = preprocess_voice_parts(score, request={"plan": plan})
+    assert result["status"] == "ready"
+    split_score = parse_score(result["modified_musicxml_path"])
+    actual_parts = split_score["score_summary"]["parts"][1:]
+    assert len(actual_parts) == len(facts["rows"])
+    for row, actual_part in zip(facts["rows"], actual_parts):
         estimated = row["pitchRange"]
-        real = score["score_summary"]["parts"][0]["pitch_range"]
-        print(f"{row['rowId']}: estimate {estimated.get('lowest_note')}..{estimated.get('highest_note')}; source {real['lowest_note']}..{real['highest_note']}")
+        real = actual_part["pitch_range"]
+        delta_low = estimated["lowest_midi"] - real["lowest_midi"]
+        delta_high = estimated["highest_midi"] - real["highest_midi"]
+        print(f"{row['rowId']}: estimate {estimated.get('lowest_note')}..{estimated.get('highest_note')}; "
+              f"real {real['lowest_note']}..{real['highest_note']}; "
+              f"delta low {delta_low:+g}, high {delta_high:+g} semitones")
         assert estimated["lowest_midi"] <= estimated["highest_midi"]
-    assert "estimate" in capsys.readouterr().out
+    assert "real" in capsys.readouterr().out
 
 
 def test_one_line_with_words_needs_no_split() -> None:
