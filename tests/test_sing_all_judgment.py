@@ -22,6 +22,7 @@ _VOICES = [
 
 def _row(key):
     return {"rowId": key, "sourcePartId": "P1", "name": key,
+            "partName": "Made-up lead",
             "pitchRange": {"lowest_note": "C4", "highest_note": "G4",
                            "tessitura_low_note": "D4", "tessitura_high_note": "F4"}}
 
@@ -63,6 +64,7 @@ def test_request_has_one_staff_and_both_layouts_with_short_keys() -> None:
     assert [row["layout"] for row in request["rows"]] == [None, "shared", "separate", "separate"]
     assert set(questions.rows) == {"r1", "r2", "r3", "r4"}
     assert request["staffs"][0]["score_xml"] == "<score/>"
+    assert all(row["part_name"] == "Made-up lead" for row in request["rows"])
 
 
 def test_no_open_staff_and_one_compatible_voice_need_no_call() -> None:

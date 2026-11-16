@@ -60,6 +60,7 @@ def test_one_line_with_words_needs_no_split() -> None:
     assert len(facts["rows"]) == 1
     assert facts["rows"][0]["partId"] == score["score_summary"]["parts"][0]["part_id"]
     assert facts["rows"][0]["hasWords"] is True
+    assert facts["rows"][0]["partName"] == score["score_summary"]["parts"][0]["part_name"]
 
 
 def test_wordless_declared_voice_gets_one_solfege_row() -> None:

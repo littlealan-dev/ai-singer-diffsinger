@@ -33,12 +33,14 @@ def _part_kind(part: Mapping[str, Any]) -> str:
 
 def _row(part: Mapping[str, Any], *, source_part_id: str, split: bool = False,
          row_id: str | None = None, name: str | None = None,
-         part_id: str | None = None, estimated_range: Mapping[str, Any] | None = None) -> dict[str, Any]:
+         part_id: str | None = None, estimated_range: Mapping[str, Any] | None = None,
+         source_part_name: str | None = None) -> dict[str, Any]:
     key = row_id or str(part.get("part_id") or "")
     has_words = split or _has_words(part)
     return {
         "rowId": key,
         "sourcePartId": source_part_id,
+        "partName": source_part_name or str(part.get("part_name") or source_part_id),
         "partId": part_id if split else (part_id or key),
         "name": name or str(part.get("part_name") or key),
         "split": split,
@@ -166,7 +168,8 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
             for derived_index in derived[index]:
                 if derived_index < len(summary_parts) and isinstance(summary_parts[derived_index], dict):
                     child = summary_parts[derived_index]
-                    rows.append(_row(child, source_part_id=source_id))
+                    rows.append(_row(child, source_part_id=source_id,
+                                     source_part_name=str(part.get("part_name") or source_id)))
             continue
         if not part_needs_split_signal(signal_by_index.get(index, {}), has_lyric_sources):
             rows.append(_row(part, source_part_id=source_id))
