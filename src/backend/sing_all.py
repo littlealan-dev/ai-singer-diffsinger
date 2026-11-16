@@ -68,6 +68,19 @@ def choices_hash(choices: Mapping[str, Any], style: Mapping[str, Any] | None) ->
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def available_balance_from_user(user: Mapping[str, Any]) -> int:
+    """Read the same monthly plus top-up availability as UserCredits."""
+    credits = user.get("credits") or {}
+    topup = user.get("topupCredits") or {}
+    total_available = int(topup.get("totalAvailable") or 0)
+    total_reserved = int(topup.get("totalReserved") or 0)
+    topup_available = (
+        total_available if total_available or total_reserved
+        else max(0, int(topup.get("totalRemaining") or 0) - total_reserved)
+    )
+    return int(credits.get("balance") or 0) - int(credits.get("reserved") or 0) + topup_available
+
+
 def build_items(
     rows: Sequence[Mapping[str, Any]], *, mode: str, duration_seconds: float,
     instrumental_charge_required: bool,

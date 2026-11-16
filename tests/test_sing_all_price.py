@@ -3,7 +3,8 @@
 import pytest
 
 from src.backend.sing_all import (
-    build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
+    available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
+    materialize_rows, quote_lines,
     style_changes, summary_with_judged_instruments,
 )
 
@@ -64,6 +65,14 @@ def test_choices_hash_covers_style_note_and_controls():
     assert key == choices_hash(dict(reversed(list(choices.items()))), style)
     assert key != choices_hash(choices, {**style, "note": "bright"})
     assert key != choices_hash(choices, {**style, "controls": {"a": {"airiness": 11}}})
+
+
+def test_available_balance_reads_legacy_topups_without_writing_credits():
+    user = {"credits": {"balance": 10, "reserved": 3},
+            "topupCredits": {"totalRemaining": 8, "totalReserved": 0}}
+    assert available_balance_from_user(user) == 15
+    user["topupCredits"].update(totalAvailable=4, totalReserved=2)
+    assert available_balance_from_user(user) == 11
 
 
 @pytest.mark.parametrize("role,note,ticked", [

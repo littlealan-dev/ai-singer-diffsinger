@@ -63,7 +63,8 @@ from src.backend.synthesis_pricing import (
 )
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
-    build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
+    available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
+    materialize_rows, quote_lines,
     style_changes, summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
@@ -1298,11 +1299,7 @@ def create_app() -> FastAPI:
         items = build_items(rows, mode=mode, duration_seconds=duration,
                             instrumental_charge_required=charge_required)
         total = sum(int(item["creditsReserved"]) for item in items)
-        credit_record = user_record.get("credits") or {}
-        topup = user_record.get("topupCredits") or {}
-        balance = (int(credit_record.get("balance") or 0)
-                   - int(credit_record.get("reserved") or 0)
-                   + int(topup.get("totalAvailable") or 0))
+        balance = available_balance_from_user(user_record)
         blocked = ("free_plan" if (user_record.get("billing") or {}).get("activePlanKey") == "free"
                    else "nothing_to_sing" if not any(row["include"] for row in rows)
                    else "not_enough_credits" if total > balance
