@@ -1154,6 +1154,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
+                parent_job_id_hint=parent["jobId"] if parent is not None else None,
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
@@ -1266,6 +1267,7 @@ class Orchestrator:
                 if isinstance(planning_context, dict)
                 else None,
                 originating_turn_id=originating_turn_id,
+                parent_job_id_hint=parent["jobId"] if parent is not None else None,
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -1524,6 +1526,7 @@ class Orchestrator:
                 else None,
                 originating_turn_id=originating_turn_id,
                 on_interrupt=release_for_retry,
+                parent_job_id_hint=job.get("parentJobId"),
             )
         finally:
             heartbeat.cancel()
@@ -1772,6 +1775,7 @@ class Orchestrator:
                 billing_components=list(spec.get("billingComponents") or []),
                 originating_turn_id=str(spec.get("originatingTurnId") or "") or None,
                 on_interrupt=release_for_retry,
+                parent_job_id_hint=job.get("parentJobId"),
             )
         finally:
             heartbeat.cancel()
@@ -2246,6 +2250,7 @@ class Orchestrator:
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
         on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
+        parent_job_id_hint: Optional[str] = None,
     ) -> None:
         """Execute a synthesis job and update status in Firestore.
 
@@ -2259,7 +2264,15 @@ class Orchestrator:
         midi_session_published = False
         # Set once the take is completed and settled: the Song's player then records it.
         take_settled = False
-        job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        try:
+            job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        except Exception:
+            if parent_job_id_hint:
+                raise
+            # A transient parent lookup error must not bypass the existing
+            # render/error-finalization path for an ordinary take.
+            self._logger.warning("synthesis_parent_lookup_failed job=%s", job_id, exc_info=True)
+            job_record = {}
         parent_job_id = job_record.get("parentJobId")
         if parent_job_id and not await asyncio.to_thread(
             child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
@@ -2721,13 +2734,20 @@ class Orchestrator:
         planning_context: Optional[Dict[str, Any]] = None,
         originating_turn_id: Optional[str] = None,
         on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
+        parent_job_id_hint: Optional[str] = None,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message.
 
         on_interrupt runs when the job is cancelled; returning True means it put
         the job back for another attempt, so the job is not marked failed.
         """
-        job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        try:
+            job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        except Exception:
+            if parent_job_id_hint:
+                raise
+            self._logger.warning("preprocess_parent_lookup_failed job=%s", job_id, exc_info=True)
+            job_record = {}
         parent_job_id = job_record.get("parentJobId")
         if parent_job_id and not await asyncio.to_thread(
             child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
