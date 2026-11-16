@@ -196,11 +196,13 @@ def check_reply(questions: QuoteQuestions, reply: Any,
     schema = quote_reply_schema(questions, compatible_ids)
     if set(reply) - {"sounds"} != set(schema["required"]) - {"sounds"}:
         errors.append("reply sections do not match the request")
+    if "sounds" in reply and "sounds" not in schema["required"]:
+        errors.append("unexpected sounds section")
     for section in schema["required"]:
         value = reply.get(section)
         expected = schema["properties"][section]["required"]
         if section == "sounds":
-            if not isinstance(value, Mapping) or set(value) - set(expected):
+            if isinstance(value, Mapping) and set(value) - set(expected):
                 errors.append("sounds keys do not match the request")
         elif not isinstance(value, Mapping) or set(value) != set(expected):
             errors.append(f"{section} keys do not match the request")

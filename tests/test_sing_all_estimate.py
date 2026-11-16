@@ -12,6 +12,7 @@ from src.api.voice_parts import LaneCounts, preprocess_voice_parts
 
 
 _SCORE = Path(__file__).parent / "fixtures" / "sa_chord_gaps_two_bars.xml"
+_SATB = Path(__file__).parent / "fixtures" / "split" / "satb_two_bars.xml"
 
 
 def _score():
@@ -96,6 +97,17 @@ def test_declared_instrument_waiting_for_sound_is_not_a_singing_row() -> None:
     assert len(facts["instruments"]) == 1
 
 
+def test_declared_instrument_with_usable_sound_needs_no_call() -> None:
+    score = _score()
+    route = score["score_summary"]["parts"][0]["instruments"][0]
+    score["score_summary"]["parts"][0]["has_lyrics"] = False
+    route.update({"synthetic": False, "instrumental_candidate": False,
+                  "eligible_for_instrumental_midi": True,
+                  "playback_preset": {"bank": 0, "kind": "melodic", "program": 0}})
+    facts = _facts(score)
+    assert facts["rows"] == facts["instruments"] == []
+
+
 def test_chat_ruling_removes_role_question() -> None:
     score = _score()
     score["voice_part_signals"]["parts"][0]["multi_voice_part"] = False
@@ -164,3 +176,68 @@ def test_open_staff_over_planner_evidence_limit_has_no_rows(monkeypatch) -> None
     assert facts["rows"] == facts["open_staffs"] == []
     assert facts["notes"] == [
         f"{score['score_summary']['parts'][0]['part_id']}:cannot_split_evidence_too_large"]
+
+
+def _satb_first_staff():
+    score = parse_score(_SATB)
+    score["parts"] = score["parts"][:1]
+    score["score_summary"]["parts"] = score["score_summary"]["parts"][:1]
+    score["voice_part_signals"]["parts"] = score["voice_part_signals"]["parts"][:1]
+    return score
+
+
+def test_two_voices_one_note_each_give_two_known_rows() -> None:
+    facts = _facts(_satb_first_staff())
+    assert len(facts["rows"]) == 2
+    assert facts["open_staffs"] == []
+    assert all(row["split"] for row in facts["rows"])
+
+
+def test_chord_in_one_of_two_voices_gives_three_known_rows() -> None:
+    score = _satb_first_staff()
+    notes = score["parts"][0]["notes"]
+    first = next(note for note in notes if note.get("voice") == "1" and not note.get("is_rest"))
+    chord_note = deepcopy(first)
+    chord_note["pitch_midi"] = float(first["pitch_midi"]) + 4
+    notes.append(chord_note)
+    facts = _facts(score)
+    assert len(facts["rows"]) == 3
+    assert facts["open_staffs"] == []
+
+
+def test_two_chorded_voices_in_separate_bars_offer_two_or_four_rows() -> None:
+    score = _satb_first_staff()
+    part = score["parts"][0]
+    part["notes"] = [note for note in part["notes"]
+                     if (note.get("voice") == "1" and note["measure_number"] == 1)
+                     or (note.get("voice") == "2" and note["measure_number"] == 2)]
+    for voice in ("1", "2"):
+        first = next(note for note in part["notes"] if note.get("voice") == voice
+                     and not note.get("is_rest"))
+        chord_note = deepcopy(first)
+        chord_note["pitch_midi"] = float(first["pitch_midi"]) + 4
+        part["notes"].append(chord_note)
+    facts = _facts(score)
+    assert facts["rows"] == []
+    assert len(facts["open_staffs"]) == 1
+    assert {layout: len(rows) for layout, rows in facts["open_staffs"][0]["rows_if"].items()} == {
+        "shared": 2, "separate": 4}
+
+
+def test_two_staves_one_line_each_still_need_two_split_rows() -> None:
+    score = parse_score(_SATB)
+    combined = deepcopy(score["parts"][0])
+    combined["part_id"] = "P1-Combined"
+    combined["notes"] = [
+        {**note, "staff": str(staff)}
+        for staff, part in enumerate(score["parts"], start=1)
+        for note in part["notes"] if str(note.get("voice")) in {"1", "5"}
+    ]
+    score["parts"] = [combined]
+    score["score_summary"]["parts"] = score["score_summary"]["parts"][:1]
+    score["score_summary"]["parts"][0]["part_id"] = "P1-Combined"
+    score["voice_part_signals"]["parts"] = score["voice_part_signals"]["parts"][:1]
+    score["voice_part_signals"]["parts"][0]["multi_voice_part"] = True
+    facts = _facts(score)
+    assert len(facts["rows"]) == 2
+    assert all(row["split"] for row in facts["rows"])

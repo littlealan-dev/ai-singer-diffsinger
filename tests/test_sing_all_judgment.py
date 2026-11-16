@@ -199,6 +199,24 @@ def test_quote_call_reasks_invalid_sound_then_keeps_null_and_reuses_cache() -> N
     assert repeated == result
 
 
+@pytest.mark.parametrize("missing_section", [False, True])
+def test_missing_sound_reasks_once_then_becomes_null(missing_section) -> None:
+    reply = _valid_reply()
+    if missing_section:
+        reply.pop("sounds")
+    else:
+        reply["sounds"].pop("i1")
+    calls = []
+    async def call(request, *, response_schema):
+        calls.append(request)
+        return json.dumps(reply)
+    result = asyncio.run(quote_judgment(
+        _facts(), "en", _VOICES, prompt="task", model="model",
+        score_fingerprint="made-up-score", call=call))
+    assert len(calls) == 2
+    assert result["sounds"]["P2-I1"] is None
+
+
 def test_quote_call_reasks_invalid_role_once_then_fails() -> None:
     reply = _valid_reply()
     reply["roles"]["p1"] = "other"
