@@ -64,7 +64,7 @@ from src.backend.synthesis_pricing import (
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
-    summary_with_judged_instruments, supported_singing_languages,
+    style_changes, summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
@@ -1269,6 +1269,8 @@ def create_app() -> FastAPI:
                 style_blocked = True
             if style_answer is not None:
                 style["controls"] = style_answer["controls"]
+                style["changes"] = style_changes(
+                    rows, style_answer["controls"], banks_by_id)
                 if not prior_style or prior_style.get("inputHash") != style_answer["inputHash"]:
                     await asyncio.to_thread(save_style, db, session_id, style_answer)
 

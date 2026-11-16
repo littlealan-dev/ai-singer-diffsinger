@@ -4,7 +4,7 @@ import pytest
 
 from src.backend.sing_all import (
     build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
-    summary_with_judged_instruments,
+    style_changes, summary_with_judged_instruments,
 )
 
 
@@ -103,6 +103,25 @@ def test_selected_voice_outside_declared_range_sets_note():
     rows[0]["note"] = None
     mark_voice_ranges(rows, {"voice_a": {"supported_range": "C3 - C6"}})
     assert rows[0]["note"] is None
+
+
+def test_style_summary_shows_only_departures_from_row_voice_defaults():
+    rows = [{"rowId": "a", "voice": "voice_a", "include": True},
+            {"rowId": "b", "voice": "voice_b", "include": False}]
+    banks = {
+        "voice_a": {"default_voice_color": "Warm",
+                    "synthesis_control_defaults": {"airiness": 0, "clarity": 100,
+                                                   "gender": 0, "intensity": 0.5}},
+        "voice_b": {"default_voice_color": None,
+                    "synthesis_control_defaults": {"airiness": 5}},
+    }
+    controls = {
+        "a": {"voiceColor": "Warm", "airiness": 10, "clarity": 100,
+              "gender": -10, "intensity": 0.7},
+        "b": {"voiceColor": None, "airiness": 15},
+    }
+    assert style_changes(rows, controls, banks) == {
+        "a": {"airiness": 10, "gender": -10, "intensity": pytest.approx(0.2)}}
 
 
 @pytest.mark.parametrize("role,sound,expected", [

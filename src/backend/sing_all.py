@@ -184,6 +184,35 @@ def mark_voice_ranges(rows: list[dict[str, Any]],
             continue
 
 
+def style_changes(
+    rows: Sequence[Mapping[str, Any]], controls: Mapping[str, Mapping[str, Any]],
+    voicebanks: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Show only departures from each row's own voicebank defaults."""
+    changes: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_id = str(row["rowId"])
+        if not row.get("include") or row_id not in controls:
+            continue
+        bank = voicebanks[row["voice"]]
+        defaults = bank.get("synthesis_control_defaults") or {}
+        current = controls[row_id]
+        delta: dict[str, Any] = {}
+        color = current.get("voiceColor")
+        if color != bank.get("default_voice_color") and color is not None:
+            delta["voiceColor"] = color
+        for name in ("airiness", "clarity", "gender", "intensity"):
+            value = current.get(name)
+            default = defaults.get(name)
+            if isinstance(value, (int, float)) and isinstance(default, (int, float)):
+                difference = value - default
+                if difference:
+                    delta[name] = difference
+        if delta:
+            changes[row_id] = delta
+    return changes
+
+
 def summary_with_judged_instruments(
     summary: Mapping[str, Any], judgment: Mapping[str, Any],
     *, sung_source_ids: set[str] | None = None,
