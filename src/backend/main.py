@@ -63,7 +63,7 @@ from src.backend.synthesis_pricing import (
 )
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
-    build_items, choices_hash, materialize_rows, quote_lines,
+    build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
     summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
@@ -1249,6 +1249,7 @@ def create_app() -> FastAPI:
             if row["voice"] not in compatible_ids:
                 row["voice"] = judgment["voices"][row["rowId"]]
                 row["voicePicked"] = "recommended"
+        mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
         note = str(choices.get("styleNote") or "").strip()
         style: dict[str, Any] = {"note": note, "controls": {}}
         style_blocked = False
@@ -1271,7 +1272,10 @@ def create_app() -> FastAPI:
                 if not prior_style or prior_style.get("inputHash") != style_answer["inputHash"]:
                     await asyncio.to_thread(save_style, db, session_id, style_answer)
 
-        priced_summary = summary_with_judged_instruments(summary, judgment)
+        priced_summary = summary_with_judged_instruments(
+            summary, judgment,
+            sung_source_ids={row["sourcePartId"] for row in rows if row["include"]},
+        )
         has_instrumentals = score_has_instrumental_parts(priced_summary)
         charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
         charge_required = (has_instrumentals and await asyncio.to_thread(

@@ -2,8 +2,11 @@
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
+
+from music21 import pitch
 
 from src.backend.language_selection import normalize_language_code
 from src.backend.synthesis_pricing import (
@@ -163,8 +166,27 @@ def materialize_rows(
     return rows
 
 
+def mark_voice_ranges(rows: list[dict[str, Any]],
+                      voicebanks: Mapping[str, Mapping[str, Any]]) -> None:
+    """Flag a recommended or chosen voice outside its declared absolute range."""
+    for row in rows:
+        declared = voicebanks.get(str(row.get("voice")), {}).get("supported_range")
+        bounds = re.findall(r"[A-G](?:#|b)?-?\d+", declared) if isinstance(declared, str) else []
+        row_range = row.get("pitchRange") or {}
+        low, high = row_range.get("lowest_note"), row_range.get("highest_note")
+        if len(bounds) < 2 or not low or not high:
+            continue
+        try:
+            if (pitch.Pitch(str(low)).midi < pitch.Pitch(bounds[0]).midi
+                    or pitch.Pitch(str(high)).midi > pitch.Pitch(bounds[1]).midi):
+                row["note"] = "voice_out_of_range"
+        except (ValueError, pitch.PitchException):
+            continue
+
+
 def summary_with_judged_instruments(
     summary: Mapping[str, Any], judgment: Mapping[str, Any],
+    *, sung_source_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Price a copy of the score as if Sing it saved the quote's roles and sounds."""
     resolution = summary.get("instrument_program_resolution") or {}
@@ -194,4 +216,16 @@ def summary_with_judged_instruments(
         summary, assignments, allow_user_choice=True)
     if problem:
         raise ValueError("The quote's instrument answers do not fit the score.")
+    if sung_source_ids:
+        # An undecided part the user ticks is a vocal choice, not a parallel
+        # instrumental track. This copy is used only to price the quote.
+        sung_route_ids = {
+            route_id for route_id, part_id in routes.items()
+            if part_id in sung_source_ids and part_id in roles
+        }
+        amended_resolution = amended.get("instrument_program_resolution") or {}
+        amended_resolution["instrumental_score_instrument_ids"] = [
+            route_id for route_id in amended_resolution.get("instrumental_score_instrument_ids") or []
+            if route_id not in sung_route_ids
+        ]
     return amended

@@ -3,7 +3,7 @@
 import pytest
 
 from src.backend.sing_all import (
-    build_items, choices_hash, materialize_rows, quote_lines,
+    build_items, choices_hash, mark_voice_ranges, materialize_rows, quote_lines,
     summary_with_judged_instruments,
 )
 
@@ -95,6 +95,16 @@ def test_only_chosen_staff_layout_is_shown_and_split_is_priced_once():
             "take:a:lyrics", "take:b:solfege", "split:P1"]
 
 
+def test_selected_voice_outside_declared_range_sets_note():
+    rows = [{"rowId": "a", "voice": "voice_a", "note": None,
+             "pitchRange": {"lowest_note": "C3", "highest_note": "G4"}}]
+    mark_voice_ranges(rows, {"voice_a": {"supported_range": "D3 - C6"}})
+    assert rows[0]["note"] == "voice_out_of_range"
+    rows[0]["note"] = None
+    mark_voice_ranges(rows, {"voice_a": {"supported_range": "C3 - C6"}})
+    assert rows[0]["note"] is None
+
+
 @pytest.mark.parametrize("role,sound,expected", [
     ("voice", None, False),
     ("instrument", None, True),
@@ -115,3 +125,8 @@ def test_undecided_part_counts_as_instrumental_unless_judged_voice(role, sound, 
         summary, {"roles": {"P1": role}, "sounds": {"P1-I1": sound}})
     assert bool(amended["instrument_program_resolution"]["instrumental_score_instrument_ids"]) is expected
     assert summary["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
+    if role != "voice":
+        ticked = summary_with_judged_instruments(
+            summary, {"roles": {"P1": role}, "sounds": {"P1-I1": sound}},
+            sung_source_ids={"P1"})
+        assert ticked["instrument_program_resolution"]["instrumental_score_instrument_ids"] == []
