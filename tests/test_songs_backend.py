@@ -467,7 +467,31 @@ def test_replace_stops_a_running_take_and_uploads(client, monkeypatch):
     assert "3 credits" in workspace["messages"][-1]["content"]
 
 
-@pytest.mark.parametrize("result,kind", [("too_late", "synthesis"), (None, "preprocess")])
+def test_replace_stops_a_running_split_and_uploads(client, monkeypatch):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    first = _upload_score(test_client, session_id).json()["score_id"]
+    _start_take(app, session_id, "running-split", status="running", kind="preprocess")
+
+    def stop_job(job_id):
+        app.state.job_store.update_job(job_id, status="cancelled", cancelledBy="user")
+        return "stopped"
+
+    monkeypatch.setattr(app.state.job_store, "stop_job", stop_job)
+    monkeypatch.setattr(
+        "src.backend.main._release_stopped_reservation",
+        lambda **_: pytest.fail("a split has no take reservation to release"),
+    )
+
+    response = _replace_upload(test_client, session_id)
+    assert response.status_code == 200
+    assert response.json()["score_id"] != first
+    assert app.state.job_store.get_job("running-split")["status"] == "cancelled"
+    messages = test_client.get(f"/songs/{session_id}/workspace").json()["messages"]
+    assert any(message["content"] == backend_message("job.stop_split_history") for message in messages)
+
+
+@pytest.mark.parametrize("result,kind", [("too_late", "synthesis"), ("too_late", "preprocess")])
 def test_replace_too_late_or_during_a_split_keeps_the_score(client, monkeypatch, result, kind):
     test_client, app = client
     session_id = _create_session(test_client)

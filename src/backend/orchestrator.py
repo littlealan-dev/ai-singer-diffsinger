@@ -121,6 +121,10 @@ class SynthesisStopped(Exception):
     """The take was stopped before its publication point."""
 
 
+class PreprocessStopped(ChatTurnStopped):
+    """A split was stopped or its input score was replaced before publication."""
+
+
 @dataclass
 class _PlannerV2State:
     """Planner v2's latest sheet and choices for one preprocess job; each repair builds on them."""
@@ -139,6 +143,9 @@ class LlmTurnLimitReached(RuntimeError):
 # the context, so they share the same budget object.
 _llm_turn_budget: contextvars.ContextVar[Optional[_LlmTurnBudget]] = contextvars.ContextVar(
     "llm_turn_budget", default=None
+)
+_preprocess_job_context: contextvars.ContextVar[Optional[tuple[str, str]]] = contextvars.ContextVar(
+    "preprocess_job_context", default=None
 )
 PREPROCESS_PLANNING_ERROR_MESSAGE = (
     "Couldn't create a line-preparation plan. Please retry the request."
@@ -1800,6 +1807,47 @@ class Orchestrator:
             return False
         return bool(job and job.get("status") == "cancelled" and job.get("cancelledBy") == "user")
 
+    async def _raise_if_preprocess_stopped(self) -> None:
+        # Offline replay uses a recorder instead of a live JobStore. It has no
+        # Stop state to observe; production workers always use JobStore.
+        if not isinstance(self._job_store, JobStore):
+            return
+        context = _preprocess_job_context.get()
+        if context is not None and await self._is_user_stopped_job(context[0]):
+            raise PreprocessStopped("job_stopped")
+
+    async def _pass_preprocess_stop_point(self, session_id: str) -> None:
+        if not isinstance(self._job_store, JobStore):
+            return
+        context = _preprocess_job_context.get()
+        if context is None:
+            return
+        job_id, user_id = context
+        job = await asyncio.to_thread(self._job_store.get_job, job_id)
+        if job is None or job.get("status") == "cancelled":
+            raise PreprocessStopped("job_stopped")
+        snapshot = await self._sessions.get_snapshot(session_id, user_id)
+        if job.get("scoreId") and job.get("scoreId") != snapshot.get("score_id"):
+            raise PreprocessStopped("score_replaced")
+        if not await asyncio.to_thread(self._job_store.pass_stop_point, job_id):
+            raise PreprocessStopped("job_stopped")
+
+    async def _update_preprocess_progress(self, job_id: str, message: str) -> None:
+        fields = {
+            "status": "running", "step": "preprocess", "message": message,
+            "progress": 0.05,
+        }
+        if isinstance(self._job_store, JobStore):
+            updated = await asyncio.to_thread(
+                self._job_store.update_job_progress, job_id, **fields
+            )
+            if not updated:
+                raise PreprocessStopped("job_stopped")
+        else:
+            await asyncio.to_thread(
+                self._job_store.update_job, job_id, **fields, jobKind="preprocess"
+            )
+
     async def _release_user_stopped_job(self, user_id: str, job_id: str) -> None:
         """Release billing after Stop while preserving the job's stopped fields."""
         from src.backend.credits import release_credits
@@ -2641,17 +2689,16 @@ class Orchestrator:
                 stop_session_id=None, stop_user_id=None,
                 stop_turn_id=None, stop_loop=None,
             ))
+        context_token = _preprocess_job_context.set((job_id, user_id))
+
         async def publish_attempt_messages(
             attempt_messages: List[Dict[str, Any]],
         ) -> None:
+            await self._raise_if_preprocess_stopped()
+            await self._update_preprocess_progress(job_id, initial_message)
             await asyncio.to_thread(
                 self._job_store.update_job,
                 job_id,
-                status="running",
-                step="preprocess",
-                message=initial_message,
-                progress=0.05,
-                jobKind="preprocess",
                 details={"attempt_messages": copy.deepcopy(attempt_messages)},
             )
 
@@ -2662,15 +2709,8 @@ class Orchestrator:
                 job_id=job_id,
                 user_id=user_id,
             )
-            await asyncio.to_thread(
-                self._job_store.update_job,
-                job_id,
-                status="running",
-                step="preprocess",
-                message=initial_message,
-                progress=0.05,
-                jobKind="preprocess",
-            )
+            await self._raise_if_preprocess_stopped()
+            await self._update_preprocess_progress(job_id, initial_message)
             snapshot = await self._sessions.get_snapshot(session_id, user_id)
             current_credit_availability = await self._get_current_credit_availability(
                 user_id,
@@ -2681,10 +2721,12 @@ class Orchestrator:
                 and isinstance(planning_context, dict)
                 and self._settings.preprocess_planner == "v2"
             ):
+                await self._raise_if_preprocess_stopped()
                 tool_calls, initial_thought_summary, planner_v2 = await self._plan_preprocess_v2(
                     score, planning_context, session_id=session_id, user_id=user_id
                 )
             elif not tool_calls and isinstance(planning_context, dict):
+                await self._raise_if_preprocess_stopped()
                 plan_response, plan_error = await self._plan_preprocess_with_llm(
                     snapshot,
                     score,
@@ -2720,6 +2762,7 @@ class Orchestrator:
                 originating_turn_id=originating_turn_id,
                 planner_v2=planner_v2,
             )
+            await self._pass_preprocess_stop_point(session_id)
             message = str(response.get("message") or "").strip() or "Preprocess finished."
             await self._sessions.append_history(session_id, "assistant", message)
             if response.get("type") == "chat_error":
@@ -2771,6 +2814,18 @@ class Orchestrator:
                     completedAt=datetime.now(timezone.utc),
                     **({"laneCounts": lane_counts} if lane_counts is not None else {}),
                 )
+        except PreprocessStopped as exc:
+            if str(exc) == "score_replaced":
+                await asyncio.to_thread(
+                    self._job_store.update_job,
+                    job_id,
+                    status="cancelled",
+                    step="cancelled",
+                    message=backend_message("job.stopped"),
+                    progress=1.0,
+                    jobKind="preprocess",
+                )
+            return
         except asyncio.CancelledError:
             # Shutdown cancels this task. CancelledError is not an Exception,
             # so without this the job would stay "running" forever.
@@ -2788,6 +2843,8 @@ class Orchestrator:
                         exc,
                     )
             if released_for_retry:
+                raise
+            if await self._is_user_stopped_job(job_id):
                 raise
             interrupted_message = backend_message("job.preprocess_interrupted")
             try:
@@ -2810,6 +2867,8 @@ class Orchestrator:
                 )
             raise
         except Exception as exc:
+            if await self._is_user_stopped_job(job_id):
+                return
             if isinstance(exc, PreprocessPlanningError):
                 self._logger.warning(
                     "preprocess_job_planning_failed session=%s error=%s",
@@ -2831,6 +2890,7 @@ class Orchestrator:
                 jobKind="preprocess",
             )
         finally:
+            _preprocess_job_context.reset(context_token)
             clear_log_context()
 
     async def _render_synthesis_action_required_message(
@@ -2993,6 +3053,8 @@ class Orchestrator:
                     await progress_callback(attempt_messages)
 
         while True:
+            if preprocess_job_id is not None:
+                await self._raise_if_preprocess_stopped()
             attempt_number += 1
             explicit_verse_number = self._normalize_verse_number(
                 (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
@@ -3255,6 +3317,7 @@ class Orchestrator:
                     score_version = _snapshot_score_version(latest_snapshot)
                     score_summary = latest_snapshot.get("score_summary")
                 if planner_v2 is not None:
+                    await self._raise_if_preprocess_stopped()
                     v2_calls, v2_stop_reason = await self._plan_preprocess_v2_repair(
                         planner_v2, last_action_required_payload or {}
                     )
@@ -4966,6 +5029,7 @@ class Orchestrator:
         """Make a validated derived score the active artifact for downstream tools."""
         path_value = modified_musicxml_path or score.get("source_musicxml_path")
         if not isinstance(path_value, str) or not path_value.strip():
+            await self._pass_preprocess_stop_point(session_id)
             await self._sessions.set_score(session_id, score)
             return
 
@@ -5001,6 +5065,7 @@ class Orchestrator:
                 exc,
             )
 
+        await self._pass_preprocess_stop_point(session_id)
         await self._sessions.set_score(
             session_id, score, summary=summary if isinstance(summary, dict) else None
         )
@@ -6430,6 +6495,7 @@ class Orchestrator:
             self._settings.preprocess_initial_plan_llm_max_responses,
         )
         for attempt in range(1, max_llm_responses + 1):
+            await self._raise_if_preprocess_stopped()
             attempt_context = self._preprocess_planning_context_for_attempt(
                 planning_context,
                 attempt=attempt,
@@ -6474,6 +6540,7 @@ class Orchestrator:
         user_id: str,
     ) -> tuple[List[ToolCall], str, "_PlannerV2State"]:
         """Plan the first attempt with planner v2: code builds the sheet, the LLM picks options."""
+        await self._raise_if_preprocess_stopped()
         from src.api.preprocess_assembler import AssemblyError
         from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose
         from src.api.preprocess_evidence import EvidenceUnavailable
@@ -6647,6 +6714,7 @@ class Orchestrator:
         self, state: "_PlannerV2State", payload: Dict[str, Any]
     ) -> tuple[Optional[List[ToolCall]], Optional[str]]:
         """Re-choose only the failing bars; None and a stop reason when there is nothing to ask."""
+        await self._raise_if_preprocess_stopped()
         from src.api.preprocess_assembler import AssemblyError
         from src.api.preprocess_chooser import ChooserError, assemble_chosen, choose_repair
         from src.api.preprocess_evidence import EvidenceUnavailable
@@ -6723,6 +6791,7 @@ class Orchestrator:
             self._logger.warning(
                 "planner_v2_evidence_unavailable reason=%s", request.evidence_unavailable
             )
+        await self._raise_if_preprocess_stopped()
         bundle = PromptBundle(
             static_prompt_text=_planner_v2_prompt(),
             dynamic_prompt_text=request.dynamic_text,
@@ -7412,6 +7481,7 @@ class Orchestrator:
         role: LlmRole = LlmRole.DEFAULT,
     ) -> tuple[Optional[LlmResponse], Optional[str]]:
         """Ask the LLM to interpret tool output and optionally produce further tool calls."""
+        await self._raise_if_preprocess_stopped()
         if self._llm_client is None:
             return None, tool_summary
         history = list(snapshot.get("history", []))
@@ -7485,6 +7555,7 @@ class Orchestrator:
                 role=role,
                 score_tools=self._score_tools(role, snapshot.get("score_summary")),
             )
+            await self._raise_if_preprocess_stopped()
             text = await asyncio.to_thread(
                 self._call_llm_client_generate,
                 prompt_bundle,
@@ -8846,6 +8917,7 @@ class Orchestrator:
                     )
                 preprocess_args["score"] = preprocess_score
                 self._logger.info("mcp_call tool=preprocess_voice_parts session=%s", session_id)
+                await self._raise_if_preprocess_stopped()
                 result = await asyncio.to_thread(
                     self._router.call_tool, "preprocess_voice_parts", preprocess_args
                 )
