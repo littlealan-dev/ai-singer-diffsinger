@@ -1230,25 +1230,24 @@ def create_app() -> FastAPI:
         ):
             kind = str(job.get("jobKind") or "")
             refunded = 0
-            if kind == "preprocess":
-                result = "not_stoppable"
-            else:
-                result = await asyncio.to_thread(job_store.stop_job, job_id)
-                if result == "stopped":
+            result = await asyncio.to_thread(job_store.stop_job, job_id)
+            if result == "stopped":
+                if kind != "preprocess":
                     refunded = await _release_stopped_reservation(
                         settings=request.app.state.settings,
                         user_id=user_id,
                         job_id=job_id,
                     )
-                    history_key = (
-                        "job.stop_mix_history" if kind == "export_mix"
-                        else "job.stop_take_history"
-                    )
-                    await sessions.append_history(
-                        session_id,
-                        "assistant",
-                        backend_message(history_key, credits=refunded),
-                    )
+                history_key = (
+                    "job.stop_split_history" if kind == "preprocess"
+                    else "job.stop_mix_history" if kind == "export_mix"
+                    else "job.stop_take_history"
+                )
+                await sessions.append_history(
+                    session_id,
+                    "assistant",
+                    backend_message(history_key, credits=refunded),
+                )
             jobs.append(
                 {"jobId": job_id, "jobKind": kind, "result": result, "refundedCredits": refunded}
             )

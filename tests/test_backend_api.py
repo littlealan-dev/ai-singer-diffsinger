@@ -1446,13 +1446,14 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
         "jobs": [
             {"jobId": "take", "jobKind": "synthesis", "result": "stopped", "refundedCredits": 7},
             {"jobId": "mix", "jobKind": "export_mix", "result": "too_late", "refundedCredits": 0},
-            {"jobId": "prep", "jobKind": "preprocess", "result": "not_stoppable", "refundedCredits": 0},
+            {"jobId": "prep", "jobKind": "preprocess", "result": "stopped", "refundedCredits": 0},
         ],
     }
     snapshot = asyncio.run(app.state.sessions.get_snapshot(session_id, "test-user"))
     assert snapshot["files"]["stopTurnId"] == latest["id"]
     assert snapshot["history"][-1]["role"] == "assistant"
-    assert "7 credits" in snapshot["history"][-1]["content"]
+    assert "7 credits" in snapshot["history"][-2]["content"]
+    assert snapshot["history"][-1]["content"] == backend_message("job.stop_split_history")
 
 
 def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator, monkeypatch):
