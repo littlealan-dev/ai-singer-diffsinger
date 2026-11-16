@@ -13,6 +13,7 @@ from src.musicxml.instrument_programs import (
     drop_resolved_program_assignments,
     instrumental_programs_by_part,
     llm_program_assignments_from_summary,
+    settle_split_sources,
 )
 from src.musicxml.performance_midi import build_instrumental_performance_midis
 from src.backend.orchestrator import _part_feeds_instrumental_midi
@@ -666,6 +667,50 @@ def test_sing_all_can_leave_an_undeclared_instrument_for_user_choice(tmp_path: P
     eligible = {part["raw_part_id"]: part["eligible"] for part in result["instrumental_parts"]}
     assert eligible["P3"] is True
     assert eligible.get("P2") is not True
+
+
+def test_visible_singing_split_settles_only_its_undeclared_source(tmp_path: Path) -> None:
+    _source, summary = _undeclared_accompaniment(tmp_path)
+    answered, action = apply_llm_program_assignments(
+        summary,
+        [
+            {
+                "score_instrument_id": instrument_id,
+                "role": "instrumental",
+                "playback_preset": fluidr3_preset(program=0),
+                "source": "llm_inferred",
+            }
+            for instrument_id in ("P2:default", "P3:default")
+        ],
+    )
+    assert action is None
+    answered["parts"].append({"part_id": "P_DERIVED_TEST", "instruments": []})
+    transform = {
+        "line": {
+            "derived_lane": {"source": {"part_index": 1}},
+            "appended_part_ref": {"part_index": 3},
+        }
+    }
+    settled = settle_split_sources(answered, transform)
+    routes = _instruments_by_id(settled)
+    assert routes["P2:default"]["instrumental_role"] == "not_instrumental"
+    assert routes["P2:default"]["program_source"] == "split_for_singing"
+    assert routes["P2:default"]["playback_preset"] is None
+    assert "P2:default" not in llm_program_assignments_from_summary(settled)
+    assert "P2:default" not in settled["instrument_program_resolution"]["instrumental_score_instrument_ids"]
+    assert "P3:default" in settled["instrument_program_resolution"]["instrumental_score_instrument_ids"]
+    assert apply_llm_program_assignments(
+        settled,
+        [{"score_instrument_id": "P2:default", "playback_preset": fluidr3_preset(program=0),
+          "source": "llm_inferred"}],
+    )[1] is not None
+
+    hidden = {"line": {**transform["line"], "appended_part_ref": {
+        "part_index": 3, "hidden_default_lane": True,
+    }}}
+    assert _instruments_by_id(settle_split_sources(answered, hidden))["P2:default"][
+        "instrumental_role"
+    ] == "instrumental"
 
 
 HAPPY_BIRTHDAY_DEMO = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"

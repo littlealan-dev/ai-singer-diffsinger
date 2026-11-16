@@ -86,6 +86,7 @@ from src.musicxml.performance_midi import (
 )
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    settle_split_sources,
     drop_resolved_program_assignments,
     llm_program_assignments_from_summary,
 )
@@ -5054,7 +5055,9 @@ class Orchestrator:
             )
             parsed_summary = parsed.get("score_summary") if isinstance(parsed, dict) else None
             if isinstance(parsed_summary, dict):
-                summary = parsed_summary
+                summary = settle_split_sources(
+                    parsed_summary, score.get("voice_part_transforms") or {}
+                )
         except Exception as exc:
             # The preprocess result is already validated. Keep it active even if
             # refreshing optional LLM context fails independently.
@@ -6177,6 +6180,11 @@ class Orchestrator:
             value = current_score.get(key)
             if isinstance(value, dict) and value:
                 reparsed_score[key] = copy.deepcopy(value)
+        summary = reparsed_score.get("score_summary")
+        if isinstance(summary, dict):
+            reparsed_score["score_summary"] = settle_split_sources(
+                summary, reparsed_score.get("voice_part_transforms") or {}
+            )
 
     async def _resolve_preprocess_score(
         self,
