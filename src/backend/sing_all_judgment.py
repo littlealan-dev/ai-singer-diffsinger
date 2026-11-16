@@ -260,7 +260,8 @@ def style_reply_schema(rows: Sequence[Mapping[str, Any]],
             for name in ("airiness", "clarity", "gender", "intensity")
         }
         controls["voiceColor"] = {
-            "type": "STRING", "nullable": True, "enum": colors,
+            "type": "STRING", "nullable": True,
+            **({"enum": colors} if colors else {}),
             "description": tool_properties["voice_color"]["description"],
         }
         row_properties[str(row["rowId"])] = {
@@ -289,7 +290,7 @@ def check_style_reply(reply: Any, schema: Mapping[str, Any]) -> list[str]:
         for name, control in row_schema["properties"].items():
             value = row[name]
             if name == "voiceColor":
-                if value is not None and value not in control["enum"]:
+                if value is not None and value not in control.get("enum", ()):
                     errors.append(f"{row_id}: invalid voiceColor")
             elif (isinstance(value, bool) or not isinstance(value, (int, float))
                   or not control["minimum"] <= value <= control["maximum"]):

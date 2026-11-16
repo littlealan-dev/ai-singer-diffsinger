@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from music21 import pitch
 
 from src.backend.language_selection import normalize_language_code
+from src.backend.credits import _user_credits_from_data
 from src.backend.synthesis_pricing import (
     INSTRUMENTAL_CREDIT_DURATION_SECONDS, VOCAL_CREDIT_DURATION_SECONDS,
     credits_for_duration,
@@ -70,15 +71,7 @@ def choices_hash(choices: Mapping[str, Any], style: Mapping[str, Any] | None) ->
 
 def available_balance_from_user(user: Mapping[str, Any]) -> int:
     """Read the same monthly plus top-up availability as UserCredits."""
-    credits = user.get("credits") or {}
-    topup = user.get("topupCredits") or {}
-    total_available = int(topup.get("totalAvailable") or 0)
-    total_reserved = int(topup.get("totalReserved") or 0)
-    topup_available = (
-        total_available if total_available or total_reserved
-        else max(0, int(topup.get("totalRemaining") or 0) - total_reserved)
-    )
-    return int(credits.get("balance") or 0) - int(credits.get("reserved") or 0) + topup_available
+    return _user_credits_from_data(dict(user)).available_balance
 
 
 def build_items(

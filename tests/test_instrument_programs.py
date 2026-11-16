@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from music21 import midi
+from music21 import instrument, midi, note, stream
 
 from src.api.score import parse_score
 from src.backend.synthesis_pricing import score_has_instrumental_parts
@@ -15,7 +15,22 @@ from src.musicxml.instrument_programs import (
     llm_program_assignments_from_summary,
     settle_split_sources,
 )
-from src.musicxml.performance_midi import build_instrumental_performance_midis
+from src.musicxml.performance_midi import (
+    _instrumental_part_metadata, build_instrumental_performance_midis,
+)
+
+
+def test_new_unpitched_detection_only_changes_user_assignable_parts() -> None:
+    score = stream.Score()
+    part = stream.Part(id="P1")
+    part.insert(0, instrument.Piano())
+    part.append(note.Unpitched())
+    score.insert(0, part)
+    ordinary = {"P1": {"resolved_gm_program": 0,
+                       "eligible_for_instrumental_midi": True}}
+    assert _instrumental_part_metadata(score, {0: "P1"}, ordinary)[0]["percussion"] is False
+    assignable = {"P1": {**ordinary["P1"], "user_assignable": True}}
+    assert _instrumental_part_metadata(score, {0: "P1"}, assignable)[0]["percussion"] is True
 from src.backend.orchestrator import _part_feeds_instrumental_midi
 
 

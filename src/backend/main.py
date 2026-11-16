@@ -1287,10 +1287,13 @@ def create_app() -> FastAPI:
                 if not prior_style or prior_style.get("inputHash") != style_answer["inputHash"]:
                     await asyncio.to_thread(save_style, db, session_id, style_answer)
 
-        priced_summary = summary_with_judged_instruments(
-            summary, judgment,
-            sung_source_ids={row["sourcePartId"] for row in rows if row["include"]},
-        )
+        try:
+            priced_summary = summary_with_judged_instruments(
+                summary, judgment,
+                sung_source_ids={row["sourcePartId"] for row in rows if row["include"]},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
         has_instrumentals = score_has_instrumental_parts(priced_summary)
         charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
         charge_required = (has_instrumentals and await asyncio.to_thread(

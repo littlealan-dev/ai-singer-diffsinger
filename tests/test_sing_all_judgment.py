@@ -168,6 +168,19 @@ def test_style_schema_and_control_validation() -> None:
     assert check_style_reply({"rows": {}}, schema)
 
 
+def test_style_schema_without_voice_colours_accepts_only_null() -> None:
+    schema = style_reply_schema([{"rowId": "lead", "voice": "voice_a"}],
+                                {"voice_a": {"voice_colors": []}})
+    props = schema["properties"]["rows"]["properties"]["lead"]["properties"]
+    assert "enum" not in props["voiceColor"]
+    reply = {"rows": {"lead": {
+        "voiceColor": None, "airiness": 0, "clarity": 100,
+        "gender": 0, "intensity": 0.5}}}
+    assert check_style_reply(reply, schema) == []
+    reply["rows"]["lead"]["voiceColor"] = "unknown"
+    assert check_style_reply(reply, schema) == ["lead: invalid voiceColor"]
+
+
 def test_quote_call_reasks_invalid_sound_then_keeps_null_and_reuses_cache() -> None:
     calls = []
     invalid = _valid_reply()

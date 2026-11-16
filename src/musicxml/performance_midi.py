@@ -122,16 +122,18 @@ def _instrumental_part_metadata(
         has_lyrics = raw_part_id in raw_part_ids_with_lyrics
         channel = getattr(score_instrument, "midiChannel", None)
         source_eligible = not is_explicit_vocal and bool(part.recurse().notes) and not has_lyrics
+        user_assignable = bool(program_facts.get("user_assignable"))
         percussion_flag = (
-            bool(program_facts.get("is_percussion"))
-            or channel == 9
+            channel == 9
             or isinstance(score_instrument, instrument.UnpitchedPercussion)
-            or any(isinstance(item, (note.Unpitched, percussion.PercussionChord))
-                   for item in part.recurse().notes)
+            or (user_assignable and (
+                bool(program_facts.get("is_percussion"))
+                or any(isinstance(item, (note.Unpitched, percussion.PercussionChord))
+                       for item in part.recurse().notes)
+            ))
         )
         resolved_program = program_facts.get("resolved_gm_program")
         playback_preset = program_facts.get("playback_preset")
-        user_assignable = bool(program_facts.get("user_assignable"))
         score_instrument_id = program_facts.get("score_instrument_id")
         eligible = source_eligible and (
             (bool(program_facts.get("eligible_for_instrumental_midi")) and isinstance(resolved_program, int))

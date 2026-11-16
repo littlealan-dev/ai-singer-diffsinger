@@ -143,6 +143,18 @@ def test_failed_quote_call_returns_retryable_503(monkeypatch):
     assert caught.value.detail == {"code": "quote_unavailable"}
 
 
+def test_rejected_instrument_assignments_return_retryable_503(monkeypatch):
+    endpoint, request, _ = _route(
+        monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])
+    def rejected(*args, **kwargs):
+        raise ValueError("invalid route")
+    monkeypatch.setattr(main, "summary_with_judged_instruments", rejected)
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(endpoint(main.SingAllQuoteRequest(songId="song-a"), request))
+    assert caught.value.status_code == 503
+    assert caught.value.detail == {"code": "quote_unavailable"}
+
+
 def test_quote_one_model_call_then_cache_across_customise_and_score_change(monkeypatch):
     endpoint, request, snapshot = _route(
         monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])
