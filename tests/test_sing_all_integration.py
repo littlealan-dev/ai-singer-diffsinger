@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from src.backend import sing_all_store
-from src.backend.credits import get_or_create_credits, settle_credits
+from src.backend.credits import get_or_create_credits, release_credits, settle_credits
 from src.backend.firebase_app import get_firestore_client
 
 
@@ -62,3 +62,29 @@ def test_four_takes_reserve_together_and_finish_with_one_receipt(parent_environm
     history = db.collection("sessions").document(session_id).get().to_dict()["history"]
     assert len(history) == 2
     assert all(entry["singAllJobId"] == job_id for entry in history)
+
+
+def test_failed_split_releases_every_unsung_take_and_clears_guard(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    items = [{
+        "itemId": f"take:row-{index}:lyrics", "type": "take", "rowId": f"row-{index}",
+        "mode": "lyrics", "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index in range(2)]
+    parent = {"jobId": job_id, "uid": uid, "sessionId": session_id,
+              "scoreId": "example-score", "status": "running", "stage": "splitting",
+              "revision": 0, "quote": {"total": 4, "scoreVersion": 1}, "items": items}
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    for item in items:
+        assert release_credits(uid, item["childJobId"]).status == "released"
+        item.update(status="failed", reason="split_failed")
+    assert sing_all_store.finish(
+        job_id, {"status": "failed", "stage": "done", "endReason": "split_failed",
+                 "items": items}, expected_stage="splitting", expected_revision=0)
+    assert get_or_create_credits(uid, "").reserved == 0
+    assert get_or_create_credits(uid, "").available_balance == before
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+    history = db.collection("sessions").document(session_id).get().to_dict()["history"]
+    assert len(history) == 2
