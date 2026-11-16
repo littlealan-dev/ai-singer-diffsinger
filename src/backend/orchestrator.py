@@ -8053,7 +8053,8 @@ class Orchestrator:
         part_id = str(part.get("part_id") or synth_args.get("part_id") or "").strip()
         part_name = str(part.get("part_name") or "").strip()
         label = part_name or (f"Part {part_id}" if part_id else f"Part {part_index + 1}")
-        key = f"id:{part_id}" if part_id else f"index:{part_index}"
+        mode = "solfege" if synth_args.get("require_solfege_lyrics") is True else "lyrics"
+        key = f"id:{part_id}:{mode}" if part_id else f"index:{part_index}:{mode}"
         summary_parts = (score_summary or {}).get("parts") or []
         take_signature = next(
             (
@@ -8067,6 +8068,7 @@ class Orchestrator:
         )
         return {
             "key": key,
+            "mode": mode,
             "label": label,
             "part_id": part_id or None,
             "part_index": part_index,

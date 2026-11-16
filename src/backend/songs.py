@@ -81,6 +81,7 @@ def take_entry(job_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
     track = job["audioTrack"]
     return {
         "key": str(track.get("key") or ""),
+        "mode": track.get("mode") or "lyrics",
         "partId": track.get("part_id"),
         "partIndex": track.get("part_index"),
         "label": track.get("label"),
@@ -106,7 +107,9 @@ def apply_take(player: Dict[str, Any], job_id: str, job: Dict[str, Any]) -> bool
         vocals = []  # the player holds takes of one repeat order
     entry = take_entry(job_id, job)
     for index, old in enumerate(vocals):
-        if old.get("key") == entry["key"]:
+        same_part = (old.get("partId") == entry["partId"]
+                     if entry["partId"] else old.get("partIndex") == entry["partIndex"])
+        if same_part and (old.get("mode") or "lyrics") == entry["mode"]:
             entry.update(muted=old.get("muted", False), solo=old.get("solo", False),
                          volume=old.get("volume", DEFAULT_VOCAL_VOLUME))
             if old == entry and repeats == bool(player.get("repeats")):
@@ -252,6 +255,7 @@ def player_response(player: Optional[Dict[str, Any]], *, score_id: Optional[str]
 def vocal_response(track: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "key": track.get("key"), "part_id": track.get("partId"),
+        "mode": track.get("mode") or "lyrics",
         "part_index": track.get("partIndex"), "label": track.get("label"),
         "verse_number": track.get("verseNumber"), "take_signature": track.get("takeSignature"),
         "source_job_id": track.get("sourceJobId"), "expand_repeats": bool(track.get("expandRepeats")),
