@@ -28,10 +28,12 @@ def parent_environment(firestore_emulator, monkeypatch):
     yield db, uid, session_id, job_id
     for collection, identifier in (
         ("singAllJobs", job_id), ("sessions", session_id), ("users", uid),
+        ("singAllJobs", f"{job_id}-second"),
     ):
         db.collection(collection).document(identifier).delete()
     for index in range(4):
         db.collection("credit_reservations").document(f"{job_id}-take-{index}").delete()
+    db.collection("credit_reservations").document(f"{job_id}-second-take-0").delete()
     db.collection("credit_reservations").document(f"{job_id}-instrumentals").delete()
     scope = instrumental_charge_scope(uid, session_id, "example-score")
     db.collection("instrumental_generation_charges").document(
@@ -73,6 +75,57 @@ def test_four_takes_reserve_together_and_finish_with_one_receipt(parent_environm
     history = db.collection("sessions").document(session_id).get().to_dict()["history"]
     assert len(history) == 2
     assert all(entry["singAllJobId"] == job_id for entry in history)
+
+
+def test_second_sing_it_cannot_create_a_job_or_reservation(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+
+    def parent(identifier):
+        return {
+            "jobId": identifier, "uid": uid, "sessionId": session_id,
+            "scoreId": "example-score", "status": "running", "stage": "reading",
+            "revision": 0, "quote": {"total": 2, "scoreVersion": 1},
+            "items": [{
+                "itemId": "take:P1:lyrics", "type": "take", "rowId": "P1",
+                "mode": "lyrics", "childJobId": f"{identifier}-take-0",
+                "creditsReserved": 2, "creditsCharged": 0,
+                "estimatedSeconds": 59, "unitSeconds": 30, "status": "queued",
+            }],
+        }
+
+    assert sing_all_store.create_job_with_reservations(parent(job_id)).status == "reserved"
+    second_id = f"{job_id}-second"
+    result = sing_all_store.create_job_with_reservations(parent(second_id))
+    assert (result.status, result.reason) == ("refused", "sing_all_already_running")
+    assert not db.collection("singAllJobs").document(second_id).get().exists
+    assert not db.collection("credit_reservations").document(
+        f"{second_id}-take-0").get().exists
+    assert db.collection("users").document(uid).get().to_dict()["activeSingAllJobId"] == job_id
+    assert get_or_create_credits(uid, "").reserved == 2
+
+
+def test_insufficient_credits_leave_no_parent_or_reservation(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    db.collection("users").document(uid).update({"credits.balance": 1})
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "reading",
+        "revision": 0, "quote": {"total": 2, "scoreVersion": 1},
+        "items": [{
+            "itemId": "take:P1:lyrics", "type": "take", "rowId": "P1",
+            "mode": "lyrics", "childJobId": f"{job_id}-take-0",
+            "creditsReserved": 2, "creditsCharged": 0,
+            "estimatedSeconds": 59, "unitSeconds": 30, "status": "queued",
+        }],
+    }
+    result = sing_all_store.create_job_with_reservations(parent)
+    assert result.status == "insufficient_balance"
+    assert not db.collection("singAllJobs").document(job_id).get().exists
+    assert not db.collection("credit_reservations").document(f"{job_id}-take-0").get().exists
+    user = db.collection("users").document(uid).get().to_dict()
+    assert not user.get("activeSingAllJobId")
+    assert user["credits"]["reserved"] == 0
+    assert db.collection("sessions").document(session_id).get().to_dict()["history"] == []
 
 
 def test_failed_split_releases_every_unsung_take_and_clears_guard(parent_environment):

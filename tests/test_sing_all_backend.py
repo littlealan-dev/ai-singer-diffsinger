@@ -163,7 +163,8 @@ def test_finish_updates_parent_guard_and_receipt_together(monkeypatch):
     assert writes[2][2]["history"]._values[0]["singAllJobId"] == "fake-parent"
 
 
-def _start_route(monkeypatch, *, changed=False, reserve_status="reserved"):
+def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
+                 reserve_reason="not_enough_credits"):
     row = {"rowId": "a", "sourcePartId": "P1", "partId": "P1",
            "partName": "Made-up lead", "name": "Made-up lead", "split": False,
            "hasWords": True, "include": True, "voice": "voice_a",
@@ -207,7 +208,7 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved"):
     monkeypatch.setattr(main, "create_job_with_reservations",
                         lambda job, **kwargs: (events.append(("reserve", job["jobId"]))
                                                or SimpleNamespace(status=reserve_status,
-                                                                  reason="not_enough_credits")))
+                                                                  reason=reserve_reason)))
     orchestrator = SimpleNamespace(_get_voicebank_details=voices,
                                    _enqueue_sing_all_reconcile=enqueue)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
@@ -233,3 +234,19 @@ def test_sing_it_rejects_changed_score_before_reservation(monkeypatch):
     assert caught.value.status_code == 409
     assert caught.value.detail == {"code": "quote_changed"}
     assert events == []
+
+
+@pytest.mark.parametrize("reserve_status,reserve_reason,code", [
+    ("insufficient_balance", None, "not_enough_credits"),
+    ("refused", "sing_all_already_running", "sing_all_already_running"),
+])
+def test_sing_it_refuses_without_enqueuing_when_reservation_fails(
+    monkeypatch, reserve_status, reserve_reason, code,
+):
+    endpoint, request, events = _start_route(
+        monkeypatch, reserve_status=reserve_status, reserve_reason=reserve_reason)
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": code}
+    assert [event[0] for event in events] == ["reserve"]
