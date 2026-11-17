@@ -4,7 +4,9 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
+from uuid import uuid4
 
 from music21 import pitch
 
@@ -30,6 +32,53 @@ def supported_singing_languages(voicebanks: Sequence[Mapping[str, Any]]) -> list
                 if (code := normalize_language_code(value)) is not None
             )
     return sorted(supported)
+
+
+def singing_language_options(voicebanks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Expose labels from voicebank metadata for every supported language."""
+    labels: dict[str, str] = {}
+    for bank in voicebanks:
+        details = bank.get("language_details") or {}
+        if not isinstance(details, Mapping):
+            continue
+        for code in supported_singing_languages([bank]):
+            detail = details.get(code)
+            label = detail.get("label") if isinstance(detail, Mapping) else None
+            if isinstance(label, str) and label.strip():
+                labels.setdefault(code, label)
+    return [{"code": code, "label": labels.get(code)}
+            for code in supported_singing_languages(voicebanks)]
+
+
+def quote_notes(
+    facts: Mapping[str, Any], judgment: Mapping[str, Any],
+    summary: Mapping[str, Any], *, repeats_available: bool,
+) -> list[dict[str, Any]]:
+    """Present score warnings as the card's structured note values."""
+    part_names = {str(part.get("part_id")): str(part.get("part_name") or part.get("part_id"))
+                  for part in summary.get("parts") or [] if isinstance(part, Mapping)}
+    notes: list[dict[str, Any]] = []
+    for raw in facts.get("notes") or []:
+        if not isinstance(raw, str) or ":" not in raw:
+            continue
+        part_id, code = raw.rsplit(":", 1)
+        if code in {"cannot_split_without_lyrics", "cannot_split_evidence_too_large"}:
+            notes.append({"code": code, "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    sounds = judgment.get("sounds") or {}
+    missing_sound_parts: set[str] = set()
+    for item in facts.get("instruments") or []:
+        route = item.get("route") or {}
+        route_id = str(route.get("score_instrument_id") or "")
+        part_id = str(item.get("partId") or "")
+        if (part_id and route_id in sounds and sounds[route_id] is None
+                and part_id not in missing_sound_parts):
+            missing_sound_parts.add(part_id)
+            notes.append({"code": "no_sound_chosen", "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    if not repeats_available:
+        notes.append({"code": "repeats_written_order", "partId": None, "partName": None})
+    return notes
 
 
 def open_sing_all_result(
@@ -67,6 +116,130 @@ def choices_hash(choices: Mapping[str, Any], style: Mapping[str, Any] | None) ->
     payload = {"choices": choices, "style": style or {}}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict[str, Any]:
+    """Freeze one quote into a parent with fixed child and reservation ids."""
+    now = datetime.now(timezone.utc)
+    items = deepcopy(quote["items"])
+    for item in items:
+        if item["type"] in {"split", "take"}:
+            item["childJobId"] = uuid4().hex
+        elif item["type"] == "instrumental":
+            item["reservationId"] = f"{job_id}-instrumentals"
+    rows = deepcopy(quote["rows"])
+    for row in rows:
+        row["partId"] = None if row.get("split") else row.get("sourcePartId")
+        row["name"] = row.get("partName") or row.get("name") or row.get("sourcePartId")
+    return {
+        "jobId": job_id, "uid": quote["uid"], "sessionId": quote["sessionId"],
+        "scoreId": quote["scoreId"], "title": title, "kind": "full",
+        "status": "running", "stage": "reading", "revision": 0,
+        "choices": deepcopy(quote["choices"]), "style": deepcopy(quote.get("style") or {}),
+        "quote": {"quoteId": quote["quoteId"], "total": quote["total"],
+                  "choicesHash": quote["choicesHash"], "scoreVersion": quote["scoreVersion"]},
+        "judgment": deepcopy(quote["judgment"]), "rows": rows, "items": items,
+        "cancelRequested": False, "endReason": None,
+        "notes": deepcopy(quote.get("notes") or []),
+        "render": {"state": "none"}, "createdAt": now, "updatedAt": now,
+        "lastProgressAt": now, "endedAt": None, "finalScoreVersion": None,
+    }
+
+
+def progress(
+    job: Mapping[str, Any], *, now: datetime | None = None,
+    split_estimate_seconds: int = 240, singing_start_seconds: int = 60,
+) -> dict[str, Any]:
+    """Present a parent record as the public Sing All progress and receipt."""
+    instant = now or datetime.now(timezone.utc)
+    created = job["createdAt"]
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    ended = job.get("status") != "running"
+    ended_at = job.get("endedAt")
+    end_time = datetime.fromisoformat(ended_at) if isinstance(ended_at, str) else ended_at
+    if isinstance(end_time, datetime) and end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    elapsed_until = end_time if ended and isinstance(end_time, datetime) else instant
+    elapsed = max(0, int((elapsed_until - created).total_seconds()))
+    items = list(job.get("items") or [])
+    splits = [item for item in items if item.get("type") == "split"]
+    takes = [item for item in items if item.get("type") == "take"]
+    rows = [row for row in job.get("rows") or [] if row.get("include")]
+    names = {str(row.get("rowId")): str(row.get("name") or "") for row in rows}
+    source_names = {str(row.get("sourcePartId")): str(row.get("partName") or
+                    row.get("name") or "") for row in rows}
+    public_rows = [{
+        "rowId": str(row["rowId"]), "name": names[str(row["rowId"])],
+        "voice": str(row.get("voice") or ""),
+        "voiceName": str(row.get("voiceName") or row.get("voice") or ""),
+        "split": bool(row.get("split")),
+        "takes": [{"mode": item["mode"], "status": item.get("status", "queued"),
+                   "reason": item.get("reason")}
+                  for item in takes if item.get("rowId") == row["rowId"]],
+    } for row in rows]
+    charged = sum(int(item.get("creditsCharged") or 0) for item in items)
+    refunded = sum(max(0, int(item.get("creditsReserved") or 0)
+                       - int(item.get("creditsCharged") or 0))
+                   for item in items if item.get("status") in {"done", "failed", "stopped"})
+    total = int((job.get("quote") or {}).get("total") or 0)
+    receipt = []
+    if ended:
+        for item in items:
+            kind = item.get("type")
+            reserved = int(item.get("creditsReserved") or 0)
+            item_charged = int(item.get("creditsCharged") or 0)
+            receipt.append({
+                "itemId": item["itemId"], "type": kind,
+                "rowId": item.get("rowId") if kind == "take" else None,
+                "mode": item.get("mode") if kind == "take" else None,
+                "name": (names.get(str(item.get("rowId"))) if kind == "take" else
+                         source_names.get(str(item.get("sourcePartId"))) if kind == "split"
+                         else None),
+                "credits": item_charged if item_charged else reserved,
+                "outcome": "included" if reserved == 0 else
+                           "charged" if item_charged else "refunded",
+                "reason": item.get("reason"),
+            })
+    remaining = None
+    if not ended:
+        pending_splits = sum(item.get("status") != "done" for item in splits)
+        singing_seconds = max((float(item.get("estimatedSeconds") or 0)
+                               for item in takes if item.get("status") not in
+                               {"done", "failed", "stopped"}), default=0)
+        startup = singing_start_seconds if job.get("stage") in {
+            "reading", "splitting", "solfege"} else 0
+        remaining = int(pending_splits * split_estimate_seconds + startup + singing_seconds)
+    choices = job.get("choices") or {}
+    reason = job.get("endReason")
+    if reason == "instrumental_failed":
+        reason = "instrumentals_failed"
+    render = job.get("render") or {}
+    return {
+        "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
+        "status": job["status"], "stage": job["stage"], "endReason": reason,
+        "cancelRequested": bool(job.get("cancelRequested")),
+        "choices": {key: choices[key] for key in
+                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "counts": {
+            "splits": {"done": sum(item.get("status") == "done" for item in splits),
+                       "total": len(splits)},
+            "takes": {"done": sum(item.get("status") == "done" for item in takes),
+                      "failed": sum(item.get("status") in {"failed", "stopped"}
+                                    for item in takes), "total": len(takes)},
+        },
+        "rows": public_rows,
+        "credits": {"reserved": max(0, total - charged - refunded),
+                    "charged": charged, "refunded": refunded},
+        "receipt": receipt, "notes": deepcopy(job.get("notes") or []),
+        "elapsedS": elapsed, "remainingS": remaining,
+        "render": {"state": render.get("state", "none"), "placeInLine": None},
+        "createdAt": created.isoformat(),
+        "endedAt": (ended_at.isoformat() if isinstance(ended_at, datetime)
+                    else ended_at),
+    }
 
 
 def available_balance_from_user(user: Mapping[str, Any]) -> int:
@@ -235,8 +408,9 @@ def summary_with_judged_instruments(
     }
     assignments = []
     for route_id in unresolved:
-        role = roles.get(routes.get(route_id))
-        if role == "voice":
+        part_id = routes.get(route_id)
+        role = roles.get(part_id)
+        if role == "voice" or (part_id in roles and part_id in (sung_source_ids or set())):
             assignments.append({"score_instrument_id": route_id, "source": "llm_inferred",
                                 "role": "not_instrumental", "evidence": []})
             continue
@@ -251,16 +425,152 @@ def summary_with_judged_instruments(
         summary, assignments, allow_user_choice=True)
     if problem:
         raise ValueError("The quote's instrument answers do not fit the score.")
-    if sung_source_ids:
-        # An undecided part the user ticks is a vocal choice, not a parallel
-        # instrumental track. This copy is used only to price the quote.
-        sung_route_ids = {
-            route_id for route_id, part_id in routes.items()
-            if part_id in sung_source_ids and part_id in roles
-        }
-        amended_resolution = amended.get("instrument_program_resolution") or {}
-        amended_resolution["instrumental_score_instrument_ids"] = [
-            route_id for route_id in amended_resolution.get("instrumental_score_instrument_ids") or []
-            if route_id not in sung_route_ids
-        ]
     return amended
+
+
+def decide(
+    job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
+    score_state: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Choose one idempotent parent transition without reading Firestore.
+
+    The caller commits the returned fields with a revision check before carrying
+    out actions. A repeated call then sees the new state and cannot start a
+    second child or move the same reservation twice.
+    """
+    if job.get("status") != "running":
+        return {}, []
+    items = deepcopy(job.get("items") or [])
+    rows = deepcopy(job.get("rows") or [])
+
+    def finish(status: str, reason: str | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        actions: list[dict[str, Any]] = []
+        for item in items:
+            if item.get("status") in {"queued", "running"}:
+                item["status"] = "stopped" if status == "cancelled" else "failed"
+                item["reason"] = reason
+                if item["type"] == "take":
+                    actions.append({"kind": "release", "reservationId": item["childJobId"]})
+                elif item["type"] == "instrumental":
+                    actions.append({"kind": "release", "reservationId": item["reservationId"]})
+        actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
+        return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
+
+    if job.get("cancelRequested"):
+        return finish("cancelled", "stopped")
+    if score_state.get("terminalFailure"):
+        return finish("failed", str(score_state["terminalFailure"]))
+
+    stage = job.get("stage")
+    if stage == "reading":
+        if score_state.get("scoreId") != job.get("scoreId"):
+            return finish("failed", "score_replaced")
+        if score_state.get("verse") != job.get("choices", {}).get("verse"):
+            return {}, [{"kind": "reparse_verse", "verse": job["choices"]["verse"]}]
+        expected = [(row["rowId"], row.get("sourcePartId"), row.get("include")) for row in rows]
+        actual = [(row["rowId"], row.get("sourcePartId"), row.get("include"))
+                  for row in score_state.get("rows") or []]
+        if expected != actual:
+            return finish("failed", "quote_changed")
+        return {"stage": "splitting"}, [{"kind": "save_assignments"}]
+
+    if stage == "splitting":
+        for item in items:
+            if item["type"] != "split" or item.get("status") == "done":
+                continue
+            child_id = item["childJobId"]
+            child = children.get(child_id)
+            if child is None or child.get("status") == "queued":
+                now = score_state.get("now")
+                lease = item.get("startLeaseUntil")
+                if (item.get("status") == "running" and isinstance(now, datetime)
+                        and isinstance(lease, datetime) and lease > now):
+                    return {}, []
+                item["status"] = "running"
+                if isinstance(now, datetime):
+                    item["startLeaseUntil"] = now + timedelta(seconds=60)
+                return {"items": items}, [{"kind": "start_split", "itemId": item["itemId"]}]
+            if child.get("status") == "running":
+                return {}, []
+            if child.get("status") != "completed" or child.get("reviewRequired"):
+                return finish("failed", "split_failed")
+            produced = {str(part["laneKey"]): part for part in child.get("parts") or []}
+            affected = [row for row in rows if row.get("sourcePartId") == item["sourcePartId"]
+                        and row.get("split")]
+            if set(produced) != {row["rowId"] for row in affected} or len(produced) != len(affected):
+                return finish("failed", "quote_changed")
+            for row in affected:
+                part = produced[row["rowId"]]
+                row["partId"] = part["partId"]
+                row["name"] = part.get("name") or row.get("name")
+            item["status"] = "done"
+            return {"rows": rows, "items": items}, []
+        return {"stage": "solfege"}, []
+
+    if stage == "solfege":
+        if not any(item["type"] == "take" and item["mode"] == "solfege"
+                   and item.get("status") == "queued" for item in items):
+            return {"stage": "singing"}, []
+        if not job.get("solfegePrepared"):
+            now = score_state.get("now")
+            lease = job.get("solfegeStartLeaseUntil")
+            if isinstance(now, datetime) and isinstance(lease, datetime) and lease > now:
+                return {}, []
+            fields = ({"solfegeStartLeaseUntil": now + timedelta(seconds=60)}
+                      if isinstance(now, datetime) else {})
+            return fields, [{"kind": "add_solfege"}]
+        failed_rows = set(job.get("solfegeFailedRows") or [])
+        actions = []
+        for item in items:
+            if item["type"] == "take" and item["mode"] == "solfege" and item["rowId"] in failed_rows:
+                item.update(status="failed", reason="solfege_failed")
+                actions.append({"kind": "release", "reservationId": item["childJobId"]})
+        if not any(item["type"] == "take" and item.get("status") == "queued" for item in items):
+            return finish("failed", "nothing_to_sing")
+        return {"stage": "singing", "items": items}, actions
+
+    if stage == "singing":
+        if not job.get("instrumentalsPrepared"):
+            return {}, [{"kind": "prepare_instrumentals"}]
+        instrumental = next((item for item in items if item["type"] == "instrumental"), None)
+        if instrumental and any(item["type"] == "take" and item["status"] == "done"
+                                for item in items):
+            if instrumental["status"] == "queued":
+                instrumental["status"] = "running"
+                return {"items": items}, [{"kind": "settle_instrumental"}]
+            if instrumental["status"] == "running":
+                return {}, [{"kind": "settle_instrumental"}]
+        for item in items:
+            if item["type"] != "take" or item.get("status") in {"done", "failed", "stopped"}:
+                continue
+            child = children.get(item["childJobId"])
+            if child is None or child.get("status") == "queued":
+                now = score_state.get("now")
+                lease = item.get("startLeaseUntil")
+                if (item.get("status") == "running" and isinstance(now, datetime)
+                        and isinstance(lease, datetime) and lease > now):
+                    continue
+                item["status"] = "running"
+                if isinstance(now, datetime):
+                    item["startLeaseUntil"] = now + timedelta(seconds=60)
+                return {"items": items}, [{"kind": "start_take", "itemId": item["itemId"]}]
+            if child.get("status") == "running":
+                continue
+            if child.get("status") == "completed":
+                item["status"] = "done"
+                item["creditsCharged"] = child.get("creditsCharged", item["creditsReserved"])
+            else:
+                item["status"] = "stopped" if child.get("status") == "cancelled" else "failed"
+                item["reason"] = child.get("error") or "take_failed"
+            return {"items": items}, []
+        if instrumental and instrumental["status"] == "queued":
+            if all(item["type"] != "take" or item["status"] in {"failed", "stopped"} for item in items):
+                instrumental["status"] = "failed"
+                return {"items": items}, [{"kind": "release", "reservationId": instrumental["reservationId"]}]
+        takes = [item for item in items if item["type"] == "take"]
+        if all(item["status"] in {"done", "failed", "stopped"} for item in takes):
+            done = sum(item["status"] == "done" for item in takes)
+            return finish("completed" if done == len(takes) else "partial" if done else "failed")
+        return {}, []
+
+    return {}, []

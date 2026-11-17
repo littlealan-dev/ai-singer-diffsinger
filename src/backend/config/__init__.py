@@ -264,6 +264,13 @@ class Settings:
     synthesis_tasks_queue: str = ""
     synthesis_job_max_dispatch_attempts: int = 3
     synthesis_job_lease_seconds: float = 90.0
+    # A repeatable parent-job reconcile request. Inline mode is for local runs.
+    sing_all_reconcile_dispatch_mode: str = "inline"
+    sing_all_reconcile_url: str = ""
+    sing_all_reconcile_tasks_queue: str = ""
+    sing_all_reconcile_worker_token: str = ""
+    sing_all_reconcile_invoker_service_account: str = ""
+    sing_all_reconcile_audience: str = ""
     # A second synthesis worker (the RTX PRO 6000 one) for some users' jobs,
     # dispatched the same way as SYNTHESIS_DISPATCH_MODE with its own URL,
     # audience and queue. "off" sends every job to the standard worker;
@@ -458,6 +465,17 @@ class Settings:
         ) = _premium_synthesis_route_env(synthesis_dispatch_mode)
         preprocess_worker_enabled = _env_bool("PREPROCESS_WORKER_ENABLED", False)
         synthesis_worker_enabled = _env_bool("SYNTHESIS_WORKER_ENABLED", False)
+        sing_all_reconcile_dispatch_mode = (
+            os.getenv("SING_ALL_RECONCILE_DISPATCH_MODE", "inline").strip().lower() or "inline"
+        )
+        if sing_all_reconcile_dispatch_mode not in {"inline", "http", "cloud_tasks"}:
+            raise ValueError("SING_ALL_RECONCILE_DISPATCH_MODE must be inline, http, or cloud_tasks.")
+        sing_all_reconcile_url = os.getenv("SING_ALL_RECONCILE_URL", "").strip().rstrip("/")
+        sing_all_reconcile_tasks_queue = os.getenv("SING_ALL_RECONCILE_TASKS_QUEUE", "").strip()
+        if sing_all_reconcile_dispatch_mode != "inline" and not sing_all_reconcile_url:
+            raise ValueError("SING_ALL_RECONCILE_URL is required for remote dispatch.")
+        if sing_all_reconcile_dispatch_mode == "cloud_tasks" and not sing_all_reconcile_tasks_queue:
+            raise ValueError("SING_ALL_RECONCILE_TASKS_QUEUE is required for Cloud Tasks.")
         mcp_startup_timeout_seconds = _env_float("MCP_STARTUP_TIMEOUT_SECONDS", 30.0)
         backend_ready_timeout_seconds = _env_float("BACKEND_READY_TIMEOUT_SECONDS", 240.0)
         backend_shutdown_total_seconds = _env_float(
@@ -686,6 +704,15 @@ class Settings:
             synthesis_job_lease_seconds=max(
                 15.0, _env_float("SYNTHESIS_JOB_LEASE_SECONDS", 90.0)
             ),
+            sing_all_reconcile_dispatch_mode=sing_all_reconcile_dispatch_mode,
+            sing_all_reconcile_url=sing_all_reconcile_url,
+            sing_all_reconcile_tasks_queue=sing_all_reconcile_tasks_queue,
+            sing_all_reconcile_worker_token=os.getenv("SING_ALL_RECONCILE_WORKER_TOKEN", "").strip(),
+            sing_all_reconcile_invoker_service_account=os.getenv(
+                "SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT", ""
+            ).strip().lower(),
+            sing_all_reconcile_audience=(os.getenv("SING_ALL_RECONCILE_AUDIENCE", "").strip()
+                                         or sing_all_reconcile_url),
             synthesis_premium_routing=synthesis_premium_routing,
             synthesis_premium_worker_url=synthesis_premium_worker_url,
             synthesis_premium_worker_audience=synthesis_premium_worker_audience,

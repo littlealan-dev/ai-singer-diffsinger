@@ -13,6 +13,7 @@ import src.backend.main as main_module
 from src.backend.config import Settings
 from src.backend.job_dispatch import (
     PREPROCESS_JOB_KIND,
+    SING_ALL_RECONCILE_KIND,
     SYNTHESIS_JOB_KIND,
     JobDispatchError,
     JobDispatcher,
@@ -48,6 +49,51 @@ def test_each_kind_has_its_own_route():
     assert preprocess.token_header == "X-Preprocess-Worker-Token"
     with pytest.raises(ValueError):
         job_route(settings, "export")
+
+
+def test_sing_all_reconcile_http_requests_are_repeatable():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    settings = _settings(sing_all_reconcile_dispatch_mode="http",
+                         sing_all_reconcile_url="http://reconcile.test",
+                         sing_all_reconcile_worker_token="test-token")
+    dispatcher = JobDispatcher(job_route(settings, SING_ALL_RECONCILE_KIND),
+                               transport=httpx.MockTransport(handler))
+
+    async def run():
+        await dispatcher.dispatch("fake-parent")
+        await dispatcher.dispatch("fake-parent")
+        await asyncio.gather(*dispatcher._http_tasks)
+
+    asyncio.run(run())
+    assert len(seen) == 2
+    assert all(str(request.url) == "http://reconcile.test/internal/sing-all/reconcile"
+               for request in seen)
+    assert all(request.content == b'{"jobId":"fake-parent"}' for request in seen)
+    assert all(request.headers["X-Sing-All-Reconcile-Token"] == "test-token"
+               for request in seen)
+
+
+def test_sing_all_reconcile_cloud_tasks_have_no_fixed_name(monkeypatch):
+    settings = _settings(sing_all_reconcile_dispatch_mode="cloud_tasks",
+                         sing_all_reconcile_url="https://reconcile.example",
+                         sing_all_reconcile_tasks_queue=SYNTHESIS_QUEUE,
+                         sing_all_reconcile_invoker_service_account="fake-invoker")
+    tasks = []
+
+    def fake_post(url, headers, json, timeout):
+        tasks.append(json["task"])
+        return httpx.Response(200, json={"name": "generated-name"})
+
+    monkeypatch.setattr(dispatch_module, "_google_access_token", lambda: "fake-token")
+    monkeypatch.setattr(dispatch_module.httpx, "post", fake_post)
+    asyncio.run(JobDispatcher(job_route(settings, SING_ALL_RECONCILE_KIND)).dispatch("fake-parent"))
+    assert "name" not in tasks[0]
+    assert tasks[0]["httpRequest"]["url"] == "https://reconcile.example/internal/sing-all/reconcile"
 
 
 def test_http_dispatch_of_a_synthesis_job_posts_to_the_synthesis_worker():

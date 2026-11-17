@@ -47,6 +47,7 @@ from src.backend.audio_mix import MixTrackSource, get_audio_duration_seconds, re
 from src.backend.job_store import JobStore, build_progress_payload
 from src.backend.job_dispatch import (
     PREPROCESS_JOB_KIND,
+    SING_ALL_RECONCILE_KIND,
     SYNTHESIS_JOB_KIND,
     JobRoute,
     job_route,
@@ -64,8 +65,9 @@ from src.backend.synthesis_pricing import (
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
-    materialize_rows, quote_lines,
-    style_changes, summary_with_judged_instruments, supported_singing_languages,
+    job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
+    quote_notes, singing_language_options, style_changes,
+    summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
@@ -73,8 +75,12 @@ from src.backend.sing_all_judgment import (
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
-    latest_judgment, read_judgment, read_style, save_judgment, save_quote, save_style,
+    active_job_for_song, create_job_with_reservations, latest_judgment,
+    load as load_sing_all_job,
+    read_judgment, read_quote, read_style,
+    save_judgment, save_quote, save_style,
 )
+from src.backend.sing_all_runner import SingAllRunner
 from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
@@ -404,6 +410,14 @@ class SingAllQuoteRequest(BaseModel):
     choices: dict[str, Any] = Field(default_factory=dict)
 
 
+class SingAllJobRequest(BaseModel):
+    quoteId: str = Field(min_length=1, max_length=200)
+
+
+class SingAllReconcileRequest(BaseModel):
+    jobId: str = Field(min_length=1, max_length=200)
+
+
 class SolfegeSettingsPayload(BaseModel):
     """Canonical user-selectable solfege settings."""
     system: Literal["movable_do", "fixed_do"]
@@ -491,6 +505,15 @@ class FeedbackSubmitRequest(BaseModel):
     ratings: dict[str, Any]
     comment: Any = ""
     client: dict[str, Any] | None = None
+
+
+def _running_sing_all_job(user_id: str, user_record: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Resolve the user's active pointer only while its parent still runs."""
+    job_id = user_record.get("activeSingAllJobId")
+    job = load_sing_all_job(job_id) if isinstance(job_id, str) and job_id else None
+    if job and job.get("uid") == user_id and job.get("status") == "running":
+        return job
+    return None
 
 
 def create_app() -> FastAPI:
@@ -647,6 +670,14 @@ def create_app() -> FastAPI:
             job_id, claim.job, attempt=claim.attempt, worker_id=worker_id
         )
         return JSONResponse(content={"status": "done", "attempt": claim.attempt})
+
+    @app.post("/internal/sing-all/reconcile")
+    async def reconcile_sing_all(payload: SingAllReconcileRequest, request: Request) -> JSONResponse:
+        """Retryable wake for one parent, accepted only from the configured worker."""
+        route = job_route(settings, SING_ALL_RECONCILE_KIND)
+        await _require_worker_caller(request, route)
+        await SingAllRunner(request.app.state.orchestrator).reconcile(payload.jobId)
+        return JSONResponse(content={"status": "done"})
 
     @app.post("/internal/synthesis-jobs/{job_id}")
     async def run_synthesis_job(job_id: str, request: Request) -> JSONResponse:
@@ -835,6 +866,7 @@ def create_app() -> FastAPI:
                 "progress_url": _job_progress_url(session_id, job_id),
             }
             for job_id, data in songs.workspace_jobs(session_jobs)
+            if not data.get("parentJobId")
         ]
         player_payload = songs.player_response(player, score_id=state.score_id)
         tracks = songs.usable_vocals(
@@ -892,6 +924,9 @@ def create_app() -> FastAPI:
             await sessions.get_song_row(session_id, user_id)
         except (KeyError, PermissionError):
             return _song_error(404, "song_not_found", "song.not_found")
+        if (request.app.state.settings.session_store == "firestore"
+                and await asyncio.to_thread(active_job_for_song, user_id, session_id)):
+            return _song_error(409, "work_running", "song.work_running")
         if await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id):
             return _song_error(409, "work_running", "song.work_running")
         try:
@@ -1176,6 +1211,25 @@ def create_app() -> FastAPI:
             "song": _upload_song_block((await _get_session_or_404(sessions, session_id, user_id)).song()),
         }
 
+    @app.get("/sing-all/active")
+    async def get_active_sing_all(request: Request) -> Dict[str, Any]:
+        """Return the caller's running Sing All, even from another Song."""
+        user_id = await _get_user_id_or_401(request)
+        db = get_firestore_client()
+        user_record = await asyncio.to_thread(
+            lambda: db.collection("users").document(user_id).get().to_dict() or {})
+        job = await asyncio.to_thread(_running_sing_all_job, user_id, user_record)
+        return {"job": sing_all_progress(job) if job else None}
+
+    @app.get("/sing-all/jobs/{job_id}")
+    async def get_sing_all_job(job_id: str, request: Request) -> Dict[str, Any]:
+        """Return one parent and receipt to its owner, at any stage or status."""
+        user_id = await _get_user_id_or_401(request)
+        job = await asyncio.to_thread(load_sing_all_job, job_id)
+        if not job or job.get("uid") != user_id:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"})
+        return sing_all_progress(job)
+
     @app.post("/sing-all/quote")
     async def get_sing_all_quote(payload: SingAllQuoteRequest, request: Request) -> Dict[str, Any]:
         """Quote the caller's Song without changing its score or reserving credits."""
@@ -1194,8 +1248,10 @@ def create_app() -> FastAPI:
         db = get_firestore_client()
         user_record = await asyncio.to_thread(
             lambda: db.collection("users").document(user_id).get().to_dict() or {})
-        if user_record.get("activeSingAllJobId"):
-            return {"blocked": "already_running", "activeJobId": user_record["activeSingAllJobId"]}
+        active_job = await asyncio.to_thread(_running_sing_all_job, user_id, user_record)
+        if active_job:
+            return {"blocked": "already_running", "activeJobId": active_job["jobId"],
+                    "activeSongId": active_job["sessionId"]}
 
         orchestrator: Orchestrator = request.app.state.orchestrator
         voicebanks = await orchestrator._get_voicebank_details()
@@ -1209,8 +1265,11 @@ def create_app() -> FastAPI:
         mode = "solfege" if solfege_only else str(choices.get("mode") or "lyrics")
         if mode not in {"lyrics", "solfege", "both"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
-        repeats = bool(choices.get("repeats", True))
-        verses = summary.get("available_verses") or []
+        repeats_available = summary.get("repeat_expansion_available") is not False
+        repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
+        verses = sorted({str(value) for value in summary.get("available_verses") or []},
+                        key=lambda value: (not value.isdecimal(),
+                                           int(value) if value.isdecimal() else value))
         verse = str(choices.get("verse") or (verses[0] if verses else "1"))
         settings: Settings = request.app.state.settings
         facts = quote_facts(
@@ -1264,7 +1323,7 @@ def create_app() -> FastAPI:
                 row["voicePicked"] = "recommended"
         mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
         note = str(choices.get("styleNote") or "").strip()
-        style: dict[str, Any] = {"note": note, "controls": {}}
+        style: dict[str, Any] = {"note": note, "controls": {}, "changes": {}}
         style_blocked = False
         if note:
             banks_by_id = {bank["id"]: bank for bank in voicebanks}
@@ -1307,6 +1366,8 @@ def create_app() -> FastAPI:
                    else "nothing_to_sing" if not any(row["include"] for row in rows)
                    else "not_enough_credits" if total > balance
                    else "style_unavailable" if style_blocked else None)
+        notes = quote_notes(facts, judgment, summary,
+                            repeats_available=repeats_available)
         normalized_choices = {
             "rows": [{"rowId": row["rowId"], "include": row["include"],
                       "voice": row["voice"], "voicePicked": row["voicePicked"]}
@@ -1319,16 +1380,116 @@ def create_app() -> FastAPI:
             "scoreVersion": version, "choicesHash": choices_hash(normalized_choices, style),
             "choices": normalized_choices, "rows": rows, "items": items,
             "total": total, "judgment": judgment, "style": style,
+            "notes": notes,
         })
         return {
             "quoteId": quote_record["quoteId"], "rows": rows,
-            "options": {"languages": supported, "mode": mode, "verse": verse,
-                        "repeats": repeats, "solfegeOnly": solfege_only},
+            "voices": [{"id": bank["id"], "name": bank.get("name") or bank["id"]}
+                       for bank in voicebanks if bank["id"] in compatible_ids],
+            "options": {"language": language,
+                        "languages": singing_language_options(voicebanks),
+                        "mode": mode, "verse": verse, "verses": verses,
+                        "repeats": repeats, "repeatsAvailable": repeats_available,
+                        "solfegeOnly": solfege_only},
             "lines": quote_lines(items, duration_seconds=duration, balance=balance),
             "total": total, "balance": balance, "blocked": blocked,
-            "notes": facts.get("notes") or [], "style": style,
+            "notes": notes, "style": style,
             "choicesHash": quote_record["choicesHash"],
         }
+
+    @app.post("/sing-all/jobs")
+    async def start_sing_all(payload: SingAllJobRequest, request: Request) -> Dict[str, Any]:
+        """Start only the caller's still-current quote; no LLM is called here."""
+        user_id = await _get_user_id_or_401(request)
+        db = get_firestore_client()
+        quote = await asyncio.to_thread(read_quote, db, payload.quoteId, uid=user_id)
+        if quote is None:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        session_id = quote["sessionId"]
+        snapshot = await _get_snapshot_or_404(request.app.state.sessions, session_id, user_id)
+        current = snapshot.get("current_score") or {}
+        score, summary = current.get("score"), snapshot.get("score_summary")
+        score_id, version = snapshot.get("score_id"), current.get("version")
+        if not isinstance(score, dict) or not isinstance(summary, dict) or not isinstance(version, int):
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        if score_id != quote["scoreId"] or version != quote["scoreVersion"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        choices = quote["choices"]
+        style = quote.get("style") or {}
+        if choices_hash(choices, style) != quote["choicesHash"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        orchestrator: Orchestrator = request.app.state.orchestrator
+        voicebanks = await orchestrator._get_voicebank_details()
+        settings: Settings = request.app.state.settings
+        facts = quote_facts(
+            score, summary, voicebanks, verse_number=choices["verse"],
+            evidence_max_chars=settings.preprocess_chooser_evidence_max_chars)
+        model = (settings.gemini_sing_all_quote.model if settings.llm_provider == "gemini"
+                 else settings.openai_default.model)
+        expected_hash = input_hash(
+            {"facts": facts, "language": choices["language"], "voicebanks": voicebanks,
+             "score": f"{score_id}:{version}"},
+            quote_prompt(synthesis_max_duration_seconds=settings.synthesis_max_duration_seconds),
+            model,
+        )
+        if expected_hash != quote["judgment"].get("inputHash"):
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        try:
+            rows = materialize_rows(facts, quote["judgment"], choices["rows"])
+            source_names = {str(part.get("part_id")): part.get("part_name")
+                            for part in summary.get("parts") or [] if isinstance(part, dict)}
+            for row in rows:
+                row["partName"] = source_names.get(row["sourcePartId"]) or row["sourcePartId"]
+            mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
+            priced_summary = summary_with_judged_instruments(
+                summary, quote["judgment"],
+                sung_source_ids={row["sourcePartId"] for row in rows if row["include"]})
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"}) from exc
+        if rows != quote["rows"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
+        instrumental_required = (score_has_instrumental_parts(priced_summary)
+                                 and await asyncio.to_thread(
+                                     get_instrumental_charge_state, charge_scope) != "paid")
+        duration = selected_score_duration(summary, expand_repeats=choices["repeats"])
+        items = build_items(rows, mode=choices["mode"], duration_seconds=duration,
+                            instrumental_charge_required=instrumental_required)
+        total = sum(int(item["creditsReserved"]) for item in items)
+        if items != quote["items"] or total != quote["total"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed"})
+        if not any(row["include"] for row in rows):
+            raise HTTPException(status_code=409, detail={"code": "nothing_to_sing"})
+        user_record = await asyncio.to_thread(
+            lambda: db.collection("users").document(user_id).get().to_dict() or {})
+        if (user_record.get("billing") or {}).get("activePlanKey") == "free":
+            raise HTTPException(status_code=409, detail={"code": "free_plan"})
+        if style.get("note") and not style.get("controls"):
+            raise HTTPException(status_code=409, detail={"code": "style_unavailable"})
+        job_id = uuid.uuid4().hex
+        title = (snapshot.get("song") or {}).get("title") or summary.get("title") or "Song"
+        job = job_from_quote(quote, title=title, job_id=job_id)
+        voice_names = {str(bank["id"]): str(bank.get("name") or bank["id"])
+                       for bank in voicebanks}
+        for row in job["rows"]:
+            row["voiceName"] = voice_names.get(str(row.get("voice")), str(row.get("voice") or ""))
+        result = await asyncio.to_thread(
+            create_job_with_reservations, job,
+            instrumental_scope=charge_scope if instrumental_required else None)
+        if result.status != "reserved":
+            code = (result.reason if result.status == "refused" else
+                    "not_enough_credits" if result.status == "insufficient_balance" else result.status)
+            detail: Dict[str, Any] = {"code": code}
+            if code == "sing_all_already_running":
+                fresh_user = await asyncio.to_thread(
+                    lambda: db.collection("users").document(user_id).get().to_dict() or {})
+                active_job = await asyncio.to_thread(_running_sing_all_job, user_id, fresh_user)
+                if active_job:
+                    detail.update(activeJobId=active_job["jobId"],
+                                  activeSongId=active_job["sessionId"])
+            raise HTTPException(status_code=409, detail=detail)
+        await orchestrator._enqueue_sing_all_reconcile(job_id)
+        return sing_all_progress(job)
 
     @app.get("/sessions/{session_id}/synthesis-estimate")
     async def get_synthesis_estimate(
@@ -1514,6 +1675,9 @@ def create_app() -> FastAPI:
         orchestrator: Orchestrator = request.app.state.orchestrator
         user_id = await _get_user_id_or_401(request)
         await _get_session_or_404(sessions, session_id, user_id)
+        if (request.app.state.settings.session_store == "firestore"
+                and await asyncio.to_thread(active_job_for_song, user_id, session_id)):
+            raise HTTPException(status_code=409, detail={"code": "sing_all_already_running"})
         try:
             result = await orchestrator.update_solfege_settings(
                 session_id,
@@ -3098,7 +3262,8 @@ def _should_require_app_check(request: Request) -> bool:
     path = request.url.path
     if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
         return False
-    if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/")):
+    if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/",
+                        "/internal/sing-all/reconcile")):
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 

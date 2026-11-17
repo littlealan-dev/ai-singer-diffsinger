@@ -37,6 +37,7 @@ _RETRYABLE_STATUS = {408, 409, 425, 429}
 
 PREPROCESS_JOB_KIND = "preprocess"
 SYNTHESIS_JOB_KIND = "synthesis"
+SING_ALL_RECONCILE_KIND = "sing_all_reconcile"
 
 
 class JobDispatchError(RuntimeError):
@@ -65,6 +66,8 @@ class JobRoute:
     variant: str = "standard"
 
     def endpoint(self, job_id: str) -> str:
+        if self.kind == SING_ALL_RECONCILE_KIND:
+            return f"{self.worker_url}{self.endpoint_path}"
         return f"{self.worker_url}{self.endpoint_path}/{job_id}"
 
 
@@ -101,6 +104,22 @@ def job_route(settings: Settings, kind: str) -> JobRoute:
             endpoint_path="/internal/synthesis-jobs",
             token_header="X-Synthesis-Worker-Token",
             invoker_setting_name="SYNTHESIS_WORKER_INVOKER_SERVICE_ACCOUNT",
+        )
+    if kind == SING_ALL_RECONCILE_KIND:
+        return JobRoute(
+            kind=kind,
+            mode=settings.sing_all_reconcile_dispatch_mode,
+            worker_url=settings.sing_all_reconcile_url,
+            worker_enabled=True,
+            worker_token=settings.sing_all_reconcile_worker_token,
+            invoker_service_account=settings.sing_all_reconcile_invoker_service_account,
+            audience=settings.sing_all_reconcile_audience,
+            tasks_queue=settings.sing_all_reconcile_tasks_queue,
+            max_dispatch_attempts=3,
+            lease_seconds=90.0,
+            endpoint_path="/internal/sing-all/reconcile",
+            token_header="X-Sing-All-Reconcile-Token",
+            invoker_setting_name="SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT",
         )
     raise ValueError(f"Unknown job kind: {kind}")
 
@@ -177,7 +196,10 @@ class JobDispatcher:
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for attempt in range(1, attempts + 1):
                 try:
-                    response = await client.post(url, headers=headers, content=b"{}")
+                    if kind == SING_ALL_RECONCILE_KIND:
+                        response = await client.post(url, headers=headers, json={"jobId": job_id})
+                    else:
+                        response = await client.post(url, headers=headers, content=b"{}")
                 except httpx.HTTPError as exc:
                     logger.warning(
                         "%s_dispatch_http_error job_id=%s attempt=%s error=%s",
@@ -230,20 +252,22 @@ class JobDispatcher:
             raise JobDispatchError(
                 f"{self._route.invoker_setting_name} is required for Cloud Tasks."
             )
+        body = ({"jobId": job_id} if kind == SING_ALL_RECONCILE_KIND else {})
         task = {
-            "name": f"{queue}/tasks/{kind}-{job_id}",
             "dispatchDeadline": f"{DISPATCH_DEADLINE_SECONDS}s",
             "httpRequest": {
                 "httpMethod": "POST",
                 "url": self._route.endpoint(job_id),
                 "headers": {"Content-Type": "application/json"},
-                "body": base64.b64encode(b"{}").decode("ascii"),
+                "body": base64.b64encode(json.dumps(body).encode("utf-8")).decode("ascii"),
                 "oidcToken": {
                     "serviceAccountEmail": service_account,
                     "audience": self._route.audience,
                 },
             },
         }
+        if kind != SING_ALL_RECONCILE_KIND:
+            task["name"] = f"{queue}/tasks/{kind}-{job_id}"
         try:
             response = httpx.post(
                 f"{CLOUD_TASKS_API}/{queue}/tasks",

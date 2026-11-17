@@ -84,6 +84,28 @@ async def _first_option_call(request):
     return _first_answer(request)
 
 
+@pytest.mark.parametrize("layout,expected_targets", [("shared", 4), ("separate", 6)])
+def test_sing_all_layout_pin_fixes_only_the_open_staff(tmp_path, layout, expected_targets):
+    score = _two_chord_voices_with_silent_lanes(tmp_path)
+    context = _context(score)
+    ordinary, _, _ = asyncio.run(chooser.choose(score, context, call=_first_option_call))
+    assert any(slot.kind == "lane_layout" for slot in ordinary.slots)
+
+    sheet, choices, _ = asyncio.run(chooser.choose(
+        score, context, lane_layouts={"Solo|1": layout}, call=_first_option_call))
+    assert not any(slot.kind == "lane_layout" for slot in sheet.slots)
+    assert sheet.fixed["Solo|1|1-2|lane_layout"].option_id == layout
+    assert len(chooser.assemble_chosen(sheet, choices, score=score)["targets"]) == expected_targets
+
+
+def test_sing_all_layout_pin_rejects_non_open_staff_and_unknown_value(tmp_path):
+    score = _two_chord_voices_with_silent_lanes(tmp_path)
+    context = _context(score)
+    for pins in ({"Solo|2": "shared"}, {"Solo|1": "overlap"}):
+        with pytest.raises(chooser.ChooserError):
+            asyncio.run(chooser.choose(score, context, lane_layouts=pins, call=_first_option_call))
+
+
 def _scope(sheet, request):
     lanes = {lane.lane_id: lane for lane in sheet.lanes}
     return {(lanes[lane_id].part_index, lanes[lane_id].scope_key) for lane_id in request.lane_keys.values()}
