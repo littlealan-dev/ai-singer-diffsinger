@@ -1092,11 +1092,16 @@ class Orchestrator:
         A job already running in the session keeps running; the newer job
         becomes the session's current one.
         """
+        retry_existing = False
         if parent is not None:
             job_id = parent["childJobId"]
             existing = await asyncio.to_thread(self._job_store.get_job, job_id)
             if existing is not None:
-                return SynthesisChatResponse({"type": "chat_progress", "job_id": job_id}, None)
+                active_task = self._synthesis_tasks.get(job_id)
+                if (existing.get("status") != "queued"
+                        or (active_task is not None and not active_task.done())):
+                    return SynthesisChatResponse({"type": "chat_progress", "job_id": job_id}, None)
+                retry_existing = True
         elif job_id is None:
             job_id = uuid.uuid4().hex
         render_type = arguments.get("render_type")
@@ -1124,7 +1129,7 @@ class Orchestrator:
         )
         if parent is None:
             await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
-        else:
+        elif not retry_existing:
             await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
@@ -1170,6 +1175,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
         )
         self._synthesis_tasks[job_id] = task
@@ -1217,8 +1223,15 @@ class Orchestrator:
             if busy is not None:
                 return busy
         job_id = parent["childJobId"] if parent is not None else uuid.uuid4().hex
-        if parent is not None and await asyncio.to_thread(self._job_store.get_job, job_id):
-            return {"type": "chat_progress", "job_id": job_id}
+        retry_existing = False
+        if parent is not None:
+            existing = await asyncio.to_thread(self._job_store.get_job, job_id)
+            if existing is not None:
+                active_task = self._preprocess_tasks.get(session_id)
+                if (existing.get("status") != "queued"
+                        or (active_task is not None and not active_task.done())):
+                    return {"type": "chat_progress", "job_id": job_id}
+                retry_existing = True
         input_path, storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
@@ -1229,7 +1242,7 @@ class Orchestrator:
         )
         if parent is None:
             await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
-        else:
+        elif not retry_existing:
             await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,

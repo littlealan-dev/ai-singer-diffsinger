@@ -334,7 +334,7 @@ def decide(
                 continue
             child_id = item["childJobId"]
             child = children.get(child_id)
-            if child is None:
+            if child is None or child.get("status") == "queued":
                 now = score_state.get("now")
                 lease = item.get("startLeaseUntil")
                 if (item.get("status") == "running" and isinstance(now, datetime)
@@ -344,7 +344,7 @@ def decide(
                 if isinstance(now, datetime):
                     item["startLeaseUntil"] = now + timedelta(seconds=60)
                 return {"items": items}, [{"kind": "start_split", "itemId": item["itemId"]}]
-            if child.get("status") in {"queued", "running"}:
+            if child.get("status") == "running":
                 return {}, []
             if child.get("status") != "completed" or child.get("reviewRequired"):
                 return finish("failed", "split_failed")
@@ -398,7 +398,7 @@ def decide(
             if item["type"] != "take" or item.get("status") in {"done", "failed", "stopped"}:
                 continue
             child = children.get(item["childJobId"])
-            if child is None:
+            if child is None or child.get("status") == "queued":
                 now = score_state.get("now")
                 lease = item.get("startLeaseUntil")
                 if (item.get("status") == "running" and isinstance(now, datetime)
@@ -408,7 +408,7 @@ def decide(
                 if isinstance(now, datetime):
                     item["startLeaseUntil"] = now + timedelta(seconds=60)
                 return {"items": items}, [{"kind": "start_take", "itemId": item["itemId"]}]
-            if child.get("status") in {"queued", "running"}:
+            if child.get("status") == "running":
                 continue
             if child.get("status") == "completed":
                 item["status"] = "done"

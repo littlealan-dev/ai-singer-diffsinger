@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.backend import main, sing_all_store
+from src.backend.orchestrator import Orchestrator
 from src.backend.message_catalog import backend_message
 from src.backend.session import _new_history_entry
 
@@ -143,6 +144,72 @@ def test_child_worker_requires_running_parent_and_listed_child(monkeypatch):
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "another-child")
     parent["status"] = "failed"
     assert not sing_all_store.child_allowed("fake-parent", "take:a:lyrics", "fake-child")
+
+
+def test_existing_queued_children_are_redispatched_without_creating_them_again():
+    updates = []
+    dispatches = []
+
+    def no_create(**_kwargs):
+        raise AssertionError("A queued child already exists")
+
+    job_store = SimpleNamespace(
+        get_job=lambda _job_id: {"status": "queued"},
+        create_job=no_create,
+        update_job=lambda job_id, **fields: updates.append((job_id, fields)),
+    )
+
+    async def snapshot(*_args):
+        return {"score_summary": {}}
+
+    async def metadata(_args):
+        return {}
+
+    async def capture(*_args):
+        return "jobs/example/input.xml", None, {"scoreId": "example-score"}
+
+    async def dispatch_synthesis(_session_id, job_id, **_kwargs):
+        dispatches.append(("take", job_id))
+
+    async def dispatch_split(_session_id, job_id, _calls, **_kwargs):
+        dispatches.append(("split", job_id))
+        return {"job_id": job_id}
+
+    orchestrator = SimpleNamespace(
+        _job_store=job_store,
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _settings=SimpleNamespace(backend_use_storage=False),
+        _synthesis_dispatcher=SimpleNamespace(mode="http"),
+        _preprocess_dispatcher=SimpleNamespace(mode="http"),
+        _synthesis_tasks={}, _preprocess_tasks={},
+        _build_synthesis_voicebank_metadata=metadata,
+        _build_synthesis_audio_track_metadata=lambda *_args, **_kwargs: {},
+        _capture_job_input=capture,
+        _dispatch_synthesis_job=dispatch_synthesis,
+        _dispatch_preprocess_job=dispatch_split,
+    )
+
+    async def run():
+        await Orchestrator._start_synthesis_job(
+            orchestrator, "example-song", {}, {"part_id": "P1"},
+            user_id="example-user", parent={
+                "jobId": "example-parent", "itemId": "take:P1:lyrics",
+                "childJobId": "example-take"},
+        )
+        await Orchestrator._start_preprocess_job(
+            orchestrator, "example-song", {}, [], initial_message="Preparing lines",
+            initial_thought_summary="", user_id="example-user", user_email="",
+            parent={"jobId": "example-parent", "itemId": "split:P1",
+                    "childJobId": "example-split"},
+        )
+
+    asyncio.run(run())
+    assert dispatches == [("take", "example-take"), ("split", "example-split")]
+    assert [(job_id, fields["parentJobId"], fields["parentItemId"])
+            for job_id, fields in updates] == [
+                ("example-take", "example-parent", "take:P1:lyrics"),
+                ("example-split", "example-parent", "split:P1"),
+            ]
 
 
 def test_finish_updates_parent_guard_and_receipt_together(monkeypatch):

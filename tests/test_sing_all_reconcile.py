@@ -97,6 +97,9 @@ def test_split_start_lease_prevents_a_second_simultaneous_start():
     assert decide(job, {}, state) == ({}, [])
     expired = {**state, "now": now + timedelta(seconds=61)}
     assert decide(job, {}, expired)[1] == actions
+    queued = {"split-child": {"status": "queued"}}
+    assert decide(job, queued, state) == ({}, [])
+    assert decide(job, queued, expired)[1] == actions
 
 
 def test_ticked_undeclared_part_is_saved_as_vocal_not_midi():
@@ -170,6 +173,21 @@ def test_singing_starts_each_take_then_finishes_partial():
     fields, actions = decide(job, {}, _score(job))
     assert fields["status"] == "partial" and fields["stage"] == "done"
     assert [action["kind"] for action in actions] == ["clear_active", "append_end_history"]
+
+
+def test_queued_take_is_retried_after_its_start_lease():
+    job = _job("singing")
+    job["instrumentalsPrepared"] = True
+    job["items"][0]["status"] = "done"
+    job["items"][2]["status"] = "done"
+    now = datetime.now(timezone.utc)
+    state = {**_score(job), "now": now}
+    fields, actions = decide(job, {}, state)
+    job.update(fields)
+    queued = {"take-a": {"status": "queued"}}
+    assert decide(job, queued, state) == ({}, [])
+    expired = {**state, "now": now + timedelta(seconds=61)}
+    assert decide(job, queued, expired)[1] == actions
 
 
 def test_instrumentals_settle_after_any_take_and_refund_after_none():
