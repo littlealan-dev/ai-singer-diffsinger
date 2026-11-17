@@ -98,6 +98,98 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
     }
 
 
+def progress(
+    job: Mapping[str, Any], *, now: datetime | None = None,
+    split_estimate_seconds: int = 240, singing_start_seconds: int = 60,
+) -> dict[str, Any]:
+    """Present a parent record as the public Sing All progress and receipt."""
+    instant = now or datetime.now(timezone.utc)
+    created = job["createdAt"]
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    elapsed = max(0, int((instant - created).total_seconds()))
+    items = list(job.get("items") or [])
+    splits = [item for item in items if item.get("type") == "split"]
+    takes = [item for item in items if item.get("type") == "take"]
+    rows = [row for row in job.get("rows") or [] if row.get("include")]
+    names = {str(row.get("rowId")): str(row.get("name") or "") for row in rows}
+    source_names = {str(row.get("sourcePartId")): str(row.get("partName") or
+                    row.get("name") or "") for row in rows}
+    public_rows = [{
+        "rowId": str(row["rowId"]), "name": names[str(row["rowId"])],
+        "voice": str(row.get("voice") or ""),
+        "voiceName": str(row.get("voiceName") or row.get("voice") or ""),
+        "split": bool(row.get("split")),
+        "takes": [{"mode": item["mode"], "status": item.get("status", "queued"),
+                   "reason": item.get("reason")}
+                  for item in takes if item.get("rowId") == row["rowId"]],
+    } for row in rows]
+    charged = sum(int(item.get("creditsCharged") or 0) for item in items)
+    refunded = sum(max(0, int(item.get("creditsReserved") or 0)
+                       - int(item.get("creditsCharged") or 0))
+                   for item in items if item.get("status") in {"done", "failed", "stopped"})
+    total = int((job.get("quote") or {}).get("total") or 0)
+    ended = job.get("status") != "running"
+    receipt = []
+    if ended:
+        for item in items:
+            kind = item.get("type")
+            reserved = int(item.get("creditsReserved") or 0)
+            item_charged = int(item.get("creditsCharged") or 0)
+            receipt.append({
+                "itemId": item["itemId"], "type": kind,
+                "rowId": item.get("rowId") if kind == "take" else None,
+                "mode": item.get("mode") if kind == "take" else None,
+                "name": (names.get(str(item.get("rowId"))) if kind == "take" else
+                         source_names.get(str(item.get("sourcePartId"))) if kind == "split"
+                         else None),
+                "credits": item_charged if item_charged else reserved,
+                "outcome": "included" if reserved == 0 else
+                           "charged" if item_charged else "refunded",
+                "reason": item.get("reason"),
+            })
+    remaining = None
+    if not ended:
+        pending_splits = sum(item.get("status") != "done" for item in splits)
+        singing_seconds = max((float(item.get("estimatedSeconds") or 0)
+                               for item in takes if item.get("status") not in
+                               {"done", "failed", "stopped"}), default=0)
+        startup = singing_start_seconds if job.get("stage") in {
+            "reading", "splitting", "solfege"} else 0
+        remaining = int(pending_splits * split_estimate_seconds + startup + singing_seconds)
+    choices = job.get("choices") or {}
+    reason = job.get("endReason")
+    if reason == "instrumental_failed":
+        reason = "instrumentals_failed"
+    render = job.get("render") or {}
+    ended_at = job.get("endedAt")
+    return {
+        "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
+        "status": job["status"], "stage": job["stage"], "endReason": reason,
+        "cancelRequested": bool(job.get("cancelRequested")),
+        "choices": {key: choices[key] for key in
+                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "counts": {
+            "splits": {"done": sum(item.get("status") == "done" for item in splits),
+                       "total": len(splits)},
+            "takes": {"done": sum(item.get("status") == "done" for item in takes),
+                      "failed": sum(item.get("status") in {"failed", "stopped"}
+                                    for item in takes), "total": len(takes)},
+        },
+        "rows": public_rows,
+        "credits": {"reserved": max(0, total - charged - refunded),
+                    "charged": charged, "refunded": refunded},
+        "receipt": receipt, "notes": deepcopy(job.get("notes") or []),
+        "elapsedS": elapsed, "remainingS": remaining,
+        "render": {"state": render.get("state", "none"), "placeInLine": None},
+        "createdAt": created.isoformat(),
+        "endedAt": (ended_at.isoformat() if isinstance(ended_at, datetime)
+                    else ended_at),
+    }
+
+
 def available_balance_from_user(user: Mapping[str, Any]) -> int:
     """Read the same monthly plus top-up availability as UserCredits."""
     return _user_credits_from_data(dict(user)).available_balance
