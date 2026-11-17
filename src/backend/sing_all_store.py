@@ -140,6 +140,13 @@ def load(job_id: str) -> dict[str, Any] | None:
     return get_firestore_client().collection("singAllJobs").document(job_id).get().to_dict()
 
 
+def running_jobs() -> list[str]:
+    """List parent ids for the scheduler's lost-notification sweep."""
+    docs = (get_firestore_client().collection("singAllJobs")
+            .where("status", "==", "running").stream())
+    return [doc.id for doc in docs]
+
+
 def active_job_for_song(uid: str, session_id: str) -> dict[str, Any] | None:
     """Return this Song's running parent, ignoring a stale active pointer."""
     db = get_firestore_client()

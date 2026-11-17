@@ -75,7 +75,8 @@ from src.backend.sing_all_judgment import (
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
-    active_job_for_song, create_job_with_reservations, latest_judgment,
+    active_job_for_song, apply as apply_sing_all_job, create_job_with_reservations,
+    latest_judgment, running_jobs as running_sing_all_jobs,
     load as load_sing_all_job,
     read_judgment, read_quote, read_style,
     save_judgment, save_quote, save_style,
@@ -679,6 +680,15 @@ def create_app() -> FastAPI:
         await SingAllRunner(request.app.state.orchestrator).reconcile(payload.jobId)
         return JSONResponse(content={"status": "done"})
 
+    @app.post("/internal/sing-all/sweep")
+    async def sweep_sing_all(request: Request) -> JSONResponse:
+        """Pick up lost notifications and end children past the S4 time limits."""
+        await _require_worker_caller(request, job_route(settings, SING_ALL_RECONCILE_KIND))
+        runner = SingAllRunner(request.app.state.orchestrator)
+        for job_id in await asyncio.to_thread(running_sing_all_jobs):
+            await runner.reconcile(job_id, sweep=True)
+        return JSONResponse(content={"status": "done"})
+
     @app.post("/internal/synthesis-jobs/{job_id}")
     async def run_synthesis_job(job_id: str, request: Request) -> JSONResponse:
         """Run one dispatched synthesis job inside this request.
@@ -974,7 +984,7 @@ def create_app() -> FastAPI:
         replace_requested = (replace or "").strip().lower() == "true"
         work_running = bool(
             await asyncio.to_thread(job_store.list_active_jobs, user_id=user_id, session_id=session_id)
-        )
+        ) or bool(await asyncio.to_thread(active_job_for_song, user_id, session_id))
         if work_running and not replace_requested:
             return JSONResponse(
                 status_code=409,
@@ -1099,7 +1109,8 @@ def create_app() -> FastAPI:
                 stop = await _stop_song_work(
                     request, session_id=session_id, user_id=user_id, state=state
                 )
-                if any(job["result"] != "stopped" for job in stop["jobs"]):
+                if (any(job["result"] != "stopped" for job in stop["jobs"])
+                        or (stop["singAll"] or {}).get("result") == "too_late"):
                     logger.info(
                         "upload_replace_stop_too_late session_id=%s results=%s",
                         session_id,
@@ -1559,9 +1570,42 @@ def create_app() -> FastAPI:
         await sessions.set_metadata(session_id, "stopTurnId", latest_user_id)
 
         jobs = []
+        parent = await asyncio.to_thread(active_job_for_song, user_id, session_id)
+        sing_all = None
+        if parent:
+            parent_id = parent["jobId"]
+            for _ in range(8):
+                if parent.get("cancelRequested") or await asyncio.to_thread(
+                    apply_sing_all_job, parent_id, {"cancelRequested": True},
+                    expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
+                ):
+                    break
+                parent = await asyncio.to_thread(load_sing_all_job, parent_id)
+                if not parent or parent.get("status") != "running":
+                    break
+            else:
+                raise RuntimeError("Sing All parent changed throughout stop request.")
+            await SingAllRunner(request.app.state.orchestrator).reconcile(parent_id)
+            ended = await asyncio.to_thread(load_sing_all_job, parent_id) or parent
+            takes = [item for item in ended.get("items") or [] if item.get("type") == "take"]
+            too_late = ended.get("status") == "completed"
+            if ended.get("status") == "running" and takes:
+                remaining = [item for item in takes if item.get("status") not in
+                             {"done", "failed", "stopped"}]
+                children = await asyncio.gather(*(
+                    asyncio.to_thread(job_store.get_job, item["childJobId"])
+                    for item in remaining
+                ))
+                too_late = (bool(remaining)
+                            and all((child or {}).get("pastStopPoint") for child in children)
+                            and all(item.get("status") == "done" for item in takes
+                                    if item not in remaining))
+            sing_all = {"jobId": parent_id, "result": "too_late" if too_late else "stopping"}
         for job_id, job in await asyncio.to_thread(
             job_store.list_active_jobs, user_id=user_id, session_id=session_id
         ):
+            if job.get("parentJobId"):
+                continue
             kind = str(job.get("jobKind") or "")
             refunded = 0
             result = await asyncio.to_thread(job_store.stop_job, job_id)
@@ -1586,11 +1630,13 @@ def create_app() -> FastAPI:
                 {"jobId": job_id, "jobKind": kind, "result": result, "refundedCredits": refunded}
             )
         results = {job["result"] for job in jobs}
+        if sing_all:
+            results.add("stopped" if sing_all["result"] == "stopping" else "too_late")
         overall = next(
             (value for value in ("stopped", "too_late", "not_stoppable") if value in results),
             "nothing_running",
         )
-        return {"result": overall, "jobs": jobs}
+        return {"result": overall, "jobs": jobs, "singAll": sing_all}
 
     @app.post("/sessions/{session_id}/chat")
     async def chat(session_id: str, request: Request, payload: ChatRequest) -> Any:
@@ -3263,7 +3309,7 @@ def _should_require_app_check(request: Request) -> bool:
     if path in {"/auth/turnstile/verify", "/billing/webhook", "/healthz", "/readyz"}:
         return False
     if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/",
-                        "/internal/sing-all/reconcile")):
+                        "/internal/sing-all/reconcile", "/internal/sing-all/sweep")):
         return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 

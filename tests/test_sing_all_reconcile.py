@@ -224,3 +224,78 @@ def test_cancelled_job_winds_down_once():
     terminal = deepcopy(job)
     terminal.update(fields)
     assert decide(terminal, {}, _score(job)) == ({}, [])
+
+
+def test_stop_while_splitting_keeps_a_late_split_and_refunds_all_takes():
+    job = _job("splitting")
+    job["cancelRequested"] = True
+    job["items"][0]["status"] = "running"
+    fields, actions = decide(job, {"split-child": {"status": "running"}}, _score(job))
+    assert "status" not in fields
+    assert fields["items"][0]["status"] == "running"
+    assert {action["reservationId"] for action in actions if action["kind"] == "release"} == {
+        "take-a", "take-b"}
+    job.update(fields)
+    fields, actions = decide(job, {"split-child": {"status": "completed"}}, _score(job))
+    assert fields["status"] == "cancelled"
+    assert fields["items"][0]["status"] == "done"
+
+
+def test_stop_after_one_take_keeps_its_charge_and_refunds_the_rest():
+    job = _job("singing")
+    job["cancelRequested"] = True
+    job["items"][0]["status"] = "done"
+    job["items"][1].update(status="done", creditsCharged=2)
+    fields, actions = decide(job, {}, _score(job))
+    assert (fields["status"], fields["endReason"]) == ("cancelled", "stopped")
+    assert fields["items"][1]["creditsCharged"] == 2
+    assert fields["items"][2]["status"] == "stopped"
+    assert {action["reservationId"] for action in actions
+            if action["kind"] == "release"} == {"take-b"}
+
+
+def test_stop_waits_for_a_take_past_its_stop_point_then_completes():
+    job = _job("singing")
+    job["cancelRequested"] = True
+    job["items"][0]["status"] = "done"
+    job["items"][1].update(status="done", creditsCharged=2)
+    job["items"][2]["status"] = "running"
+    fields, actions = decide(job, {"take-b": {"status": "running"}}, _score(job))
+    assert fields == {} and actions == []
+    fields, actions = decide(job, {"take-b": {"status": "completed", "creditsCharged": 2}},
+                             _score(job))
+    assert fields["status"] == "completed" and fields["endReason"] is None
+    assert [item["creditsCharged"] for item in fields["items"] if item["type"] == "take"] == [2, 2]
+    assert not any(action["kind"] == "release" for action in actions)
+
+
+def test_sweep_expires_each_split_after_its_own_30_minutes():
+    job = _job("splitting")
+    now = datetime.now(timezone.utc)
+    job["items"][0].update(status="running", startedAt=now - timedelta(minutes=31))
+    fields, actions = decide(job, {"split-child": {"status": "running"}},
+                             {**_score(job), "now": now, "sweep": True})
+    assert fields["status"] == "failed" and fields["endReason"] == "stuck"
+    assert fields["items"][0]["reason"] == "stuck"
+    assert {action["reservationId"] for action in actions if action["kind"] == "release"} == {
+        "take-a", "take-b"}
+    assert any(action["kind"] == "fail_stuck_child" for action in actions)
+    job["items"][0]["startedAt"] = now - timedelta(minutes=29)
+    assert decide(job, {"split-child": {"status": "running"}},
+                  {**_score(job), "now": now, "sweep": True}) == ({}, [])
+
+
+def test_sweep_expires_stalled_takes_21_minutes_after_singing_starts():
+    job = _job("singing")
+    now = datetime.now(timezone.utc)
+    job["items"][0]["status"] = "done"
+    job["items"][1]["status"] = "running"
+    job["singingStartedAt"] = now - timedelta(minutes=21)
+    fields, actions = decide(job, {"take-a": {"status": "running"}},
+                             {**_score(job), "now": now, "sweep": True})
+    assert fields["status"] == "failed" and fields["endReason"] == "stuck"
+    assert {action["reservationId"] for action in actions if action["kind"] == "release"} == {
+        "take-a", "take-b"}
+    job["lastTakeAt"] = now - timedelta(minutes=19)
+    assert decide(job, {"take-a": {"status": "running"}},
+                  {**_score(job), "now": now, "sweep": True})[0].get("endReason") != "stuck"

@@ -154,6 +154,64 @@ def test_failed_split_releases_every_unsung_take_and_clears_guard(parent_environ
     assert len(history) == 2
 
 
+@pytest.mark.parametrize("stage,completed,late", [
+    ("reading", 0, False), ("splitting", 0, False), ("solfege", 0, False),
+    ("singing", 1, False), ("singing", 1, True),
+])
+def test_stop_winds_down_with_the_right_credit_balance(
+    parent_environment, stage, completed, late,
+):
+    db, uid, session_id, job_id = parent_environment
+    items = [{
+        "itemId": f"take:row-{index}:lyrics", "type": "take", "rowId": f"row-{index}",
+        "mode": "lyrics", "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index in range(2)]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": stage,
+        "revision": 0, "quote": {"total": 4, "scoreVersion": 1}, "items": items,
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    children = {}
+    for index in range(completed):
+        assert settle_credits(uid, items[index]["childJobId"], 59).status == "settled"
+        items[index].update(status="done", creditsCharged=2)
+    if late:
+        items[1]["status"] = "running"
+        children[items[1]["childJobId"]] = {"status": "running", "pastStopPoint": True}
+    assert sing_all_store.apply(job_id, {"items": items, "cancelRequested": True},
+                                expected_stage=stage, expected_revision=0)
+
+    async def snapshot(*_args):
+        return {"score_id": "example-score", "current_score": {"version": 1, "score": {}}}
+
+    job_store = SimpleNamespace(
+        get_job=lambda child_id: children.get(child_id),
+        stop_job=lambda child_id: "too_late" if children[child_id].get("pastStopPoint")
+        else children[child_id].update(status="cancelled") or "stopped",
+    )
+    runner = SingAllRunner(SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot), _job_store=job_store,
+    ))
+    asyncio.run(runner.reconcile(job_id))
+    if late:
+        assert sing_all_store.load(job_id)["status"] == "running"
+        assert get_or_create_credits(uid, "").reserved == 2
+        assert settle_credits(uid, items[1]["childJobId"], 59).status == "settled"
+        children[items[1]["childJobId"]] = {"status": "completed", "creditsCharged": 2}
+        asyncio.run(runner.reconcile(job_id))
+    ended = sing_all_store.load(job_id)
+    assert ended["status"] == ("completed" if late else "cancelled")
+    assert ended["stage"] == "done"
+    credits = get_or_create_credits(uid, "")
+    assert credits.reserved == 0
+    assert credits.available_balance == before - 2 * (2 if late else completed)
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
 def test_concurrent_reconcile_runs_four_stubbed_takes_once(parent_environment):
     db, uid, session_id, job_id = parent_environment
     rows = [{"rowId": f"P{index}", "partId": f"P{index}",

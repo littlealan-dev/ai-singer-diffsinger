@@ -1451,6 +1451,7 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
     assert response.status_code == 200
     assert response.json() == {
         "result": "stopped",
+        "singAll": None,
         "jobs": [
             {"jobId": "take", "jobKind": "synthesis", "result": "stopped", "refundedCredits": 7},
             {"jobId": "mix", "jobKind": "export_mix", "result": "too_late", "refundedCredits": 0},
@@ -1462,6 +1463,41 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
     assert snapshot["history"][-1]["role"] == "assistant"
     assert "7 credits" in snapshot["history"][-2]["content"]
     assert snapshot["history"][-1]["content"] == backend_message("job.stop_split_history")
+
+
+@pytest.mark.parametrize("too_late", [False, True])
+def test_stop_session_reports_parent_without_listing_its_child(client, monkeypatch, too_late):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    parent = {
+        "jobId": "made-up-parent", "status": "running", "stage": "singing",
+        "revision": 0, "items": [{"type": "take", "childJobId": "made-up-child",
+                                  "status": "running"}],
+    }
+    monkeypatch.setattr("src.backend.main.active_job_for_song", lambda *_: parent)
+    monkeypatch.setattr("src.backend.main.load_sing_all_job", lambda *_: parent)
+    def request_cancel(_job_id, fields, **_kwargs):
+        parent.update(fields)
+        return True
+    monkeypatch.setattr("src.backend.main.apply_sing_all_job", request_cancel)
+    async def reconcile(_self, _job_id):
+        if not too_late:
+            parent["status"] = "cancelled"
+    monkeypatch.setattr("src.backend.main.SingAllRunner.reconcile", reconcile)
+    monkeypatch.setattr(app.state.job_store, "list_active_jobs", lambda **_: [
+        ("made-up-child", {"jobKind": "synthesis", "parentJobId": "made-up-parent",
+                            "status": "running"}),
+    ])
+    monkeypatch.setattr(app.state.job_store, "get_job", lambda *_: {
+        "status": "running", "pastStopPoint": too_late,
+    })
+    response = test_client.post(f"/sessions/{session_id}/stop")
+    assert response.status_code == 200
+    assert response.json() == {
+        "result": "too_late" if too_late else "stopped", "jobs": [],
+        "singAll": {"jobId": "made-up-parent",
+                    "result": "too_late" if too_late else "stopping"},
+    }
 
 
 def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator, monkeypatch):
