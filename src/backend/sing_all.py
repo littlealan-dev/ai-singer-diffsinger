@@ -34,6 +34,53 @@ def supported_singing_languages(voicebanks: Sequence[Mapping[str, Any]]) -> list
     return sorted(supported)
 
 
+def singing_language_options(voicebanks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Expose labels from voicebank metadata for every supported language."""
+    labels: dict[str, str] = {}
+    for bank in voicebanks:
+        details = bank.get("language_details") or {}
+        if not isinstance(details, Mapping):
+            continue
+        for code in supported_singing_languages([bank]):
+            detail = details.get(code)
+            label = detail.get("label") if isinstance(detail, Mapping) else None
+            if isinstance(label, str) and label.strip():
+                labels.setdefault(code, label)
+    return [{"code": code, "label": labels.get(code)}
+            for code in supported_singing_languages(voicebanks)]
+
+
+def quote_notes(
+    facts: Mapping[str, Any], judgment: Mapping[str, Any],
+    summary: Mapping[str, Any], *, repeats_available: bool,
+) -> list[dict[str, Any]]:
+    """Present score warnings as the card's structured note values."""
+    part_names = {str(part.get("part_id")): str(part.get("part_name") or part.get("part_id"))
+                  for part in summary.get("parts") or [] if isinstance(part, Mapping)}
+    notes: list[dict[str, Any]] = []
+    for raw in facts.get("notes") or []:
+        if not isinstance(raw, str) or ":" not in raw:
+            continue
+        part_id, code = raw.rsplit(":", 1)
+        if code in {"cannot_split_without_lyrics", "cannot_split_evidence_too_large"}:
+            notes.append({"code": code, "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    sounds = judgment.get("sounds") or {}
+    missing_sound_parts: set[str] = set()
+    for item in facts.get("instruments") or []:
+        route = item.get("route") or {}
+        route_id = str(route.get("score_instrument_id") or "")
+        part_id = str(item.get("partId") or "")
+        if (part_id and route_id in sounds and sounds[route_id] is None
+                and part_id not in missing_sound_parts):
+            missing_sound_parts.add(part_id)
+            notes.append({"code": "no_sound_chosen", "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    if not repeats_available:
+        notes.append({"code": "repeats_written_order", "partId": None, "partName": None})
+    return notes
+
+
 def open_sing_all_result(
     arguments: Mapping[str, Any], *, voicebanks: Sequence[Mapping[str, Any]],
     active_job_id: str | None = None,

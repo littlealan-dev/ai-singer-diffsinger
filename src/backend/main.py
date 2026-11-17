@@ -66,7 +66,8 @@ from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
-    style_changes, summary_with_judged_instruments, supported_singing_languages,
+    quote_notes, singing_language_options, style_changes,
+    summary_with_judged_instruments, supported_singing_languages,
 )
 from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
@@ -1264,8 +1265,11 @@ def create_app() -> FastAPI:
         mode = "solfege" if solfege_only else str(choices.get("mode") or "lyrics")
         if mode not in {"lyrics", "solfege", "both"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
-        repeats = bool(choices.get("repeats", True))
-        verses = summary.get("available_verses") or []
+        repeats_available = summary.get("repeat_expansion_available") is not False
+        repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
+        verses = sorted({str(value) for value in summary.get("available_verses") or []},
+                        key=lambda value: (not value.isdecimal(),
+                                           int(value) if value.isdecimal() else value))
         verse = str(choices.get("verse") or (verses[0] if verses else "1"))
         settings: Settings = request.app.state.settings
         facts = quote_facts(
@@ -1319,7 +1323,7 @@ def create_app() -> FastAPI:
                 row["voicePicked"] = "recommended"
         mark_voice_ranges(rows, {bank["id"]: bank for bank in voicebanks})
         note = str(choices.get("styleNote") or "").strip()
-        style: dict[str, Any] = {"note": note, "controls": {}}
+        style: dict[str, Any] = {"note": note, "controls": {}, "changes": {}}
         style_blocked = False
         if note:
             banks_by_id = {bank["id"]: bank for bank in voicebanks}
@@ -1362,6 +1366,8 @@ def create_app() -> FastAPI:
                    else "nothing_to_sing" if not any(row["include"] for row in rows)
                    else "not_enough_credits" if total > balance
                    else "style_unavailable" if style_blocked else None)
+        notes = quote_notes(facts, judgment, summary,
+                            repeats_available=repeats_available)
         normalized_choices = {
             "rows": [{"rowId": row["rowId"], "include": row["include"],
                       "voice": row["voice"], "voicePicked": row["voicePicked"]}
@@ -1374,14 +1380,20 @@ def create_app() -> FastAPI:
             "scoreVersion": version, "choicesHash": choices_hash(normalized_choices, style),
             "choices": normalized_choices, "rows": rows, "items": items,
             "total": total, "judgment": judgment, "style": style,
+            "notes": notes,
         })
         return {
             "quoteId": quote_record["quoteId"], "rows": rows,
-            "options": {"languages": supported, "mode": mode, "verse": verse,
-                        "repeats": repeats, "solfegeOnly": solfege_only},
+            "voices": [{"id": bank["id"], "name": bank.get("name") or bank["id"]}
+                       for bank in voicebanks if bank["id"] in compatible_ids],
+            "options": {"language": language,
+                        "languages": singing_language_options(voicebanks),
+                        "mode": mode, "verse": verse, "verses": verses,
+                        "repeats": repeats, "repeatsAvailable": repeats_available,
+                        "solfegeOnly": solfege_only},
             "lines": quote_lines(items, duration_seconds=duration, balance=balance),
             "total": total, "balance": balance, "blocked": blocked,
-            "notes": facts.get("notes") or [], "style": style,
+            "notes": notes, "style": style,
             "choicesHash": quote_record["choicesHash"],
         }
 
