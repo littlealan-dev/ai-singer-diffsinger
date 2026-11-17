@@ -380,6 +380,14 @@ def decide(
     if stage == "singing":
         if not job.get("instrumentalsPrepared"):
             return {}, [{"kind": "prepare_instrumentals"}]
+        instrumental = next((item for item in items if item["type"] == "instrumental"), None)
+        if instrumental and any(item["type"] == "take" and item["status"] == "done"
+                                for item in items):
+            if instrumental["status"] == "queued":
+                instrumental["status"] = "running"
+                return {"items": items}, [{"kind": "settle_instrumental"}]
+            if instrumental["status"] == "running":
+                return {}, [{"kind": "settle_instrumental"}]
         for item in items:
             if item["type"] != "take" or item.get("status") in {"done", "failed", "stopped"}:
                 continue
@@ -403,16 +411,10 @@ def decide(
                 item["status"] = "stopped" if child.get("status") == "cancelled" else "failed"
                 item["reason"] = child.get("error") or "take_failed"
             return {"items": items}, []
-        instrumental = next((item for item in items if item["type"] == "instrumental"), None)
         if instrumental and instrumental["status"] == "queued":
-            if any(item["type"] == "take" and item["status"] == "done" for item in items):
-                instrumental["status"] = "running"
-                return {"items": items}, [{"kind": "settle_instrumental"}]
             if all(item["type"] != "take" or item["status"] in {"failed", "stopped"} for item in items):
                 instrumental["status"] = "failed"
                 return {"items": items}, [{"kind": "release", "reservationId": instrumental["reservationId"]}]
-        if instrumental and instrumental["status"] == "running":
-            return {}, [{"kind": "settle_instrumental"}]
         takes = [item for item in items if item["type"] == "take"]
         if all(item["status"] in {"done", "failed", "stopped"} for item in takes):
             done = sum(item["status"] == "done" for item in takes)
