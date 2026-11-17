@@ -748,6 +748,40 @@ def test_visible_singing_split_settles_only_its_undeclared_source(tmp_path: Path
     ] == "instrumental"
 
 
+def test_singing_split_source_stays_vocal_after_verse_reparse(tmp_path: Path) -> None:
+    source, summary = _undeclared_accompaniment(tmp_path)
+    answered, action = apply_llm_program_assignments(
+        summary,
+        [
+            {"score_instrument_id": "P2:default", "role": "not_instrumental",
+             "source": "llm_inferred"},
+            {"score_instrument_id": "P3:default", "role": "instrumental",
+             "playback_preset": fluidr3_preset(program=0), "source": "llm_inferred"},
+        ],
+    )
+    assert action is None
+    answered["parts"].append({"part_id": "P_DERIVED_TEST", "instruments": []})
+    settled = settle_split_sources(answered, {"line": {
+        "derived_lane": {"source": {"part_index": 1}},
+        "appended_part_ref": {"part_index": 3},
+    }})
+    reparsed = parse_score(source, verse_number="1")["score_summary"]
+    carried = carry_resolved_instrument_programs(settled, reparsed)
+    routes = _instruments_by_id(carried)
+    assert routes["P2:default"]["instrumental_role"] == "not_instrumental"
+    assert routes["P2:default"]["program_source"] == "split_for_singing"
+    assert "P2:default" not in carried["instrument_program_resolution"][
+        "unresolved_score_instrument_ids"]
+    assert "P2:default" not in carried["instrument_program_resolution"][
+        "instrumental_score_instrument_ids"]
+    assert routes["P3:default"]["instrumental_role"] == "instrumental"
+    assert apply_llm_program_assignments(
+        carried, [{"score_instrument_id": "P2:default",
+                   "playback_preset": fluidr3_preset(program=0),
+                   "source": "llm_inferred"}],
+    )[1] is not None
+
+
 HAPPY_BIRTHDAY_DEMO = Path(__file__).resolve().parents[1] / "ui" / "public" / "demo-scores" / "happy-birthday.xml"
 
 
