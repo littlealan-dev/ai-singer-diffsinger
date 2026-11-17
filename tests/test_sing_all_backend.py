@@ -1,6 +1,7 @@
 """Sing All parent creation uses the existing all-or-nothing credit transaction."""
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -168,10 +169,15 @@ def test_existing_queued_children_are_redispatched_without_creating_them_again()
     async def capture(*_args):
         return "jobs/example/input.xml", None, {"scoreId": "example-score"}
 
-    async def dispatch_synthesis(_session_id, job_id, **_kwargs):
+    # Each call must fit the real method, as it does in production.
+    async def dispatch_synthesis(session_id, job_id, **kwargs):
+        inspect.signature(Orchestrator._dispatch_synthesis_job).bind(
+            None, session_id, job_id, **kwargs)
         dispatches.append(("take", job_id))
 
-    async def dispatch_split(_session_id, job_id, _calls, **_kwargs):
+    async def dispatch_split(session_id, job_id, calls, **kwargs):
+        inspect.signature(Orchestrator._dispatch_preprocess_job).bind(
+            None, session_id, job_id, calls, **kwargs)
         dispatches.append(("split", job_id))
         return {"job_id": job_id}
 

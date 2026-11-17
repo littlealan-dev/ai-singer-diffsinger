@@ -1160,7 +1160,6 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
-                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
