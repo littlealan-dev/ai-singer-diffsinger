@@ -443,3 +443,107 @@ def test_both_modes_make_two_takes_and_two_player_tracks(parent_environment):
     credits = get_or_create_credits(uid, "")
     assert credits.reserved == 0
     assert credits.available_balance == before - 4
+
+
+def test_quoted_split_layout_makes_exact_rows_and_completes_takes(parent_environment):
+    _db, uid, session_id, job_id = parent_environment
+    rows = [{
+        "rowId": f"P1:staff1:V1:slot{slot}", "sourcePartId": "P1",
+        "partId": None, "name": f"Quoted line {slot}", "split": True,
+        "include": True, "voice": f"example-voice-{slot}",
+    } for slot in (1, 2)]
+    items = [{
+        "itemId": "split:P1", "type": "split", "sourcePartId": "P1",
+        "childJobId": f"{job_id}-split", "status": "queued", "creditsReserved": 0,
+    }] + [{
+        "itemId": f"take:{row['rowId']}:lyrics", "type": "take",
+        "rowId": row["rowId"], "mode": "lyrics",
+        "childJobId": f"{job_id}-take-{index}", "creditsReserved": 2,
+        "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index, row in enumerate(rows)]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "splitting",
+        "revision": 0, "quote": {"total": 4, "scoreVersion": 1},
+        "items": items, "rows": rows,
+        "choices": {"verse": 1, "language": "en", "repeats": False},
+        "judgment": {"layouts": {"P1|staff1": "separate"}},
+        "instrumentalsPrepared": True,
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    selection = {"number": "1", "name": "Made-up words"}
+    snapshot = {
+        "score_id": "example-score",
+        "current_score": {"version": 1, "score": {
+            "selected_verse_number": 1,
+            "selected_lyric_selection": selection,
+            "parts": [{"part_id": "P1"}],
+        }},
+        "score_summary": {"parts": [{"part_index": 0, "part_id": "P1"}]},
+    }
+    children = {}
+    split_requests = []
+    take_requests = []
+
+    async def get_snapshot(*_args):
+        return snapshot
+
+    async def start_split(_session_id, _score, _calls, **kwargs):
+        context = kwargs["planning_context"]
+        split_requests.append(context)
+        assert context["lane_layouts"] == {"P1|staff1": "separate"}
+        assert context["request"]["part_id"] == "P1"
+        child_id = kwargs["parent"]["childJobId"]
+        children[child_id] = {
+            "status": "completed", "reviewRequired": True, "actionRequired": None}
+        score = snapshot["current_score"]["score"]
+        score["parts"] = [{"part_id": "P1"}, {"part_id": "P2"}, {"part_id": "P3"}]
+        score["voice_part_transforms"] = {
+            f"made-up-{slot}": {
+                "source_part_index": 0, "source_voice_part_id": "V1",
+                "derived_lane": {"slot": slot},
+                "appended_part_ref": {"part_index": slot, "part_id": f"P{slot + 1}"},
+            } for slot in (1, 2)
+        }
+        snapshot["current_score"]["version"] = 2
+        snapshot["score_summary"]["parts"] = [
+            {"part_index": 0, "part_id": "P1"},
+        ] + [{
+            "part_index": slot, "part_id": f"P{slot + 1}",
+            "part_name": f"Made-up harmony {slot}", "lyric_selections": [selection],
+        } for slot in (1, 2)]
+        return {"job_id": child_id}
+
+    async def start_take(_session_id, _score, args, **kwargs):
+        child_id = kwargs["parent"]["childJobId"]
+        take_requests.append((args["part_id"], args["voicebank"]))
+        assert (await asyncio.to_thread(settle_credits, uid, child_id, 59)).status == "settled"
+        children[child_id] = {"status": "completed", "creditsCharged": 2}
+        return {"job_id": child_id}
+
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=get_snapshot),
+        _job_store=SimpleNamespace(get_job=lambda child_id: children.get(child_id)),
+        _build_preprocess_workflow_planning_context=lambda *_args, **_kwargs: {},
+        _start_preprocess_job=start_split,
+        _score_has_review_pending=lambda _score: False,
+        _normalize_synthesize_voice_color=lambda args: asyncio.sleep(0, result=args),
+        _start_synthesis_job=start_take,
+    )
+    runner = SingAllRunner(orchestrator)
+    asyncio.run(runner.reconcile(job_id))
+    asyncio.run(runner.reconcile(job_id))
+    finished = sing_all_store.load(job_id)
+    assert finished["status"] == "completed"
+    assert [row["partId"] for row in finished["rows"]] == ["P2", "P3"]
+    assert [row["name"] for row in finished["rows"]] == [
+        "Made-up harmony 1", "Made-up harmony 2"]
+    assert [row["voice"] for row in finished["rows"]] == [
+        "example-voice-1", "example-voice-2"]
+    assert take_requests == [("P2", "example-voice-1"), ("P3", "example-voice-2")]
+    assert len(split_requests) == 1
+    credits = get_or_create_credits(uid, "")
+    assert credits.reserved == 0
+    assert credits.available_balance == before - 4
