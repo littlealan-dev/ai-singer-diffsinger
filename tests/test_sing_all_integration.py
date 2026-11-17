@@ -249,3 +249,71 @@ def test_instrumentals_settle_on_first_success_or_refund_if_all_fail(
     assert credits.reserved == 0
     assert credits.available_balance == before - (3 if second_succeeds else 0)
     assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
+@pytest.mark.parametrize("split_status,reason", [
+    ("failed", "split_failed"),
+    ("completed", "quote_changed"),
+])
+def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
+    parent_environment, split_status, reason,
+):
+    db, uid, session_id, job_id = parent_environment
+    rows = [{
+        "rowId": f"P1:staff1:V1:slot{slot}", "sourcePartId": "P1",
+        "partId": None, "split": True, "voice": "example-voice",
+    } for slot in (1, 2)]
+    items = [{
+        "itemId": "split:P1", "type": "split", "sourcePartId": "P1",
+        "childJobId": f"{job_id}-split", "status": "running", "creditsReserved": 0,
+    }] + [{
+        "itemId": f"take:{row['rowId']}:lyrics", "type": "take",
+        "rowId": row["rowId"], "mode": "lyrics",
+        "childJobId": f"{job_id}-take-{index}", "creditsReserved": 2,
+        "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index, row in enumerate(rows)]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "splitting",
+        "revision": 0, "quote": {"total": 4, "scoreVersion": 1},
+        "items": items, "rows": rows, "choices": {"verse": 1},
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    snapshot = {
+        "score_id": "example-score",
+        "current_score": {"version": 2, "score": {
+            "parts": [{"part_id": "P1"}, {"part_id": "P2"}],
+            "voice_part_transforms": {"made-up-lane": {
+                "source_part_index": 0, "source_voice_part_id": "V1",
+                "derived_lane": {"slot": 1},
+                "appended_part_ref": {"part_index": 1, "part_id": "P2"},
+            }},
+        }},
+        "score_summary": {"parts": [
+            {"part_index": 0, "part_id": "P1"},
+            {"part_index": 1, "part_id": "P2", "part_name": "Made-up harmony"},
+        ]},
+    }
+
+    async def get_snapshot(*_args):
+        return snapshot
+
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=get_snapshot),
+        _job_store=SimpleNamespace(get_job=lambda child_id: {
+            "status": split_status, "reviewRequired": False,
+        } if child_id == f"{job_id}-split" else None),
+    )
+    runner = SingAllRunner(orchestrator)
+    asyncio.run(runner.reconcile(job_id))
+    asyncio.run(runner.reconcile(job_id))
+    finished = sing_all_store.load(job_id)
+    assert finished["status"] == "failed"
+    assert finished["endReason"] == reason
+    assert finished["stage"] == "done"
+    assert all(item["status"] == "failed" for item in finished["items"])
+    assert get_or_create_credits(uid, "").reserved == 0
+    assert get_or_create_credits(uid, "").available_balance == before
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
