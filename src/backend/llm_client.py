@@ -105,7 +105,15 @@ class RegressionLlmClient:
         role: LlmRole = LlmRole.DEFAULT,
         response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        del prompt_bundle, response_schema
+        del prompt_bundle
+        if role == LlmRole.SING_ALL_QUOTE:
+            # The quote and style calls send the exact reply schema; the first value it allows
+            # is valid, except that a part answered as a voice has no sound.
+            answer = self._schema_answer(response_schema or {})
+            for key, part_role in (answer.get("roles") or {}).items():
+                if part_role != "instrument" and key in (answer.get("sounds") or {}):
+                    answer["sounds"][key] = None
+            return json.dumps(answer)
         contents = [str(item.get("content") or "") for item in history]
         # Background preprocessing may append its assistant summary after a new
         # browser message. Drive this deterministic harness from the latest user
@@ -196,6 +204,9 @@ class RegressionLlmClient:
                 {"request": {"plan": {"targets": [chord_lane(0), chord_lane(1)]}}},
             )
 
+        if latest.strip() == "Sing All":
+            # The UI's Sing All button; the score is English, so open the card without asking.
+            return self._response("Here is the quote for singing every part.", "open_sing_all", {"language": "en"})
         if latest.startswith(TOOL_RESULT_PREFIX):
             return self._response("The requested operation completed.")
         if scenario is None:
@@ -305,6 +316,24 @@ class RegressionLlmClient:
         return self._response(
             "Preparing the selected line.", "start_preprocess_voice_part_workflow", {}
         )
+
+    @classmethod
+    def _schema_answer(cls, schema: Dict[str, Any]) -> Any:
+        """The first value each field of a Gemini-style reply schema allows."""
+        if schema.get("enum"):
+            return schema["enum"][0]
+        kind = str(schema.get("type") or "").upper()
+        if kind == "OBJECT":
+            return {key: cls._schema_answer(value)
+                    for key, value in (schema.get("properties") or {}).items()}
+        if kind == "ARRAY":
+            return []
+        if kind in {"NUMBER", "INTEGER"}:
+            value = max(0, schema.get("minimum", 0))
+            return min(value, schema["maximum"]) if "maximum" in schema else value
+        if schema.get("nullable"):
+            return None
+        return ""
 
     @staticmethod
     def _response(

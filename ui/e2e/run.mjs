@@ -8,6 +8,8 @@ const rootDir = path.resolve(uiDir, "..");
 const outputDir = path.join(rootDir, "tests", "output", "ui-regression");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const projectId = "demo-sightsinger-e2e";
+// E2E_UI_PORT moves the UI off 5173 when a dev server already uses it.
+const uiPort = process.env.E2E_UI_PORT || "5173";
 const children = [];
 
 function start(command, args, options = {}) {
@@ -83,7 +85,7 @@ try {
     BACKEND_AUDIO_FORMAT: "wav",
     BACKEND_DEFAULT_VOICEBANK:
       process.env.REGRESSION_VOICEBANK || "Qixuan_v2.7.0_DiffSinger_OpenUtau",
-    CORS_ALLOW_ORIGINS: "http://127.0.0.1:5173",
+    CORS_ALLOW_ORIGINS: `http://127.0.0.1:${uiPort}`,
     FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9099",
     FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
     FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9199",
@@ -161,11 +163,11 @@ try {
   await waitFor("http://127.0.0.1:8003/readyz", "synthesis worker");
   await waitFor("http://127.0.0.1:8000/readyz", "backend");
 
-  start("npm", ["run", "dev", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort"], {
+  start("npm", ["run", "dev", "--", "--host", "127.0.0.1", "--port", uiPort, "--strictPort"], {
     cwd: uiDir,
     env,
   });
-  await waitFor("http://127.0.0.1:5173/app", "UI");
+  await waitFor(`http://127.0.0.1:${uiPort}/app`, "UI");
 
   const test = start("npm", ["exec", "--", "playwright", "test", ...process.argv.slice(2)], {
     cwd: uiDir,

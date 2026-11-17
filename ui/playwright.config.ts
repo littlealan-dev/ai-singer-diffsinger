@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+// E2E_UI_PORT moves the UI off 5173 when a dev server already uses it.
+const uiPort = process.env.E2E_UI_PORT ?? "5173";
+
 export default defineConfig({
   testDir: "./e2e/specs",
   outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR ?? "../tests/output/ui-regression/artifacts/local",
@@ -18,7 +21,7 @@ export default defineConfig({
     ],
   ],
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: `http://127.0.0.1:${uiPort}`,
     launchOptions: {
       args: ["--autoplay-policy=user-gesture-required"],
     },
@@ -31,8 +34,8 @@ export default defineConfig({
   webServer: process.env.E2E_MANAGED_WEB_SERVER
     ? undefined
     : {
-        command: "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
-        url: "http://127.0.0.1:5173/app",
+        command: `npm run dev -- --host 127.0.0.1 --port ${uiPort} --strictPort`,
+        url: `http://127.0.0.1:${uiPort}/app`,
         reuseExistingServer: !process.env.CI,
         env: {
           VITE_APP_ENV: "dev",
