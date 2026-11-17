@@ -562,8 +562,13 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
         "name": f"Made-up line {index}", "split": False,
         "hasWords": True, "include": True, "voice": "example-voice",
     } for index in range(4)]
-    choices = {"language": "en", "verse": 1, "mode": "lyrics",
-               "repeats": False, "rows": []}
+    choices = {
+        "language": "en", "solfegeOnly": False, "mode": "lyrics",
+        "verse": "1", "repeats": False,
+        "rows": [{"rowId": row["rowId"], "include": True,
+                  "voice": row["voice"], "voicePicked": "recommended"}
+                 for row in rows],
+    }
     quote = sing_all_store.save_quote(db, {
         "uid": uid, "sessionId": session_id, "scoreId": "example-score",
         "scoreVersion": 1, "choices": choices,
@@ -577,7 +582,7 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
     snapshot = {
         "score_id": "example-score", "song": {"title": "Made-up song"},
         "current_score": {"version": 1, "score": {
-            "selected_verse_number": 1,
+            "selected_verse_number": "1",
             "selected_lyric_selection": selection,
             "parts": [{"part_id": row["partId"]} for row in rows],
         }},
@@ -656,6 +661,16 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
     endpoint = next(route.endpoint for route in main.app.routes
                     if getattr(route, "path", None) == "/sing-all/jobs")
     parent = asyncio.run(endpoint(main.SingAllJobRequest(quoteId=quote["quoteId"]), request))
+    assert parent["songId"] == session_id
+    assert parent["title"] == "Made-up song"
+    assert parent["status"] == "running" and parent["stage"] == "reading"
+    assert parent["choices"] == {key: choices[key] for key in
+                                 ("language", "solfegeOnly", "mode", "verse", "repeats")}
+    assert parent["counts"] == {"splits": {"done": 0, "total": 0},
+                                 "takes": {"done": 0, "failed": 0, "total": 4}}
+    assert len(parent["rows"]) == 4
+    assert parent["credits"] == {"reserved": 8, "charged": 0, "refunded": 0}
+    assert parent["receipt"] == []
     assert enqueued == [parent["jobId"]]
     assert get_or_create_credits(uid, "").reserved == 8
     asyncio.run(SingAllRunner(orchestrator).reconcile(parent["jobId"]))

@@ -89,12 +89,19 @@ def test_ended_progress_has_receipt_and_no_remaining_time(status):
     job["endReason"] = "instrumental_failed"
     job["endedAt"] = NOW
     result = progress(job, now=NOW + timedelta(seconds=5))
+    assert set(result) == {
+        "jobId", "songId", "title", "status", "stage", "endReason",
+        "cancelRequested", "choices", "counts", "rows", "credits", "receipt",
+        "notes", "elapsedS", "remainingS", "render", "createdAt", "endedAt",
+    }
     assert result["endReason"] == "instrumentals_failed"
     assert result["counts"] == {"splits": {"done": 1, "total": 1},
                                  "takes": {"done": 1, "failed": 1, "total": 2}}
     assert result["credits"] == {"reserved": 0, "charged": 2, "refunded": 4}
     assert result["elapsedS"] == 20
     assert result["remainingS"] is None
+    assert result["render"] == {"state": "none", "placeInLine": None}
+    assert result["createdAt"] == "2026-01-02T11:59:40+00:00"
     assert result["endedAt"] == NOW.isoformat()
     assert [(item["type"], item["name"], item["credits"], item["outcome"])
             for item in result["receipt"]] == [
