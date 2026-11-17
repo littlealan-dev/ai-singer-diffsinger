@@ -564,6 +564,9 @@ def _prepare_app(monkeypatch, overrides=None):
         "src.backend.main.verify_id_token_claims",
         lambda token: {"uid": "test-user", "email": "test@example.com"},
     )
+    # Ordinary API tests use an in-memory Song and have no active Sing All.
+    # Tests for the parent Stop/Replace path override this stub explicitly.
+    monkeypatch.setattr("src.backend.main.active_job_for_song", lambda *_: None)
     monkeypatch.setattr("src.backend.main._get_maintenance_config", lambda: {"enabled": False})
     monkeypatch.setattr(
         "src.backend.credits.get_or_create_credits",
