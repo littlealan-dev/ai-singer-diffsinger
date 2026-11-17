@@ -236,7 +236,7 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
            "partName": "Made-up lead", "name": "Made-up lead", "split": False,
            "hasWords": True, "include": True, "voice": "voice_a",
            "voicePicked": "recommended", "note": None}
-    choices = {"language": "en", "verse": "1", "mode": "lyrics",
+    choices = {"language": "en", "solfegeOnly": False, "verse": "1", "mode": "lyrics",
                "repeats": True, "rows": []}
     quote = {"quoteId": "quote-a", "uid": "owner", "sessionId": "song-a",
              "scoreId": "score-a", "scoreVersion": 2, "choices": choices,
@@ -264,7 +264,12 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
     monkeypatch.setattr(main, "_get_user_id_or_401", auth)
     monkeypatch.setattr(main, "_get_snapshot_or_404", owned)
     monkeypatch.setattr(main, "read_quote", lambda db, quote_id, uid: quote)
-    monkeypatch.setattr(main, "get_firestore_client", lambda: _Db({"billing": {"activePlanKey": "plus"}}))
+    user = {"billing": {"activePlanKey": "plus"}}
+    if reserve_reason == "sing_all_already_running":
+        user["activeSingAllJobId"] = "other-parent"
+    monkeypatch.setattr(main, "get_firestore_client", lambda: _Db({"users/owner": user}))
+    monkeypatch.setattr(main, "load_sing_all_job", lambda job_id: {
+        "jobId": job_id, "uid": "owner", "sessionId": "other-song", "status": "running"})
     monkeypatch.setattr(main, "quote_facts", lambda *args, **kwargs: {})
     monkeypatch.setattr(main, "input_hash", lambda *args, **kwargs: "facts-a")
     monkeypatch.setattr(main, "materialize_rows", lambda *args, **kwargs: [dict(row)])
@@ -289,8 +294,10 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
 def test_sing_it_reserves_then_starts_one_parent_without_model(monkeypatch):
     endpoint, request, events = _start_route(monkeypatch)
     result = asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
-    assert result["kind"] == "full"
-    assert result["items"][0]["childJobId"]
+    assert result["status"] == "running" and result["stage"] == "reading"
+    assert result["songId"] == "song-a" and result["title"] == "Made-up song"
+    assert result["rows"][0]["voiceName"] == "voice_a"
+    assert result["counts"]["takes"] == {"done": 0, "failed": 0, "total": 1}
     assert [event[0] for event in events] == ["reserve", "enqueue"]
 
 
@@ -315,5 +322,8 @@ def test_sing_it_refuses_without_enqueuing_when_reservation_fails(
     with pytest.raises(main.HTTPException) as caught:
         asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
     assert caught.value.status_code == 409
-    assert caught.value.detail == {"code": code}
+    expected = {"code": code}
+    if code == "sing_all_already_running":
+        expected.update(activeJobId="other-parent", activeSongId="other-song")
+    assert caught.value.detail == expected
     assert [event[0] for event in events] == ["reserve"]

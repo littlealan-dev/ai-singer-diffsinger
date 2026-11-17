@@ -89,9 +89,12 @@ def _row():
 def test_already_running_blocks_before_quote_or_model(monkeypatch):
     endpoint, request, _ = _route(
         monkeypatch, user={"activeSingAllJobId": "job-a"}, rows=[_row()])
+    monkeypatch.setattr(main, "load_sing_all_job", lambda job_id: {
+        "jobId": job_id, "uid": "owner", "sessionId": "another-song", "status": "running"})
     monkeypatch.setattr(main, "quote_facts", lambda *args, **kwargs: pytest.fail("facts read"))
     result = asyncio.run(endpoint(main.SingAllQuoteRequest(songId="song-a"), request))
-    assert result == {"blocked": "already_running", "activeJobId": "job-a"}
+    assert result == {"blocked": "already_running", "activeJobId": "job-a",
+                      "activeSongId": "another-song"}
 
 
 def test_unsupported_language_blocks_without_model(monkeypatch):

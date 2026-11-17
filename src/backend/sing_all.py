@@ -92,7 +92,8 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
         "quote": {"quoteId": quote["quoteId"], "total": quote["total"],
                   "choicesHash": quote["choicesHash"], "scoreVersion": quote["scoreVersion"]},
         "judgment": deepcopy(quote["judgment"]), "rows": rows, "items": items,
-        "cancelRequested": False, "endReason": None, "notes": [],
+        "cancelRequested": False, "endReason": None,
+        "notes": deepcopy(quote.get("notes") or []),
         "render": {"state": "none"}, "createdAt": now, "updatedAt": now,
         "lastProgressAt": now, "endedAt": None, "finalScoreVersion": None,
     }
