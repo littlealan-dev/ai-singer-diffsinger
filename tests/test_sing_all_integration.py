@@ -1,12 +1,15 @@
 """Sing All parent records, holds, guard and receipt use one Firestore transaction."""
 
+import asyncio
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
 from src.backend import sing_all_store
 from src.backend.credits import get_or_create_credits, release_credits, settle_credits
 from src.backend.firebase_app import get_firestore_client
+from src.backend.sing_all_runner import SingAllRunner
 
 
 @pytest.fixture
@@ -88,3 +91,70 @@ def test_failed_split_releases_every_unsung_take_and_clears_guard(parent_environ
     assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
     history = db.collection("sessions").document(session_id).get().to_dict()["history"]
     assert len(history) == 2
+
+
+def test_concurrent_reconcile_runs_four_stubbed_takes_once(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    rows = [{"rowId": f"P{index}", "partId": f"P{index}",
+             "sourcePartId": f"P{index}", "voice": "example-voice"}
+            for index in range(4)]
+    items = [{
+        "itemId": f"take:P{index}:lyrics", "type": "take", "rowId": f"P{index}",
+        "mode": "lyrics", "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index in range(4)]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "singing",
+        "revision": 0, "instrumentalsPrepared": True,
+        "quote": {"total": 8, "scoreVersion": 1}, "items": items, "rows": rows,
+        "choices": {"verse": 1, "language": "en", "repeats": False},
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    selection = {"number": "1", "name": "Made-up line"}
+    snapshot = {
+        "score_id": "example-score",
+        "current_score": {"version": 1, "score": {
+            "selected_verse_number": 1, "selected_lyric_selection": selection}},
+        "score_summary": {"parts": [
+            {"part_id": row["partId"], "lyric_selections": [selection]} for row in rows]},
+    }
+    children = {}
+    started = []
+
+    async def get_snapshot(*_args):
+        return snapshot
+
+    async def start_take(_session_id, _score, _args, **kwargs):
+        child_id = kwargs["parent"]["childJobId"]
+        started.append(child_id)
+        await asyncio.sleep(0)
+        result = await asyncio.to_thread(settle_credits, uid, child_id, 59)
+        assert result.status == "settled"
+        children[child_id] = {"status": "completed", "creditsCharged": 2}
+        return {"job_id": child_id}
+
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=get_snapshot),
+        _job_store=SimpleNamespace(get_job=lambda child_id: children.get(child_id)),
+        _normalize_synthesize_voice_color=lambda args: asyncio.sleep(0, result=args),
+        _start_synthesis_job=start_take,
+    )
+    runner = SingAllRunner(orchestrator)
+
+    async def run_twice():
+        await asyncio.gather(runner.reconcile(job_id), runner.reconcile(job_id))
+        await runner.reconcile(job_id)
+
+    asyncio.run(run_twice())
+    finished = sing_all_store.load(job_id)
+    assert finished["status"] == "completed"
+    assert finished["stage"] == "done"
+    assert [item["status"] for item in finished["items"]] == ["done"] * 4
+    assert len(started) == len(set(started)) == 4
+    credits = get_or_create_credits(uid, "")
+    assert credits.reserved == 0
+    assert credits.available_balance == before - 8
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
