@@ -169,6 +169,7 @@ def test_chat_message_and_export_mix_reach_handlers_during_sing_all(monkeypatch)
 
 def test_preprocess_workflow_handoff_refuses_active_song_before_verse_check(monkeypatch):
     calls = []
+    refusal = {"status": "action_required", "reason": "sing_all_already_running"}
 
     async def no_busy(*_args):
         return None
@@ -189,12 +190,17 @@ def test_preprocess_workflow_handoff_refuses_active_song_before_verse_check(monk
             final_message="Preparing the made-up alto.", include_score=False,
         ), None
 
+    async def followup(_snapshot, prompt, _score, **_kwargs):
+        calls.append(("followup", prompt))
+        return LlmResponse(tool_calls=[], final_message="Please wait for Sing All to finish.",
+                           include_score=False), None
+
     async def history(song, role, _message):
         calls.append(("history", song, role))
         return {"id": "made-up-turn"}
 
     async def snapshot(*_args):
-        return {"files": {}, "current_score": {"score": {"parts": []}},
+        return {"files": {}, "current_score": {"version": 1, "score": {"parts": []}},
                 "score_summary": {"parts": []}}
 
     async def start(song, *_args, **_kwargs):
@@ -211,12 +217,14 @@ def test_preprocess_workflow_handoff_refuses_active_song_before_verse_check(monk
     orchestrator = object.__new__(orchestrator_module.Orchestrator)
     orchestrator._logger = logging.getLogger(__name__)
     orchestrator._settings = SimpleNamespace(
-        session_store="firestore", llm_max_message_chars=1000)
+        session_store="firestore", llm_max_message_chars=1000,
+        preprocess_max_attempts=3)
     orchestrator._get_chat_lock = lambda _song: _async_lock()
     orchestrator._preprocess_busy_response = no_busy
     orchestrator._normalize_selected_voicebank_id = selected_voice
     orchestrator._get_current_credit_availability = credits
     orchestrator._decide_with_llm = decide
+    orchestrator._decide_followup_with_llm = followup
     orchestrator._check_chat_turn_stopped = no_stop
     orchestrator._append_chat_reply = reply
     orchestrator._should_include_score = lambda _message: False
@@ -224,14 +232,17 @@ def test_preprocess_workflow_handoff_refuses_active_song_before_verse_check(monk
     orchestrator._tool_calls_require_verse_selection = lambda *_args, **_kwargs: (
         calls.append(("verse_check",)) or False)
     orchestrator._build_preprocess_workflow_planning_context = lambda *_args, **_kwargs: {}
+    orchestrator._build_workflow_candidate = lambda **_kwargs: None
+    orchestrator._format_thought_summary_block = lambda *_args: None
     orchestrator._start_preprocess_job = start
     orchestrator._sessions = SimpleNamespace(
         append_history=history, get_snapshot=snapshot)
 
     refused = asyncio.run(orchestrator.handle_chat(
         "active-song", "Split the alto", user_id="made-up-owner", user_email=""))
-    assert refused["action_required"] == {
-        "status": "action_required", "reason": "sing_all_already_running"}
+    assert refused["action_required"] == refusal
+    assert refused["message"] == "Please wait for Sing All to finish."
+    assert ("followup", '{"reason": "sing_all_already_running", "status": "action_required"}') in calls
     assert not any(call[0] in {"verse_check", "start"} for call in calls)
 
     allowed = asyncio.run(orchestrator.handle_chat(
@@ -246,19 +257,28 @@ async def _async_lock():
 
 def test_followup_preprocess_handoff_refuses_active_song_before_verse_check(monkeypatch):
     calls = []
+    refusal = {"status": "action_required", "reason": "sing_all_already_running"}
     workflow_call = ToolCall(name="start_preprocess_voice_part_workflow",
                              arguments={"request": {"part_id": "Alto"}})
     snapshot = {"files": {}, "score_summary": {"parts": []},
                 "current_score": {"version": 1, "score": {"parts": []}}}
 
-    async def execute(*_args, **_kwargs):
+    async def execute(*args, **kwargs):
+        if args[2][0].name == "start_preprocess_voice_part_workflow":
+            return await orchestrator_module.Orchestrator._execute_tool_calls(
+                orchestrator, *args, **kwargs)
         return ToolExecutionResult(
             score=snapshot["current_score"]["score"],
             audio_response={"type": "chat_text", "message": ""},
             followup_prompt='{"status":"continue"}',
         )
 
-    async def followup(*_args, **_kwargs):
+    async def followup(_snapshot, prompt, _score, **_kwargs):
+        calls.append(("followup", prompt))
+        if len([call for call in calls if call[0] == "followup"]) > 1:
+            return LlmResponse(tool_calls=[],
+                               final_message="Please wait for Sing All to finish.",
+                               include_score=False), None
         return LlmResponse(tool_calls=[workflow_call],
                            final_message="Preparing the made-up alto.",
                            include_score=False), None
@@ -282,6 +302,9 @@ def test_followup_preprocess_handoff_refuses_active_song_before_verse_check(monk
     orchestrator._settings = SimpleNamespace(session_store="firestore", preprocess_max_attempts=3)
     orchestrator._sessions = SimpleNamespace(get_snapshot=get_snapshot, append_history=history)
     orchestrator._execute_tool_calls = execute
+    async def no_stop():
+        return None
+    orchestrator._check_chat_turn_stopped = no_stop
     orchestrator._decide_followup_with_llm = followup
     orchestrator._build_workflow_candidate = lambda **_kwargs: None
     orchestrator._merge_thought_summary = lambda message, *_args: message
@@ -301,10 +324,12 @@ def test_followup_preprocess_handoff_refuses_active_song_before_verse_check(monk
         ))
 
     refused = run("active-song")
-    assert refused["action_required"] == {
-        "status": "action_required", "reason": "sing_all_already_running"}
+    assert refused["action_required"] == refusal
+    assert refused["message"] == "Please wait for Sing All to finish."
+    assert ("followup", '{"reason": "sing_all_already_running", "status": "action_required"}') in calls
     assert not any(call[0] in {"verse_check", "start"} for call in calls)
 
+    calls.clear()
     allowed = run("other-song")
     assert allowed["type"] == "chat_progress"
     assert ("verse_check",) in calls and ("start", "other-song") in calls

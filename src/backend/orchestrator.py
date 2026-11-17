@@ -670,13 +670,8 @@ class Orchestrator:
                         response_message = followup_error
                     await self._append_chat_reply(session_id, response_message)
                     return {"type": "chat_text", "message": response_message}
-                if self._should_start_preprocess_workflow(llm_response.tool_calls):
-                    refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
-                    if refusal is not None:
-                        response_message = backend_message("upload.work_running")
-                        await self._append_chat_reply(session_id, response_message)
-                        return {"type": "chat_text", "message": response_message,
-                                "action_required": refusal}
+                if (self._should_start_preprocess_workflow(llm_response.tool_calls)
+                        and await self._sing_all_preprocess_handoff_refusal(user_id, session_id) is None):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
                         if isinstance(snapshot.get("files"), dict)
@@ -3721,10 +3716,9 @@ class Orchestrator:
                     )
                 refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
                 if refusal is not None:
-                    response_message = backend_message("upload.work_running")
-                    await self._sessions.append_history(session_id, "assistant", response_message)
-                    return {"type": "chat_text", "message": response_message,
-                            "action_required": refusal}
+                    pending_calls = list(followup_response.tool_calls)
+                    pending_thought_summary = followup_response.thought_summary or ""
+                    continue
                 latest_files = latest_snapshot.get("files")
                 handoff_explicit_verse_number = self._normalize_verse_number(
                     latest_files.get(EXPLICIT_VERSE_METADATA_KEY)
@@ -8762,6 +8756,15 @@ class Orchestrator:
                 summarize_payload(call.arguments),
             )
             if call.name == TOOL_START_PREPROCESS_WORKFLOW:
+                refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
+                if refusal is not None:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(refusal, sort_keys=True),
+                        action_required_payload=refusal,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
                 raise RuntimeError(
                     "Preprocess workflow handoff reached the generic executor without interception."
                 )
