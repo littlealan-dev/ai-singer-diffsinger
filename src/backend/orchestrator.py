@@ -671,6 +671,12 @@ class Orchestrator:
                     await self._append_chat_reply(session_id, response_message)
                     return {"type": "chat_text", "message": response_message}
                 if self._should_start_preprocess_workflow(llm_response.tool_calls):
+                    refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
+                    if refusal is not None:
+                        response_message = backend_message("upload.work_running")
+                        await self._append_chat_reply(session_id, response_message)
+                        return {"type": "chat_text", "message": response_message,
+                                "action_required": refusal}
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
                         if isinstance(snapshot.get("files"), dict)
@@ -3713,6 +3719,12 @@ class Orchestrator:
                     raise RuntimeError(
                         "Preprocess workflow handoff cannot start from inside a preprocess job."
                     )
+                refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
+                if refusal is not None:
+                    response_message = backend_message("upload.work_running")
+                    await self._sessions.append_history(session_id, "assistant", response_message)
+                    return {"type": "chat_text", "message": response_message,
+                            "action_required": refusal}
                 latest_files = latest_snapshot.get("files")
                 handoff_explicit_verse_number = self._normalize_verse_number(
                     latest_files.get(EXPLICIT_VERSE_METADATA_KEY)
@@ -5639,6 +5651,16 @@ class Orchestrator:
     def _should_start_preprocess_workflow(self, tool_calls: List[ToolCall]) -> bool:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
+
+    async def _sing_all_preprocess_handoff_refusal(
+        self, user_id: str, session_id: str,
+    ) -> Optional[Dict[str, str]]:
+        """Guard workflow handoffs before they bypass the generic tool executor."""
+        if self._settings.session_store != "firestore":
+            return None
+        if await asyncio.to_thread(active_job_for_song, user_id, session_id):
+            return {"status": "action_required", "reason": "sing_all_already_running"}
+        return None
 
     def _build_preprocess_workflow_planning_context(
         self,
