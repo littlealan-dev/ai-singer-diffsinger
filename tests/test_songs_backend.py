@@ -516,6 +516,36 @@ def test_replace_stops_a_running_split_and_uploads(client, monkeypatch):
     assert any(message["content"] == backend_message("job.stop_split_history") for message in messages)
 
 
+@pytest.mark.parametrize("too_late", [False, True])
+def test_replace_stops_a_sing_all_before_replacing_the_score(client, monkeypatch, too_late):
+    test_client, _app = client
+    session_id = _create_session(test_client)
+    first = _upload_score(test_client, session_id).json()["score_id"]
+    parent = {
+        "jobId": "made-up-parent", "status": "running", "stage": "singing",
+        "revision": 0, "items": [{"type": "take", "childJobId": "made-up-child",
+                                  "status": "running" if too_late else "queued"}],
+    }
+    monkeypatch.setattr("src.backend.main.active_job_for_song", lambda *_: parent)
+    monkeypatch.setattr("src.backend.main.load_sing_all_job", lambda *_: parent)
+    def request_cancel(_job_id, fields, **_kwargs):
+        parent.update(fields)
+        return True
+    monkeypatch.setattr("src.backend.main.apply_sing_all_job", request_cancel)
+    async def reconcile(_self, _job_id):
+        parent["status"] = "completed" if too_late else "cancelled"
+    monkeypatch.setattr("src.backend.main.SingAllRunner.reconcile", reconcile)
+
+    response = _replace_upload(test_client, session_id)
+    if too_late:
+        assert response.status_code == 409 and response.json()["code"] == "stop_too_late"
+        assert _app.state.sessions._sessions[session_id].score_id == first
+    else:
+        assert response.status_code == 200
+        assert response.json()["score_id"] != first
+        assert parent["cancelRequested"] is True
+
+
 @pytest.mark.parametrize("result,kind", [("too_late", "synthesis"), ("too_late", "preprocess")])
 def test_replace_too_late_or_during_a_split_keeps_the_score(client, monkeypatch, result, kind):
     test_client, app = client

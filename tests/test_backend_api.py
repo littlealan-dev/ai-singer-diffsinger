@@ -1500,6 +1500,23 @@ def test_stop_session_reports_parent_without_listing_its_child(client, monkeypat
     }
 
 
+def test_sing_all_sweep_route_reconciles_each_running_parent(client, monkeypatch):
+    test_client, _app = client
+    seen = []
+    async def accept_worker(_request, route):
+        seen.append(route.kind)
+    async def reconcile(_self, job_id, *, sweep=False):
+        seen.append((job_id, sweep))
+    monkeypatch.setattr("src.backend.main._require_worker_caller", accept_worker)
+    monkeypatch.setattr("src.backend.main.running_sing_all_jobs",
+                        lambda: ["made-up-parent-a", "made-up-parent-b"])
+    monkeypatch.setattr("src.backend.main.SingAllRunner.reconcile", reconcile)
+    response = test_client.post("/internal/sing-all/sweep")
+    assert response.status_code == 200 and response.json() == {"status": "done"}
+    assert seen == ["sing_all_reconcile", ("made-up-parent-a", True),
+                    ("made-up-parent-b", True)]
+
+
 def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator, monkeypatch):
     from google.cloud import firestore
     from src.backend.main import _release_stopped_reservation

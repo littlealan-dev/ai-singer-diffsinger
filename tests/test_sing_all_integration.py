@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -209,6 +210,132 @@ def test_stop_winds_down_with_the_right_credit_balance(
     credits = get_or_create_credits(uid, "")
     assert credits.reserved == 0
     assert credits.available_balance == before - 2 * (2 if late else completed)
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
+def test_sweep_recovers_a_lost_completion_notification(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    child_id = f"{job_id}-take-0"
+    item = {
+        "itemId": "take:P1:lyrics", "type": "take", "rowId": "P1", "mode": "lyrics",
+        "childJobId": child_id, "creditsReserved": 2, "creditsCharged": 0,
+        "estimatedSeconds": 59, "unitSeconds": 30, "status": "running",
+    }
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "singing",
+        "revision": 0, "instrumentalsPrepared": True,
+        "quote": {"total": 2, "scoreVersion": 1}, "items": [item],
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    assert settle_credits(uid, child_id, 59).status == "settled"
+
+    async def snapshot(*_args):
+        return {"score_id": "example-score", "current_score": {"version": 1, "score": {}}}
+
+    runner = SingAllRunner(SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _job_store=SimpleNamespace(get_job=lambda _id: {
+            "status": "completed", "creditsCharged": 2}),
+    ))
+    assert job_id in sing_all_store.running_jobs()
+    asyncio.run(runner.reconcile(job_id, sweep=True))
+    assert sing_all_store.load(job_id)["status"] == "completed"
+    assert get_or_create_credits(uid, "").available_balance == before - 2
+    assert get_or_create_credits(uid, "").reserved == 0
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
+@pytest.mark.parametrize("stage,minutes,charged", [
+    ("splitting", 31, 0), ("singing", 21, 2),
+])
+def test_sweep_fails_stuck_children_and_refunds_with_injected_time(
+    parent_environment, stage, minutes, charged,
+):
+    db, uid, session_id, job_id = parent_environment
+    now = datetime.now(timezone.utc)
+    items = [{
+        "itemId": f"take:row-{index}:lyrics", "type": "take", "rowId": f"row-{index}",
+        "mode": "lyrics", "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index in range(2)]
+    child_id = items[1]["childJobId"]
+    if stage == "splitting":
+        child_id = f"{job_id}-split"
+        items.insert(0, {
+            "itemId": "split:P1", "type": "split", "sourcePartId": "P1",
+            "childJobId": child_id, "creditsReserved": 0, "status": "running",
+            "startedAt": now - timedelta(minutes=minutes),
+        })
+    else:
+        items[0].update(status="done", creditsCharged=2)
+        items[1].update(status="running", startedAt=now - timedelta(minutes=minutes))
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": stage,
+        "revision": 0, "instrumentalsPrepared": True,
+        "quote": {"total": 4, "scoreVersion": 1}, "items": items,
+        **({"singingStartedAt": now - timedelta(minutes=minutes)}
+           if stage == "singing" else {}),
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    if charged:
+        assert settle_credits(uid, items[0]["childJobId"], 59).status == "settled"
+    child = {"status": "running"}
+    failed = []
+
+    async def snapshot(*_args):
+        return {"score_id": "example-score", "current_score": {"version": 1, "score": {}}}
+
+    def fail_child(identifier, **_kwargs):
+        failed.append(identifier)
+        child["status"] = "failed"
+        return True
+
+    runner = SingAllRunner(SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _job_store=SimpleNamespace(
+            get_job=lambda identifier: child if identifier == child_id else None,
+            fail_job_if_active=fail_child,
+        ),
+    ))
+    asyncio.run(runner.reconcile(job_id, sweep=True, now=now))
+    ended = sing_all_store.load(job_id)
+    assert failed == [child_id]
+    assert ended["status"] == ("partial" if charged else "failed")
+    assert ended["endReason"] == "stuck"
+    assert get_or_create_credits(uid, "").reserved == 0
+    assert get_or_create_credits(uid, "").available_balance == before - charged
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
+def test_stop_after_parent_has_ended_changes_no_credits(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    child_id = f"{job_id}-take-0"
+    item = {
+        "itemId": "take:P1:lyrics", "type": "take", "rowId": "P1", "mode": "lyrics",
+        "childJobId": child_id, "creditsReserved": 2, "creditsCharged": 0,
+        "estimatedSeconds": 59, "unitSeconds": 30, "status": "queued",
+    }
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "singing",
+        "revision": 0, "quote": {"total": 2, "scoreVersion": 1}, "items": [item],
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    assert settle_credits(uid, child_id, 59).status == "settled"
+    item.update(status="done", creditsCharged=2)
+    assert sing_all_store.finish(job_id, {"items": [item], "status": "completed", "stage": "done"},
+                                 expected_stage="singing", expected_revision=0)
+    runner = SingAllRunner(SimpleNamespace())
+    asyncio.run(runner.reconcile(job_id))
+    assert sing_all_store.load(job_id)["status"] == "completed"
+    assert get_or_create_credits(uid, "").available_balance == before - 2
+    assert get_or_create_credits(uid, "").reserved == 0
     assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
 
 

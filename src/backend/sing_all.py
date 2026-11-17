@@ -457,8 +457,6 @@ def decide(
         actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
 
-    if job.get("cancelRequested"):
-        return wind_down(job, children)
     if score_state.get("terminalFailure"):
         return finish("failed", str(score_state["terminalFailure"]))
 
@@ -499,6 +497,8 @@ def decide(
             actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
             return {"items": items, "status": "partial" if done else "failed",
                     "stage": "done", "endReason": "stuck"}, actions
+    if job.get("cancelRequested"):
+        return wind_down(job, children)
     if stage == "reading":
         if score_state.get("scoreId") != job.get("scoreId"):
             return finish("failed", "score_replaced")
