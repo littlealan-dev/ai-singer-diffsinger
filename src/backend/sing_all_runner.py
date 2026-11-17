@@ -330,7 +330,14 @@ class SingAllRunner:
                      if line.get("name") != GENERATED_LYRIC_NAME]
             matching = [line for line in lines
                         if str(line.get("number")) == str(job["choices"]["verse"])]
-            selection = (matching or sorted(lines, key=lambda line: str(line.get("number") or "")) or [None])[0]
+            def line_order(line: dict[str, Any]) -> tuple[int, int, str]:
+                number = str(line.get("number") or "")
+                try:
+                    return (0, int(number), number)
+                except ValueError:
+                    return (1, 0, number)
+
+            selection = (matching or sorted(lines, key=line_order) or [None])[0]
         if not isinstance(selection, dict):
             raise ValueError("The quoted lyric line is no longer present.")
         if (snapshot["current_score"]["score"].get("selected_lyric_selection") != selection):

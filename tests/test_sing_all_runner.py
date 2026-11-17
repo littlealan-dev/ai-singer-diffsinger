@@ -139,6 +139,38 @@ def test_solfege_tool_failure_marks_quoted_rows_skipped(monkeypatch, tmp_path):
                         "solfegeSelections": {}}]
 
 
+def test_lyrics_take_uses_lowest_numbered_line_when_verse_is_absent():
+    selected = []
+
+    async def normalize(args):
+        return args
+
+    async def start(_session_id, _score, args, **_kwargs):
+        selected.append(args["lyric_selection"])
+
+    async def reparse(*_args, **_kwargs):
+        raise AssertionError("The selected line is already loaded")
+
+    orchestrator = SimpleNamespace(
+        _normalize_synthesize_voice_color=normalize,
+        _start_synthesis_job=start,
+        _reparse_score=reparse,
+    )
+    job = _job([{"itemId": "take:row-a:lyrics", "type": "take", "mode": "lyrics",
+                 "rowId": "row-a", "childJobId": "take-a"}],
+               rows=[{"rowId": "row-a", "partId": "P1", "voice": "voice_a"}],
+               choices={"verse": "3", "language": "en", "repeats": False})
+    line_two = {"number": "2", "name": "Made-up second verse"}
+    line_ten = {"number": "10", "name": "Made-up tenth verse"}
+    snapshot = {
+        "score_summary": {"parts": [{"part_id": "P1", "lyric_selections": [line_ten, line_two]}]},
+        "current_score": {"score": {"selected_lyric_selection": line_two}},
+    }
+    runner = sing_all_runner.SingAllRunner(orchestrator)
+    asyncio.run(runner._start_take(job, {"itemId": "take:row-a:lyrics"}, snapshot))
+    assert selected == [line_two]
+
+
 async def _async_value(value):
     return value
 
