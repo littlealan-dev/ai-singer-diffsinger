@@ -3842,7 +3842,7 @@ class VoicePartPropagationStrategyTests(unittest.TestCase):
         self.assertEqual(result.get("score"), finalized_payload["score"])
         self.assertEqual(result.get("modified_musicxml_path"), "/tmp/derived.xml")
 
-    def test_validate_ready_with_warnings_coverage_threshold(self) -> None:
+    def test_note_the_score_prints_no_word_for_is_reported_not_missing(self) -> None:
         notes = []
         for idx in range(10):
             notes.append(
@@ -3881,14 +3881,20 @@ class VoicePartPropagationStrategyTests(unittest.TestCase):
             source_part_index=0,
             source_voice_part_id="soprano",
         )
-        self.assertEqual(result.get("status"), "ready_with_warnings")
-        self.assertEqual(result["validation"]["lyric_coverage_ratio"], 0.9)
+        # The soprano prints no word on its last note, so the alto's last note
+        # can't get one: it is reported, not counted as a copying miss.
+        self.assertEqual(result.get("status"), "ready")
+        self.assertEqual(result.get("warnings") or [], [])
+        self.assertEqual(result["validation"]["lyric_coverage_ratio"], 1.0)
+        self.assertEqual(result["validation"]["missing_lyric_sung_note_count"], 0)
+        self.assertEqual(result["validation"]["no_printed_words_note_count"], 1)
+        self.assertEqual(result["validation"]["no_printed_words_ranges"], [{"start": 3, "end": 3}])
         self.assertEqual(result["validation"]["lyric_exempt_note_count"], 0)
 
 
 class VoicePartRepairLoopTests(unittest.TestCase):
-    def _make_score(self, *, target_offset: float) -> dict:
-        return {
+    def _make_score(self, *, target_offset: float, tenor_word: bool = False) -> dict:
+        score = {
             "parts": [
                 {
                     "part_id": "P1",
@@ -3920,6 +3926,27 @@ class VoicePartRepairLoopTests(unittest.TestCase):
                 }
             ]
         }
+        if tenor_word:
+            score["parts"].append(
+                {
+                    "part_id": "P2",
+                    "part_name": "TENOR",
+                    "notes": [
+                        {
+                            "offset_beats": target_offset,
+                            "duration_beats": 1.0,
+                            "pitch_midi": 50.0,
+                            "lyric": "B",
+                            "syllabic": "single",
+                            "lyric_is_extended": False,
+                            "is_rest": False,
+                            "voice": "1",
+                            "measure_number": 1 if target_offset < 4 else 4,
+                        }
+                    ],
+                }
+            )
+        return score
 
     def test_repair_loop_retry_success(self) -> None:
         original = os.environ.get("VOICE_PART_REPAIR_LOOP_ENABLED")
@@ -3954,29 +3981,51 @@ class VoicePartRepairLoopTests(unittest.TestCase):
             else:
                 os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = original
 
+    def test_no_repair_where_the_score_prints_no_words(self) -> None:
+        original = os.environ.get("VOICE_PART_REPAIR_LOOP_ENABLED")
+        os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
+        try:
+            # Nothing in the score prints a word at beat 10, so no repair can add one.
+            score = self._make_score(target_offset=10.0)
+            result = preprocess_voice_parts(score, plan=self._alto_from_soprano_plan())
+            self.assertEqual(result.get("status"), "ready", result)
+            self.assertFalse((result.get("metadata", {}).get("repair_loop") or {}).get("attempted"))
+            self.assertEqual(
+                result["validation"]["no_printed_words_ranges"], [{"start": 4, "end": 4}]
+            )
+        finally:
+            if original is None:
+                os.environ.pop("VOICE_PART_REPAIR_LOOP_ENABLED", None)
+            else:
+                os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = original
+
+    def _alto_from_soprano_plan(self) -> dict:
+        return {
+            "targets": [
+                {
+                    "target": {"part_index": 0, "voice_part_id": "alto"},
+                    "actions": [
+                        {"type": "split_voice_part"},
+                        {
+                            "type": "propagate_lyrics",
+                            "strategy": "strict_onset",
+                            "source_priority": [
+                                {"part_index": 0, "voice_part_id": "soprano"}
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+
     def test_repair_loop_escalation_after_retries(self) -> None:
         original = os.environ.get("VOICE_PART_REPAIR_LOOP_ENABLED")
         os.environ["VOICE_PART_REPAIR_LOOP_ENABLED"] = "1"
         try:
-            score = self._make_score(target_offset=10.0)
-            plan = {
-                "targets": [
-                    {
-                        "target": {"part_index": 0, "voice_part_id": "alto"},
-                        "actions": [
-                            {"type": "split_voice_part"},
-                            {
-                                "type": "propagate_lyrics",
-                                "strategy": "strict_onset",
-                                "source_priority": [
-                                    {"part_index": 0, "voice_part_id": "soprano"}
-                                ],
-                            },
-                        ],
-                    }
-                ]
-            }
-            result = preprocess_voice_parts(score, plan=plan)
+            # The tenor prints a word at the alto's beat, but the plan copies from
+            # the soprano: a genuine copying miss that no repair here can fix.
+            score = self._make_score(target_offset=10.0, tenor_word=True)
+            result = preprocess_voice_parts(score, plan=self._alto_from_soprano_plan())
             self.assertEqual(result.get("status"), "action_required")
             self.assertEqual(result.get("action"), "validation_failed_needs_review")
             repair_loop = result.get("repair_loop", {})
@@ -4734,6 +4783,112 @@ class LyriclessComplexityTests(unittest.TestCase):
         result = synthesize_preflight_action_required(score, part_index=0)
         self.assertIsNotNone(result)
         self.assertEqual(result["reason"], "complex_score_missing_lyrics_without_derived_target")
+
+
+def _beat_note(start: float, end: float, lyric: str | None, *, measure: int = 1, **extra) -> dict:
+    return {
+        "offset_beats": start,
+        "duration_beats": end - start,
+        "pitch_midi": 60.0,
+        "lyric": lyric,
+        "is_rest": False,
+        "measure_number": measure,
+        **extra,
+    }
+
+
+class NoPrintedWordsTests(unittest.TestCase):
+    """A lane note the score prints no word for is reported, not a copying miss (SIG-188)."""
+
+    def test_printed_index_merges_spans_and_skips_unprinted_sources(self) -> None:
+        score = {
+            "parts": [
+                {"part_id": "Soprano", "part_name": "Soprano", "notes": [
+                    _beat_note(0, 1, "la"), _beat_note(1, 2, "+"), _beat_note(5, 6, "lo"),
+                    _beat_note(12, 13, "do", lyric_name=GENERATED_LYRIC_NAME),
+                ]},
+                {"part_id": "Alto", "part_name": "Alto", "notes": [
+                    _beat_note(0.5, 3, "li"), _beat_note(6, 8, None), _beat_note(8, 10, "lu"),
+                ]},
+                {"part_id": "P_DERIVED_ABC", "part_name": "Soprano - voice part 1 (Derived)",
+                 "notes": [_beat_note(20, 21, "copied")]},
+            ]
+        }
+        index = voice_parts_module._build_printed_lyric_index(score)
+
+        self.assertEqual(index, [(0, 3), (5, 6), (8, 10)])
+        cases = {1: True, 3.5: False, 5: True, 6: False, 6.5: False, -1: False, 12.5: False, 20.5: False}
+        for onset, printed in cases.items():
+            with self.subTest(onset=onset):
+                self.assertIs(voice_parts_module._printed_at(index, onset), printed)
+        self.assertFalse(voice_parts_module._printed_at([], 0.0))
+
+    def test_one_printed_word_in_six_notes_is_full_coverage(self) -> None:
+        # The score prints one word, on note 1; notes 2-6 have nothing printed over them.
+        source = [_beat_note(i, i + 1, "la" if i == 0 else None, measure=1 + i // 4) for i in range(6)]
+        lane = [dict(note) for note in source]
+        validation = voice_parts_module._validate_transformed_notes(
+            transformed_notes=lane,
+            source_notes=source,
+            printed_index=voice_parts_module._build_printed_lyric_index(
+                {"parts": [{"part_id": "S", "part_name": "S", "notes": source}]}
+            ),
+        )
+
+        self.assertEqual(validation["lyric_coverage_ratio"], 1.0)
+        self.assertEqual(validation["word_lyric_coverage_ratio"], 1.0)
+        self.assertEqual(validation["missing_lyric_sung_note_count"], 0)
+        self.assertEqual(validation["unresolved_measures"], [])
+        self.assertEqual(validation["no_printed_words_note_count"], 5)
+        self.assertEqual(validation["no_printed_words_ranges"], [{"start": 1, "end": 2}])
+
+    def test_merge_sums_unprinted_notes_and_unions_their_bars(self) -> None:
+        merged = voice_parts_module._merge_validation_payloads([
+            {"word_lyric_note_count": 3, "missing_lyric_sung_note_count": 1,
+             "no_printed_words_note_count": 2, "no_printed_words_ranges": [{"start": 1, "end": 1}]},
+            {"word_lyric_note_count": 2, "missing_lyric_sung_note_count": 0,
+             "no_printed_words_note_count": 3, "no_printed_words_ranges": [{"start": 2, "end": 3}]},
+        ])
+
+        self.assertEqual(merged["no_printed_words_note_count"], 5)
+        self.assertEqual(merged["no_printed_words_ranges"], [{"start": 1, "end": 3}])
+        # Unprinted notes stay out of the merged ratio: 5 words over 5 + 1 missing.
+        self.assertAlmostEqual(merged["lyric_coverage_ratio"], 5 / 6)
+
+    def test_printed_index_is_built_once_from_the_input_score(self) -> None:
+        notes = [
+            {"offset_beats": float(i), "duration_beats": 1.0, "pitch_midi": 64.0, "lyric": f"A{i}",
+             "syllabic": "single", "lyric_is_extended": False, "is_rest": False, "voice": "1",
+             "measure_number": 1}
+            for i in range(4)
+        ] + [
+            {"offset_beats": float(i), "duration_beats": 1.0, "pitch_midi": 55.0, "lyric": None,
+             "syllabic": None, "lyric_is_extended": False, "is_rest": False, "voice": "2",
+             "measure_number": 1}
+            for i in range(4)
+        ]
+        score = {"parts": [{"part_id": "P1", "part_name": "SOPRANO ALTO", "notes": notes}]}
+        plan = {"targets": [
+            {"target": {"part_index": 0, "voice_part_id": voice},
+             "actions": [{"type": "split_voice_part"},
+                         {"type": "propagate_lyrics", "strategy": "strict_onset",
+                          "source_priority": [{"part_index": 0, "voice_part_id": "soprano"}]}]}
+            for voice in ("soprano", "alto")
+        ]}
+        built_from = []
+        real = voice_parts_module._build_printed_lyric_index
+
+        def recording(score_arg):
+            built_from.append(deepcopy(score_arg["parts"]))
+            return real(score_arg)
+
+        with patch.object(voice_parts_module, "_build_printed_lyric_index", side_effect=recording):
+            preprocess_voice_parts(deepcopy(score), plan=plan)
+
+        # One index for both lanes, built before the first lane copied any lyrics.
+        self.assertEqual(len(built_from), 1)
+        self.assertEqual(built_from[0], score["parts"])
+
 
 if __name__ == "__main__":
     unittest.main()

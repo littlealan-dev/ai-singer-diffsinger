@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import os
 import re
 import json
@@ -546,6 +547,7 @@ def preprocess_voice_parts(
             verse_number=verse_number,
             copy_all_verses=copy_all_verses,
             section_overrides=section_overrides,
+            printed_index=_build_printed_lyric_index(score),
         )
     except MusicXmlAppendError as exc:
         return _musicxml_append_error(exc)
@@ -1069,6 +1071,7 @@ def _prepare_score_for_voice_part_legacy(
     copy_all_verses: bool = False,
     section_overrides: Optional[Sequence[Dict[str, Any]]] = None,
     derived_lane: Optional[Dict[str, Any]] = None,
+    printed_index: Sequence[Tuple[float, float]],
 ) -> Dict[str, Any]:
     parts = score.get("parts") or []
     if not parts:
@@ -1289,6 +1292,7 @@ def _prepare_score_for_voice_part_legacy(
     validation = _validate_transformed_notes(
         transformed_notes=propagated_notes,
         source_notes=source_notes,
+        printed_index=printed_index,
     )
     status = "ready"
     warnings: List[Dict[str, Any]] = []
@@ -1494,6 +1498,8 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
     pending_review_messages: List[str] = []
     pending_review_section_results: List[Dict[str, Any]] = []
     original_parts = deepcopy(original_score.get("parts") or [])
+    # Where the input score prints words, before any target writes copied lyrics.
+    printed_index = _build_printed_lyric_index(original_score)
     explicit_targets_by_part: Dict[int, set[str]] = {}
     for target_entry in targets:
         target_ref = target_entry.get("target") or {}
@@ -1513,7 +1519,9 @@ def _execute_preprocess_plan(score: Dict[str, Any], plan: Dict[str, Any]) -> Dic
         # Keep canonical source parts stable across targets so later targets can
         # still reference original lyric/melody sources from the same input score.
         target_input_score["parts"] = [deepcopy(part) for part in original_parts] + extra_parts
-        result = _execute_single_preprocess_target(target_input_score, target_entry)
+        result = _execute_single_preprocess_target(
+            target_input_score, target_entry, printed_index=printed_index
+        )
         target_outputs.append(_build_preprocess_target_output(result))
         if result.get("status") not in {"ready", "ready_with_warnings"}:
             if (
@@ -2975,12 +2983,15 @@ def _resolved_derived_lane(target_entry: Dict[str, Any]) -> Optional[Dict[str, A
 
 
 def _execute_single_preprocess_target(
-    score: Dict[str, Any], target_entry: Dict[str, Any]
+    score: Dict[str, Any],
+    target_entry: Dict[str, Any],
+    *,
+    printed_index: Sequence[Tuple[float, float]],
 ) -> Dict[str, Any]:
     target_ref = target_entry["target"]
     sections = target_entry.get("sections") or []
     if sections:
-        return _execute_timeline_sections(score, target_entry)
+        return _execute_timeline_sections(score, target_entry, printed_index=printed_index)
     actions = target_entry.get("actions") or []
     split_action = next((action for action in actions if action["type"] == "split_voice_part"), None)
     duplicate_actions = [
@@ -3043,6 +3054,7 @@ def _execute_single_preprocess_target(
         copy_all_verses=copy_all_verses,
         section_overrides=section_overrides,
         derived_lane=_resolved_derived_lane(target_entry),
+        printed_index=printed_index,
     )
     if (
         _feature_flag_enabled("VOICE_PART_REPAIR_LOOP_ENABLED")
@@ -3078,6 +3090,7 @@ def _execute_single_preprocess_target(
                 copy_all_verses=copy_all_verses,
                 section_overrides=section_overrides,
                 derived_lane=_resolved_derived_lane(target_entry),
+                printed_index=printed_index,
             )
             repair_attempts.append(
                 {
@@ -3210,7 +3223,11 @@ def _generate_same_part_voice_part_derivations(
 
 
 def _execute_timeline_sections(
-    score: Dict[str, Any], target_entry: Dict[str, Any], *, allow_repair: bool = True
+    score: Dict[str, Any],
+    target_entry: Dict[str, Any],
+    *,
+    allow_repair: bool = True,
+    printed_index: Sequence[Tuple[float, float]],
 ) -> Dict[str, Any]:
     target_ref = target_entry["target"]
     derived_lane = _resolved_derived_lane(target_entry)
@@ -3566,6 +3583,7 @@ def _execute_timeline_sections(
     validation = _validate_transformed_notes(
         transformed_notes=working_notes,
         source_notes=source_notes_for_validation,
+        printed_index=printed_index,
     )
     structural = validation.get("structural") or {}
     if structural.get("hard_fail"):
@@ -3602,7 +3620,9 @@ def _execute_timeline_sections(
                     section["split_selector"] = (
                         "upper" if "voice part 1" in vp_text or "soprano" in vp_text or "tenor" in vp_text else "lower"
                     )
-            retry = _execute_timeline_sections(score, patched_entry, allow_repair=False)
+            retry = _execute_timeline_sections(
+                score, patched_entry, allow_repair=False, printed_index=printed_index
+            )
             meta = retry.setdefault("metadata", {})
             meta["repair_loop"] = {
                 "attempted": True,
@@ -5170,23 +5190,72 @@ def _resolve_source_notes(
     )
 
 
+def _build_printed_lyric_index(score: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """Return the merged beat spans in which an original part sounds a printed word or hold.
+
+    Build it from the score before any lane is prepared: a lane that replaces its
+    own part writes copied lyrics back into the score, and those are not printed.
+    """
+    derived = _derived_part_indices(score)
+    spans: List[Tuple[float, float]] = []
+    for index, part in enumerate(score.get("parts") or []):
+        if not isinstance(part, dict) or index in derived or part.get("is_derived_part"):
+            continue
+        for note in part.get("notes") or []:
+            if (
+                _is_countable_sung_note(note)
+                and _has_lyric(note)
+                and not _is_generated_solfege_lyric(note)
+            ):
+                start = float(note.get("offset_beats") or 0.0)
+                spans.append((start, start + float(note.get("duration_beats") or 0.0)))
+    merged: List[Tuple[float, float]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _printed_at(index: Sequence[Tuple[float, float]], onset: float) -> bool:
+    """Return whether a printed word or hold is sounding at this beat (span ends are exclusive)."""
+    position = bisect.bisect_right(index, (onset, math.inf)) - 1
+    return position >= 0 and onset < index[position][1]
+
+
 def _validate_transformed_notes(
     *,
     transformed_notes: Sequence[Dict[str, Any]],
     source_notes: Sequence[Dict[str, Any]],
+    printed_index: Sequence[Tuple[float, float]],
 ) -> Dict[str, Any]:
     sung_notes = [note for note in transformed_notes if _is_countable_sung_note(note)]
     exempt_notes = [note for note in sung_notes if bool(note.get("lyric_exempt"))]
-    missing_notes = [note for note in sung_notes if not _has_lyric(note) and note not in exempt_notes]
+    # A lane note with no lyric is a copying miss only when the score prints a word
+    # or hold over it somewhere (or it continues a tie). Where nothing is printed it
+    # cannot get words, so it leaves both coverage ratios and is reported instead.
+    missing_notes: List[Dict[str, Any]] = []
+    unprinted_notes: List[Dict[str, Any]] = []
+    for note in sung_notes:
+        if _has_lyric(note) or note in exempt_notes:
+            continue
+        if note.get("tie_type") in {"stop", "continue"} or _printed_at(
+            printed_index, float(note.get("offset_beats") or 0.0)
+        ):
+            missing_notes.append(note)
+        else:
+            unprinted_notes.append(note)
     word_notes = [note for note in sung_notes if _lyric_kind(note) == "word" and note not in exempt_notes]
     extension_notes = [
         note for note in sung_notes if _lyric_kind(note) == "extension" and note not in exempt_notes
     ]
     effective_total = max(1, len(sung_notes) - len(exempt_notes))
+    covered_total = max(1, len(sung_notes) - len(exempt_notes) - len(unprinted_notes))
     lyric_coverage_ratio = round(
-        float(effective_total - len(missing_notes)) / float(effective_total), 4
+        float(covered_total - len(missing_notes)) / float(covered_total), 4
     )
-    word_lyric_coverage_ratio = round(float(len(word_notes)) / float(effective_total), 4)
+    word_lyric_coverage_ratio = round(float(len(word_notes)) / float(covered_total), 4)
     extension_lyric_ratio = round(float(len(extension_notes)) / float(effective_total), 4)
     source_offsets = {
         round(float(note.get("offset_beats") or 0.0), 6)
@@ -5215,6 +5284,13 @@ def _validate_transformed_notes(
             if int(note.get("measure_number") or 0) > 0
         }
     )
+    unprinted_measures = sorted(
+        {
+            int(note.get("measure_number") or 0)
+            for note in unprinted_notes
+            if int(note.get("measure_number") or 0) > 0
+        }
+    )
     structural = _validate_structural_singability(transformed_notes)
     return {
         "lyric_coverage_ratio": lyric_coverage_ratio,
@@ -5227,6 +5303,8 @@ def _validate_transformed_notes(
         "missing_lyric_sung_note_count": len(missing_notes),
         "lyric_exempt_note_count": len(exempt_notes),
         "unresolved_measures": unresolved_measures,
+        "no_printed_words_note_count": len(unprinted_notes),
+        "no_printed_words_ranges": _collapse_measure_ranges(unprinted_measures),
         "structural": structural,
     }
 
@@ -7489,6 +7567,8 @@ def _merge_validation_payloads(validations: Sequence[Dict[str, Any]]) -> Dict[st
     total_source_word = 0
     alignment_values: List[float] = []
     unresolved_measures: set[int] = set()
+    total_unprinted = 0
+    unprinted_measures: set[int] = set()
     structural_measures: set[int] = set()
     max_simultaneous = 0
     simultaneous_conflicts = 0
@@ -7507,6 +7587,11 @@ def _merge_validation_payloads(validations: Sequence[Dict[str, Any]]) -> Dict[st
             alignment_values.append(float(validation["source_alignment_ratio"]))
         for measure in validation.get("unresolved_measures") or []:
             unresolved_measures.add(int(measure))
+        total_unprinted += int(validation.get("no_printed_words_note_count") or 0)
+        for measure_range in validation.get("no_printed_words_ranges") or []:
+            unprinted_measures.update(
+                range(int(measure_range["start"]), int(measure_range["end"]) + 1)
+            )
         structural = validation.get("structural") or {}
         if isinstance(structural, dict):
             hard_fail = hard_fail or bool(structural.get("hard_fail"))
@@ -7538,6 +7623,8 @@ def _merge_validation_payloads(validations: Sequence[Dict[str, Any]]) -> Dict[st
         "missing_lyric_sung_note_count": total_missing,
         "lyric_exempt_note_count": total_exempt,
         "unresolved_measures": sorted(unresolved_measures),
+        "no_printed_words_note_count": total_unprinted,
+        "no_printed_words_ranges": _collapse_measure_ranges(sorted(unprinted_measures)),
         "structural": {
             "hard_fail": hard_fail,
             "max_simultaneous_notes": max_simultaneous,
