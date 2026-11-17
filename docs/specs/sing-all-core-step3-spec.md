@@ -35,7 +35,7 @@ Alan accepted rows 1 to 17 on 2026-11-15, and decided row 18 the same day. Rows 
 | 5 | The instrumental item is charged "once per job" | Once per score, as today: today's instrumentals rate (1 credit per started 2 minutes), held in its own reservation, charged when the first take succeeds and refunded if none does; nothing if this score's instrumentals were already paid for in chat (Alan, 2026-11-15) | Today's charge record is per score. Charging per job would charge a user twice for the same instrumentals. Riding on one take's reservation, as a chat take does, would refund it when that one take fails though others succeed |
 | 6 | Instruments with no usable sound are settled by the chat model | The quote call chooses the sound, by the chat prompt's rule, for each instrument the score gives no usable sound and for each part it judges an instrument. "Sing it" saves those sounds and roles into the score summary with the function the chat's `synthesize` uses, so the chat model isn't asked again. Every part that isn't sung is a MIDI track: only a vocal row the user unticks is left out. When the call can't choose a sound, or its sound fails the check twice, the track is still included with no instrument chosen: muted, and the player's instrument dropdown says "Choose an instrument" (Alan, 2026-11-15) | Sing All has no chat turn to ask in, and the same call adds no call. Saving the answers keeps chat and Sing All agreeing on what each part is. The user can always pick the instrument in the player |
 | 7 | `choices.styleNote`, and a default voice style | A style note under Customise. Customise's button is "Apply", which always folds back to the summary; a changed note is turned into each row's voice controls by one small style call then (rule S), and the summary shows them as changes from each voice's default, e.g. "gender −10 · airiness +10". Customise shows no values and makes no style call while the user types. With no note, and for a row the note doesn't concern, each take uses the voicebank's defaults and its default voice colour, not a colour chosen for the song as chat does (Alan, 2026-11-15) | The user sees what will be sung before paying, with no live updates and one call per Apply. A separate call keeps the voices and lines fixed while the note is edited |
-| 8 | The quote follows "the same consent rule as today" (`presentedTurnId`) | The card shows the quote and "Sing it" sends its id. The backend prices the request again and starts only if the parts and the total are the same; otherwise it returns the new quote | Today's rule is about chat turns: quote in one turn, confirm in the next. The card is not a chat turn |
+| 8 | The quote follows "the same consent rule as today" (`presentedTurnId`) | The card shows the quote and "Sing it" sends its id. The backend prices the request again and starts only if the parts and the total are the same; otherwise it answers `quote_changed`, and the card asks for a new quote with the same choices | Today's rule is about chat turns: quote in one turn, confirm in the next. The card is not a chat turn |
 | 9 | Reserve "per item" | One reservation per take, under the id its child job will have, and one for the instrumentals under `{jobId}-instrumentals`, all written in one transaction with the one-active guard. Split items are 0 credits, so they have no reservation until step 8 | Today a reservation belongs to one job id, and a take settles its own. Keying each take's reservation by its child's id lets every child settle and refund through today's functions, unchanged. The instrumentals have no child, so the reconciler settles theirs with one new function |
 | 10 | A failed or partial split, more parts than quoted, or solfège failing when only solfège was chosen: the job pauses (`needs_decision`) | In step 3 the job ends there. Nothing unsung is charged. Splits that worked stay in the Song, so the next quote doesn't split them again | Pausing, reviewing and re-quoting are step 6. Until then, ending with a refund is the safe side |
 | 11 | "Every Sing All job sings on the RTX batch job" | True in production. A setting chooses the transport: the render job, or today's per-take dispatch for local runs and tests | The render job can't run on a laptop. The takes, credits and reconciler are the same either way |
@@ -146,7 +146,7 @@ All need sign-in.
 
 | Method and path | Purpose | Task |
 |---|---|---|
-| `GET /sing-all/active` | Is Sing All on for me, and my running job's progress | S3 |
+| `GET /sing-all/active` | My running Sing All's progress, or none | S3 |
 | `POST /sing-all/quote` | Rows, voices, options and price for a Song and a set of choices. 503 `quote_unavailable` when the quote call fails | S1 |
 | `POST /sing-all/jobs` | "Sing it": start the job for a quote | S2 |
 | `GET /sing-all/jobs/{id}` | One job's progress and receipt, for its owner | S3 |
@@ -155,6 +155,171 @@ All need sign-in.
 | `POST /internal/sing-all/sweep` | Called by Cloud Scheduler every 5 minutes | S4 |
 
 `GET /sing-all/jobs` (the list) is left for step 5, with the job link.
+
+## API contract (fixed 2026-11-17)
+
+The page is built against these shapes. A field may be added later; none is renamed or removed without a spec change. Where a rule elsewhere in this spec says what an endpoint "returns", this section gives the exact shape.
+
+Every endpoint needs sign-in (401 otherwise). An error is an HTTP status with the body `{"detail": {"code": str, …extra fields}}`. The Sing All endpoints use camelCase; `GET /songs/{id}/workspace` keeps its existing snake_case and only gains the fields named below.
+
+### The chat reply that opens the card (S1 change 9, built)
+
+```text
+chat response   {type: "chat_text", message: str, singAll?: {language: str, solfegeOnly: bool}}
+                # singAll present: the page opens the card in this reply's bubble and asks for a quote with
+                # choices {language, solfegeOnly}. The card is not saved; after a reload it is gone until "Sing it".
+```
+
+### `POST /sing-all/quote`
+
+```text
+request   {songId: str,
+           choices?: {                                   # every field optional; absent = the quick-mode default
+             language?:    str,                          # default "en"; forced to "en" when solfegeOnly
+             solfegeOnly?: bool,                         # default false; forces mode "solfege"
+             mode?:        "lyrics" | "solfege" | "both",                 # default "lyrics"
+             verse?:       str,                          # default the lowest of options.verses, else "1"
+             repeats?:     bool,                         # default options.repeatsAvailable
+             rows?:        [{rowId: str, include: bool, voice: str, voicePicked: "recommended" | "user"}],
+                           # a row not listed keeps its default; a voice is kept only with voicePicked "user"
+             styleNote?:   str}}                         # sent only by "Apply"; "" or absent = no style
+
+200, a quote:
+{
+  quoteId:     str,
+  blocked:     null | "free_plan" | "nothing_to_sing" | "not_enough_credits" | "style_unavailable",
+  rows:        [Row],                                    # every row, ticked or not, top part first
+  voices:      [{id: str, name: str}],                   # the enabled voicebanks that sing options.language;
+                                                         # the only voices Customise offers
+  options:     {language: str,
+                languages: [{code: str, label: str | null}],   # every language an enabled voicebank sings;
+                                                               # label from language_details, else null
+                                                               # (the page names it with Intl.DisplayNames)
+                solfegeOnly: bool, mode: "lyrics" | "solfege" | "both",
+                verse: str, verses: [str],               # verses: the score's available verses, [] if none
+                repeats: bool, repeatsAvailable: bool},  # repeatsAvailable false: sung in written order
+  lines:       [Line],
+  total:       int, balance: int,                        # credits
+  notes:       [Note],
+  style:       {note: str,
+                controls: {rowId: {voiceColor: str | null, airiness: num, clarity: num, gender: num, intensity: num}},
+                changes:  {rowId: {voiceColor?: str, airiness?: num, clarity?: num, gender?: num, intensity?: num}}},
+                # controls and changes are {} with no note; changes holds only what differs from the
+                # row's voice defaults, as differences (airiness +10 → 10), voiceColor as the colour's name
+  choicesHash: str
+}
+
+200, no quote (no quoteId, nothing else):
+{blocked: "already_running", activeJobId: str, activeSongId: str}       # link to the running job's Song
+{blocked: "no_voice_for_language", language: str, supported: [str]}
+
+Row  = {rowId: str, sourcePartId: str, partName: str,     # partName: the source part's name
+        partId: str | null,                               # null for a line a split will make
+        name: str,                                        # the line's own name, e.g. "Soprano", "Tenor · voice 2"
+        split: bool, hasWords: bool,
+        note: null | "no_words" | "likely_instrument" | "undecided" | "voice_out_of_range",
+        include: bool, voice: str, voicePicked: "recommended" | "user",
+        pitchRange: {lowest_note: str, highest_note: str} | {}}
+Line = {kind: "singing", parts: int, takes: int, secondsEach: num, credits: int}
+     | {kind: "preparing", credits: 0}                    # only when a split is needed
+     | {kind: "instrumentals", credits: int}              # only when an instrumental item exists
+     | {kind: "total", credits: int}
+     | {kind: "balance", before: int, after: int}
+Note = {code: "cannot_split_without_lyrics" | "cannot_split_evidence_too_large"
+            | "no_sound_chosen" | "repeats_written_order",
+        partId: str | null, partName: str | null}         # null for a note about the whole score
+```
+
+| Error | When |
+|---|---|
+| 404 `song_not_found` | No such Song, or not the caller's |
+| 409 `score_unavailable` | The Song has no parsed score |
+| 422 `invalid_mode`, `invalid_rows` | A malformed choice |
+| 503 `quote_unavailable` | The quote call failed after its re-ask; the card offers "Try again" |
+
+### `POST /sing-all/jobs` ("Sing it")
+
+```text
+request   {quoteId: str}
+200       Progress                                       # the new job, status "running", stage "reading"
+```
+
+| Error (409) | When | The page |
+|---|---|---|
+| `quote_changed` | The quote is gone, expired, not the caller's, or no longer matches the Song | Asks for a new quote with the same choices and shows it: "The score changed, so here is the new quote." No new quote is sent in the error |
+| `sing_all_already_running`, with `activeJobId`, `activeSongId` | A Sing All is running | Links to that Song |
+| `not_enough_credits` | The balance changed since the quote | "Top up" |
+| `free_plan`, `nothing_to_sing`, `style_unavailable` | As in the quote | As in the quote |
+| any other code | Nothing was reserved or started | "Couldn't start. Try again." |
+
+### `GET /sing-all/active` and `GET /sing-all/jobs/{jobId}`
+
+```text
+GET /sing-all/active         200 {job: Progress | null}  # the caller's running Sing All, from any Song
+GET /sing-all/jobs/{jobId}   200 Progress                # any status; 404 job_not_found if missing or not the caller's
+
+Progress = {
+  jobId: str, songId: str, title: str,
+  status: "running" | "completed" | "partial" | "failed" | "cancelled",
+  stage:  "reading" | "splitting" | "solfege" | "singing" | "done",
+  endReason: null | "score_replaced" | "quote_changed" | "split_failed" | "solfege_failed"
+           | "nothing_to_sing" | "instrumentals_failed" | "stopped" | "stuck",
+           # S3 maps the reconciler's own reasons onto these; the page treats any other value as a plain failure
+  cancelRequested: bool,
+  choices: {language: str, solfegeOnly: bool, mode: "lyrics" | "solfege" | "both", verse: str, repeats: bool},
+  counts:  {splits: {done: int, total: int}, takes: {done: int, failed: int, total: int}},
+           # done: made; failed: failed or stopped; total: every take item
+  rows:    [{rowId: str, name: str, voice: str, voiceName: str, split: bool,
+             takes: [{mode: "lyrics" | "solfege",
+                      status: "queued" | "running" | "done" | "failed" | "stopped",
+                      reason: str | null}]}],            # ticked rows only, in quote order
+  credits: {reserved: int, charged: int, refunded: int}, # reserved: still held; the three add up to the quote total
+  receipt: [{itemId: str, type: "take" | "split" | "instrumental",
+             rowId: str | null, mode: "lyrics" | "solfege" | null, name: str | null,
+             credits: int, outcome: "charged" | "refunded" | "included", reason: str | null}],
+           # [] while running; every item once the job has ended ("included": a 0-credit split)
+  notes:   [Note],                                       # as in the quote
+  elapsedS: int, remainingS: int | null,                 # remainingS rough; null once ended
+  render:  {state: "none" | "waiting" | "running" | "ended", placeInLine: int | null},
+           # placeInLine: 1 = next to start; null unless waiting (filled by S5)
+  createdAt: str, endedAt: str | null                    # ISO 8601
+}
+```
+
+The page polls `GET /sing-all/active` while a job runs. When it answers `{job: null}` for a job the page was showing, the page reads `GET /sing-all/jobs/{jobId}` once for the ended card.
+
+### `POST /sessions/{id}/stop` (S4 adds `singAll`)
+
+```text
+200 {result: "stopped" | "too_late" | "not_stoppable" | "nothing_running",
+     jobs:   [{jobId, jobKind, result, refundedCredits}],   # chat jobs only; Sing All children are never listed
+     singAll: null | {jobId: str, result: "stopping" | "too_late"}}
+     # stopping: cancelRequested is set; finished takes are kept and charged, the rest refunded
+     # too_late: every remaining take is past its stop point; the job completes
+     # result counts singAll "stopping" as "stopped" and "too_late" as "too_late"
+```
+
+Replace on a Song with a running Sing All stops it the same way first; if `singAll.result` is `too_late`, the upload answers today's 409 `stop_too_late` and the score is not replaced.
+
+### `GET /songs/{id}/workspace` (fields added)
+
+```text
+messages[i].singAllJobId?: str     # on the "Sing All started" and "Sing All finished" entries;
+                                   # the page shows the card once, at the first entry with that id
+player.vocals[i].mode: "lyrics" | "solfege"         # a track saved before step 3 reads "lyrics"
+jobs: Sing All children (jobs with parentJobId) are left out; the card shows them
+```
+
+### Who builds what
+
+| Part | Task |
+|---|---|
+| The chat reply, the quote's request, rows, lines, total, balance, blocked, style.controls | S1 (merged) |
+| The quote's `voices`, `options.language`, `options.languages` labels, `options.verses`, `options.repeatsAvailable` (and the `repeats` default), structured `notes` with `no_sound_chosen` and `repeats_written_order`, `style.changes` always present, `activeSongId` | S3 backend |
+| "Sing it" answering `Progress`; `activeSongId` on `sing_all_already_running` | S3 backend (S2 answers the job record until then) |
+| `GET /sing-all/active`, `GET /sing-all/jobs/{jobId}`, `Progress`, the workspace fields | S3 backend |
+| The stop response's `singAll`, children left out of `jobs`, Replace | S4 |
+| `render.placeInLine` | S5 (S3 answers `null`) |
 
 
 ---
@@ -252,7 +417,7 @@ def quote(song, choices):
         (and, before any of these, "no_voice_for_language" above)
         "style_unavailable"   a note was sent and the style call failed
     save sing_all_quotes/{quoteId}, with the style  (expires like a take quote)
-    return rows, options, lines, total, balance, blocked, notes, style
+    return rows, voices, options, lines, total, balance, blocked, notes, style      # the API contract's shape
 ```
 
 **Quick-mode defaults** (from `sing-all-quick-mode-proposal.md` §2): every row ticked, except the rows of a part the call judged an instrument or couldn't judge (`likely_instrument`, `undecided`); mode lyrics; verse 1, or the lowest verse the score has; with repeats, or written order when the score's repeats can't be followed; the recommended voice for each row.
@@ -766,7 +931,7 @@ quote = sing_all_quotes[quoteId]                 # must be the caller's and not 
 if input_hash(the Song now) != quote.judgment.inputHash:
     return 409 quote_changed                     # the score or the voices changed: the page asks for a new quote
 fresh = rows and items from the score now, quote.choices and quote.judgment
-if fresh rows, items or total differ from quote: return 409 quote_changed + fresh       # difference 8
+if fresh rows, items or total differ from quote: return 409 quote_changed     # difference 8; the page asks again
 if fresh.blocked:                                return 409 + the reason
 job = new parent, carrying quote.judgment; every split and take item gets its childJobId now
 
@@ -780,7 +945,7 @@ in ONE transaction:                              # difference 9
     set users.activeSingAllJobId
 add the history entry {role assistant, singAllJobId, content "Sing All started: …"}
 enqueue reconcile(jobId)
-return the job's progress
+return progress(job)                             # the API contract's Progress (S3)
 ```
 
 Every side effect after this is safe to repeat, because each child's id is fixed at "Sing it": creating a child that exists does nothing, dispatching it twice is one task, and releasing a reservation twice is a no-op.
@@ -1024,18 +1189,7 @@ job = singAllJobs[users.activeSingAllJobId] if set and not ended
 return {"job": progress(job) or None}
 ```
 
-`progress(job)`, also returned by `GET /sing-all/jobs/{id}`:
-
-```text
-jobId, songId, title, status, stage, endReason, notes[]
-counts      {splits: {done, total}, takes: {done, total}}
-rows[]      {rowId, name, voiceName, split, takes: [{mode, status}]}
-credits     {reserved, charged, refunded}
-receipt[]   {label, credits, outcome charged | refunded, reason}      # once the job has ended
-elapsedS, remainingS                                                   # remainingS is rough
-render      {state, placeInLine}                                       # S5
-cancelRequested
-```
+`progress(job)` is the API contract's `Progress`, returned by `GET /sing-all/active`, `GET /sing-all/jobs/{id}` and "Sing it".
 
 `remainingS` is rough: about 4 minutes for each split still to run, plus 1 minute to start singing and the sung length once. The constants are settings.
 
@@ -1049,7 +1203,7 @@ cancelRequested
 | Card, the quote couldn't be made | "The quote couldn't be made." with "Try again", which asks for the quote again. No "Sing it" |
 | Card, before "Sing it" | The summary line, the voices, the style lines when a note is applied, the quote lines, "▸ Customise" and "Sing it · N cr": the "Sing All (3)" layout, with real data. "Sing it" is shown only here, never while Customise is open |
 | Customise | Language (the dropdown above), Parts and voices (tick, voice), Sing in (Lyrics, Solfège, Both), Verse, Repeats. Every change asks for a new quote, which reuses the saved answer and makes no new call, and doesn't send the note. Style notes: a 2-line text box. In place of "Sing it", the button is "Apply": it sends the note with the choices, and always folds back to the summary, which shows the style's values. "Reset" returns to the defaults and clears the note. Mixes are not shown in step 3 |
-| "Sing it" answers `quote_changed` | The card shows the new quote it was sent, or asks for one, with one line: "The score changed, so here is the new quote." Nothing has started |
+| "Sing it" answers `quote_changed` | The card asks for a new quote with the same choices and shows it, with one line: "The score changed, so here is the new quote." Nothing has started |
 | Card, running | The stage list with counts ("Splitting the vocal parts (1 of 2)", "Singing (3 of 8)"), each row's ticks, elapsed time, the rough time left, "You can close this page. Your song will be here when you come back.", and Stop |
 | Card, ended | Completed, partial, failed or cancelled; which parts were sung; the receipt |
 | Header pill | "Sing All · Singing 3/8", from any Song, linking to the job's Song |
@@ -1065,7 +1219,8 @@ In the job's Song the chat input stays usable. Send works; the starter buttons f
 #### 1. Endpoints, `src/backend/main.py`, `src/backend/sing_all.py`
 
 - `GET /sing-all/active`, `GET /sing-all/jobs/{id}` (owner only, else 404), `progress(job)`.
-- `GET /songs/{id}/workspace` returns each history entry's `singAllJobId`, and each vocal's `mode`.
+- `GET /songs/{id}/workspace` returns each history entry's `singAllJobId` and each vocal's `mode`, and leaves Sing All children out of `jobs`.
+- The API contract's other S3 rows: the quote's added fields, and "Sing it" answering `Progress`, with `activeSongId` on `sing_all_already_running`.
 
 #### 2. UI, `ui/src/components/SingAllCard.tsx`, `ui/src/MainApp.tsx`, `ui/src/api.ts`
 
@@ -1080,6 +1235,7 @@ May change: the files above, `ui/e2e`, tests. Must not change: the Songs pages' 
 ### Done when
 
 - Backend tests: `GET /sing-all/active` with no job and with a job at each stage; `GET /sing-all/jobs/{id}` for the owner and for another user.
+- Backend tests for the API contract's S3 rows: every `Progress` field name and value set, on a job at each stage and each status; the quote's `voices`, `options` and structured `notes` on made-up scores (one whose repeats can't be followed, one with an instrument whose sound is null); "Sing it" answering `Progress`; a second "Sing it" carrying `activeJobId` and `activeSongId`; a Sing All child left out of the workspace's `jobs`.
 - Playwright, mocked API: the card with the defaults; "Reading the score…" while the quote is pending; a failed quote with "Try again" working on the second attempt; `quote_changed` at "Sing it" showing the new quote; a change under Customise asks for a new quote and updates the total; "Upgrade to sing" on a free plan; "Top up" without enough credits; the running card through each stage; the ended card for each status; the pill from another Song; a reload showing the card again; the mode switch.
 - Playwright on the real local backend (`ui/e2e/run.mjs`, regression LLM): a made-up 2-part score that needs no split goes from the button to two tracks in the player, and the receipt matches the credits taken. The harness has one voice installed and the score has no staff to decide and no undecided part, so this run makes no quote call and the regression LLM is unchanged.
 - Checked at phone width.
@@ -1118,6 +1274,8 @@ def wind_down(job):                    # the reconciler, once cancelRequested is
 
 The Stop button asks first: "Stop Sing All? Parts already sung are kept and charged. The rest is refunded." Replace on the job's Song asks the same thing in its own popup, then replaces the score.
 
+The stop response gains `singAll`, and never lists a Sing All child in `jobs`: the API contract's `POST /sessions/{id}/stop`.
+
 **The sweeper.** `POST /internal/sing-all/sweep`:
 
 ```python
@@ -1141,6 +1299,7 @@ for job in singAllJobs where status == "running":
 - A test with a lost child notification: the sweep completes the job.
 - A test with a split child with no progress for 31 minutes and one with no new take for 21 minutes: the stuck items fail and are refunded, the job ends, the guard is cleared. Time is injected, not slept.
 - Replace during a Sing All: the job is cancelled and the new score is in place.
+- The stop response's `singAll` for `stopping` and for `too_late`, and a Sing All child never listed in its `jobs`.
 
 ### Out of scope
 
@@ -1174,7 +1333,7 @@ enqueue reconcile(job)
 | `SING_ALL_RENDER_CONCURRENCY` | 4 | 4 |
 | `SING_ALL_RENDER_JOB` | empty | The Cloud Run Job's full name |
 
-A waiting job shows "Queued for singing · 2nd in line". There is no fallback to the L4 (HLD §17.5). An execution that ends with takes not made is started once more; it skips takes that already exist. After that the remaining takes fail and are refunded.
+A waiting job shows "Queued for singing · 2nd in line": `Progress.render.placeInLine` is its place among the waiting jobs, oldest first, 1 = next to start, and `null` when it isn't waiting. There is no fallback to the L4 (HLD §17.5). An execution that ends with takes not made is started once more; it skips takes that already exist. After that the remaining takes fail and are refunded.
 
 ### Change
 
