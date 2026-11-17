@@ -286,7 +286,8 @@ def test_workspace_returns_chat_score_jobs_and_usable_tracks(client):
     upload = _upload_score(test_client, session_id).json()
     sessions = app.state.sessions
     asyncio.run(sessions.append_history(session_id, "user", "sing the solo"))
-    asyncio.run(sessions.append_history(session_id, "assistant", "Here it is."))
+    asyncio.run(sessions.append_history(session_id, "assistant", "Here it is.",
+                                        sing_all_job_id="made-up-sing-all-parent"))
 
     take = _start_take(app, session_id, "done-take")
     _start_take(app, session_id, "failed-take", turn="turn-2", status="failed",
@@ -298,6 +299,10 @@ def test_workspace_returns_chat_score_jobs_and_usable_tracks(client):
     app.state.job_store.create_job(job_id="running-split", user_id="test-user",
                                    session_id=session_id, status="running")
     app.state.job_store.update_job("running-split", jobKind="preprocess")
+    app.state.job_store.create_job(job_id="sing-all-child", user_id="test-user",
+                                   session_id=session_id, status="running")
+    app.state.job_store.update_job("sing-all-child", jobKind="synthesis",
+                                   parentJobId="made-up-sing-all-parent")
     asyncio.run(sessions.record_take(session_id, "done-take", take))
 
     response = test_client.get(f"/songs/{session_id}/workspace")
@@ -312,6 +317,7 @@ def test_workspace_returns_chat_score_jobs_and_usable_tracks(client):
     assert [(m["role"], m["content"]) for m in workspace["messages"]] == [
         ("user", "sing the solo"), ("assistant", "Here it is."),
     ]
+    assert workspace["messages"][1]["singAllJobId"] == "made-up-sing-all-parent"
     jobs = {job["job_id"]: job for job in workspace["jobs"]}
     assert list(jobs) == ["done-take", "failed-take", "running-split"]
     assert jobs["done-take"]["originating_turn_id"] == "turn-1"
@@ -320,6 +326,7 @@ def test_workspace_returns_chat_score_jobs_and_usable_tracks(client):
     assert jobs["failed-take"]["status"] == "error"
     [vocal] = workspace["player"]["vocals"]
     assert (vocal["key"], vocal["source_job_id"], vocal["volume"]) == ("id:P1", "done-take", 1.0)
+    assert vocal["mode"] == "lyrics"
     assert "playback_token=" in vocal["audio_url"]
     assert vocal["progress_url"] == f"/sessions/{session_id}/progress?job_id=done-take"
     assert workspace["player"]["bus"] == {"muted": False, "solo": False, "level_db": 0.0}

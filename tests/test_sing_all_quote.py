@@ -89,9 +89,12 @@ def _row():
 def test_already_running_blocks_before_quote_or_model(monkeypatch):
     endpoint, request, _ = _route(
         monkeypatch, user={"activeSingAllJobId": "job-a"}, rows=[_row()])
+    monkeypatch.setattr(main, "load_sing_all_job", lambda job_id: {
+        "jobId": job_id, "uid": "owner", "sessionId": "another-song", "status": "running"})
     monkeypatch.setattr(main, "quote_facts", lambda *args, **kwargs: pytest.fail("facts read"))
     result = asyncio.run(endpoint(main.SingAllQuoteRequest(songId="song-a"), request))
-    assert result == {"blocked": "already_running", "activeJobId": "job-a"}
+    assert result == {"blocked": "already_running", "activeJobId": "job-a",
+                      "activeSongId": "another-song"}
 
 
 def test_unsupported_language_blocks_without_model(monkeypatch):
@@ -127,8 +130,58 @@ def test_solfege_only_forces_english_mode(monkeypatch):
         songId="song-a", choices={"language": "ja", "solfegeOnly": True,
                                   "mode": "lyrics"}), request))
     assert result["options"]["mode"] == "solfege"
-    assert result["options"]["languages"] == ["en"]
+    assert result["options"]["languages"] == [{"code": "en", "label": None}]
     assert result["lines"][0]["credits"] == 2
+
+
+def test_quote_contract_labels_repeats_and_structured_notes(monkeypatch):
+    endpoint, request, snapshot = _route(
+        monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])
+    snapshot["score_summary"].update(
+        repeat_expansion_available=False, available_verses=["3", "1"],
+        parts=[{"part_id": "P1", "part_name": "Lead"},
+               {"part_id": "P2", "part_name": "Piano"}],
+    )
+    async def voices():
+        return [
+            {"id": "voice_a", "name": "Voice A", "languages": ["en", "zh"],
+             "language_details": {"zh": {"label": "Mandarin Chinese"}}},
+            {"id": "voice_b", "name": "Voice B", "languages": ["ja"]},
+        ]
+    request.app.state.orchestrator._get_voicebank_details = voices
+    monkeypatch.setattr(main, "quote_facts", lambda *args, **kwargs: {
+        "rows": [_row()], "open_staffs": [],
+        "notes": ["P1:cannot_split_without_lyrics"],
+        "instruments": [{"partId": "P2", "route": {"score_instrument_id": "instrument-a"}}],
+    })
+    async def judgment(*args, **kwargs):
+        return {"inputHash": "hash-a", "voices": {"a": "voice_a"},
+                "roles": {}, "layouts": {}, "sounds": {"instrument-a": None}}
+    monkeypatch.setattr(main, "quote_judgment", judgment)
+    monkeypatch.setattr(main, "summary_with_judged_instruments",
+                        lambda summary, *args, **kwargs: summary)
+    saved = []
+    monkeypatch.setattr(main, "save_quote", lambda db, record:
+                        (saved.append(record) or {"quoteId": "quote-a",
+                                                  "choicesHash": "hash-a"}))
+    result = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices={"repeats": True}), request))
+    assert result["voices"] == [{"id": "voice_a", "name": "Voice A"}]
+    assert result["options"] == {
+        "language": "en", "languages": [{"code": "en", "label": None},
+                                        {"code": "ja", "label": None},
+                                        {"code": "zh", "label": "Mandarin Chinese"}],
+        "solfegeOnly": False, "mode": "lyrics", "verse": "1", "verses": ["1", "3"],
+        "repeats": False, "repeatsAvailable": False,
+    }
+    assert result["notes"] == [
+        {"code": "cannot_split_without_lyrics", "partId": "P1", "partName": "Lead"},
+        {"code": "no_sound_chosen", "partId": "P2", "partName": "Piano"},
+        {"code": "repeats_written_order", "partId": None, "partName": None},
+    ]
+    assert result["style"] == {"note": "", "controls": {}, "changes": {}}
+    assert saved[0]["notes"] == result["notes"]
+    assert saved[0]["choices"]["repeats"] is False
 
 
 def test_failed_quote_call_returns_retryable_503(monkeypatch):

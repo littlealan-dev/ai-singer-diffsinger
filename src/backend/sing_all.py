@@ -34,6 +34,53 @@ def supported_singing_languages(voicebanks: Sequence[Mapping[str, Any]]) -> list
     return sorted(supported)
 
 
+def singing_language_options(voicebanks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Expose labels from voicebank metadata for every supported language."""
+    labels: dict[str, str] = {}
+    for bank in voicebanks:
+        details = bank.get("language_details") or {}
+        if not isinstance(details, Mapping):
+            continue
+        for code in supported_singing_languages([bank]):
+            detail = details.get(code)
+            label = detail.get("label") if isinstance(detail, Mapping) else None
+            if isinstance(label, str) and label.strip():
+                labels.setdefault(code, label)
+    return [{"code": code, "label": labels.get(code)}
+            for code in supported_singing_languages(voicebanks)]
+
+
+def quote_notes(
+    facts: Mapping[str, Any], judgment: Mapping[str, Any],
+    summary: Mapping[str, Any], *, repeats_available: bool,
+) -> list[dict[str, Any]]:
+    """Present score warnings as the card's structured note values."""
+    part_names = {str(part.get("part_id")): str(part.get("part_name") or part.get("part_id"))
+                  for part in summary.get("parts") or [] if isinstance(part, Mapping)}
+    notes: list[dict[str, Any]] = []
+    for raw in facts.get("notes") or []:
+        if not isinstance(raw, str) or ":" not in raw:
+            continue
+        part_id, code = raw.rsplit(":", 1)
+        if code in {"cannot_split_without_lyrics", "cannot_split_evidence_too_large"}:
+            notes.append({"code": code, "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    sounds = judgment.get("sounds") or {}
+    missing_sound_parts: set[str] = set()
+    for item in facts.get("instruments") or []:
+        route = item.get("route") or {}
+        route_id = str(route.get("score_instrument_id") or "")
+        part_id = str(item.get("partId") or "")
+        if (part_id and route_id in sounds and sounds[route_id] is None
+                and part_id not in missing_sound_parts):
+            missing_sound_parts.add(part_id)
+            notes.append({"code": "no_sound_chosen", "partId": part_id,
+                          "partName": part_names.get(part_id)})
+    if not repeats_available:
+        notes.append({"code": "repeats_written_order", "partId": None, "partName": None})
+    return notes
+
+
 def open_sing_all_result(
     arguments: Mapping[str, Any], *, voicebanks: Sequence[Mapping[str, Any]],
     active_job_id: str | None = None,
@@ -92,9 +139,106 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
         "quote": {"quoteId": quote["quoteId"], "total": quote["total"],
                   "choicesHash": quote["choicesHash"], "scoreVersion": quote["scoreVersion"]},
         "judgment": deepcopy(quote["judgment"]), "rows": rows, "items": items,
-        "cancelRequested": False, "endReason": None, "notes": [],
+        "cancelRequested": False, "endReason": None,
+        "notes": deepcopy(quote.get("notes") or []),
         "render": {"state": "none"}, "createdAt": now, "updatedAt": now,
         "lastProgressAt": now, "endedAt": None, "finalScoreVersion": None,
+    }
+
+
+def progress(
+    job: Mapping[str, Any], *, now: datetime | None = None,
+    split_estimate_seconds: int = 240, singing_start_seconds: int = 60,
+) -> dict[str, Any]:
+    """Present a parent record as the public Sing All progress and receipt."""
+    instant = now or datetime.now(timezone.utc)
+    created = job["createdAt"]
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    ended = job.get("status") != "running"
+    ended_at = job.get("endedAt")
+    end_time = datetime.fromisoformat(ended_at) if isinstance(ended_at, str) else ended_at
+    if isinstance(end_time, datetime) and end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    elapsed_until = end_time if ended and isinstance(end_time, datetime) else instant
+    elapsed = max(0, int((elapsed_until - created).total_seconds()))
+    items = list(job.get("items") or [])
+    splits = [item for item in items if item.get("type") == "split"]
+    takes = [item for item in items if item.get("type") == "take"]
+    rows = [row for row in job.get("rows") or [] if row.get("include")]
+    names = {str(row.get("rowId")): str(row.get("name") or "") for row in rows}
+    source_names = {str(row.get("sourcePartId")): str(row.get("partName") or
+                    row.get("name") or "") for row in rows}
+    public_rows = [{
+        "rowId": str(row["rowId"]), "name": names[str(row["rowId"])],
+        "voice": str(row.get("voice") or ""),
+        "voiceName": str(row.get("voiceName") or row.get("voice") or ""),
+        "split": bool(row.get("split")),
+        "takes": [{"mode": item["mode"], "status": item.get("status", "queued"),
+                   "reason": item.get("reason")}
+                  for item in takes if item.get("rowId") == row["rowId"]],
+    } for row in rows]
+    charged = sum(int(item.get("creditsCharged") or 0) for item in items)
+    refunded = sum(max(0, int(item.get("creditsReserved") or 0)
+                       - int(item.get("creditsCharged") or 0))
+                   for item in items if item.get("status") in {"done", "failed", "stopped"})
+    total = int((job.get("quote") or {}).get("total") or 0)
+    receipt = []
+    if ended:
+        for item in items:
+            kind = item.get("type")
+            reserved = int(item.get("creditsReserved") or 0)
+            item_charged = int(item.get("creditsCharged") or 0)
+            receipt.append({
+                "itemId": item["itemId"], "type": kind,
+                "rowId": item.get("rowId") if kind == "take" else None,
+                "mode": item.get("mode") if kind == "take" else None,
+                "name": (names.get(str(item.get("rowId"))) if kind == "take" else
+                         source_names.get(str(item.get("sourcePartId"))) if kind == "split"
+                         else None),
+                "credits": item_charged if item_charged else reserved,
+                "outcome": "included" if reserved == 0 else
+                           "charged" if item_charged else "refunded",
+                "reason": item.get("reason"),
+            })
+    remaining = None
+    if not ended:
+        pending_splits = sum(item.get("status") != "done" for item in splits)
+        singing_seconds = max((float(item.get("estimatedSeconds") or 0)
+                               for item in takes if item.get("status") not in
+                               {"done", "failed", "stopped"}), default=0)
+        startup = singing_start_seconds if job.get("stage") in {
+            "reading", "splitting", "solfege"} else 0
+        remaining = int(pending_splits * split_estimate_seconds + startup + singing_seconds)
+    choices = job.get("choices") or {}
+    reason = job.get("endReason")
+    if reason == "instrumental_failed":
+        reason = "instrumentals_failed"
+    render = job.get("render") or {}
+    return {
+        "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
+        "status": job["status"], "stage": job["stage"], "endReason": reason,
+        "cancelRequested": bool(job.get("cancelRequested")),
+        "choices": {key: choices[key] for key in
+                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "counts": {
+            "splits": {"done": sum(item.get("status") == "done" for item in splits),
+                       "total": len(splits)},
+            "takes": {"done": sum(item.get("status") == "done" for item in takes),
+                      "failed": sum(item.get("status") in {"failed", "stopped"}
+                                    for item in takes), "total": len(takes)},
+        },
+        "rows": public_rows,
+        "credits": {"reserved": max(0, total - charged - refunded),
+                    "charged": charged, "refunded": refunded},
+        "receipt": receipt, "notes": deepcopy(job.get("notes") or []),
+        "elapsedS": elapsed, "remainingS": remaining,
+        "render": {"state": render.get("state", "none"), "placeInLine": None},
+        "createdAt": created.isoformat(),
+        "endedAt": (ended_at.isoformat() if isinstance(ended_at, datetime)
+                    else ended_at),
     }
 
 
