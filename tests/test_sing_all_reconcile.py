@@ -69,6 +69,16 @@ def test_reading_checks_score_and_saves_assignments_before_splitting():
     assert decide(job, {}, verse) == ({}, [{"kind": "reparse_verse", "verse": "1"}])
 
 
+def test_terminal_preparation_failure_releases_every_unsettled_item():
+    job = _job("singing", instrumental=True)
+    fields, actions = decide(job, {}, {"terminalFailure": "instrumental_failed"})
+    assert (fields["status"], fields["endReason"], fields["stage"]) == (
+        "failed", "instrumental_failed", "done")
+    assert {action["reservationId"] for action in actions
+            if action["kind"] == "release"} == {
+                "take-a", "take-b", "parent-instrumentals"}
+
+
 def test_splitting_uses_fixed_child_and_keeps_quoted_voices():
     job = _job("splitting")
     fields, actions = decide(job, {}, _score(job))

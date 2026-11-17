@@ -17,6 +17,12 @@ from src.backend.sing_all import (
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 
+class SingAllTerminalError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class SingAllRunner:
     """Reconcile one parent; a second wake can safely observe the same state."""
 
@@ -51,7 +57,11 @@ class SingAllRunner:
             before = [action for action in actions if action["kind"] in {
                 "release", "save_assignments"}]
             for action in before:
-                await self._action(job, action, snapshot)
+                try:
+                    await self._action(job, action, snapshot)
+                except SingAllTerminalError as exc:
+                    await self._terminal_failure(job_id, exc.reason)
+                    return
             if fields:
                 terminal = fields.get("stage") == "done"
                 if terminal:
@@ -66,9 +76,30 @@ class SingAllRunner:
             for action in actions:
                 if action not in before and not (fields and fields.get("stage") == "done"
                                                  and action["kind"] in {"clear_active", "append_end_history"}):
-                    await self._action(job, action, snapshot)
+                    try:
+                        await self._action(job, action, snapshot)
+                    except SingAllTerminalError as exc:
+                        await self._terminal_failure(job_id, exc.reason)
+                        return
             if job.get("status") != "running":
                 return
+
+    async def _terminal_failure(self, job_id: str, reason: str) -> None:
+        """End a deterministic preparation failure before any take can start."""
+        for _ in range(8):
+            job = await asyncio.to_thread(sing_all_store.load, job_id)
+            if not job or job.get("status") != "running":
+                return
+            fields, actions = decide(job, {}, {"terminalFailure": reason})
+            for action in actions:
+                if action["kind"] == "release":
+                    await self._action(job, action, {})
+            if await asyncio.to_thread(
+                sing_all_store.finish, job_id, fields,
+                expected_stage=job["stage"], expected_revision=job.get("revision", 0),
+            ):
+                return
+        raise RuntimeError("Sing All parent changed throughout failure settlement.")
 
     async def _children(self, job: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         children: dict[str, dict[str, Any]] = {}
@@ -169,11 +200,14 @@ class SingAllRunner:
             )
         elif kind == "save_assignments":
             summary = snapshot.get("score_summary") or {}
-            amended = summary_with_judged_instruments(
-                summary, job["judgment"],
-                sung_source_ids={row["sourcePartId"] for row in job["rows"]
-                                 if row.get("include")},
-            )
+            try:
+                amended = summary_with_judged_instruments(
+                    summary, job["judgment"],
+                    sung_source_ids={row["sourcePartId"] for row in job["rows"]
+                                     if row.get("include")},
+                )
+            except ValueError as exc:
+                raise SingAllTerminalError("quote_changed") from exc
             await self.orchestrator._sessions.set_score_summary(session_id, amended)
         elif kind == "reparse_verse":
             await self.orchestrator._reparse_score(
@@ -185,9 +219,15 @@ class SingAllRunner:
         elif kind == "add_solfege":
             await self._add_solfege(job, snapshot)
         elif kind == "prepare_instrumentals":
-            await self._prepare_instrumentals(job, snapshot)
+            try:
+                await self._prepare_instrumentals(job, snapshot)
+            except Exception as exc:
+                raise SingAllTerminalError("instrumental_failed") from exc
         elif kind == "start_take":
-            await self._start_take(job, action, snapshot)
+            try:
+                await self._start_take(job, action, snapshot)
+            except ValueError as exc:
+                raise SingAllTerminalError("quote_changed") from exc
         elif kind == "settle_instrumental":
             await self._settle_instrumental(job)
         else:
@@ -215,7 +255,7 @@ class SingAllRunner:
                     "childJobId": item["childJobId"]},
         )
         if result.get("action_required"):
-            raise ValueError("The quoted split could not start.")
+            raise SingAllTerminalError("split_failed")
 
     async def _add_solfege(self, job: dict[str, Any], snapshot: dict[str, Any]) -> None:
         session_id = job["sessionId"]
@@ -224,15 +264,18 @@ class SingAllRunner:
         targets = {row["partId"] for row in job["rows"] if row["rowId"] in rows}
         source = await self.orchestrator._sessions.ensure_active_musicxml(session_id, job["uid"])
         output = self.orchestrator._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
-        result = await asyncio.to_thread(
-            self.orchestrator._router.call_tool, "add_solfege_lyric_verse",
-            {"source_musicxml_path": self.orchestrator._mcp_musicxml_path(source),
-             "output_musicxml_path": str(output.relative_to(self.orchestrator._settings.project_root)),
-             "part_ids": sorted(targets),
-             "settings": dict(snapshot.get("solfege_settings") or {})},
-        )
+        try:
+            result = await asyncio.to_thread(
+                self.orchestrator._router.call_tool, "add_solfege_lyric_verse",
+                {"source_musicxml_path": self.orchestrator._mcp_musicxml_path(source),
+                 "output_musicxml_path": str(output.relative_to(self.orchestrator._settings.project_root)),
+                 "part_ids": sorted(targets),
+                 "settings": dict(snapshot.get("solfege_settings") or {})},
+            )
+        except Exception:
+            result = None
         if not isinstance(result, dict):
-            raise ValueError("Invalid solfege result.")
+            result = {"skipped": [{"part_id": part_id} for part_id in targets]}
         if result.get("completed_targets"):
             await self.orchestrator._persist_solfege_result(session_id, result)
         skipped = {entry.get("part_id") for entry in result.get("skipped") or []}

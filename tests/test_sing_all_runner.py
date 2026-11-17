@@ -90,6 +90,59 @@ def test_completed_child_is_counted_once_then_parent_finishes(monkeypatch):
     assert not any(event[0] == "release" for event in events)
 
 
+def test_instrumental_preparation_failure_refunds_and_ends_parent(monkeypatch):
+    async def fail_prepare(_self, _job, _snapshot):
+        raise RuntimeError("made-up MIDI preparation failure")
+
+    monkeypatch.setattr(sing_all_runner.SingAllRunner, "_prepare_instrumentals", fail_prepare)
+    job = _job([
+        {"itemId": "take:a:lyrics", "type": "take", "mode": "lyrics",
+         "childJobId": "take-a", "status": "queued", "creditsReserved": 2},
+        {"itemId": "instrumental", "type": "instrumental",
+         "reservationId": "parent-a-instrumentals", "status": "queued",
+         "creditsReserved": 1},
+    ], instrumentalsPrepared=False)
+    record, events = _run_job(monkeypatch, job, {})
+    assert (record["status"], record["endReason"]) == (
+        "failed", "instrumental_failed")
+    assert events[:3] == [
+        ("release", "take-a"), ("release", "parent-a-instrumentals"),
+        ("finish", "failed", "done"),
+    ]
+
+
+def test_solfege_tool_failure_marks_quoted_rows_skipped(monkeypatch, tmp_path):
+    updates = []
+
+    def fail_tool(*_args, **_kwargs):
+        raise RuntimeError("made-up solfege tool failure")
+
+    def apply(_job_id, fields, **_kwargs):
+        updates.append(fields)
+        return True
+
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(
+            ensure_active_musicxml=lambda *_args: _async_value(tmp_path / "score.xml"),
+            session_dir=lambda *_args: tmp_path,
+        ),
+        _router=SimpleNamespace(call_tool=fail_tool),
+        _mcp_musicxml_path=str,
+        _settings=SimpleNamespace(project_root=tmp_path),
+    )
+    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a"}],
+               rows=[{"rowId": "row-a", "partId": "P1"}], stage="solfege")
+    runner = sing_all_runner.SingAllRunner(orchestrator)
+    asyncio.run(runner._add_solfege(job, {}))
+    assert updates == [{"solfegePrepared": True, "solfegeFailedRows": ["row-a"],
+                        "solfegeSelections": {}}]
+
+
+async def _async_value(value):
+    return value
+
+
 def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     async def snapshot(*args):
         return {}

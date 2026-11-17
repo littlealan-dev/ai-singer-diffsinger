@@ -314,6 +314,8 @@ def decide(
 
     if job.get("cancelRequested"):
         return finish("cancelled", "stopped")
+    if score_state.get("terminalFailure"):
+        return finish("failed", str(score_state["terminalFailure"]))
 
     stage = job.get("stage")
     if stage == "reading":
