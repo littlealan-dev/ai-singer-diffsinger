@@ -1247,3 +1247,16 @@ def test_default_prompt_never_prepares_a_line_when_the_score_has_no_lyrics() -> 
         "If the selected original part has `is_potentially_complex_for_preprocess=true`, "
         "do not quote or synthesize that part."
     ) in prompt
+
+
+def test_chat_prompt_reports_bars_with_no_printed_words_as_information_only() -> None:
+    from src.backend.llm_prompt import _SYSTEM_PROMPT_PATH
+
+    line = (
+        "- When the result's `validation.no_printed_words_ranges` lists bars, say in that review "
+        "request that the score prints no words for the prepared line in those bars, so those notes "
+        "will not be sung. This is information only: do not offer any change or correction for "
+        "those bars."
+    )
+    assert _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").split("\n").count(line) == 1
+    assert line in _role_prompt("default")
