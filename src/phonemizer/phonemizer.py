@@ -214,6 +214,28 @@ class Phonemizer:
             return None
         return meta.get("vowel_strength")
 
+    def is_known_word(self, token: str) -> bool:
+        """Return whether dictionary or language G2P can look up this token."""
+        raw = token.strip()
+        if not raw:
+            return False
+        if raw in self._phoneme_to_id or raw.upper() in self._phoneme_to_id:
+            return True
+        lyric = self._prepare_lyrics([raw])[0]
+        if not lyric.lookup:
+            return False
+        normalized = self._normalize_grapheme(lyric.lookup)
+        if normalized and normalized in self._dictionary:
+            return True
+        if lyric.fallback_lookups and all(
+            (lookup := self._normalize_grapheme(part)) and lookup in self._dictionary
+            for part in lyric.fallback_lookups
+        ):
+            return True
+        fallback = self._pronunciation_pipeline.g2p_fallback
+        known_word = getattr(fallback, "is_known_word", None)
+        return bool(self.allow_g2p and callable(known_word) and known_word(raw))
+
     def _prepare_lyrics(self, tokens: Sequence[str]) -> Sequence[PreparedLyric]:
         """Run the selected language's phrase-level romanization step."""
         prepared = self._pronunciation_pipeline.prepare(tokens)
