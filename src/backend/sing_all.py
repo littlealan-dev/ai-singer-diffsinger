@@ -366,7 +366,13 @@ def decide(
                    and item.get("status") == "queued" for item in items):
             return {"stage": "singing"}, []
         if not job.get("solfegePrepared"):
-            return {}, [{"kind": "add_solfege"}]
+            now = score_state.get("now")
+            lease = job.get("solfegeStartLeaseUntil")
+            if isinstance(now, datetime) and isinstance(lease, datetime) and lease > now:
+                return {}, []
+            fields = ({"solfegeStartLeaseUntil": now + timedelta(seconds=60)}
+                      if isinstance(now, datetime) else {})
+            return fields, [{"kind": "add_solfege"}]
         failed_rows = set(job.get("solfegeFailedRows") or [])
         actions = []
         for item in items:

@@ -118,3 +118,57 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     assert children["split-a"]["parts"] == [
         {"laneKey": "P1:staff1:V1:slot1", "partId": "P2", "name": "Made-up harmony"}]
     assert children["split-a"]["reviewRequired"] is False
+
+
+def test_concurrent_reconcile_starts_one_solfege_transform(monkeypatch):
+    record = _job([{
+        "itemId": "take:a:solfege", "type": "take", "rowId": "a",
+        "mode": "solfege", "childJobId": "take-a", "status": "queued",
+        "creditsReserved": 2,
+    }], stage="solfege")
+    record["rows"] = [{"rowId": "a", "partId": "P1", "voice": "example-voice"}]
+    record["choices"] = {"verse": 1}
+    transforms = []
+
+    def load(_job_id):
+        return deepcopy(record)
+
+    def apply(_job_id, fields, *, expected_stage, expected_revision):
+        if (record["stage"] != expected_stage
+                or record["revision"] != expected_revision):
+            return False
+        record.update(deepcopy(fields))
+        record["revision"] += 1
+        return True
+
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "load", load)
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
+
+    async def snapshot(*_args):
+        return {"score_id": "score-a", "current_score": {"version": 1, "score": {}}}
+
+    runner = sing_all_runner.SingAllRunner(SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _job_store=SimpleNamespace(get_job=lambda _job_id: None),
+    ))
+
+    async def add_solfege(job, _snapshot):
+        transforms.append(job["revision"])
+        await asyncio.sleep(0.01)
+        assert apply(job["jobId"], {"solfegePrepared": True},
+                     expected_stage="solfege", expected_revision=job["revision"])
+
+    async def start_take(_job, _action, _snapshot):
+        return None
+
+    runner._add_solfege = add_solfege
+    runner._start_take = start_take
+
+    async def run_concurrently():
+        await asyncio.gather(runner.reconcile(record["jobId"]),
+                             runner.reconcile(record["jobId"]))
+
+    asyncio.run(run_concurrently())
+    assert len(transforms) == 1
+    assert record["solfegePrepared"] is True
+    assert record["stage"] == "singing"

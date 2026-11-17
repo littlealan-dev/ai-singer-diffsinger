@@ -139,6 +139,19 @@ def test_solfege_prepares_once_and_releases_a_failed_line():
     assert actions == [{"kind": "release", "reservationId": "take-b"}]
 
 
+def test_solfege_start_lease_blocks_a_simultaneous_transform():
+    job = _job("solfege")
+    now = datetime.now(timezone.utc)
+    state = {**_score(job), "now": now}
+    fields, actions = decide(job, {}, state)
+    assert actions == [{"kind": "add_solfege"}]
+    assert fields["solfegeStartLeaseUntil"] == now + timedelta(seconds=60)
+    job.update(fields)
+    assert decide(job, {}, state) == ({}, [])
+    expired = {**state, "now": now + timedelta(seconds=61)}
+    assert decide(job, {}, expired)[1] == actions
+
+
 def test_singing_starts_each_take_then_finishes_partial():
     job = _job("singing")
     job["instrumentalsPrepared"] = True
