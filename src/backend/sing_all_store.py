@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import uuid4
 
+from google.api_core.exceptions import Aborted
 from google.cloud import firestore
 
 from src.backend.credits import (
@@ -181,7 +182,14 @@ def apply(
                                  "updatedAt": datetime.now(timezone.utc)})
         return True
 
-    return _apply(db.transaction())
+    try:
+        return _apply(db.transaction())
+    except ValueError as exc:
+        if isinstance(exc.__cause__, Aborted):
+            # The Firestore transaction exhausted its contention retries. The
+            # runner reloads the parent and attempts its decision again.
+            return False
+        raise
 
 
 def finish(
@@ -225,7 +233,12 @@ def finish(
         transaction.update(session_ref, {"history": firestore.ArrayUnion([entry])})
         return True
 
-    return _finish(db.transaction())
+    try:
+        return _finish(db.transaction())
+    except ValueError as exc:
+        if isinstance(exc.__cause__, Aborted):
+            return False
+        raise
 
 
 def clear_active(uid: str, job_id: str) -> None:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.backend import sing_all_store, songs
+from src.backend import main, sing_all_runner, sing_all_store, songs
 from src.backend.credits import (
     get_instrumental_charge_state, get_or_create_credits, instrumental_charge_scope,
     release_credits, settle_credits,
@@ -547,3 +547,123 @@ def test_quoted_split_layout_makes_exact_rows_and_completes_takes(parent_environ
     credits = get_or_create_credits(uid, "")
     assert credits.reserved == 0
     assert credits.available_balance == before - 4
+
+
+def test_sing_it_through_four_player_tracks_never_calls_the_model(
+    parent_environment, monkeypatch,
+):
+    db, uid, session_id, _fixture_job_id = parent_environment
+    db.collection("users").document(uid).update({"billing.activePlanKey": "plus"})
+    before = get_or_create_credits(uid, "").available_balance
+    selection = {"number": "1", "name": "Made-up words"}
+    rows = [{
+        "rowId": f"P{index}", "sourcePartId": f"P{index}",
+        "partId": f"P{index}", "partName": f"Made-up line {index}",
+        "name": f"Made-up line {index}", "split": False,
+        "hasWords": True, "include": True, "voice": "example-voice",
+    } for index in range(4)]
+    choices = {"language": "en", "verse": 1, "mode": "lyrics",
+               "repeats": False, "rows": []}
+    quote = sing_all_store.save_quote(db, {
+        "uid": uid, "sessionId": session_id, "scoreId": "example-score",
+        "scoreVersion": 1, "choices": choices,
+        "choicesHash": main.choices_hash(choices, {}),
+        "judgment": {"inputHash": "made-up-hash", "roles": {}, "sounds": {}},
+        "style": {}, "rows": rows,
+        "items": main.build_items(rows, mode="lyrics", duration_seconds=59,
+                                  instrumental_charge_required=False),
+        "total": 8,
+    })
+    snapshot = {
+        "score_id": "example-score", "song": {"title": "Made-up song"},
+        "current_score": {"version": 1, "score": {
+            "selected_verse_number": 1,
+            "selected_lyric_selection": selection,
+            "parts": [{"part_id": row["partId"]} for row in rows],
+        }},
+        "score_summary": {"duration_seconds": 59, "parts": [{
+            "part_id": row["partId"], "part_name": row["partName"],
+            "lyric_selections": [selection],
+        } for row in rows]},
+    }
+    children = {}
+    player = songs.empty_player(uid, "example-score")
+    enqueued = []
+
+    async def no_model(*_args, **_kwargs):
+        raise AssertionError("Sing it and reconcile must use the saved judgment")
+
+    async def get_snapshot(*_args):
+        return snapshot
+
+    async def set_score_summary(_session_id, summary):
+        snapshot["score_summary"] = summary
+
+    async def voices():
+        return [{"id": "example-voice", "languages": ["en"]}]
+
+    async def prepare_instrumentals(_session_id, **_kwargs):
+        return snapshot["score_summary"], None
+
+    async def start_take(_session_id, _score, args, **kwargs):
+        child_id = kwargs["parent"]["childJobId"]
+        assert (await asyncio.to_thread(settle_credits, uid, child_id, 59)).status == "settled"
+        part_id = args["part_id"]
+        child = {
+            "status": "completed", "creditsCharged": 2, "jobKind": "synthesis",
+            "scoreId": "example-score", "audioTrack": {
+                "key": f"id:{part_id}:lyrics", "mode": "lyrics", "part_id": part_id,
+                "label": f"Made-up line {part_id}"},
+        }
+        assert songs.apply_take(player, child_id, child)
+        children[child_id] = child
+        return {"job_id": child_id}
+
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=get_snapshot,
+                                  set_score_summary=set_score_summary),
+        _job_store=SimpleNamespace(get_job=lambda child_id: children.get(child_id)),
+        _settings=SimpleNamespace(preprocess_chooser_evidence_max_chars=1000),
+        _get_voicebank_details=voices,
+        _ensure_instrumental_midi_artifacts=prepare_instrumentals,
+        _normalize_synthesize_voice_color=lambda args: asyncio.sleep(0, result=args),
+        _start_synthesis_job=start_take,
+        _enqueue_sing_all_reconcile=lambda job_id: asyncio.sleep(
+            0, result=enqueued.append(job_id)),
+        _call_sing_all_judgment=no_model,
+    )
+    monkeypatch.setattr(main, "_get_user_id_or_401", lambda _request: asyncio.sleep(0, result=uid))
+    monkeypatch.setattr(main, "_get_snapshot_or_404",
+                        lambda *_args: asyncio.sleep(0, result=snapshot))
+    monkeypatch.setattr(main, "quote_facts", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "input_hash", lambda *_args, **_kwargs: "made-up-hash")
+    monkeypatch.setattr(main, "materialize_rows", lambda *_args, **_kwargs: [dict(row) for row in rows])
+    monkeypatch.setattr(main, "mark_voice_ranges", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "summary_with_judged_instruments",
+                        lambda summary, *_args, **_kwargs: summary)
+    monkeypatch.setattr(main, "score_has_instrumental_parts", lambda _summary: False)
+    monkeypatch.setattr(main, "selected_score_duration", lambda *_args, **_kwargs: 59)
+    monkeypatch.setattr(sing_all_runner, "quote_facts", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(sing_all_runner, "materialize_rows",
+                        lambda *_args, **_kwargs: [dict(row) for row in rows])
+    monkeypatch.setattr(sing_all_runner, "mark_voice_ranges", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sing_all_runner, "summary_with_judged_instruments",
+                        lambda summary, *_args, **_kwargs: summary)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        sessions=orchestrator._sessions, orchestrator=orchestrator,
+        settings=main.app.state.settings)))
+    endpoint = next(route.endpoint for route in main.app.routes
+                    if getattr(route, "path", None) == "/sing-all/jobs")
+    parent = asyncio.run(endpoint(main.SingAllJobRequest(quoteId=quote["quoteId"]), request))
+    assert enqueued == [parent["jobId"]]
+    assert get_or_create_credits(uid, "").reserved == 8
+    asyncio.run(SingAllRunner(orchestrator).reconcile(parent["jobId"]))
+    finished = sing_all_store.load(parent["jobId"])
+    assert finished["status"] == "completed"
+    assert len(player["vocals"]) == 4
+    assert {track["partId"] for track in player["vocals"]} == {
+        "P0", "P1", "P2", "P3"}
+    credits = get_or_create_credits(uid, "")
+    assert credits.reserved == 0
+    assert credits.available_balance == before - 8
