@@ -855,6 +855,7 @@ def create_app() -> FastAPI:
                 "progress_url": _job_progress_url(session_id, job_id),
             }
             for job_id, data in songs.workspace_jobs(session_jobs)
+            if not data.get("parentJobId")
         ]
         player_payload = songs.player_response(player, score_id=state.score_id)
         tracks = songs.usable_vocals(
