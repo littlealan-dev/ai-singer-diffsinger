@@ -28,8 +28,10 @@ import {
   chat,
   createSession,
   exportMix,
+  fetchActiveSingAll,
   fetchInstrumentalMidi,
   fetchScoreXml,
+  fetchSingAllJob,
   fetchProgress,
   fetchSynthesisEstimate,
   fetchSolfegeSettings,
@@ -55,6 +57,8 @@ import {
   type PlayerMixRequest,
   type ProgressResponse,
   type ScoreSummary,
+  type SingAllOpen,
+  type SingAllProgress,
   type SolfegeMode,
   type SolfegeSystem,
   type SongInfo,
@@ -64,9 +68,10 @@ import {
   type WorkspaceInstrument,
   type WorkspaceJob,
   type WorkspaceMessage,
+  type WorkspaceVocal,
 } from "./api";
 import CreditsHeader from "./components/CreditsHeader";
-import SingAllPrototypeCard from "./components/SingAllPrototypeCard";
+import SingAllCard from "./components/SingAllCard";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
@@ -217,8 +222,10 @@ type Message = {
   progressValue?: number;
   jobId?: string;
   feedback?: FeedbackPromptState;
-  // UI prototype: the bubble renders the fake Sing All card.
-  singAllPrototype?: boolean;
+  // The chat model opened Sing All in this reply: the bubble shows the quote card.
+  singAll?: SingAllOpen;
+  // The Sing All job this bubble's card follows: set at "Sing it", or from the history.
+  singAllJobId?: string;
 };
 
 type AttemptMessage = {
@@ -256,6 +263,8 @@ type MultiTrackAudioTrack = {
   // before jobs recorded it. A take whose signature no longer matches its part
   // in the current score summary was sung from music that has since changed.
   takeSignature?: string | null;
+  // Lyrics or solfège; a take from before Sing All is lyrics.
+  mode?: "lyrics" | "solfege";
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -674,7 +683,7 @@ const GroupedInstrumentPicker = ({
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="score-track-instrument-label">{unassigned ? "Choose a kit" : selectedInstrument.label}</span>
+        <span className="score-track-instrument-label">{unassigned ? (percussion ? "Choose a kit" : "Choose an instrument") : selectedInstrument.label}</span>
         <ChevronsUpDown size={13} aria-hidden="true" />
       </button>
       {typeof document !== "undefined" && pickerMenu && createPortal(pickerMenu, document.body)}
@@ -1847,7 +1856,7 @@ const ScoreTrackControlsPanel = ({
                   onClick={() => onUpdateInstrumentalSolo(inst.key, !inst.solo)}
                   disabled={inst.unassigned}
                   aria-pressed={inst.solo}
-                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.solo ? "Unsolo track" : "Solo track"}
+                  title={inst.unassigned ? `${inst.percussion ? "Choose a kit" : "Choose an instrument"} to hear this part` : inst.solo ? "Unsolo track" : "Solo track"}
                 >
                   S
                 </button>
@@ -1857,7 +1866,7 @@ const ScoreTrackControlsPanel = ({
                   onClick={() => onUpdateInstrumentalMute(inst.key, !inst.muted)}
                   disabled={inst.unassigned}
                   aria-pressed={inst.muted}
-                  title={inst.unassigned ? "Choose a kit to hear this part" : inst.muted ? "Unmute track" : "Mute track"}
+                  title={inst.unassigned ? `${inst.percussion ? "Choose a kit" : "Choose an instrument"} to hear this part` : inst.muted ? "Unmute track" : "Mute track"}
                 >
                   {inst.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
                 </button>
@@ -2694,6 +2703,43 @@ type RebuiltChat = {
   detachedJob: WorkspaceJob | null;
 };
 
+// A player track as the workspace saved it.
+const workspaceVocalTrack = (vocal: WorkspaceVocal): MultiTrackAudioTrack => ({
+  key: vocal.key,
+  label: vocal.label,
+  audioUrl: vocal.audio_url,
+  partId: vocal.part_id ?? null,
+  partIndex: vocal.part_index ?? null,
+  verseNumber: vocal.verse_number ?? null,
+  durationSeconds: vocal.duration_seconds ?? undefined,
+  jobId: vocal.source_job_id,
+  sourceJobId: vocal.source_job_id,
+  expandRepeats: vocal.expand_repeats ?? undefined,
+  takeSignature: vocal.take_signature ?? null,
+  mode: vocal.mode ?? "lyrics",
+  muted: vocal.muted,
+  solo: vocal.solo,
+  volume: vocal.volume,
+});
+
+const SING_ALL_POLL_MS = 3000;
+
+// The header pill's words for a running Sing All, e.g. "Singing 3/8".
+const singAllPillStage = (job: SingAllProgress): string => {
+  if (job.cancelRequested) return "Stopping";
+  if (job.render.state === "waiting") return "Queued";
+  switch (job.stage) {
+    case "reading":
+      return "Reading the score";
+    case "splitting":
+      return `Splitting ${job.counts.splits.done}/${job.counts.splits.total}`;
+    case "solfege":
+      return "Adding solfège";
+    default:
+      return `Singing ${job.counts.takes.done}/${job.counts.takes.total}`;
+  }
+};
+
 const isLiveJob = (job: WorkspaceJob) => job.status === "queued" || job.status === "running";
 
 // Rebuilds a reopened Song's chat. A turn is a user message and the assistant
@@ -2748,13 +2794,23 @@ function rebuildChat(messages: WorkspaceMessage[], jobs: WorkspaceJob[]): Rebuil
 
   let turnId: string | null = null;
   let turnStart = 0;
+  // A Sing All job has a started and a finished entry; its card shows at the first.
+  const singAllShown = new Set<string>();
   messages.forEach((message) => {
     if (message.role === "user") {
       closeTurn(turnId, turnStart);
       turnId = message.id;
       turnStart = rebuilt.length;
     }
-    rebuilt.push({ id: message.id, role: message.role, content: message.content });
+    const singAllJobId =
+      message.singAllJobId && !singAllShown.has(message.singAllJobId) ? message.singAllJobId : undefined;
+    if (singAllJobId) singAllShown.add(singAllJobId);
+    rebuilt.push({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      ...(singAllJobId ? { singAllJobId } : {}),
+    });
   });
   closeTurn(turnId, turnStart);
   return { messages: rebuilt, resume, detachedJob };
@@ -2928,6 +2984,10 @@ export default function MainApp() {
   // exists once its session has a score, and its id is the session id.
   const routeSongId = useMatch("/app/song/:songId")?.params.songId ?? null;
   const [currentSong, setCurrentSong] = useState<SongInfo | null>(null);
+  // Sing All: the caller's running job, from any Song, and each job a card shows.
+  const [activeSingAll, setActiveSingAll] = useState<SingAllProgress | null>(null);
+  const [singAllJobs, setSingAllJobs] = useState<Record<string, SingAllProgress>>({});
+  const singAllRunningHere = Boolean(activeSingAll && activeSingAll.songId === sessionId);
   const [songLoadState, setSongLoadState] = useState<SongLoadState>("idle");
   // From sending a chat message until the assistant's reply arrives. The Song
   // can't be left meanwhile; running work alone doesn't keep the user in it.
@@ -3360,9 +3420,10 @@ export default function MainApp() {
           solo: existing ? existing.solo : false,
           volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
           gmProgram: existing ? existing.gmProgram : (part.playback_preset?.program ?? part.midi_program ?? 0),
-          soundfontBank: part.program_source === "user_assignable" ? 128 : existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
-          presetKind: part.program_source === "user_assignable" ? "percussion_kit" : existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
-          percussion: part.program_source === "user_assignable" ? true : part.percussion,
+          // A part with no sound chosen is a drum kit or an instrument as the part itself is.
+          soundfontBank: part.program_source === "user_assignable" ? (part.percussion ? 128 : 0) : existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
+          presetKind: part.program_source === "user_assignable" ? (part.percussion ? "percussion_kit" : "melodic") : existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
+          percussion: part.percussion,
         };
       });
     });
@@ -4592,24 +4653,7 @@ export default function MainApp() {
       setScoreSummary(summary);
       setPerformanceMidi(summary?.performance_midi ?? null);
       setMessages(rebuilt.messages);
-      setMultiTrackAudioTracks(
-        workspace.player.vocals.map((vocal) => ({
-          key: vocal.key,
-          label: vocal.label,
-          audioUrl: vocal.audio_url,
-          partId: vocal.part_id ?? null,
-          partIndex: vocal.part_index ?? null,
-          verseNumber: vocal.verse_number ?? null,
-          durationSeconds: vocal.duration_seconds ?? undefined,
-          jobId: vocal.source_job_id,
-          sourceJobId: vocal.source_job_id,
-          expandRepeats: vocal.expand_repeats ?? undefined,
-          takeSignature: vocal.take_signature ?? null,
-          muted: vocal.muted,
-          solo: vocal.solo,
-          volume: vocal.volume,
-        }))
-      );
+      setMultiTrackAudioTracks(workspace.player.vocals.map(workspaceVocalTrack));
       setExpandRepeats(workspace.player.repeats && summary?.repeat_expansion_available !== false);
       setInstrumentalBus({
         muted: workspace.player.bus.muted,
@@ -5065,6 +5109,140 @@ export default function MainApp() {
     if (generation !== workspaceGenerationRef.current) return;
     setScore({ name: score.name, data });
   }, [score, sessionId]);
+
+  const rememberSingAllJob = useCallback((job: SingAllProgress) => {
+    setSingAllJobs((current) => ({ ...current, [job.jobId]: job }));
+  }, []);
+
+  const loadSingAllJob = useCallback(
+    (jobId: string) => {
+      fetchSingAllJob(jobId)
+        .then(rememberSingAllJob)
+        .catch(() => {
+          // The card keeps waiting; reopening the Song asks again.
+        });
+    },
+    [rememberSingAllJob]
+  );
+
+  // The caller's running Sing All, from any Song: asked once on sign-in...
+  useEffect(() => {
+    if (!isAuthenticated || !user) {
+      setActiveSingAll(null);
+      return;
+    }
+    let cancelled = false;
+    fetchActiveSingAll()
+      .then((job) => {
+        if (cancelled) return;
+        setActiveSingAll(job);
+        if (job) rememberSingAllJob(job);
+      })
+      .catch(() => {
+        // No pill until the next sign-in or "Sing it".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, user?.uid, rememberSingAllJob]);
+
+  // ...then every few seconds while it runs. When it ends, the job is read once
+  // more for its ended card.
+  const activeSingAllId = activeSingAll?.jobId ?? null;
+  useEffect(() => {
+    if (!activeSingAllId) return;
+    let cancelled = false;
+    void (async () => {
+      for (;;) {
+        await wait(SING_ALL_POLL_MS);
+        if (cancelled) return;
+        let job: SingAllProgress | null;
+        try {
+          job = await fetchActiveSingAll();
+        } catch {
+          continue;
+        }
+        if (cancelled) return;
+        if (job?.jobId === activeSingAllId) {
+          rememberSingAllJob(job);
+          setActiveSingAll(job);
+          continue;
+        }
+        loadSingAllJob(activeSingAllId);
+        setActiveSingAll(job);
+        if (job) rememberSingAllJob(job);
+        return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSingAllId, loadSingAllJob, rememberSingAllJob]);
+
+  const handleSingAllStarted = (messageId: string, jobId: string, progress: SingAllProgress | null) => {
+    setMessages((current) =>
+      current.map((message) => (message.id === messageId ? { ...message, singAllJobId: jobId } : message))
+    );
+    if (progress) {
+      rememberSingAllJob(progress);
+      setActiveSingAll(progress);
+      return;
+    }
+    fetchActiveSingAll()
+      .then((job) => {
+        setActiveSingAll(job);
+        if (job) rememberSingAllJob(job);
+      })
+      .catch(() => loadSingAllJob(jobId));
+  };
+
+  const handleSingAllStop = async (songId: string) => {
+    try {
+      const response = await stopSessionWork(songId);
+      if (response.singAll?.result === "too_late") {
+        setNotice("Too late to stop: it's just finishing");
+      }
+    } catch {
+      setNotice("Couldn't stop the work. Please try again.");
+    }
+    fetchActiveSingAll()
+      .then((job) => {
+        if (job) rememberSingAllJob(job);
+      })
+      .catch(() => {});
+  };
+
+  // Takes made by a Sing All in the Song on screen: each new one reloads the player
+  // and the score, which the job may have split.
+  const singAllTakesHere = Object.values(singAllJobs)
+    .filter((job) => job.songId === sessionId)
+    .reduce((sum, job) => sum + job.counts.takes.done, 0);
+  const singAllTakesSeenRef = useRef<{ songId: string | null; done: number }>({ songId: null, done: 0 });
+  useEffect(() => {
+    const seen = singAllTakesSeenRef.current;
+    singAllTakesSeenRef.current = { songId: sessionId, done: singAllTakesHere };
+    if (!sessionId || seen.songId !== sessionId || singAllTakesHere <= seen.done) return;
+    const generation = workspaceGenerationRef.current;
+    void (async () => {
+      let workspace: SongWorkspace;
+      try {
+        workspace = await fetchWorkspace(sessionId);
+      } catch {
+        return;
+      }
+      if (workspaceGenerationRef.current !== generation) return;
+      const summary = workspace.score.score_summary ?? null;
+      setScoreSummary(summary);
+      setPerformanceMidi(summary?.performance_midi ?? null);
+      setMultiTrackAudioTracks(workspace.player.vocals.map(workspaceVocalTrack));
+      setMixBaselineEpoch((current) => current + 1);
+      try {
+        await refreshScorePreview();
+      } catch {
+        // The preview keeps the score it shows.
+      }
+    })();
+  }, [sessionId, singAllTakesHere, refreshScorePreview]);
 
   // The single sink for job progress. Stream events and the polling fallback
   // both land here, so audio, MIDI and estimate updates cannot depend on which
@@ -6055,6 +6233,9 @@ export default function MainApp() {
           "details" in response ? response.details : undefined
         ),
       };
+      if (response.type === "chat_text" && response.singAll) {
+        assistantMessage.singAll = response.singAll;
+      }
       if (response.type === "chat_audio") {
         assistantMessage.audioUrl = response.audio_url;
         assistantMessage.audioTrack = response.audio_track;
@@ -6145,23 +6326,6 @@ export default function MainApp() {
     const content = input.trim();
     const voicebankId = selectedVoicebankId;
     setInput("");
-    if (content === SING_ALL_PROMPT) {
-      // UI prototype: stands in for the chat model's reply, which will check the language
-      // and open the card (open_sing_all). Nothing is sent to the backend.
-      setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", content }]);
-      window.setTimeout(() => {
-        setMessages((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: "Here's the quote for singing the whole song. Tap Customise to change anything.",
-            singAllPrototype: true,
-          },
-        ]);
-      }, 600);
-      return;
-    }
     await sendMessage(content, voicebankId);
   };
 
@@ -6324,6 +6488,21 @@ export default function MainApp() {
           </div>
         ) : null}
         <div className="header-actions">
+          {activeSingAll ? (
+            <button
+              type="button"
+              className="btn-secondary-inline sing-all-pill"
+              data-testid="sing-all-pill"
+              title={activeSingAll.songId === sessionId ? activeSingAll.title : `Open ${activeSingAll.title}`}
+              disabled={activeSingAll.songId !== sessionId && !canLeaveSong}
+              onClick={() => {
+                if (activeSingAll.songId !== sessionId) navigate(`/app/song/${activeSingAll.songId}`);
+              }}
+            >
+              <Sparkles size={14} aria-hidden="true" />
+              <span>Sing All · {singAllPillStage(activeSingAll)}</span>
+            </button>
+          ) : null}
           {currentSong ? (
             <button
               type="button"
@@ -6517,7 +6696,7 @@ export default function MainApp() {
                   msg.role,
                   msg.isProgress && "progress-bubble",
                   msg.audioUrl && "audio-bubble",
-                  msg.singAllPrototype && "sing-all-inline-bubble",
+                  (msg.singAll || msg.singAllJobId) && "sing-all-inline-bubble",
                   "reveal"
                 )}
                 style={{ animationDelay: `${index * 40}ms` }}
@@ -6618,7 +6797,21 @@ export default function MainApp() {
                 ) : (
                   <p>{msg.content}</p>
                 )}
-                {msg.singAllPrototype && <SingAllPrototypeCard />}
+                {(msg.singAll || msg.singAllJobId) && sessionId && (
+                  <SingAllCard
+                    songId={sessionId}
+                    songTitle={currentSong?.title ?? "This song"}
+                    open={msg.singAll}
+                    jobId={msg.singAllJobId}
+                    job={msg.singAllJobId ? singAllJobs[msg.singAllJobId] : null}
+                    onStarted={(jobId, progress) => handleSingAllStarted(msg.id, jobId, progress)}
+                    onLoadJob={loadSingAllJob}
+                    onOpenSong={(songId) => navigate(`/app/song/${songId}`)}
+                    onTopUp={() => openPaywall("insufficient_credits")}
+                    onUpgrade={() => openPaywall("billing_menu")}
+                    onStop={handleSingAllStop}
+                  />
+                )}
                 {msg.isProgress && !msg.audioUrl && (
                   <div className="thinking-dots" aria-label="Processing">
                     <span />
@@ -6685,25 +6878,26 @@ export default function MainApp() {
           </div>
           <div className="chat-input">
             <div className="starting-conversations" aria-label="Suggested starting conversations">
-              <button
-                type="button"
-                className="starting-conversation-button sing-all-trigger"
-                data-testid="sing-all-button"
-                disabled={creditsLocked || browserMixBounceActive}
-                onClick={() => {
-                  setInput(SING_ALL_PROMPT);
-                  composerInputRef.current?.focus();
-                }}
-              >
-                <Sparkles size={15} aria-hidden="true" />
-                <span>Sing All</span>
-              </button>
+              {scoreSummary && (
+                <button
+                  type="button"
+                  className="starting-conversation-button sing-all-trigger"
+                  data-testid="sing-all-button"
+                  disabled={creditsLocked || browserMixBounceActive || chatTurnInProgress || singAllRunningHere}
+                  title={singAllRunningHere ? "A Sing All is running" : undefined}
+                  onClick={() => void sendMessage(SING_ALL_PROMPT)}
+                >
+                  <Sparkles size={15} aria-hidden="true" />
+                  <span>Sing All</span>
+                </button>
+              )}
               {starterPrompts.map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
                   className="starting-conversation-button"
-                  disabled={creditsLocked || browserMixBounceActive}
+                  disabled={creditsLocked || browserMixBounceActive || singAllRunningHere}
+                  title={singAllRunningHere ? "A Sing All is running" : undefined}
                   onClick={() => {
                     setInput(suggestion);
                     composerInputRef.current?.focus();

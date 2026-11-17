@@ -57,8 +57,9 @@ async function mockBackend(page: Page): Promise<Backend> {
   return { uploads: () => [...uploads] };
 }
 
+// The song's own prompts; the Sing All button sits before them for every score.
 const starterPrompts = (page: Page) =>
-  page.locator(".starting-conversation-button").allTextContents();
+  page.locator(".starting-conversation-button:not(.sing-all-trigger)").allTextContents();
 
 test("demo songs load like an upload and bring their own starter prompts", async ({ page }) => {
   test.setTimeout(120_000);

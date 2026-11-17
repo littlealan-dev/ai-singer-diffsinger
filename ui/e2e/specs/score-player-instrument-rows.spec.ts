@@ -310,3 +310,49 @@ test("a drum part without sounds stays muted until the user chooses a kit", asyn
   await expect(solo).toBeEnabled();
   await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(false);
 });
+
+test("an instrument part with no sound chosen stays muted until the user chooses an instrument", async ({ page }) => {
+  test.setTimeout(120_000);
+  // Sing All saves a part it couldn't give a sound with none chosen; it is melodic, not a drum kit.
+  const performanceMidi = {
+    ...PERFORMANCE_MIDI,
+    instrumental_parts: [
+      part(1, "P2", "P2", "Piano", 0),
+      {
+        ...part(2, "P3", "P3", "Strings", 0),
+        midi_program: null,
+        program_source: "user_assignable",
+        percussion: false,
+      },
+    ],
+  };
+  await mockBackend(page, performanceMidi, [0, 0]);
+  await signInAsE2EUser(page, "score-player-unassigned-instrument");
+  await page.addStyleTag({ content: ".announcement-overlay { display: none !important; }" });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  await declineCookies.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await declineCookies.isVisible()) await declineCookies.click();
+
+  const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
+  await page.getByTestId("score-upload-input").setInputFiles({ name: "score.xml", mimeType: "application/xml", buffer: xml });
+  await expect(page.getByTestId("score-preview-surface").locator("svg").first()).toBeVisible();
+  await page.getByTestId("chat-input").fill("sing Voice");
+  await page.getByTestId("send-message").click();
+
+  const strings = page.getByTestId("score-inst-track-P3");
+  await expect(instrumentRows(page)).toHaveCount(2);
+  const picker = strings.locator(".score-track-instrument-trigger");
+  const mute = strings.locator(".score-track-mute-btn");
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Choose an instrument");
+  await expect(mute).toHaveAttribute("aria-pressed", "true");
+  await expect(mute).toBeDisabled();
+  await expect(mute).toHaveAttribute("title", "Choose an instrument to hear this part");
+
+  await picker.click();
+  await page.getByRole("menuitem", { name: "Strings", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Cello" }).click();
+  await expect(picker.locator(".score-track-instrument-label")).toHaveText("Cello");
+  await expect(mute).toHaveAttribute("aria-pressed", "false");
+  await expect(mute).toBeEnabled();
+  await expect.poll(() => playerTrackStates(page).then((states) => states?.[1]?.muted)).toBe(false);
+});

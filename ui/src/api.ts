@@ -114,6 +114,8 @@ export type WorkspaceMessage = {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  /** On the "Sing All started" and "finished" entries: the card shows at the first one. */
+  singAllJobId?: string;
 };
 
 /** A job's progress payload, plus what places it in the rebuilt chat. */
@@ -134,6 +136,8 @@ export type WorkspaceVocal = {
   expand_repeats?: boolean | null;
   duration_seconds?: number | null;
   voice_name?: string | null;
+  /** Absent on a track saved before Sing All: it counts as lyrics. */
+  mode?: SingAllTakeMode;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -211,6 +215,8 @@ export type ChatResponse =
   | {
       type: "chat_text";
       message: string;
+      /** The chat model opened Sing All for this language: the bubble shows the card. */
+      singAll?: SingAllOpen;
       stopped?: boolean;
       current_score?: unknown;
       score_summary?: ScoreSummary | null;
@@ -516,12 +522,15 @@ const API_REQUEST_TIMEOUT_SECONDS = parsePositiveNumber(
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  /** The error body's other fields, e.g. `activeSongId` beside `sing_all_already_running`. */
+  readonly detail: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, detail: Record<string, unknown> = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -681,14 +690,26 @@ async function errorFromResponse(response: Response, fallback: string): Promise<
   const text = await response.text();
   const startupMessage = backendStartingMessageFromBody(text);
   const localProxyBackendDown = IS_LOCAL_DEV && response.status === 500 && !text.trim();
-  if (startupMessage || response.status === 503 || localProxyBackendDown) {
+  // A 503 the Sing All quote answers on purpose: the card offers "Try again".
+  const quoteUnavailable = errorCodeFromBody(text) === "quote_unavailable";
+  if (!quoteUnavailable && (startupMessage || response.status === 503 || localProxyBackendDown)) {
     return new BackendStartingError(startupMessage || BACKEND_STARTING_MESSAGE);
   }
   return new ApiError(
     errorMessageFromBody(text) || fallback,
     response.status,
-    errorCodeFromBody(text) ?? undefined
+    errorCodeFromBody(text) ?? undefined,
+    errorDetailFromBody(text)
   );
+}
+
+function errorDetailFromBody(text: string): Record<string, unknown> {
+  try {
+    const detail = JSON.parse(text)?.detail;
+    return detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
+  } catch {
+    return {};
+  }
 }
 
 function errorCodeFromBody(text: string): string | null {
@@ -748,6 +769,8 @@ export type StopWorkResponse = {
     result: "stopped" | "too_late" | "not_stoppable";
     refundedCredits: number;
   }>;
+  /** The Song's running Sing All, when there was one. */
+  singAll?: { jobId: string; result: "stopping" | "too_late" } | null;
 };
 
 export async function stopSessionWork(sessionId: string): Promise<StopWorkResponse> {
@@ -1212,4 +1235,169 @@ export async function submitAudioFeedback(payload: {
       },
     }),
   });
+}
+
+// Sing All (docs/specs/sing-all-core-step3-spec.md, "API contract").
+
+export type SingAllMode = "lyrics" | "solfege" | "both";
+export type SingAllTakeMode = "lyrics" | "solfege";
+
+export type SingAllOpen = { language: string; solfegeOnly: boolean };
+
+export type SingAllRowChoice = {
+  rowId: string;
+  include: boolean;
+  voice: string;
+  voicePicked: "recommended" | "user";
+};
+
+export type SingAllChoices = {
+  language?: string;
+  solfegeOnly?: boolean;
+  mode?: SingAllMode;
+  verse?: string;
+  repeats?: boolean;
+  rows?: SingAllRowChoice[];
+  styleNote?: string;
+};
+
+export type SingAllRow = SingAllRowChoice & {
+  sourcePartId: string;
+  partName: string;
+  partId: string | null;
+  name: string;
+  split: boolean;
+  hasWords: boolean;
+  note: null | "no_words" | "likely_instrument" | "undecided" | "voice_out_of_range";
+  pitchRange: { lowest_note?: string; highest_note?: string };
+};
+
+export type SingAllLine =
+  | { kind: "singing"; parts: number; takes: number; secondsEach: number; credits: number }
+  | { kind: "preparing"; credits: number }
+  | { kind: "instrumentals"; credits: number }
+  | { kind: "total"; credits: number }
+  | { kind: "balance"; before: number; after: number };
+
+export type SingAllNote = {
+  code: string;
+  partId: string | null;
+  partName: string | null;
+};
+
+export type SingAllControls = {
+  voiceColor?: string | null;
+  airiness?: number;
+  clarity?: number;
+  gender?: number;
+  intensity?: number;
+};
+
+export type SingAllQuote = {
+  quoteId: string;
+  blocked: null | "free_plan" | "nothing_to_sing" | "not_enough_credits" | "style_unavailable";
+  rows: SingAllRow[];
+  voices: Array<{ id: string; name: string }>;
+  options: {
+    language: string;
+    languages: Array<{ code: string; label: string | null }>;
+    solfegeOnly: boolean;
+    mode: SingAllMode;
+    verse: string;
+    verses: string[];
+    repeats: boolean;
+    repeatsAvailable: boolean;
+  };
+  lines: SingAllLine[];
+  total: number;
+  balance: number;
+  notes: SingAllNote[];
+  style: {
+    note: string;
+    controls: Record<string, SingAllControls>;
+    changes: Record<string, SingAllControls>;
+  };
+  choicesHash: string;
+};
+
+export type SingAllQuoteBlocked =
+  | { blocked: "already_running"; activeJobId: string; activeSongId: string }
+  | { blocked: "no_voice_for_language"; language: string; supported: string[] };
+
+export type SingAllQuoteResponse = SingAllQuote | SingAllQuoteBlocked;
+
+export const isSingAllQuote = (response: SingAllQuoteResponse): response is SingAllQuote =>
+  "quoteId" in response && typeof response.quoteId === "string";
+
+export type SingAllItemStatus = "queued" | "running" | "done" | "failed" | "stopped";
+export type SingAllStatus = "running" | "completed" | "partial" | "failed" | "cancelled";
+export type SingAllStage = "reading" | "splitting" | "solfege" | "singing" | "done";
+
+export type SingAllProgress = {
+  jobId: string;
+  songId: string;
+  title: string;
+  status: SingAllStatus;
+  stage: SingAllStage;
+  endReason: string | null;
+  cancelRequested: boolean;
+  choices: { language: string; solfegeOnly: boolean; mode: SingAllMode; verse: string; repeats: boolean };
+  counts: {
+    splits: { done: number; total: number };
+    takes: { done: number; failed: number; total: number };
+  };
+  rows: Array<{
+    rowId: string;
+    name: string;
+    voice: string;
+    voiceName: string;
+    split: boolean;
+    takes: Array<{ mode: SingAllTakeMode; status: SingAllItemStatus; reason: string | null }>;
+  }>;
+  credits: { reserved: number; charged: number; refunded: number };
+  receipt: Array<{
+    itemId: string;
+    type: "take" | "split" | "instrumental";
+    rowId: string | null;
+    mode: SingAllTakeMode | null;
+    name: string | null;
+    credits: number;
+    outcome: "charged" | "refunded" | "included";
+    reason: string | null;
+  }>;
+  notes: SingAllNote[];
+  elapsedS: number;
+  remainingS: number | null;
+  render: { state: "none" | "waiting" | "running" | "ended"; placeInLine: number | null };
+  createdAt: string;
+  endedAt: string | null;
+};
+
+export async function requestSingAllQuote(
+  songId: string,
+  choices: SingAllChoices
+): Promise<SingAllQuoteResponse> {
+  return request("/sing-all/quote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ songId, choices }),
+  });
+}
+
+/** "Sing it". Until the S3 backend lands it answers the job record: only `jobId` is relied on. */
+export async function startSingAll(quoteId: string): Promise<SingAllProgress> {
+  return request("/sing-all/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ quoteId }),
+  });
+}
+
+export async function fetchActiveSingAll(): Promise<SingAllProgress | null> {
+  const response = await request<{ job: SingAllProgress | null }>("/sing-all/active", { method: "GET" });
+  return response.job ?? null;
+}
+
+export async function fetchSingAllJob(jobId: string): Promise<SingAllProgress> {
+  return request(`/sing-all/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
 }

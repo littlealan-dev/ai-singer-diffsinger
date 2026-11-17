@@ -3848,6 +3848,25 @@ img.voice-picker-option-avatar {
   cursor: not-allowed;
 }
 
+/* A running Sing All, from any Song; it links to the job's Song. */
+.sing-all-pill {
+  gap: 6px;
+  max-width: 220px;
+  white-space: nowrap;
+  border-color: rgba(155, 134, 255, 0.55);
+  color: var(--accent-strong);
+}
+
+.sing-all-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sing-all-pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .song-load-overlay {
   position: fixed;
   inset: 0;

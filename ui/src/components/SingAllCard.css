@@ -1,4 +1,4 @@
-/* Sing All UI prototype (fake data). Reuses the chat's selection-* classes. */
+/* The Sing All card in a chat bubble. Reuses the chat's selection-* classes. */
 /* Text matches the chat's (1rem, tables 0.95rem); only footnotes and labels are smaller. */
 .sing-all-card {
   width: 100%;
@@ -19,16 +19,6 @@
   gap: 8px;
   font-weight: 600;
   color: var(--text-strong);
-}
-
-.sing-all-badge {
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  border: 1px solid rgba(155, 134, 255, 0.4);
-  border-radius: 999px;
-  padding: 2px 8px;
-  color: var(--accent-strong);
 }
 
 .sing-all-step {
@@ -229,15 +219,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.sing-all-proto-toggle {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.sing-all-confirmed {
-  opacity: 0.85;
 }
 
 /* Narrow chat: "Sing in" wraps instead of overflowing. */
@@ -446,3 +427,101 @@
   border-radius: 0 8px 8px 0;
 }
 
+
+/* A line the user should notice: "The score changed, so here is the new quote." */
+.sing-all-notice {
+  margin: 0;
+  color: var(--accent-strong);
+}
+
+.sing-all-warning {
+  margin: 0;
+  color: #ffb36b;
+}
+
+/* Not enough credits: the total in red. */
+.sing-all-total.sing-all-short td {
+  color: #ff7a7a;
+}
+
+.sing-all-style-lines p {
+  margin: 0;
+}
+
+/* The running job: the stages in order, the current one strong. */
+.sing-all-stages {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+
+.sing-all-stage.is-done {
+  color: var(--text-muted);
+}
+
+.sing-all-stage.is-now {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.sing-all-stage.is-later {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.sing-all-job-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.sing-all-job-rows li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sing-all-job-rows li > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sing-all-take-marks {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sing-all-take-mark.is-done {
+  color: #7fe0a6;
+}
+
+.sing-all-take-mark.is-failed,
+.sing-all-take-mark.is-stopped {
+  color: #ffb36b;
+}
+
+.sing-all-take-mark.is-running,
+.sing-all-take-mark.is-queued {
+  color: var(--text-muted);
+}
+
+.sing-all-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+}
+
+.sing-all-confirm p {
+  margin: 0;
+}
+
+.sing-all-receipt .sing-all-refunded td {
+  color: var(--text-muted);
+}
