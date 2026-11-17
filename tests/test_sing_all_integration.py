@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.backend import sing_all_store
+from src.backend import sing_all_store, songs
 from src.backend.credits import (
     get_instrumental_charge_state, get_or_create_credits, instrumental_charge_scope,
     release_credits, settle_credits,
@@ -317,3 +317,76 @@ def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
     assert get_or_create_credits(uid, "").reserved == 0
     assert get_or_create_credits(uid, "").available_balance == before
     assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
+def test_both_modes_make_two_takes_and_two_player_tracks(parent_environment):
+    _db, uid, session_id, job_id = parent_environment
+    lyrics = {"number": "1", "name": "Made-up words"}
+    solfege = {"number": "9", "name": "Generated solfege"}
+    items = [{
+        "itemId": f"take:P1:{mode}", "type": "take", "rowId": "P1",
+        "mode": mode, "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index, mode in enumerate(("lyrics", "solfege"))]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "solfege",
+        "revision": 0, "instrumentalsPrepared": True,
+        "solfegePrepared": True, "solfegeSelections": {"P1": solfege},
+        "quote": {"total": 4, "scoreVersion": 1}, "items": items,
+        "rows": [{"rowId": "P1", "partId": "P1", "sourcePartId": "P1",
+                  "voice": "example-voice"}],
+        "choices": {"verse": 1, "mode": "both", "language": "en", "repeats": False},
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    snapshot = {
+        "score_id": "example-score",
+        "current_score": {"version": 1, "score": {
+            "selected_verse_number": 1, "selected_lyric_selection": lyrics}},
+        "score_summary": {"parts": [{
+            "part_id": "P1", "lyric_selections": [lyrics]}]},
+    }
+    children = {}
+    calls = []
+    player = songs.empty_player(uid, "example-score")
+
+    async def get_snapshot(*_args):
+        return snapshot
+
+    async def reparse_score(_session_id, **kwargs):
+        snapshot["current_score"]["score"]["selected_lyric_selection"] = kwargs["lyric_selection"]
+
+    async def start_take(_session_id, _score, args, **kwargs):
+        child_id = kwargs["parent"]["childJobId"]
+        mode = "solfege" if args["require_solfege_lyrics"] else "lyrics"
+        calls.append((mode, args["lyric_selection"], args.get("solfege_pronunciation_patch")))
+        assert (await asyncio.to_thread(settle_credits, uid, child_id, 59)).status == "settled"
+        child = {
+            "status": "completed", "creditsCharged": 2, "jobKind": "synthesis",
+            "scoreId": "example-score", "audioTrack": {
+                "key": f"id:P1:{mode}", "mode": mode, "part_id": "P1",
+                "part_index": 0, "label": "Made-up voice"},
+        }
+        assert songs.apply_take(player, child_id, child)
+        children[child_id] = child
+        return {"job_id": child_id}
+
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=get_snapshot),
+        _job_store=SimpleNamespace(get_job=lambda child_id: children.get(child_id)),
+        _normalize_synthesize_voice_color=lambda args: asyncio.sleep(0, result=args),
+        _reparse_score=reparse_score,
+        _start_synthesis_job=start_take,
+    )
+    runner = SingAllRunner(orchestrator)
+    asyncio.run(runner.reconcile(job_id))
+    asyncio.run(runner.reconcile(job_id))
+    assert sing_all_store.load(job_id)["status"] == "completed"
+    assert calls == [("lyrics", lyrics, None), ("solfege", solfege, True)]
+    assert [(track["mode"], track["key"]) for track in player["vocals"]] == [
+        ("lyrics", "id:P1:lyrics"), ("solfege", "id:P1:solfege")]
+    credits = get_or_create_credits(uid, "")
+    assert credits.reserved == 0
+    assert credits.available_balance == before - 4
