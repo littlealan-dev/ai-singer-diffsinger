@@ -157,7 +157,13 @@ def progress(
         created = datetime.fromisoformat(created)
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
-    elapsed = max(0, int((instant - created).total_seconds()))
+    ended = job.get("status") != "running"
+    ended_at = job.get("endedAt")
+    end_time = datetime.fromisoformat(ended_at) if isinstance(ended_at, str) else ended_at
+    if isinstance(end_time, datetime) and end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    elapsed_until = end_time if ended and isinstance(end_time, datetime) else instant
+    elapsed = max(0, int((elapsed_until - created).total_seconds()))
     items = list(job.get("items") or [])
     splits = [item for item in items if item.get("type") == "split"]
     takes = [item for item in items if item.get("type") == "take"]
@@ -179,7 +185,6 @@ def progress(
                        - int(item.get("creditsCharged") or 0))
                    for item in items if item.get("status") in {"done", "failed", "stopped"})
     total = int((job.get("quote") or {}).get("total") or 0)
-    ended = job.get("status") != "running"
     receipt = []
     if ended:
         for item in items:
@@ -212,7 +217,6 @@ def progress(
     if reason == "instrumental_failed":
         reason = "instrumentals_failed"
     render = job.get("render") or {}
-    ended_at = job.get("endedAt")
     return {
         "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
         "status": job["status"], "stage": job["stage"], "endReason": reason,

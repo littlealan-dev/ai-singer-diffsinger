@@ -93,6 +93,7 @@ def test_ended_progress_has_receipt_and_no_remaining_time(status):
     assert result["counts"] == {"splits": {"done": 1, "total": 1},
                                  "takes": {"done": 1, "failed": 1, "total": 2}}
     assert result["credits"] == {"reserved": 0, "charged": 2, "refunded": 4}
+    assert result["elapsedS"] == 20
     assert result["remainingS"] is None
     assert result["endedAt"] == NOW.isoformat()
     assert [(item["type"], item["name"], item["credits"], item["outcome"])
