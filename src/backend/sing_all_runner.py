@@ -69,7 +69,27 @@ class SingAllRunner:
                 "release", "save_assignments", "fail_stuck_child"}]
             for action in before:
                 try:
-                    await self._action(job, action, snapshot)
+                    outcome = await self._action(job, action, snapshot)
+                    if (action["kind"] == "release" and outcome == "already_settled"
+                            and "items" in fields):
+                        charged = await asyncio.to_thread(
+                            sing_all_store.settled_credits, action["reservationId"])
+                        if charged is not None:
+                            for item in fields["items"]:
+                                reservation_id = item.get("reservationId") or item.get("childJobId")
+                                if reservation_id == action["reservationId"]:
+                                    item.update(status="done", reason=None, creditsCharged=charged)
+                            if fields.get("stage") == "done":
+                                takes = [item for item in fields["items"]
+                                         if item["type"] == "take"]
+                                if job.get("cancelRequested") and all(
+                                    item["status"] == "done" for item in takes
+                                ):
+                                    fields.update(status="completed", endReason=None)
+                                elif fields.get("endReason") == "stuck" and any(
+                                    item["status"] == "done" for item in takes
+                                ):
+                                    fields["status"] = "partial"
                 except SingAllTerminalError as exc:
                     await self._terminal_failure(job_id, exc.reason)
                     return
@@ -189,7 +209,7 @@ class SingAllRunner:
         return state
 
     async def _action(self, job: dict[str, Any], action: dict[str, Any],
-                      snapshot: dict[str, Any]) -> None:
+                      snapshot: dict[str, Any]) -> str | None:
         kind = action["kind"]
         uid, session_id = job["uid"], job["sessionId"]
         if kind == "release":
@@ -197,6 +217,7 @@ class SingAllRunner:
             if result.status not in {"released", "already_released", "already_settled",
                                      "reservation_missing"}:
                 raise RuntimeError(f"Credit release: {result.status}")
+            return result.status
         elif kind == "fail_stuck_child":
             await asyncio.to_thread(
                 self.orchestrator._job_store.fail_job_if_active,

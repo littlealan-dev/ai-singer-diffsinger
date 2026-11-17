@@ -147,6 +147,15 @@ def running_jobs() -> list[str]:
     return [doc.id for doc in docs]
 
 
+def settled_credits(reservation_id: str) -> int | None:
+    """Read a charge that won the race against a parent release."""
+    record = (get_firestore_client().collection("credit_reservations")
+              .document(reservation_id).get().to_dict() or {})
+    if record.get("status") != "settled":
+        return None
+    return int(record.get("actualCredits") or 0)
+
+
 def active_job_for_song(uid: str, session_id: str) -> dict[str, Any] | None:
     """Return this Song's running parent, ignoring a stale active pointer."""
     db = get_firestore_client()

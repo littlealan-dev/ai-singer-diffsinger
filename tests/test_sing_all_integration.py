@@ -339,6 +339,41 @@ def test_stop_after_parent_has_ended_changes_no_credits(parent_environment):
     assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
 
 
+def test_stop_records_a_charge_that_settles_while_the_parent_releases(parent_environment):
+    db, uid, session_id, job_id = parent_environment
+    items = [{
+        "itemId": f"take:P{index}:lyrics", "type": "take", "rowId": f"P{index}",
+        "mode": "lyrics", "childJobId": f"{job_id}-take-{index}",
+        "creditsReserved": 2, "creditsCharged": 0, "estimatedSeconds": 59,
+        "unitSeconds": 30, "status": "queued",
+    } for index in range(2)]
+    parent = {
+        "jobId": job_id, "uid": uid, "sessionId": session_id,
+        "scoreId": "example-score", "status": "running", "stage": "singing",
+        "revision": 0, "quote": {"total": 4, "scoreVersion": 1}, "items": items,
+        "cancelRequested": True,
+    }
+    before = get_or_create_credits(uid, "").available_balance
+    assert sing_all_store.create_job_with_reservations(parent).status == "reserved"
+    assert settle_credits(uid, items[0]["childJobId"], 59).status == "settled"
+
+    async def snapshot(*_args):
+        return {"score_id": "example-score", "current_score": {"version": 1, "score": {}}}
+
+    runner = SingAllRunner(SimpleNamespace(
+        _sessions=SimpleNamespace(get_snapshot=snapshot),
+        _job_store=SimpleNamespace(get_job=lambda _id: None),
+    ))
+    asyncio.run(runner.reconcile(job_id))
+    ended = sing_all_store.load(job_id)
+    assert ended["status"] == "cancelled"
+    assert [item["status"] for item in ended["items"]] == ["done", "stopped"]
+    assert [item["creditsCharged"] for item in ended["items"]] == [2, 0]
+    assert get_or_create_credits(uid, "").available_balance == before - 2
+    assert get_or_create_credits(uid, "").reserved == 0
+    assert not db.collection("users").document(uid).get().to_dict().get("activeSingAllJobId")
+
+
 def test_concurrent_reconcile_runs_four_stubbed_takes_once(parent_environment):
     db, uid, session_id, job_id = parent_environment
     rows = [{"rowId": f"P{index}", "partId": f"P{index}",
