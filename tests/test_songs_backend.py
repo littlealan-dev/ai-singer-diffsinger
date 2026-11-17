@@ -58,6 +58,23 @@ def _mix(score_id, **overrides):
     return songs.PlayerMix.model_validate(body)
 
 
+def test_lyrics_and_solfege_takes_of_one_part_keep_separate_tracks():
+    player = songs.empty_player(None, "fake-score")
+    old_lyrics = _take("fake-score")
+    assert songs.apply_take(player, "old-lyrics", old_lyrics)
+    solfege = _take("fake-score")
+    solfege["audioTrack"].update(key="id:P1:solfege", mode="solfege")
+    assert songs.apply_take(player, "solfege", solfege)
+    assert [(track["mode"], track["sourceJobId"]) for track in player["vocals"]] == [
+        ("lyrics", "old-lyrics"), ("solfege", "solfege")]
+    new_lyrics = _take("fake-score")
+    new_lyrics["audioTrack"]["key"] = "id:P1:lyrics"
+    assert songs.apply_take(player, "new-lyrics", new_lyrics)
+    assert len(player["vocals"]) == 2
+    assert [track["sourceJobId"] for track in player["vocals"]] == ["new-lyrics", "solfege"]
+    assert songs.vocal_response(player["vocals"][1])["mode"] == "solfege"
+
+
 # ---- The stores (memory and Firestore behave the same) ----------------------
 
 
@@ -95,7 +112,8 @@ def test_a_settled_take_fills_the_player_record(workspace):
         assert player["revision"] == 1
         [entry] = player["vocals"]
         assert entry == {
-            "key": "id:P1", "partId": "P1", "partIndex": 0, "label": "Part P1", "verseNumber": 1,
+            "key": "id:P1", "mode": "lyrics", "partId": "P1", "partIndex": 0,
+            "label": "Part P1", "verseNumber": 1,
             "takeSignature": "sig-a", "sourceJobId": "take-1", "expandRepeats": False,
             "durationSeconds": 12.5, "voiceName": "Voice A",
             "muted": False, "solo": False, "volume": 1.0,

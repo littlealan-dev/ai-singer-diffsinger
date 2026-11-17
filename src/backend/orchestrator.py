@@ -52,9 +52,11 @@ from src.backend.gpu_errors import (
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all import open_sing_all_result
+from src.backend.sing_all_store import active_job_for_song, child_allowed
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.preprocess_dispatch import PreprocessDispatcher, PreprocessDispatchError
 from src.backend.job_dispatch import (
+    SING_ALL_RECONCILE_KIND,
     SYNTHESIS_JOB_KIND,
     JobDispatchError,
     JobDispatcher,
@@ -89,6 +91,7 @@ from src.musicxml.performance_midi import (
 )
 from src.musicxml.instrument_programs import (
     apply_llm_program_assignments,
+    carry_resolved_instrument_programs,
     settle_split_sources,
     drop_resolved_program_assignments,
     llm_program_assignments_from_summary,
@@ -667,7 +670,8 @@ class Orchestrator:
                         response_message = followup_error
                     await self._append_chat_reply(session_id, response_message)
                     return {"type": "chat_text", "message": response_message}
-                if self._should_start_preprocess_workflow(llm_response.tool_calls):
+                if (self._should_start_preprocess_workflow(llm_response.tool_calls)
+                        and await self._sing_all_preprocess_handoff_refusal(user_id, session_id) is None):
                     explicit_verse_number = self._normalize_verse_number(
                         (snapshot.get("files") or {}).get(EXPLICIT_VERSE_METADATA_KEY)
                         if isinstance(snapshot.get("files"), dict)
@@ -1082,13 +1086,24 @@ class Orchestrator:
         job_id: Optional[str] = None,
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
+        parent: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a Firestore job and start it: here, or on the synthesis worker.
 
         A job already running in the session keeps running; the newer job
         becomes the session's current one.
         """
-        if job_id is None:
+        retry_existing = False
+        if parent is not None:
+            job_id = parent["childJobId"]
+            existing = await asyncio.to_thread(self._job_store.get_job, job_id)
+            if existing is not None:
+                active_task = self._synthesis_tasks.get(job_id)
+                if (existing.get("status") != "queued"
+                        or (active_task is not None and not active_task.done())):
+                    return SynthesisChatResponse({"type": "chat_progress", "job_id": job_id}, None)
+                retry_existing = True
+        elif job_id is None:
             job_id = uuid.uuid4().hex
         render_type = arguments.get("render_type")
         output_storage_path = None
@@ -1104,19 +1119,19 @@ class Orchestrator:
         input_path, job_input_storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
-        await self._sessions.create_current_job(
-            session_id, self._job_store,
-            job_id=job_id,
-            user_id=user_id,
-            status="queued",
+        create_fields = dict(
+            job_id=job_id, user_id=user_id, status="queued",
             input_path=job_input_storage_path or input_path,
             render_type=render_type if isinstance(render_type, str) else None,
             originating_turn_id=originating_turn_id,
-            voicebank_metadata=voicebank_metadata,
-            audio_track=audio_track,
+            voicebank_metadata=voicebank_metadata, audio_track=audio_track,
             expand_repeats=bool(arguments.get("expand_repeats", False)),
             provenance=provenance,
         )
+        if parent is None:
+            await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
+        elif not retry_existing:
+            await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
@@ -1124,6 +1139,8 @@ class Orchestrator:
             step="queued",
             message="Got it, getting ready to sing...",
             progress=0.0,
+            **({"parentJobId": parent["jobId"], "parentItemId": parent["itemId"]}
+               if parent is not None else {}),
         )
         accepted = {
             "type": "chat_progress",
@@ -1143,6 +1160,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
@@ -1158,6 +1176,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
         )
         self._synthesis_tasks[job_id] = task
@@ -1180,6 +1199,7 @@ class Orchestrator:
         user_email: str,
         planning_context: Optional[Dict[str, Any]] = None,
         originating_turn_id: Optional[str] = None,
+        parent: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a background preprocess job and return a pollable response."""
         signals = score.get("voice_part_signals")
@@ -1199,23 +1219,32 @@ class Orchestrator:
                 "message": action_required["message"],
                 "action_required": action_required,
             }
-        busy = await self._preprocess_busy_response(session_id, user_id)
-        if busy is not None:
-            return busy
-        job_id = uuid.uuid4().hex
+        if parent is None:
+            busy = await self._preprocess_busy_response(session_id, user_id)
+            if busy is not None:
+                return busy
+        job_id = parent["childJobId"] if parent is not None else uuid.uuid4().hex
+        retry_existing = False
+        if parent is not None:
+            existing = await asyncio.to_thread(self._job_store.get_job, job_id)
+            if existing is not None:
+                active_task = self._preprocess_tasks.get(session_id)
+                if (existing.get("status") != "queued"
+                        or (active_task is not None and not active_task.done())):
+                    return {"type": "chat_progress", "job_id": job_id}
+                retry_existing = True
         input_path, storage_path, provenance = await self._capture_job_input(
             session_id, user_id, job_id
         )
-        await self._sessions.create_current_job(
-            session_id, self._job_store,
-            job_id=job_id,
-            user_id=user_id,
-            status="queued",
-            render_type="preprocess",
-            input_path=storage_path or input_path,
-            provenance=provenance,
-            originating_turn_id=originating_turn_id,
+        create_fields = dict(
+            job_id=job_id, user_id=user_id, status="queued",
+            render_type="preprocess", input_path=storage_path or input_path,
+            provenance=provenance, originating_turn_id=originating_turn_id,
         )
+        if parent is None:
+            await self._sessions.create_current_job(session_id, self._job_store, **create_fields)
+        elif not retry_existing:
+            await asyncio.to_thread(self._job_store.create_job, session_id=session_id, **create_fields)
         await asyncio.to_thread(
             self._job_store.update_job,
             job_id,
@@ -1224,6 +1253,8 @@ class Orchestrator:
             message=initial_message,
             progress=0.0,
             jobKind="preprocess",
+            **({"parentJobId": parent["jobId"], "parentItemId": parent["itemId"]}
+               if parent is not None else {}),
         )
         if self._preprocess_dispatcher.mode != "inline":
             return await self._dispatch_preprocess_job(
@@ -1250,6 +1281,7 @@ class Orchestrator:
                 if isinstance(planning_context, dict)
                 else None,
                 originating_turn_id=originating_turn_id,
+                **({"parent_job_id_hint": parent["jobId"]} if parent is not None else {}),
             )
         )
         self._preprocess_tasks[session_id] = task
@@ -1508,6 +1540,8 @@ class Orchestrator:
                 else None,
                 originating_turn_id=originating_turn_id,
                 on_interrupt=release_for_retry,
+                **({"parent_job_id_hint": job["parentJobId"]}
+                   if job.get("parentJobId") else {}),
             )
         finally:
             heartbeat.cancel()
@@ -1756,6 +1790,8 @@ class Orchestrator:
                 billing_components=list(spec.get("billingComponents") or []),
                 originating_turn_id=str(spec.get("originatingTurnId") or "") or None,
                 on_interrupt=release_for_retry,
+                **({"parent_job_id_hint": job["parentJobId"]}
+                   if job.get("parentJobId") else {}),
             )
         finally:
             heartbeat.cancel()
@@ -2230,6 +2266,7 @@ class Orchestrator:
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
         on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
+        parent_job_id_hint: Optional[str] = None,
     ) -> None:
         """Execute a synthesis job and update status in Firestore.
 
@@ -2243,6 +2280,20 @@ class Orchestrator:
         midi_session_published = False
         # Set once the take is completed and settled: the Song's player then records it.
         take_settled = False
+        try:
+            job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        except Exception:
+            if parent_job_id_hint:
+                raise
+            # A transient parent lookup error must not bypass the existing
+            # render/error-finalization path for an ordinary take.
+            self._logger.warning("synthesis_parent_lookup_failed job=%s", job_id, exc_info=True)
+            job_record = {}
+        parent_job_id = parent_job_id_hint or job_record.get("parentJobId")
+        if parent_job_id and not await asyncio.to_thread(
+            child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
+        ):
+            return
         try:
             set_log_context(
                 session_id=session_id,
@@ -2655,6 +2706,8 @@ class Orchestrator:
                 # and the premium worker. It runs whether or not a page still
                 # follows the take.
                 await self._record_take_in_player(session_id, job_id)
+            if parent_job_id:
+                await self._enqueue_sing_all_reconcile(parent_job_id)
             clear_log_context()
 
     async def _record_take_in_player(self, session_id: str, job_id: str) -> None:
@@ -2667,6 +2720,21 @@ class Orchestrator:
             self._logger.exception(
                 "player_record_update_failed session=%s job=%s", session_id, job_id
             )
+
+    async def _enqueue_sing_all_reconcile(self, job_id: str) -> None:
+        """Wake the parent after a child ends, using the configured reconcile route."""
+        from src.backend.sing_all_runner import SingAllRunner
+
+        route = job_route(self._settings, SING_ALL_RECONCILE_KIND)
+        if route.mode == "inline":
+            task = asyncio.create_task(SingAllRunner(self).reconcile(job_id))
+            task.add_done_callback(
+                lambda done: self._logger.error("sing_all_reconcile_failed job=%s error=%s",
+                                                job_id, done.exception())
+                if not done.cancelled() and done.exception() else None
+            )
+            return
+        await JobDispatcher(route).dispatch(job_id)
 
     async def _run_preprocess_job(
         self,
@@ -2682,12 +2750,25 @@ class Orchestrator:
         planning_context: Optional[Dict[str, Any]] = None,
         originating_turn_id: Optional[str] = None,
         on_interrupt: Optional[Callable[[], Awaitable[bool]]] = None,
+        parent_job_id_hint: Optional[str] = None,
     ) -> None:
         """Execute preprocess workflow in the background and publish completion message.
 
         on_interrupt runs when the job is cancelled; returning True means it put
         the job back for another attempt, so the job is not marked failed.
         """
+        try:
+            job_record = await asyncio.to_thread(self._job_store.get_job, job_id) or {}
+        except Exception:
+            if parent_job_id_hint:
+                raise
+            self._logger.warning("preprocess_parent_lookup_failed job=%s", job_id, exc_info=True)
+            job_record = {}
+        parent_job_id = parent_job_id_hint or job_record.get("parentJobId")
+        if parent_job_id and not await asyncio.to_thread(
+            child_allowed, parent_job_id, job_record.get("parentItemId"), job_id
+        ):
+            return
         inherited_budget = _llm_turn_budget.get()
         if inherited_budget is not None and inherited_budget.stop_turn_id:
             _llm_turn_budget.set(replace(
@@ -2770,7 +2851,8 @@ class Orchestrator:
             )
             await self._pass_preprocess_stop_point(session_id)
             message = str(response.get("message") or "").strip() or "Preprocess finished."
-            await self._sessions.append_history(session_id, "assistant", message)
+            if not parent_job_id:
+                await self._sessions.append_history(session_id, "assistant", message)
             if response.get("type") == "chat_error":
                 await asyncio.to_thread(
                     self._job_store.update_job,
@@ -2897,6 +2979,8 @@ class Orchestrator:
             )
         finally:
             _preprocess_job_context.reset(context_token)
+            if parent_job_id:
+                await self._enqueue_sing_all_reconcile(parent_job_id)
             clear_log_context()
 
     async def _render_synthesis_action_required_message(
@@ -3630,6 +3714,11 @@ class Orchestrator:
                     raise RuntimeError(
                         "Preprocess workflow handoff cannot start from inside a preprocess job."
                     )
+                refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
+                if refusal is not None:
+                    pending_calls = list(followup_response.tool_calls)
+                    pending_thought_summary = followup_response.thought_summary or ""
+                    continue
                 latest_files = latest_snapshot.get("files")
                 handoff_explicit_verse_number = self._normalize_verse_number(
                     latest_files.get(EXPLICIT_VERSE_METADATA_KEY)
@@ -5557,6 +5646,16 @@ class Orchestrator:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
 
+    async def _sing_all_preprocess_handoff_refusal(
+        self, user_id: str, session_id: str,
+    ) -> Optional[Dict[str, str]]:
+        """Guard workflow handoffs before they bypass the generic tool executor."""
+        if self._settings.session_store != "firestore":
+            return None
+        if await asyncio.to_thread(active_job_for_song, user_id, session_id):
+            return {"status": "action_required", "reason": "sing_all_already_running"}
+        return None
+
     def _build_preprocess_workflow_planning_context(
         self,
         tool_calls: List[ToolCall],
@@ -5985,10 +6084,17 @@ class Orchestrator:
         result = await asyncio.to_thread(self._router.call_tool, "parse_score", parse_args)
         if not isinstance(result, dict):
             return None
+        prior_score = (previous.get("current_score") or {}).get("score")
+        if isinstance(prior_score, dict):
+            self._carry_preprocess_active_metadata(prior_score, result)
         score_summary = result.get("score_summary") if isinstance(result, dict) else None
         score = dict(result)
         score.pop("score_summary", None)
         if isinstance(score_summary, dict):
+            prior_summary = previous.get("score_summary")
+            if isinstance(prior_summary, dict):
+                score_summary = carry_resolved_instrument_programs(
+                    prior_summary, score_summary)
             score_summary = await self._carry_published_performance_midi(
                 session_id,
                 previous,
@@ -6594,6 +6700,7 @@ class Orchestrator:
             sheet, choices, stats = await choose(
                 score,
                 planning_context,
+                lane_layouts=planning_context.get("lane_layouts"),
                 call=self._call_preprocess_chooser,
                 max_slots_per_request=self._settings.preprocess_chooser_max_slots_per_request,
                 evidence_max_chars=self._settings.preprocess_chooser_evidence_max_chars,
@@ -6749,6 +6856,7 @@ class Orchestrator:
             sheet, choices, stats = await choose_repair(
                 state.score,
                 state.planning_context,
+                lane_layouts=state.planning_context.get("lane_layouts"),
                 sheet=state.sheet,
                 choices=state.choices,
                 failing=failing,
@@ -8051,7 +8159,8 @@ class Orchestrator:
         part_id = str(part.get("part_id") or synth_args.get("part_id") or "").strip()
         part_name = str(part.get("part_name") or "").strip()
         label = part_name or (f"Part {part_id}" if part_id else f"Part {part_index + 1}")
-        key = f"id:{part_id}" if part_id else f"index:{part_index}"
+        mode = "solfege" if synth_args.get("require_solfege_lyrics") is True else "lyrics"
+        key = f"id:{part_id}:{mode}" if part_id else f"index:{part_index}:{mode}"
         summary_parts = (score_summary or {}).get("parts") or []
         take_signature = next(
             (
@@ -8065,6 +8174,7 @@ class Orchestrator:
         )
         return {
             "key": key,
+            "mode": mode,
             "label": label,
             "part_id": part_id or None,
             "part_index": part_index,
@@ -8646,6 +8756,15 @@ class Orchestrator:
                 summarize_payload(call.arguments),
             )
             if call.name == TOOL_START_PREPROCESS_WORKFLOW:
+                refusal = await self._sing_all_preprocess_handoff_refusal(user_id, session_id)
+                if refusal is not None:
+                    return ToolExecutionResult(
+                        score=current_score,
+                        audio_response={"type": "chat_text", "message": ""},
+                        followup_prompt=json.dumps(refusal, sort_keys=True),
+                        action_required_payload=refusal,
+                        explicit_verse_number=selected_explicit_verse_number,
+                    )
                 raise RuntimeError(
                     "Preprocess workflow handoff reached the generic executor without interception."
                 )
@@ -8661,6 +8780,20 @@ class Orchestrator:
             }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name in {
+                TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_PREPARE_SYNTHESIS_QUOTE,
+                TOOL_SYNTHESIZE, TOOL_ADD_SOLFEGE_VERSE, TOOL_MODIFY_SOLFEGE_SETTINGS,
+                TOOL_REPLACE_BIRTHDAY_NAME,
+            } and self._settings.session_store == "firestore" and await asyncio.to_thread(
+                active_job_for_song, user_id, session_id):
+                refusal = {"status": "action_required", "reason": "sing_all_already_running"}
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(refusal, sort_keys=True),
+                    action_required_payload=refusal,
+                    explicit_verse_number=selected_explicit_verse_number,
+                )
             if call.name == TOOL_OPEN_SING_ALL:
                 if not isinstance(score_summary, dict) or not score_summary.get("parts"):
                     self._logger.warning("sing_all_without_score")

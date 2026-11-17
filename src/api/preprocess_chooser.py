@@ -509,18 +509,42 @@ def _final(sheet: Sheet, choices: dict[str, Any]) -> dict[str, Any]:
     return {slot.slot_id: choices[slot.slot_id] for slot in sheet.slots}
 
 
+def _lane_layout_pins(
+    score: dict, planning_context: dict | None,
+    lane_layouts: dict[str, str] | None,
+) -> dict[str, str]:
+    """Pin only open staff layout questions named by a Sing All quote."""
+    if not lane_layouts:
+        return {}
+    if not isinstance(lane_layouts, dict):
+        raise ChooserError("lane_layouts must be a mapping")
+    open_slots = {
+        slot.slot_id.rsplit("|", 2)[0]: slot.slot_id
+        for slot in build_sheet(score, planning_context).slots
+        if slot.kind == "lane_layout"
+    }
+    pins: dict[str, str] = {}
+    for staff, layout in lane_layouts.items():
+        if staff not in open_slots or layout not in {"shared", "separate"}:
+            raise ChooserError("Invalid lane layout pin for an open staff")
+        pins[open_slots[staff]] = layout
+    return pins
+
+
 async def choose(
     score: dict, planning_context: dict | None, *,
+    lane_layouts: dict[str, str] | None = None,
     call: Call, max_slots_per_request: int = 80, evidence_max_chars: int = 400000,
 ) -> tuple[Sheet, dict[str, Any], ChooserStats]:
     """Choose every open slot, re-asking the slots a non-default structure choice changes."""
-    sheet = build_sheet(score, planning_context)
+    pins = _lane_layout_pins(score, planning_context, lane_layouts)
+    sheet = build_sheet(score, planning_context, pinned=pins)
     context = build_request_context(score, planning_context, sheet,
                                     evidence_max_chars=evidence_max_chars)
     choices, requests, retries = await _ask_all(sheet, context, call, max_slots_per_request)
     slots_asked = len(sheet.slots)
     sheet, choices, more_requests, more_retries, second_pass_slots = await _second_pass(
-        score, planning_context, sheet, choices, pinned={}, cuts=None,
+        score, planning_context, sheet, choices, pinned=pins, cuts=None,
         call=call, max_slots_per_request=max_slots_per_request,
         evidence_max_chars=evidence_max_chars,
     )
@@ -594,6 +618,7 @@ def _repair_slot(slot: Slot, previous: str | None, findings: list[SlotFinding]) 
 
 async def choose_repair(
     score: dict, planning_context: dict | None, *,
+    lane_layouts: dict[str, str] | None = None,
     sheet: Sheet, choices: dict[str, Any],
     failing: dict[str, list[tuple[int, int]]],
     findings_by_lane: dict[str, list[SlotFinding]],
@@ -621,6 +646,7 @@ async def choose_repair(
     earlier = _selection_lookup(selected)
     layout_pins = {slot_id: value for slot_id, value in selected.items()
                    if slot_id.endswith("|lane_layout") and value == "separate"}
+    layout_pins.update(_lane_layout_pins(score, planning_context, lane_layouts))
 
     def failing_here(slot: Slot) -> bool:
         if slot.kind == "lane_layout":
