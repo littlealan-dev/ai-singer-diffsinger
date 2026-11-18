@@ -128,7 +128,6 @@ class SessionState:
             "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
             "song": self.song(),
-            "share_token": self.share_token,
         }
 
     def _score_snapshot(self) -> Optional[Dict[str, Any]]:

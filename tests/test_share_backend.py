@@ -9,10 +9,17 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud.firestore import Client
 
 from src.backend.message_catalog import backend_message
+from src.backend.config import Settings
 from src.backend.orchestrator import INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY
 from tests.test_backend_api import _create_session, _upload_score, client_with_env  # noqa: F401
 from tests.test_score_job_history import workspace  # noqa: F401
 from tests.test_songs_backend import _start_take, _upload
+
+
+def test_share_setting_rejects_unknown_mode(monkeypatch):
+    monkeypatch.setenv("SHARE_LINKS", "unexpected")
+    with pytest.raises(ValueError, match="SHARE_LINKS must be one of"):
+        Settings.from_env()
 
 
 def test_share_store_is_atomic_and_read_only(workspace):
@@ -25,7 +32,14 @@ def test_share_store_is_atomic_and_read_only(workspace):
         before = (await store.get_song_row(sid, owner))["last_active_at"]
         first = await store.share_on(sid, owner)
         assert len(first) == 22
+        if hasattr(store, "_doc_ref"):
+            session_updated = store._doc_ref(sid).get().update_time
+            share_ref = store._client.collection("shares").document(first)
+            share_updated = share_ref.get().update_time
         assert await store.share_on(sid, owner) == first
+        if hasattr(store, "_doc_ref"):
+            assert store._doc_ref(sid).get().update_time == session_updated
+            assert share_ref.get().update_time == share_updated
         assert (await store.get_share(first))["sessionId"] == sid
         assert (await store.read_shared(sid)).share_token == first
         assert (await store.get_song_row(sid, owner))["last_active_at"] == before
@@ -73,7 +87,9 @@ def test_share_owner_lifecycle_and_public_page(client_with_env, firestore_emulat
 
     # A public viewer never changes the Song's activity or sees internal IDs.
     state = app.state.sessions._sessions[sid]
+    owner_score = http.get(f"/sessions/{sid}/score")
     before = state.last_active_at
+    order_before = http.get("/songs").json()
     page = http.get(base, headers={"authorization": ""})
     assert page.status_code == 200
     assert page.headers["Cache-Control"] == "no-store"
@@ -83,11 +99,15 @@ def test_share_owner_lifecycle_and_public_page(client_with_env, firestore_emulat
     assert payload["title"] == "Test"
     assert payload["player"]["vocals"] == []
     assert sid not in page.text and "test-user" not in page.text
-    assert http.get(f"{base}/score").status_code == 200
+    public_score = http.get(f"{base}/score")
+    assert public_score.status_code == owner_score.status_code == 200
+    assert public_score.content == owner_score.content
     assert state.last_active_at == before
+    assert http.get("/songs").json() == order_before
 
     off = http.delete(owner_path)
     assert off.status_code == 200 and off.json() == {"enabled": False, "url": None}
+    assert http.get("/songs").json()["songs"][0]["shared"] is False
     assert http.delete(owner_path).json() == off.json()
     for path in (base, f"{base}/score", f"{base}/midi", f"{base}/audio?track=id%3AP1"):
         response = http.get(path)
@@ -124,6 +144,13 @@ def test_share_audio_range_and_stale_track(client_with_env, firestore_emulator, 
     assert data.status_code == 206 and data.content == b"cde"
     assert "content-disposition" not in data.headers
     assert "content-disposition" not in http.get(vocal["audio_url"] + "&download=1").headers
+    app.state.settings = replace(app.state.settings, share_audio_limit_per_minute=1)
+    later = app.state.share_clock() + 61
+    app.state.share_clock = lambda: later
+    assert http.get(vocal["audio_url"]).status_code == 200
+    limited = http.get(vocal["audio_url"])
+    assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
+    app.state.settings = replace(app.state.settings, share_audio_limit_per_minute=1200)
     assert http.get(f"/public/s/{token}/audio?track=missing").status_code == 404
     app.state.job_store.update_job("made-up-take", outputPath="outside/take.wav")
     assert http.get(vocal["audio_url"]).status_code == 404
@@ -185,6 +212,11 @@ def test_share_midi_matches_owner_and_rate_limits(client_with_env, firestore_emu
     _upload_score(http, sid)
     token = http.post(f"/songs/{sid}/share", json={"notice_accepted": True}).json()["url"].rsplit("/", 1)[-1]
     state = app.state.sessions._sessions[sid]
+    audio = app.state.sessions.session_dir(sid) / "take.wav"
+    audio.write_bytes(b"made-up-audio")
+    take = _start_take(app, sid, "made-up-midi-test-take",
+                       outputPath=str(audio.relative_to(app.state.settings.project_root)))
+    asyncio.run(app.state.sessions.record_take(sid, "made-up-midi-test-take", take))
     midi = app.state.sessions.session_dir(sid) / "made-up.mid"
     midi.write_bytes(b"MThd" + bytes(10))
     state.files.update({
@@ -201,13 +233,17 @@ def test_share_midi_matches_owner_and_rate_limits(client_with_env, firestore_emu
     monkeypatch.setattr(app.state.orchestrator, "instrumental_midi_signature", signature)
     owner = http.get(f"/sessions/{sid}/instrumental-midi")
     before = state.last_active_at
+    order_before = http.get("/songs").json()
     page = http.get(f"/public/s/{token}")
     assert page.json()["player"]["midi_url"] == f"/public/s/{token}/midi?expand_repeats=false"
     public = http.get(f"/public/s/{token}/midi")
+    assert http.get(f"/public/s/{token}/score").status_code == 200
+    assert http.get(page.json()["player"]["vocals"][0]["audio_url"]).content == b"made-up-audio"
     assert owner.status_code == public.status_code == 200
     assert owner.content == public.content == midi.read_bytes()
     assert "content-disposition" not in public.headers
     assert state.last_active_at == before
+    assert http.get("/songs").json() == order_before
 
     app.state.settings = replace(app.state.settings, share_page_limit_per_minute=2)
     now = [100.0]
@@ -264,7 +300,8 @@ def test_share_page_uses_latest_mix_modes_and_score(client_with_env, firestore_e
     assert notice_ref.get().to_dict()["shareNoticeAt"] == accepted_at
     another = _create_session(http)
     _upload_score(http, another)
-    assert http.post(f"/songs/{another}/share", json={}).status_code == 200
+    second = http.post(f"/songs/{another}/share", json={})
+    assert second.status_code == 200 and second.json()["url"] != first.json()["url"]
     base = f"/public/s/{first.json()['url'].rsplit('/', 1)[-1]}"
 
     monkeypatch.setattr("src.backend.main.verify_id_token_claims",

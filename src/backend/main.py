@@ -2586,93 +2586,95 @@ async def _serve_score(
     sessions: SessionStore, settings: Settings, session_id: str,
     user_id: str | None, snapshot: Dict[str, Any], *, touch: bool = True,
 ) -> Response:
-        # The score's recorded source path may be another backend's disk (the
-        # preprocess worker's), so it is never read here: a scored session serves
-        # its active artifact, which stays inside this session's folder or comes
-        # from storage.
-        score_path: Path
-        if not _current_score_has_source_path(snapshot.get("current_score")):
-            files = snapshot.get("files")
-            fallback_path = files.get("musicxml_path") if isinstance(files, dict) else None
-            if not isinstance(fallback_path, str) or not fallback_path.strip():
-                raise HTTPException(status_code=404, detail="Score not found.")
-            score_path = _resolve_allowlisted_score_path(settings, fallback_path)
-        else:
-            try:
-                score_path = await sessions.ensure_active_musicxml(session_id, user_id, touch=touch)
-            except SessionMusicXmlUnavailableError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": exc.code, "message": str(exc)},
-                ) from exc
-        if not score_path.is_file():
-            raise HTTPException(status_code=404, detail="Score file not found.")
-        content = _read_musicxml_content(
-            score_path,
-            max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
-        )
-        # A session keeps one stable score URL while transforms replace the
-        # underlying MusicXML.  Prevent browsers and intermediaries from
-        # serving the score that was current before the latest transform.
-        return Response(
-            content=content,
-            media_type="application/xml",
-            headers={"Cache-Control": "no-store"},
-        )
+    # The score's recorded source path may be another backend's disk (the
+    # preprocess worker's), so it is never read here: a scored session serves
+    # its active artifact, which stays inside this session's folder or comes
+    # from storage.
+    score_path: Path
+    if not _current_score_has_source_path(snapshot.get("current_score")):
+        files = snapshot.get("files")
+        fallback_path = files.get("musicxml_path") if isinstance(files, dict) else None
+        if not isinstance(fallback_path, str) or not fallback_path.strip():
+            raise HTTPException(status_code=404, detail="Score not found.")
+        score_path = _resolve_allowlisted_score_path(settings, fallback_path)
+    else:
+        try:
+            score_path = await sessions.ensure_active_musicxml(session_id, user_id, touch=touch)
+        except SessionMusicXmlUnavailableError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+    if not score_path.is_file():
+        raise HTTPException(status_code=404, detail="Score file not found.")
+    content = _read_musicxml_content(
+        score_path,
+        max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,
+    )
+    # A session keeps one stable score URL while transforms replace the
+    # underlying MusicXML.  Prevent browsers and intermediaries from
+    # serving the score that was current before the latest transform.
+    return Response(
+        content=content,
+        media_type="application/xml",
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 async def _serve_instrumental_midi(
     sessions: SessionStore, orchestrator: Orchestrator, session_id: str,
     user_id: str | None, snapshot: Dict[str, Any], expand_repeats: bool,
     *, touch: bool = True,
 ) -> FileResponse:
-        files = snapshot.get("files")
-        published_signature = (
-            files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) if isinstance(files, dict) else None
+    files = snapshot.get("files")
+    published_signature = (
+        files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) if isinstance(files, dict) else None
+    )
+    if not isinstance(snapshot.get("current_score"), dict) or not published_signature:
+        raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+    summary = snapshot.get("score_summary")
+    try:
+        musicxml_path = None if touch else await sessions.ensure_active_musicxml(
+            session_id, user_id, touch=False
         )
-        if not isinstance(snapshot.get("current_score"), dict) or not published_signature:
-            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
-        summary = snapshot.get("score_summary")
-        try:
-            musicxml_path = None if touch else await sessions.ensure_active_musicxml(
-                session_id, user_id, touch=False
-            )
-            current_signature = await orchestrator.instrumental_midi_signature(
-                session_id,
-                user_id=user_id,
-                score_id=snapshot.get("score_id"),
-                score_summary=summary if isinstance(summary, dict) else None,
-                musicxml_path=musicxml_path,
-            )
-        except (KeyError, OSError, SessionMusicXmlUnavailableError) as exc:
-            raise HTTPException(
-                status_code=404, detail="Instrumental MIDI is unavailable for this score."
-            ) from exc
-        if published_signature != current_signature:
-            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
-        key = (
-            "instrumental_midi_expanded_path"
-            if expand_repeats
-            else "instrumental_midi_original_path"
-        )
-        stored_path = files.get(key) if isinstance(files, dict) else None
-        if not isinstance(stored_path, str) or not stored_path:
-            raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
-        midi_path = _session_midi_local_path(sessions, session_id, stored_path)
-        # Another instance may have published the file: restore it from storage.
-        if not await orchestrator.restore_instrumental_midi(
+        current_signature = await orchestrator.instrumental_midi_signature(
+            session_id,
             user_id=user_id,
-            session_id=session_id,
-            files=files,
-            kind="expanded" if expand_repeats else "written",
-            local_path=midi_path,
-        ):
-            raise HTTPException(status_code=404, detail="Instrumental MIDI file not found.")
-        return FileResponse(
-            midi_path,
-            media_type="audio/midi",
-            filename=midi_path.name if touch else None,
-            headers={"Cache-Control": "no-store"},
+            score_id=snapshot.get("score_id"),
+            score_summary=summary if isinstance(summary, dict) else None,
+            musicxml_path=musicxml_path,
         )
+    except (KeyError, OSError, SessionMusicXmlUnavailableError) as exc:
+        raise HTTPException(
+            status_code=404, detail="Instrumental MIDI is unavailable for this score."
+        ) from exc
+    if published_signature != current_signature:
+        raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+    key = (
+        "instrumental_midi_expanded_path"
+        if expand_repeats
+        else "instrumental_midi_original_path"
+    )
+    stored_path = files.get(key) if isinstance(files, dict) else None
+    if not isinstance(stored_path, str) or not stored_path:
+        raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
+    midi_path = _session_midi_local_path(sessions, session_id, stored_path)
+    # Another instance may have published the file: restore it from storage.
+    if not await orchestrator.restore_instrumental_midi(
+        user_id=user_id,
+        session_id=session_id,
+        files=files,
+        kind="expanded" if expand_repeats else "written",
+        local_path=midi_path,
+    ):
+        raise HTTPException(status_code=404, detail="Instrumental MIDI file not found.")
+    return FileResponse(
+        midi_path,
+        media_type="audio/midi",
+        filename=midi_path.name if touch else None,
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 def _session_midi_local_path(sessions: SessionStore, session_id: str, stored_path: str) -> Path:
     """Return this instance's path for a published session MIDI file.
