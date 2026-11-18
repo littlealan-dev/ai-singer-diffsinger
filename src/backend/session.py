@@ -576,7 +576,7 @@ class SessionStore(WorkspacePersistence):
             "shareToken": state.share_token,
         }
 
-    async def get_player(self, session_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def get_player(self, session_id: str, user_id: Optional[str], *, shared: bool = False) -> Optional[Dict[str, Any]]:
         """The session's player record, or None before its first upload."""
         async with self._lock:
             state = self._sessions.get(session_id)
@@ -1017,7 +1017,9 @@ class FirestoreSessionStore(WorkspacePersistence):
     ) -> Path:
         """Return the active MusicXML file, restoring it from storage when needed."""
         def run() -> Path:
-            doc = self._doc_ref(session_id).get()
+            doc = self._doc_ref(session_id).get(
+                field_paths=["userId", "deletedAt", "files"] if not touch else None
+            )
             data = (doc.to_dict() or {}) if doc.exists else {}
             if not doc.exists or data.get("deletedAt"):
                 raise KeyError(session_id)
@@ -1188,10 +1190,12 @@ class FirestoreSessionStore(WorkspacePersistence):
             raise PermissionError(session_id)
         return data
 
-    async def get_player(self, session_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def get_player(self, session_id: str, user_id: Optional[str], *, shared: bool = False) -> Optional[Dict[str, Any]]:
         """The session's player record, or None before its first upload."""
         def run() -> Optional[Dict[str, Any]]:
-            doc = self._doc_ref(session_id).get()
+            doc = self._doc_ref(session_id).get(
+                field_paths=["userId", "deletedAt"] if shared else None
+            )
             data = (doc.to_dict() or {}) if doc.exists else {}
             if not doc.exists or data.get("deletedAt"):
                 raise KeyError(session_id)

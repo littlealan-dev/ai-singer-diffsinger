@@ -1006,7 +1006,7 @@ def create_app() -> FastAPI:
         if isinstance(resolved, Response):
             return resolved
         share, state = resolved
-        player = await sessions.get_player(state.id, share["ownerUid"])
+        player = await sessions.get_player(state.id, share["ownerUid"], shared=True)
         player_payload = songs.player_response(player, score_id=state.score_id)
         job_ids = [str(track.get("sourceJobId")) for track in (player or {}).get("vocals") or []
                    if track.get("sourceJobId")]
@@ -1094,7 +1094,7 @@ def create_app() -> FastAPI:
         if isinstance(resolved, Response):
             return resolved
         share, state = resolved
-        player = await sessions.get_player(state.id, share["ownerUid"])
+        player = await sessions.get_player(state.id, share["ownerUid"], shared=True)
         job_ids = [str(item.get("sourceJobId")) for item in (player or {}).get("vocals") or []
                    if item.get("sourceJobId")]
         jobs = await asyncio.to_thread(request.app.state.job_store.get_jobs, job_ids)
@@ -3422,7 +3422,7 @@ async def _get_optional_verified_user_context(request: Request) -> tuple[str, st
         user_email = str(claims.get("email") or "")
         return user_id, user_email
     except Exception:
-        logger.warning("optional_auth_token_invalid")
+        get_logger("backend.api").warning("optional_auth_token_invalid")
         return None
 
 

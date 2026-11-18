@@ -45,6 +45,7 @@ def test_share_store_is_atomic_and_read_only(workspace):
 def _share_firestore(monkeypatch):
     firestore = Client(project=f"demo-share-{uuid.uuid4().hex}", credentials=AnonymousCredentials())
     monkeypatch.setattr("src.backend.main.get_firestore_client", lambda: firestore)
+    return firestore
 
 
 @pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "on"}], indirect=True)
@@ -219,3 +220,83 @@ def test_share_midi_matches_owner_and_rate_limits(client_with_env, firestore_emu
     assert http.get(f"/public/s/{token}", headers={"x-forwarded-for": "192.0.2.2"}).status_code == 200
     now[0] += 61
     assert http.get(f"/public/s/{token}", headers={"x-forwarded-for": "192.0.2.1"}).status_code == 200
+
+
+@pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "on"}], indirect=True)
+def test_share_page_uses_latest_mix_modes_and_score(client_with_env, firestore_emulator, monkeypatch):
+    firestore = _share_firestore(monkeypatch)
+    http, app = client_with_env
+    sid = _create_session(http)
+    score_id = _upload_score(http, sid).json()["score_id"]
+    state = app.state.sessions._sessions[sid]
+    state.score_summary.update({
+        "duration_seconds": 12.5,
+        "expanded_duration_seconds": 15.0,
+        "repeat_expansion_available": True,
+        "performance_measure_map": {"written": [], "expanded": []},
+        "private_extra": "do-not-send",
+    })
+    state.score_summary["parts"][0]["take_signature"] = "original-music"
+    for job_id, key, mode in (("made-up-lyrics", "id:P1:lyrics", "lyrics"),
+                              ("made-up-solfege", "id:P1:solfege", "solfege")):
+        job = _start_take(app, sid, job_id)
+        audio_track = {**job["audioTrack"], "key": key, "mode": mode,
+                       "take_signature": "original-music"}
+        app.state.job_store.update_job(job_id, audioTrack=audio_track, voicebankName="Voice A")
+        asyncio.run(app.state.sessions.record_take(sid, job_id, app.state.job_store.get_job(job_id)))
+    mix = {
+        "score_id": score_id,
+        "vocals": [
+            {"key": "id:P1:lyrics", "muted": True, "solo": False, "volume": 1.1},
+            {"key": "id:P1:solfege", "muted": False, "solo": True, "volume": 0.8},
+        ],
+        "instruments": [{"raw_part_id": "P5", "muted": False, "solo": False,
+                         "volume": 0.65, "gm_program": 0, "soundfont_bank": 0,
+                         "preset_kind": None, "unassigned": False}],
+        "bus": {"muted": False, "solo": False, "level_db": -3},
+    }
+    assert http.put(f"/songs/{sid}/player/mix", json=mix).status_code == 200
+    first = http.post(f"/songs/{sid}/share", json={"notice_accepted": True})
+    assert first.status_code == 200
+    notice_ref = firestore.collection("users").document("test-user")
+    accepted_at = notice_ref.get().to_dict()["shareNoticeAt"]
+    assert http.post(f"/songs/{sid}/share", json={}).json() == first.json()
+    assert notice_ref.get().to_dict()["shareNoticeAt"] == accepted_at
+    another = _create_session(http)
+    _upload_score(http, another)
+    assert http.post(f"/songs/{another}/share", json={}).status_code == 200
+    base = f"/public/s/{first.json()['url'].rsplit('/', 1)[-1]}"
+
+    monkeypatch.setattr("src.backend.main.verify_id_token_claims",
+                        lambda token: {"uid": "made-up-viewer"})
+    page = http.get(base)
+    payload = page.json()
+    assert payload["is_owner"] is False and payload["song_id"] is None
+    assert payload["score"]["summary"]["duration_seconds"] == 12.5
+    assert set(payload["score"]["summary"]) == {
+        "duration_seconds", "expanded_duration_seconds", "repeat_expansion_available",
+        "performance_measure_map", "performance_midi",
+    }
+    assert payload["player"]["instruments"] == mix["instruments"]
+    assert payload["player"]["bus"]["level_db"] == -3
+    assert [(v["mode"], v["muted"], v["solo"], v["volume"])
+            for v in payload["player"]["vocals"]] == [
+                ("lyrics", True, False, 1.1), ("solfege", False, True, 0.8),
+            ]
+    assert payload["credits"]["voices"] == ["Voice A"]
+    assert all(value not in page.text for value in (
+        sid, "test-user", "made-up-lyrics", "made-up-solfege", "do-not-send",
+    ))
+
+    def broken(_):
+        raise ValueError("bad token")
+    monkeypatch.setattr("src.backend.main.verify_id_token_claims", broken)
+    assert http.get(base).json()["is_owner"] is False
+    monkeypatch.setattr("src.backend.main.verify_id_token_claims",
+                        lambda token: {"uid": "test-user"})
+    assert http.get(base).json()["song_id"] == sid
+    # A score Replace keeps the link but removes takes of the old score.
+    replaced = http.post(f"/sessions/{sid}/upload", data={"replace": "true"},
+                         files={"file": ("replacement.xml", b"<score-partwise version='3.1'></score-partwise>", "application/xml")})
+    assert replaced.status_code == 200
+    assert http.get(base).json()["player"]["vocals"] == []
