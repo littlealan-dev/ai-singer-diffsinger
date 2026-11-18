@@ -14,13 +14,19 @@ test.describe.configure({ mode: "serial", retries: 0 });
 
 const card = (page: Page) => page.getByTestId("sing-all-card");
 
-async function signInOnAPaidPlan(page: Page, testId: string): Promise<string> {
+async function signIn(page: Page, testId: string) {
   await signInAsE2EUser(page, testId);
-  // Every GET /credits re-seeds the e2e user on the free plan, which Sing All refuses.
-  // The page asks once per load, so move the user to a paid plan after that call.
-  const credits = page.waitForResponse((response) => new URL(response.url()).pathname === "/credits");
-  await page.reload();
-  await credits;
+  await expect(page.getByRole("heading", { name: "Studio Chat" })).toBeVisible();
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  if (await declineCookies.isVisible()) await declineCookies.click({ force: true });
+  const releaseNotes = page.getByRole("button", { name: "Awesome, let's go!" });
+  await releaseNotes.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
+  if (await releaseNotes.isVisible()) await releaseNotes.click({ force: true });
+}
+
+// Every GET /credits re-seeds the e2e user on the free plan, which Sing All refuses.
+// The page asks a few times while it loads, so call this once the score is in, just before the quote.
+async function moveToAPaidPlan(page: Page) {
   // The auth emulator gives the user its own uid; read it from the ID token.
   const token = await firebaseIdToken(page);
   const uid: string = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).user_id;
@@ -35,13 +41,6 @@ async function signInOnAPaidPlan(page: Page, testId: string): Promise<string> {
     },
   );
   expect(response.ok, await response.text()).toBeTruthy();
-  await expect(page.getByRole("heading", { name: "Studio Chat" })).toBeVisible();
-  const declineCookies = page.getByRole("button", { name: "Decline" });
-  if (await declineCookies.isVisible()) await declineCookies.click({ force: true });
-  const releaseNotes = page.getByRole("button", { name: "Awesome, let's go!" });
-  await releaseNotes.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);
-  if (await releaseNotes.isVisible()) await releaseNotes.click({ force: true });
-  return uid;
 }
 
 async function uploadFixture(page: Page, filename: string): Promise<string> {
@@ -70,8 +69,9 @@ async function api(page: Page, request: APIRequestContext, pathname: string) {
 test("Sing All runs from the chat button to its receipt, with every response in the contract's shape", async (
   { page, request },
 ) => {
-  await signInOnAPaidPlan(page, "sing-all-backend-run");
+  await signIn(page, "sing-all-backend-run");
   const songId = await uploadFixture(page, "sing-all-two-voices-piano.xml");
+  await moveToAPaidPlan(page);
 
   // The button's chat message: the regression LLM answers with open_sing_all.
   const chat = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/chat"));
@@ -160,4 +160,53 @@ test("Sing All runs from the chat button to its receipt, with every response in 
   // A reload shows the ended card again from the Song's history.
   await page.reload();
   await expect(card(page)).toContainText("Done: every part is sung");
+});
+
+test("Stop next to Send ends the run, and every credit is either charged or refunded", async ({ page, request }) => {
+  await signIn(page, "sing-all-backend-stop");
+  const songId = await uploadFixture(page, "sing-all-two-voices-piano.xml");
+  await moveToAPaidPlan(page);
+
+  const firstQuote = page.waitForResponse((response) => new URL(response.url()).pathname === "/sing-all/quote");
+  await page.getByTestId("sing-all-button").click();
+  const quote = await (await firstQuote).json();
+  expect(quote.blocked).toBeNull();
+  const started = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/sing-all/jobs" && response.request().method() === "POST",
+  );
+  await page.getByTestId("sing-all-sing-it").click();
+  const jobId: string = (await (await started).json()).jobId;
+
+  // Stop asks first, then stops the Song's work, Sing All included.
+  await page.getByTestId("stop-work").click();
+  const confirm = page.locator(".composer-stop-confirm");
+  await expect(confirm).toContainText("Stop Sing All?");
+  const stopped = page.waitForResponse((response) => new URL(response.url()).pathname === `/sessions/${songId}/stop`);
+  await confirm.getByRole("button", { name: "Stop" }).click();
+  const stopResponse = await stopped;
+  expect(stopResponse.status(), await stopResponse.text()).toBe(200);
+  const stop = await stopResponse.json();
+  expect(stop.singAll).toMatchObject({ jobId });
+  expect(["stopping", "too_late"]).toContain(stop.singAll.result);
+  // A Sing All child is never listed as the Song's own work.
+  expect(stop.jobs).toEqual([]);
+
+  // How far it got depends on timing: stopped in time, or too late and completed.
+  const headline = stop.singAll.result === "stopping" ? "Stopped" : "Done: every part is sung";
+  await expect(card(page)).toContainText(headline, { timeout: 300_000 });
+  await expect(page.getByTestId("sing-all-pill")).toHaveCount(0);
+  await expect(page.getByTestId("stop-work")).toHaveCount(0);
+
+  const ended = await api(page, request, `/sing-all/jobs/${jobId}`);
+  expect(ended.status).toBe(stop.singAll.result === "stopping" ? "cancelled" : "completed");
+  expect(ended.stage).toBe("done");
+  expect(ended.credits.reserved).toBe(0);
+  expect(ended.credits.charged + ended.credits.refunded).toBe(quote.total);
+  if (ended.status === "cancelled") expect(ended.endReason).toBe("stopped");
+  expect((await api(page, request, "/sing-all/active")).job).toBeNull();
+  // The player keeps exactly the takes that were made.
+  const workspace = await api(page, request, `/songs/${songId}/workspace`);
+  expect(workspace.player?.vocals ?? []).toHaveLength(ended.counts.takes.done);
+  // The Sing All button works again.
+  await expect(page.getByTestId("sing-all-button")).toBeEnabled();
 });

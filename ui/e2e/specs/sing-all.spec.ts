@@ -17,6 +17,7 @@ type Backend = {
   nextStart: (answer: Answer) => void;
   setJob: (job: Json | null, { active }?: { active?: boolean }) => void;
   history: Json[];
+  vocals: Json[];
 };
 
 const SONG = "song-1";
@@ -112,6 +113,7 @@ async function mockBackend(page: Page): Promise<Backend> {
       jobActive = active;
     },
     history: [],
+    vocals: [],
   };
   let job: Json | null = null;
   let jobActive = false;
@@ -169,7 +171,7 @@ async function mockBackend(page: Page): Promise<Backend> {
         },
         messages: backend.history,
         jobs: [],
-        player: { score_id: "score-1", revision: 0, repeats: false, vocals: [], instruments: [],
+        player: { score_id: "score-1", revision: 0, repeats: false, vocals: backend.vocals, instruments: [],
           bus: { muted: false, solo: false, level_db: 0 } },
       });
     }
@@ -352,6 +354,75 @@ test("Stop asks first, then asks the Song to stop", async ({ page }) => {
   await card(page).getByRole("alertdialog").getByRole("button", { name: "Stop" }).click();
   await stopRequest;
   await expect(card(page)).toContainText("Stopping…");
+});
+
+test("Stop next to Send asks first while this Song's Sing All runs", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-composer-stop");
+  backend.setJob(progress({ stage: "singing" }));
+  await page.reload();
+  await goToSong(page);
+  const stop = page.getByTestId("stop-work");
+  await expect(stop).toBeVisible();
+
+  await stop.click();
+  const confirm = page.locator(".composer-stop-confirm");
+  await expect(confirm).toContainText("Stop Sing All? Parts already sung are kept and charged. The rest is refunded.");
+  await confirm.getByRole("button", { name: "Keep singing" }).click();
+  await expect(confirm).toHaveCount(0);
+
+  await stop.click();
+  const stopRequest = page.waitForRequest((request) => request.url().endsWith(`/sessions/${SONG}/stop`));
+  backend.setJob(progress({ stage: "singing", cancelRequested: true }));
+  await confirm.getByRole("button", { name: "Stop" }).click();
+  await stopRequest;
+  await expect(stop).toHaveText("Stopping…");
+  await expect(stop).toBeDisabled();
+});
+
+test("Replace on the Song of a running Sing All says it stops it", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-replace");
+  backend.setJob(progress({ stage: "singing" }));
+  await page.reload();
+  await goToSong(page);
+  await expect(page.getByTestId("stop-work")).toBeVisible();
+  await page.getByTestId("score-upload-input").setInputFiles(path.resolve("e2e/fixtures/basic-one-part.xml"));
+  const popup = page.getByRole("dialog", { name: "New song or replace?" });
+  await expect(popup).toContainText(
+    "Sing All is stopped. Parts already sung are kept and charged. The rest is refunded.",
+  );
+  await popup.getByRole("button", { name: "Cancel" }).click();
+});
+
+test("with takes in both modes, the player shows one mode's takes at a time", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-mode-switch");
+  const vocal = (key: string, label: string, mode: string) => ({
+    key, label, mode, part_id: key.split(":")[0], part_index: 0, source_job_id: `take-${key}`,
+    muted: false, solo: false, volume: 1, audio_url: `http://127.0.0.1:8000/audio/${key}.wav`,
+    progress_url: "",
+  });
+  backend.vocals.push(
+    vocal("P1:lyrics", "Soprano", "lyrics"),
+    vocal("P2:lyrics", "Alto", "lyrics"),
+    vocal("P1:solfege", "Soprano (solfège)", "solfege"),
+  );
+  await goToSong(page);
+  const panel = page.getByTestId("score-tracks-panel");
+  const sungIn = panel.getByRole("group", { name: "Sung in" });
+  await expect(sungIn.getByRole("button", { name: "Lyrics" })).toHaveAttribute("aria-pressed", "true");
+  await expect(panel.getByTestId("score-vocal-track-P1:lyrics")).toBeVisible();
+  await expect(panel.getByTestId("score-vocal-track-P2:lyrics")).toBeVisible();
+  await expect(panel.getByTestId("score-vocal-track-P1:solfege")).toHaveCount(0);
+
+  await sungIn.getByRole("button", { name: "Solfège" }).click();
+  await expect(panel.getByTestId("score-vocal-track-P1:solfege")).toBeVisible();
+  await expect(panel.getByTestId("score-vocal-track-P1:lyrics")).toHaveCount(0);
+
+  // With one mode only, there is nothing to switch.
+  backend.vocals.splice(2, 1);
+  await page.reload();
+  await goToSong(page);
+  await expect(panel.getByTestId("score-vocal-track-P2:lyrics")).toBeVisible();
+  await expect(panel.getByRole("group", { name: "Sung in" })).toHaveCount(0);
 });
 
 test("a reload shows the card again from the Song's history", async ({ page }) => {

@@ -1845,6 +1845,11 @@ div[id^="fire_app_check_"] {
   cursor: not-allowed;
 }
 
+.composer-stop-confirm {
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
 .voice-picker {
   position: relative;
   flex: 0 1 220px;
@@ -2275,6 +2280,10 @@ img.voice-picker-option-avatar {
 .solfege-segmented-control button.selected {
   background: rgba(155, 134, 255, 0.14);
   color: var(--text-strong);
+}
+
+.vocal-mode-switch {
+  flex-shrink: 0;
 }
 
 .solfege-mode-options {

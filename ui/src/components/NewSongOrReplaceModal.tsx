@@ -6,6 +6,8 @@ interface NewSongOrReplaceModalProps {
   scoreName: string;
   /** The open Song has work running, which Replace would stop. */
   working: boolean;
+  /** The running work includes a Sing All, which Replace stops the same way as its Stop. */
+  singAllRunning?: boolean;
   onNewSong: () => void;
   onReplace: () => void;
   onCancel: () => void;
@@ -15,6 +17,7 @@ interface NewSongOrReplaceModalProps {
 export default function NewSongOrReplaceModal({
   scoreName,
   working,
+  singAllRunning = false,
   onNewSong,
   onReplace,
   onCancel,
@@ -61,9 +64,11 @@ export default function NewSongOrReplaceModal({
           <button type="button" className="song-choice-option" onClick={onReplace}>
             <span className="song-choice-option-name">Replace</span>
             <span className="song-choice-option-detail">
-              {working
-                ? "Put this score in this song. The chat stays, the player's tracks are cleared, and the running work is stopped."
-                : "Put this score in this song. The chat stays and the player's tracks are cleared."}
+              {singAllRunning
+                ? "Put this score in this song. The chat stays, the player's tracks are cleared, and Sing All is stopped. Parts already sung are kept and charged. The rest is refunded."
+                : working
+                  ? "Put this score in this song. The chat stays, the player's tracks are cleared, and the running work is stopped."
+                  : "Put this score in this song. The chat stays and the player's tracks are cleared."}
             </span>
           </button>
         </div>

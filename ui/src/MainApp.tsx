@@ -241,6 +241,8 @@ type ScorePayload = {
 
 type ScorePreviewLayout = "page" | "horizontal";
 
+type VocalMode = "lyrics" | "solfege";
+
 type MultiTrackAudioTrack = {
   key: string;
   label: string;
@@ -264,7 +266,7 @@ type MultiTrackAudioTrack = {
   // in the current score summary was sung from music that has since changed.
   takeSignature?: string | null;
   // Lyrics or solfège; a take from before Sing All is lyrics.
-  mode?: "lyrics" | "solfege";
+  mode?: VocalMode;
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -1596,6 +1598,9 @@ type ScoreTrackControlsPanelProps = {
   instrumentalBus: InstrumentalBusState;
   instrumentalTracksExpanded: boolean;
   disabled?: boolean;
+  // Set when the Song has takes in both modes: the mode whose takes are listed.
+  vocalModeShown?: VocalMode | null;
+  onShowVocalMode?: (mode: VocalMode) => void;
   onUpdateVocalMute: (key: string, muted: boolean) => void;
   onUpdateVocalSolo: (key: string, solo: boolean) => void;
   onUpdateVocalVolume: (key: string, volume: number) => void;
@@ -1617,6 +1622,8 @@ const ScoreTrackControlsPanel = ({
   instrumentalBus,
   instrumentalTracksExpanded,
   disabled = false,
+  vocalModeShown = null,
+  onShowVocalMode,
   onUpdateVocalMute,
   onUpdateVocalSolo,
   onUpdateVocalVolume,
@@ -1658,6 +1665,24 @@ const ScoreTrackControlsPanel = ({
       </div>
 
       <fieldset className="score-tracks-list score-tracks-list-fieldset" disabled={disabled}>
+        {vocalModeShown && (
+          <div className="solfege-segmented-control vocal-mode-switch" role="group" aria-label="Sung in">
+            {([
+              ["lyrics", "Lyrics"],
+              ["solfege", "Solfège"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={clsx({ selected: vocalModeShown === value })}
+                aria-pressed={vocalModeShown === value}
+                onClick={() => onShowVocalMode?.(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         {/* Audio / Vocal Tracks - TOP FIRST */}
         {vocalTracks.map((track) => (
           <div
@@ -2847,6 +2872,20 @@ export default function MainApp() {
   const [scorePlayerPlaybackRequestId, setScorePlayerPlaybackRequestId] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [multiTrackAudioTracks, setMultiTrackAudioTracks] = useState<MultiTrackAudioTrack[]>([]);
+  // With takes in both modes the player shows, plays and mixes one mode's takes at a time.
+  // The saved mix keeps every take.
+  const [vocalModeShown, setVocalModeShown] = useState<VocalMode>("lyrics");
+  const vocalsInBothModes = useMemo(
+    () => new Set(multiTrackAudioTracks.map((track) => track.mode ?? "lyrics")).size > 1,
+    [multiTrackAudioTracks]
+  );
+  const shownVocalTracks = useMemo(
+    () =>
+      vocalsInBothModes
+        ? multiTrackAudioTracks.filter((track) => (track.mode ?? "lyrics") === vocalModeShown)
+        : multiTrackAudioTracks,
+    [multiTrackAudioTracks, vocalModeShown, vocalsInBothModes]
+  );
   // Decoded audio of each take in the player, keyed by its source job. A take
   // is decoded once, when it enters the player; the player plays only these
   // buffers, so a take is never downloaded again. A take leaving the player
@@ -2988,6 +3027,9 @@ export default function MainApp() {
   const [activeSingAll, setActiveSingAll] = useState<SingAllProgress | null>(null);
   const [singAllJobs, setSingAllJobs] = useState<Record<string, SingAllProgress>>({});
   const singAllRunningHere = Boolean(activeSingAll && activeSingAll.songId === sessionId);
+  // Stop next to Send asks first while this Song's Sing All runs.
+  const [confirmSingAllStop, setConfirmSingAllStop] = useState(false);
+  const singAllStopping = singAllRunningHere && Boolean(activeSingAll?.cancelRequested);
   const [songLoadState, setSongLoadState] = useState<SongLoadState>("idle");
   // From sending a chat message until the assistant's reply arrives. The Song
   // can't be left meanwhile; running work alone doesn't keep the user in it.
@@ -3358,9 +3400,9 @@ export default function MainApp() {
       ? `${Math.round(Math.max(0, Math.min(1, multiTrackExportProgress)) * 100)}%`
       : null;
   const exportMixRequiredCredits = estimateExportMixCredits(
-    multiTrackAudioTracks[0]?.durationSeconds
+    shownVocalTracks[0]?.durationSeconds
   );
-  const noOpSingleTrackExport = isNoOpSingleTrackExport(multiTrackAudioTracks);
+  const noOpSingleTrackExport = isNoOpSingleTrackExport(shownVocalTracks);
 
   const instrumentalMidiTrackKeys = useMemo(
     () =>
@@ -3718,7 +3760,7 @@ export default function MainApp() {
   const handleMultiTrackPlay = useCallback(() => {
     if (scorePlayerControls) {
       logAnalyticsEvent("multitrack_play", {
-        ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+        ...multiTrackAnalyticsParams(shownVocalTracks),
         has_instrumental_midi: Boolean(instrumentalMidiUrl),
       });
       setScorePlayerError(null);
@@ -3739,7 +3781,7 @@ export default function MainApp() {
       }
       return;
     }
-    const playable = multiTrackAudioTracks
+    const playable = shownVocalTracks
       .map((track) => ({ track, waveSurfer: multiTrackWaveSurferRefs.current[track.key] }))
       .filter((entry): entry is { track: MultiTrackAudioTrack; waveSurfer: WaveSurfer } =>
         Boolean(entry.waveSurfer)
@@ -3748,19 +3790,19 @@ export default function MainApp() {
     const baseTime =
       playable.find(({ waveSurfer }) => waveSurfer.getCurrentTime() > 0)?.waveSurfer.getCurrentTime() ?? 0;
     logAnalyticsEvent("multitrack_play", {
-      ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+      ...multiTrackAnalyticsParams(shownVocalTracks),
       playback_start_seconds: Math.round(baseTime),
     });
     playable.forEach(({ track, waveSurfer }) => {
       const duration = waveSurfer.getDuration();
       waveSurfer.setTime(Math.min(baseTime, Number.isFinite(duration) ? duration : baseTime));
       waveSurfer.setVolume(track.volume);
-      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, multiTrackAudioTracks));
+      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, shownVocalTracks));
     });
     void Promise.allSettled(playable.map(({ waveSurfer }) => waveSurfer.play())).then(() => {
       setMultiTrackPlaying(true);
     });
-  }, [failedVocalDecodes, instrumentalMidiUrl, multiTrackAudioTracks, scorePlayerControls, scorePlayerError]);
+  }, [failedVocalDecodes, instrumentalMidiUrl, shownVocalTracks, scorePlayerControls, scorePlayerError]);
 
   const handleMultiTrackPause = useCallback(() => {
     scorePlayerPlayPendingRef.current = false;
@@ -3835,7 +3877,7 @@ export default function MainApp() {
         logAnalyticsEvent("browser_mix_bounce_completed", {
           duration_seconds: Math.round(scorePlayerTimelineDuration),
           file_bytes: recording.size,
-          track_count: instrumentalTracks.length + multiTrackAudioTracks.length,
+          track_count: instrumentalTracks.length + shownVocalTracks.length,
         });
         } catch (error) {
           traceBrowserMixBounce("finalization-failed", {
@@ -3862,7 +3904,7 @@ export default function MainApp() {
     } else {
       complete();
     }
-  }, [instrumentalTracks.length, multiTrackAudioTracks.length, scorePlayerTimelineDuration]);
+  }, [instrumentalTracks.length, shownVocalTracks.length, scorePlayerTimelineDuration]);
 
   browserMixBounceFinalizeRef.current = finishBrowserMixBounce;
 
@@ -3914,7 +3956,7 @@ export default function MainApp() {
       setBrowserMixBounceError("Real-time mix download is available for scores up to 5 minutes.");
       return;
     }
-    if (!hasAudibleScorePlayerMix(multiTrackAudioTracks, instrumentalTracks, instrumentalBus)) {
+    if (!hasAudibleScorePlayerMix(shownVocalTracks, instrumentalTracks, instrumentalBus)) {
       setBrowserMixBounceError("No audible tracks are selected.");
       return;
     }
@@ -4030,7 +4072,7 @@ export default function MainApp() {
       setBrowserMixBouncePhase("recording");
       logAnalyticsEvent("browser_mix_bounce_started", {
         duration_seconds: Math.round(timelineDuration),
-        track_count: instrumentalTracks.length + multiTrackAudioTracks.length,
+        track_count: instrumentalTracks.length + shownVocalTracks.length,
       });
       setMultiTrackPlaying(true);
     } catch (err) {
@@ -4048,7 +4090,7 @@ export default function MainApp() {
       setBrowserMixBounceError(message);
       logAnalyticsEvent("browser_mix_bounce_failed", { stage: "preparing" });
     }
-  }, [estimatedDuration, finishBrowserMixBounce, instrumentalBus, instrumentalTracks, multiTrackAudioTracks, primeScorePlayerAudioContext, scorePlayerTimelineDuration]);
+  }, [estimatedDuration, finishBrowserMixBounce, instrumentalBus, instrumentalTracks, shownVocalTracks, primeScorePlayerAudioContext, scorePlayerTimelineDuration]);
 
   const handleMultiTrackWaveSurferMount = useCallback((trackKey: string, instance: WaveSurfer) => {
     multiTrackWaveSurferRefs.current[trackKey] = instance;
@@ -4121,7 +4163,7 @@ export default function MainApp() {
           return;
         }
         logAnalyticsEvent("multitrack_track_download", {
-          ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+          ...multiTrackAnalyticsParams(shownVocalTracks),
           has_part_id: Boolean(track.partId),
           has_verse_number: Boolean(track.verseNumber),
         });
@@ -4130,7 +4172,7 @@ export default function MainApp() {
         setError(err?.message || "Failed to refresh audio download.");
       }
     },
-    [multiTrackAudioTracks, sessionId]
+    [shownVocalTracks, sessionId]
   );
 
   const handleMultiTrackExport = useCallback(async () => {
@@ -4141,11 +4183,11 @@ export default function MainApp() {
     }
     setMultiTrackExportError(null);
     setError(null);
-    if (isNoOpSingleTrackExport(multiTrackAudioTracks)) {
-      await handleMultiTrackTrackDownload(multiTrackAudioTracks[0]);
+    if (isNoOpSingleTrackExport(shownVocalTracks)) {
+      await handleMultiTrackTrackDownload(shownVocalTracks[0]);
       return;
     }
-    const audibleTracks = selectAudibleMultiTrackTracks(multiTrackAudioTracks);
+    const audibleTracks = selectAudibleMultiTrackTracks(shownVocalTracks);
     if (!audibleTracks.length) {
       setMultiTrackExportError("No audible tracks selected.");
       return;
@@ -4154,7 +4196,7 @@ export default function MainApp() {
       openPaywall("insufficient_credits");
       return;
     }
-    const billingReferenceTrack = multiTrackAudioTracks[0];
+    const billingReferenceTrack = shownVocalTracks[0];
     if (!billingReferenceTrack?.jobId || exportMixRequiredCredits === null) {
       setMultiTrackExportError("Export credits are still being calculated.");
       return;
@@ -4165,7 +4207,7 @@ export default function MainApp() {
       return;
     }
     logAnalyticsEvent("multitrack_export_mix", {
-      ...multiTrackAnalyticsParams(multiTrackAudioTracks),
+      ...multiTrackAnalyticsParams(shownVocalTracks),
     });
     setMultiTrackExportProgress(0);
     let exportMessageId: string | null = null;
@@ -4175,7 +4217,7 @@ export default function MainApp() {
     try {
       const response = await exportMix(
         sessionId,
-        multiTrackAudioTracks.map((track) => ({
+        shownVocalTracks.map((track) => ({
           job_id: track.jobId as string,
           part_id: track.partId as string,
           key: track.key,
@@ -4254,16 +4296,16 @@ export default function MainApp() {
         if (exportMessageId) setChatTurnBusy(false);
       }
     }
-  }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, multiTrackAudioTracks, multiTrackExportProgress, openPaywall, sessionId]);
+  }, [creditsLocked, exportMixRequiredCredits, handleMultiTrackTrackDownload, shownVocalTracks, multiTrackExportProgress, openPaywall, sessionId]);
 
   useEffect(() => {
-    multiTrackAudioTracks.forEach((track) => {
+    shownVocalTracks.forEach((track) => {
       const waveSurfer = multiTrackWaveSurferRefs.current[track.key];
       if (!waveSurfer) return;
-      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, multiTrackAudioTracks));
+      waveSurfer.setMuted(shouldMuteMultiTrackForPlayback(track, shownVocalTracks));
       waveSurfer.setVolume(track.volume);
     });
-  }, [multiTrackAudioTracks]);
+  }, [shownVocalTracks]);
 
   const renderVoiceAvatar = (voice: VoicebankOption, className: string) => {
     const imageUrl = failedVoiceImages[voice.id] ? null : voiceImageUrl(voice);
@@ -5059,7 +5101,9 @@ export default function MainApp() {
   };
 
   const handleStopWork = async () => {
-    if (!sessionId || !chatTurnInProgressRef.current || stopRequestInFlight) return;
+    if (!sessionId || stopRequestInFlight) return;
+    if (!chatTurnInProgressRef.current && !singAllRunningHere) return;
+    setConfirmSingAllStop(false);
     setStopRequestInFlight(true);
     try {
       const response = await stopSessionWork(sessionId);
@@ -5081,6 +5125,7 @@ export default function MainApp() {
       if (response.result === "too_late") {
         setNotice("Too late to stop: it's just finishing");
       }
+      if (response.singAll) refreshActiveSingAll();
     } catch {
       setNotice("Couldn't stop the work. Please try again.");
     } finally {
@@ -5205,6 +5250,11 @@ export default function MainApp() {
     } catch {
       setNotice("Couldn't stop the work. Please try again.");
     }
+    refreshActiveSingAll();
+  };
+
+  // After a stop: the card shows "Stopping…" at once; the poll follows the job to its end.
+  const refreshActiveSingAll = () => {
     fetchActiveSingAll()
       .then((job) => {
         if (job) rememberSingAllJob(job);
@@ -6110,9 +6160,9 @@ export default function MainApp() {
   // Replace was refused because the job was already finishing. Offer the
   // choice again once that job has ended.
   useEffect(() => {
-    if (!pendingUpload?.waitForWorkToEnd || chatTurnInProgress) return;
+    if (!pendingUpload?.waitForWorkToEnd || chatTurnInProgress || singAllRunningHere) return;
     setPendingUpload({ ...pendingUpload, waitForWorkToEnd: false });
-  }, [chatTurnInProgress, pendingUpload]);
+  }, [chatTurnInProgress, pendingUpload, singAllRunningHere]);
 
   // Enter and leaving the field both end up here; Escape marks the edit cancelled first.
   const commitTitleEdit = async () => {
@@ -6908,6 +6958,24 @@ export default function MainApp() {
                 </button>
               ))}
             </div>
+            {confirmSingAllStop && singAllRunningHere && !singAllStopping && (
+              <div className="sing-all-confirm composer-stop-confirm" role="alertdialog" aria-label="Stop Sing All?">
+                <p>Stop Sing All? Parts already sung are kept and charged. The rest is refunded.</p>
+                <div className="sing-all-actions">
+                  <button type="button" className="sing-all-link" onClick={() => setConfirmSingAllStop(false)}>
+                    Keep singing
+                  </button>
+                  <button
+                    type="button"
+                    className="selection-send"
+                    disabled={stopRequestInFlight}
+                    onClick={() => void handleStopWork()}
+                  >
+                    Stop
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="input-row composer-row">
               <textarea
                 ref={composerInputRef}
@@ -6935,17 +7003,22 @@ export default function MainApp() {
               >
                 <Send size={18} />
               </button>
-              {chatTurnInProgress && !jobKindPending && (
+              {((chatTurnInProgress && !jobKindPending) || singAllRunningHere) && (
                 <button
                   type="button"
                   className="stop-work-button"
-                  onClick={() => void handleStopWork()}
-                  disabled={stopRequestInFlight}
+                  onClick={() => {
+                    if (singAllRunningHere && !singAllStopping) setConfirmSingAllStop(true);
+                    else void handleStopWork();
+                  }}
+                  disabled={stopRequestInFlight || (singAllStopping && !chatTurnInProgress)}
                   aria-label="Stop"
                   data-testid="stop-work"
-                  title={stopRequestInFlight ? "Stopping…" : "Stop"}
+                  title={stopRequestInFlight || singAllStopping ? "Stopping…" : "Stop"}
                 >
-                  {stopRequestInFlight ? "Stopping…" : <Square size={17} fill="currentColor" aria-hidden="true" />}
+                  {stopRequestInFlight || (singAllStopping && !chatTurnInProgress)
+                    ? "Stopping…"
+                    : <Square size={17} fill="currentColor" aria-hidden="true" />}
                 </button>
               )}
             </div>
@@ -7226,7 +7299,7 @@ export default function MainApp() {
           <ScorePlayerEngine
             key={`score-player-${scorePlayerPlaybackRequestId}`}
             midiUrl={instrumentalMidiUrl}
-            vocalTracks={multiTrackAudioTracks}
+            vocalTracks={shownVocalTracks}
             decodedVocals={decodedVocals}
             vocalsDecoding={vocalsDecoding}
             instrumentalTracks={instrumentalTracks}
@@ -7351,7 +7424,7 @@ export default function MainApp() {
                   })}
                   onClick={handleMultiTrackExport}
                   disabled={
-                    !multiTrackAudioTracks.length ||
+                    !shownVocalTracks.length ||
                     (!noOpSingleTrackExport &&
                       (creditsLocked || exportMixRequiredCredits === null)) ||
                     multiTrackExportProgress !== null ||
@@ -7495,11 +7568,16 @@ export default function MainApp() {
                   </button>
                 ) : (
                   <ScoreTrackControlsPanel
-                    vocalTracks={multiTrackAudioTracks}
+                    vocalTracks={shownVocalTracks}
                     instrumentalTracks={instrumentalTracks}
                     instrumentalBus={instrumentalBus}
                     instrumentalTracksExpanded={instrumentalTracksExpanded}
                     disabled={browserMixBounceActive}
+                    vocalModeShown={vocalsInBothModes ? vocalModeShown : null}
+                    onShowVocalMode={(mode) => {
+                      handleMultiTrackStop();
+                      setVocalModeShown(mode);
+                    }}
                     onUpdateVocalMute={updateMultiTrackMute}
                     onUpdateVocalSolo={updateMultiTrackSolo}
                     onUpdateVocalVolume={updateMultiTrackVolume}
@@ -7635,7 +7713,8 @@ export default function MainApp() {
       {pendingUpload && !pendingUpload.waitForWorkToEnd ? (
         <NewSongOrReplaceModal
           scoreName={pendingUpload.file.name}
-          working={chatTurnInProgress}
+          working={chatTurnInProgress || singAllRunningHere}
+          singAllRunning={singAllRunningHere}
           onNewSong={() => void startNewSongWith(pendingUpload.file, pendingUpload.demoSongId)}
           onReplace={() => replaceScoreWith(pendingUpload.file, pendingUpload.demoSongId)}
           onCancel={() => setPendingUpload(null)}
