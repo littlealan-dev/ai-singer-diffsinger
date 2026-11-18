@@ -471,7 +471,7 @@ def decide(
                 and now - item["startedAt"] > timedelta(minutes=30)
                 for item in items
             )
-        elif stage == "singing":
+        elif stage == "singing" and not score_state.get("renderTransport"):
             started = job.get("singingStartedAt")
             latest = job.get("lastTakeAt") or started
             stuck = (isinstance(started, datetime) and isinstance(latest, datetime)
@@ -585,6 +585,8 @@ def decide(
                 continue
             child = children.get(item["childJobId"])
             if child is None or child.get("status") == "queued":
+                if score_state.get("renderTransport"):
+                    continue
                 now = score_state.get("now")
                 lease = item.get("startLeaseUntil")
                 if (item.get("status") == "running" and isinstance(now, datetime)

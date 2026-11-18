@@ -17,6 +17,31 @@ from src.backend.sing_all import (
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
 
+async def start_render_execution(job_id: str, settings: Any) -> None:
+    """Run one Cloud Run Job execution with this parent id as its only override."""
+    from google.auth import default
+    from google.auth.transport.requests import AuthorizedSession
+    from src.backend.sing_all_render import record_execution
+
+    def _start() -> str:
+        credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        session = AuthorizedSession(credentials)
+        response = session.post(
+            f"https://run.googleapis.com/v2/{settings.sing_all_render_job}:run",
+            json={"overrides": {"containerOverrides": [{"env": [
+                {"name": "SING_ALL_JOB_ID", "value": job_id},
+            ]}]}}, timeout=30,
+        )
+        response.raise_for_status()
+        operation = response.json().get("name")
+        if not isinstance(operation, str) or not operation:
+            raise RuntimeError("Cloud Run Jobs did not return an operation name.")
+        return operation
+
+    operation = await asyncio.to_thread(_start)
+    await asyncio.to_thread(record_execution, job_id, operation)
+
+
 class SingAllTerminalError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -59,6 +84,19 @@ class SingAllRunner:
             children = await self._children(job, snapshot)
             score_state = await self._score_state(job, snapshot, now=now)
             score_state["sweep"] = sweep
+            render_transport = (getattr(getattr(self.orchestrator, "_settings", None),
+                                        "sing_all_singing_transport", "dispatch") == "render_job")
+            score_state["renderTransport"] = render_transport
+            if (render_transport and job["stage"] == "singing"
+                    and job.get("instrumentalsPrepared")
+                    and (job.get("render") or {}).get("state", "none") == "none"
+                    and not job.get("cancelRequested")):
+                from src.backend.sing_all_render import enter_line
+                outcome = await asyncio.to_thread(
+                    enter_line, job_id, self.orchestrator._settings.max_render_slots)
+                if outcome == "start":
+                    await start_render_execution(job_id, self.orchestrator._settings)
+                return
             fields, actions = decide(job, children, score_state)
             if not fields and not actions:
                 return
@@ -353,7 +391,7 @@ class SingAllRunner:
         )
 
     async def _start_take(self, job: dict[str, Any], action: dict[str, Any],
-                          snapshot: dict[str, Any]) -> None:
+                          snapshot: dict[str, Any], *, defer_dispatch: bool = False) -> None:
         item = next(item for item in job["items"] if item["itemId"] == action["itemId"])
         row = next(row for row in job["rows"] if row["rowId"] == item["rowId"])
         controls = (job.get("style") or {}).get("controls", {}).get(row["rowId"]) or {}
@@ -400,6 +438,7 @@ class SingAllRunner:
         await self.orchestrator._start_synthesis_job(
             job["sessionId"], snapshot["current_score"]["score"], args,
             user_id=job["uid"], user_email="", billing_components=["vocal"],
+            defer_dispatch=defer_dispatch,
             parent={"jobId": job["jobId"], "itemId": item["itemId"],
                     "childJobId": item["childJobId"]},
         )
