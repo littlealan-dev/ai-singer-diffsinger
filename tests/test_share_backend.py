@@ -206,6 +206,27 @@ def test_share_allowlist_and_unified_off_response(client_with_env, firestore_emu
     assert deleted.status_code == unknown.status_code and deleted.json() == unknown.json()
 
 
+@pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "allowlist"}], indirect=True)
+def test_removed_allowlist_owner_can_revoke_share(client_with_env, firestore_emulator, monkeypatch):
+    _share_firestore(monkeypatch)
+    http, app = client_with_env
+    sid = _create_session(http)
+    _upload_score(http, sid)
+    app.state.share_allowlist._load_config = lambda: {"allowedUids": ["test-user"]}
+    url = http.post(f"/songs/{sid}/share", json={"notice_accepted": True}).json()["url"]
+    path = f"/public/s/{url.rsplit('/', 1)[-1]}"
+    assert http.get(path).status_code == 200
+
+    app.state.share_allowlist._config = None
+    app.state.share_allowlist._load_config = lambda: {"allowedUids": []}
+    assert http.get(f"/songs/{sid}/workspace").json()["song"]["share"]["available"] is False
+    response = http.delete(f"/songs/{sid}/share")
+    assert response.status_code == 200
+    assert response.json() == {"enabled": False, "url": None}
+    revoked = http.get(path)
+    assert revoked.status_code == 404 and revoked.json()["code"] == "share_off"
+
+
 @pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "on"}], indirect=True)
 def test_share_midi_matches_owner_and_rate_limits(client_with_env, firestore_emulator, monkeypatch):
     _share_firestore(monkeypatch)

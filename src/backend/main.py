@@ -991,8 +991,8 @@ def create_app() -> FastAPI:
 
     @app.delete("/songs/{session_id}/share")
     async def turn_share_off(session_id: str, request: Request) -> Any:
-        user_id, user_email = await _get_user_context_or_401(request)
-        if not await can_share(request, user_id, user_email):
+        user_id = await _get_user_id_or_401(request)
+        if settings.share_links == "off":
             return _share_error(403, "share_not_available", "share.not_available")
         try:
             await sessions.share_off(session_id, user_id)
