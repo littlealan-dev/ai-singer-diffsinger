@@ -54,14 +54,16 @@ def enter_line(job_id: str, max_slots: int, *, db: Any = None,
             transaction.update(job_ref, {"render": {"state": "running", "attempt": 1,
                                                     "placeInLine": None,
                                                     "queuedAt": None, "operation": None,
-                                                    "launchLeaseUntil": None},
+                                                    "launchLeaseUntil": None,
+                                                    "startedAt": now},
                                          "singingStartedAt": now})
             return "start"
         waiting.append({"jobId": job_id, "queuedAt": now})
         transaction.set(slot_ref, {"running": running, "waiting": waiting})
         transaction.update(job_ref, {"render": {"state": "waiting", "attempt": 0,
                                                 "placeInLine": len(waiting),
-                                                "queuedAt": now, "operation": None}})
+                                                "queuedAt": now, "startedAt": None,
+                                                "operation": None}})
         return "waiting"
 
     return _enter(db.transaction())
@@ -115,7 +117,7 @@ def remove_waiting(job_id: str, *, db: Any = None) -> bool:
             return False
         waiting = [entry for entry in waiting if entry["jobId"] != job_id]
         transaction.update(_job(db, job_id),
-                           {"render.state": "done", "render.placeInLine": None})
+                           {"render.state": "ended", "render.placeInLine": None})
         _positions(transaction, db, waiting)
         transaction.set(slot_ref, {"running": slots.get("running") or [],
                                    "waiting": waiting})
@@ -143,8 +145,10 @@ def leave_slot(job_id: str, *, retry: bool, max_slots: int, db: Any = None,
             return []
         running.remove(job_id)
         render = current.get("render") or {}
-        if (retry and current.get("status") == "running"
-                and not current.get("cancelRequested") and int(render.get("attempt") or 0) < 2):
+        retry_queued = (retry and current.get("status") == "running"
+                        and not current.get("cancelRequested")
+                        and int(render.get("attempt") or 0) < 2)
+        if retry_queued:
             waiting.append({"jobId": job_id, "queuedAt": now})
             queued_jobs[job_id] = current
         promoted: list[str] = []
@@ -153,7 +157,7 @@ def leave_slot(job_id: str, *, retry: bool, max_slots: int, db: Any = None,
             candidate = queued_jobs[entry["jobId"]]
             if candidate.get("status") != "running" or candidate.get("cancelRequested"):
                 transaction.update(_job(db, entry["jobId"]),
-                                   {"render.state": "done", "render.placeInLine": None})
+                                   {"render.state": "ended", "render.placeInLine": None})
                 continue
             candidate_id = entry["jobId"]
             running.append(candidate_id)
@@ -163,12 +167,14 @@ def leave_slot(job_id: str, *, retry: bool, max_slots: int, db: Any = None,
                                {"render.state": "running", "render.attempt": attempt,
                                 "render.placeInLine": None, "render.operation": None,
                                 "render.launchLeaseUntil": None,
+                                "render.startedAt": now,
                                 "singingStartedAt": now})
         if job_id not in promoted:
             transaction.update(_job(db, job_id),
                                {"render.state": "waiting" if any(
-                                   entry["jobId"] == job_id for entry in waiting) else "done",
-                                "render.placeInLine": None, "render.operation": None})
+                                   entry["jobId"] == job_id for entry in waiting) else "ended",
+                                "render.placeInLine": None, "render.operation": None,
+                                **({"render.queuedAt": now} if retry_queued else {})})
         _positions(transaction, db, waiting)
         transaction.set(slot_ref, {"running": running, "waiting": waiting})
         return promoted

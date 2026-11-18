@@ -40,6 +40,7 @@ def test_one_slot_queues_second_parent_then_starts_it(render_db):
     assert slots["running"] == [second]
     assert slots["waiting"][0]["jobId"] == third
     assert db.collection("singAllJobs").document(third).get().to_dict()["render"]["placeInLine"] == 1
+    assert db.collection("singAllJobs").document(first).get().to_dict()["render"]["state"] == "ended"
 
 
 def test_stopped_waiter_leaves_line(render_db):
@@ -94,6 +95,42 @@ def test_launch_uses_one_jobs_api_execution_with_parent_override(monkeypatch):
              {"name": "SING_ALL_JOB_ID", "value": "parent"}]}]}}, 30),
         ("parent", "projects/project/locations/region/operations/op"),
     ]
+
+
+def test_slot_promotion_launches_waiter_once_with_stubbed_jobs_api(render_db, monkeypatch):
+    db, (first, second, _) = render_db
+    calls = []
+    monkeypatch.setattr("google.auth.default", lambda **kwargs: (object(), "project"))
+
+    class Response:
+        def __init__(self, operation):
+            self.operation = operation
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"name": self.operation}
+
+    class Session:
+        def __init__(self, credentials):
+            pass
+
+        def post(self, url, *, json, timeout):
+            job_id = json["overrides"]["containerOverrides"][0]["env"][0]["value"]
+            calls.append(job_id)
+            return Response(f"projects/project/locations/region/operations/{job_id}")
+
+    monkeypatch.setattr("google.auth.transport.requests.AuthorizedSession", Session)
+    settings = SimpleNamespace(sing_all_render_job="projects/project/locations/region/jobs/render")
+    assert sing_all_render.enter_line(first, 1, db=db) == "start"
+    asyncio.run(sing_all_runner.start_render_execution(first, settings))
+    assert sing_all_render.enter_line(second, 1, db=db) == "waiting"
+    assert db.collection("singAllJobs").document(second).get().to_dict()["render"]["placeInLine"] == 1
+    promoted = sing_all_render.leave_slot(first, retry=False, max_slots=1, db=db)
+    assert promoted == [second]
+    asyncio.run(sing_all_runner.start_render_execution(promoted[0], settings))
+    assert calls == [first, second]
 
 
 def _fake_render(monkeypatch, *, stop_after_first=False):
