@@ -13,6 +13,7 @@ import uuid
 import weakref
 import copy
 import hashlib
+import secrets
 
 from firebase_admin import firestore
 
@@ -85,6 +86,7 @@ class SessionState:
     song_created_at: Optional[datetime] = None
     song_listed: bool = False
     deleted_at: Optional[datetime] = None
+    share_token: Optional[str] = None
     # The memory store's player record; Firestore keeps it in a subcollection.
     player: Optional[Dict[str, Any]] = None
 
@@ -126,6 +128,7 @@ class SessionState:
             "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
             "song": self.song(),
+            "share_token": self.share_token,
         }
 
     def _score_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -270,6 +273,7 @@ class SessionStore(WorkspacePersistence):
         self._storage_bucket = storage_bucket
         self._sessions: Dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
+        self._shares: Dict[str, Dict[str, Any]] = {}
 
     async def _change_workspace(self, session_id, change):
         async with self._lock:
@@ -345,6 +349,39 @@ class SessionStore(WorkspacePersistence):
             state.last_active_at = _utcnow()
             return state.snapshot()
 
+    async def read_shared(self, session_id: str) -> SessionState:
+        """Read a Song for a viewer without changing its activity or chat history."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.deleted_at is not None or state.song_created_at is None:
+                raise KeyError(session_id)
+            shared = copy.deepcopy(state)
+            shared.history = []
+            if self._backend_use_storage:
+                self._hydrate_scores_locked(shared)
+            return shared
+
+    async def get_share(self, token: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            return copy.deepcopy(self._shares.get(token))
+
+    async def share_on(self, session_id: str, user_id: str) -> str:
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            if state.share_token:
+                return state.share_token
+            token = secrets.token_urlsafe(16)
+            state.share_token = token
+            self._shares[token] = {"sessionId": session_id, "ownerUid": user_id, "createdAt": _utcnow()}
+            return token
+
+    async def share_off(self, session_id: str, user_id: str) -> None:
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            if state.share_token:
+                self._shares.pop(state.share_token, None)
+                state.share_token = None
+
     async def append_history(
         self, session_id: str, role: str, content: str, *, sing_all_job_id: str | None = None
     ) -> Dict[str, str]:
@@ -377,7 +414,7 @@ class SessionStore(WorkspacePersistence):
             state.last_active_at = _utcnow()
 
     async def ensure_active_musicxml(
-        self, session_id: str, user_id: Optional[str]
+        self, session_id: str, user_id: Optional[str], *, touch: bool = True
     ) -> Path:
         """Return the active MusicXML file, restoring it from storage when needed."""
         async with self._lock:
@@ -396,7 +433,8 @@ class SessionStore(WorkspacePersistence):
                 backend_use_storage=self._backend_use_storage,
                 storage_bucket=self._storage_bucket,
             )
-            state.last_active_at = _utcnow()
+            if touch:
+                state.last_active_at = _utcnow()
             return path
 
     async def set_score(self, session_id: str, score: Dict[str, Any], *,
@@ -535,6 +573,7 @@ class SessionStore(WorkspacePersistence):
             "title": state.title, "songCreatedAt": state.song_created_at,
             "lastActiveAt": state.last_active_at, "currentJobId": state.current_job_id,
             "scoreId": state.score_id,
+            "shareToken": state.share_token,
         }
 
     async def get_player(self, session_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -802,6 +841,7 @@ class FirestoreSessionStore(WorkspacePersistence):
             ),
             song_listed=bool(data.get("songListed", False)),
             deleted_at=data.get("deletedAt") if isinstance(data.get("deletedAt"), datetime) else None,
+            share_token=data.get("shareToken"),
         )
 
     async def _run_session_io(self, session_id: str, work: Callable[[], _T]) -> _T:
@@ -821,16 +861,69 @@ class FirestoreSessionStore(WorkspacePersistence):
             {**fields, "lastActiveAt": firestore.SERVER_TIMESTAMP}
         )
 
-    def _read_owned(self, session_id: str, user_id: Optional[str]) -> Dict[str, Any]:
+    def _read_owned(self, session_id: str, user_id: Optional[str], *, touch: bool = True,
+                    field_paths: Optional[List[str]] = None) -> Dict[str, Any]:
         """Read a session document, enforcing ownership, and mark it active."""
-        doc = self._doc_ref(session_id).get()
+        doc = self._doc_ref(session_id).get(field_paths=field_paths)
         data = (doc.to_dict() or {}) if doc.exists else {}
         if not doc.exists or data.get("deletedAt"):
             raise KeyError(session_id)
         if user_id and data.get("userId") and data.get("userId") != user_id:
             raise PermissionError(session_id)
-        self._update(session_id, {})
+        if touch:
+            self._update(session_id, {})
         return data
+
+    async def read_shared(self, session_id: str) -> SessionState:
+        """Read only public Song fields, with no activity write."""
+        fields = ["userId", "createdAt", "lastActiveAt", "deletedAt", "songCreatedAt",
+                  "title", "scoreId", "scoreSummary", "files", "currentScore",
+                  "currentScorePath", "currentScoreVersion", "shareToken"]
+        def run() -> SessionState:
+            data = self._read_owned(session_id, None, touch=False, field_paths=fields)
+            if not data.get("songCreatedAt"):
+                raise KeyError(session_id)
+            state = self._state_from_doc(session_id, data)
+            if self._backend_use_storage and state.current_score_path:
+                state.current_score = _load_score_from_storage(self._storage_bucket, state.current_score_path)
+            return state
+        return await self._run_session_io(session_id, run)
+
+    async def get_share(self, token: str) -> Optional[Dict[str, Any]]:
+        def run() -> Optional[Dict[str, Any]]:
+            doc = self._client.collection("shares").document(token).get()
+            return (doc.to_dict() or {}) if doc.exists else None
+        return await asyncio.to_thread(run)
+
+    async def share_on(self, session_id: str, user_id: str) -> str:
+        def run() -> str:
+            ref = self._doc_ref(session_id)
+            @firestore.transactional
+            def commit(txn) -> str:
+                data = self._owned_song(ref.get(transaction=txn), session_id, user_id)
+                if data.get("shareToken"):
+                    return data["shareToken"]
+                token = secrets.token_urlsafe(16)
+                share_ref = self._client.collection("shares").document(token)
+                txn.update(ref, {"shareToken": token})
+                txn.set(share_ref, {"sessionId": session_id, "ownerUid": user_id,
+                                    "createdAt": firestore.SERVER_TIMESTAMP})
+                return token
+            return commit(self._client.transaction())
+        return await self._run_session_io(session_id, run)
+
+    async def share_off(self, session_id: str, user_id: str) -> None:
+        def run() -> None:
+            ref = self._doc_ref(session_id)
+            @firestore.transactional
+            def commit(txn) -> None:
+                data = self._owned_song(ref.get(transaction=txn), session_id, user_id)
+                token = data.get("shareToken")
+                if token:
+                    txn.update(ref, {"shareToken": firestore.DELETE_FIELD})
+                    txn.delete(self._client.collection("shares").document(token))
+            commit(self._client.transaction())
+        await self._run_session_io(session_id, run)
 
     async def create_session(self, user_id: Optional[str]) -> SessionState:
         """Create a new session document and local directory."""
@@ -920,7 +1013,7 @@ class FirestoreSessionStore(WorkspacePersistence):
         )
 
     async def ensure_active_musicxml(
-        self, session_id: str, user_id: Optional[str]
+        self, session_id: str, user_id: Optional[str], *, touch: bool = True
     ) -> Path:
         """Return the active MusicXML file, restoring it from storage when needed."""
         def run() -> Path:
@@ -943,7 +1036,8 @@ class FirestoreSessionStore(WorkspacePersistence):
             persisted_path = (data.get("files") or {}).get("musicxml_path")
             if restored_path != persisted_path:
                 updates["files.musicxml_path"] = restored_path
-            self._update(session_id, updates)
+            if touch:
+                self._update(session_id, updates)
             return path
 
         return await self._run_session_io(session_id, run)
@@ -1205,7 +1299,7 @@ class FirestoreSessionStore(WorkspacePersistence):
                 self._client.collection(self._collection)
                 .where("userId", "==", user_id)
                 .where("songListed", "==", True)
-                .select(["title", "songCreatedAt", "lastActiveAt", "currentJobId", "scoreId", "deletedAt"])
+                .select(["title", "songCreatedAt", "lastActiveAt", "currentJobId", "scoreId", "deletedAt", "shareToken"])
             )
             listed = [(doc.id, doc.to_dict() or {}) for doc in query.stream()]
             listed = [(sid, data) for sid, data in listed if not data.get("deletedAt")]
@@ -1252,6 +1346,7 @@ def _song_row(session_id: str, data: Dict[str, Any], player: Optional[Dict[str, 
         "last_active_at": songs.iso_time(data.get("lastActiveAt")),
         "current_job_id": data.get("currentJobId"),
         "track_count": len(tracks) if holds_this_score else 0,
+        "shared": bool(data.get("shareToken")),
     }
 
 
