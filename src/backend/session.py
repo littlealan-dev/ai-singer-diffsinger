@@ -429,7 +429,7 @@ class SessionStore(WorkspacePersistence):
             path = _ensure_active_musicxml_path(
                 project_root=self._project_root,
                 session_dir=self.session_dir(session_id),
-                files=state.files,
+                files=state.files if touch else dict(state.files),
                 backend_use_storage=self._backend_use_storage,
                 storage_bucket=self._storage_bucket,
             )

@@ -84,6 +84,13 @@ def _premium_synthesis_route_env(synthesis_mode: str) -> tuple[str, str, str, st
     return routing, worker_url, tasks_queue, audience
 
 
+def _share_links_env() -> str:
+    value = os.getenv("SHARE_LINKS", "off").strip().lower() or "off"
+    if value not in {"off", "allowlist", "on"}:
+        raise ValueError("SHARE_LINKS must be one of off, allowlist, on.")
+    return value
+
+
 def _env_bool(name: str, default: bool) -> bool:
     """Read a boolean env var with a default."""
     value = os.getenv(name)
@@ -284,6 +291,10 @@ class Settings:
     synthesis_premium_worker_url: str = ""
     synthesis_premium_worker_audience: str = ""
     synthesis_premium_tasks_queue: str = ""
+    share_links: str = "off"
+    share_base_url: str = "https://sightsinger.app"
+    share_page_limit_per_minute: int = 240
+    share_audio_limit_per_minute: int = 1200
     # The worker service has no GPU, so it starts only the CPU MCP worker.
     mcp_gpu_enabled: bool = True
     # Start MCP on the first tool call rather than at boot: for request-billed
@@ -735,6 +746,10 @@ class Settings:
             synthesis_premium_worker_url=synthesis_premium_worker_url,
             synthesis_premium_worker_audience=synthesis_premium_worker_audience,
             synthesis_premium_tasks_queue=synthesis_premium_tasks_queue,
+            share_links=_share_links_env(),
+            share_base_url=os.getenv("SHARE_BASE_URL", "https://sightsinger.app").strip().rstrip("/"),
+            share_page_limit_per_minute=_env_int("SHARE_PAGE_LIMIT_PER_MINUTE", 240),
+            share_audio_limit_per_minute=_env_int("SHARE_AUDIO_LIMIT_PER_MINUTE", 1200),
             mcp_gpu_enabled=mcp_gpu_enabled,
             # Unset keeps the earlier behaviour: only the preprocess worker
             # starts MCP on its first call.

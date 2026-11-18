@@ -277,6 +277,7 @@ def test_a_session_becomes_a_song_at_its_first_upload(client):
     assert row == {
         "id": session_id, "title": "Test", "created_at": song["created_at"],
         "last_active_at": row["last_active_at"], "status": "idle", "track_count": 0,
+        "shared": False,
     }
 
 

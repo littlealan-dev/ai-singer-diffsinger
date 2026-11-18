@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, AsyncIterator, Iterator, Literal, Optional
+from collections import deque
 import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import json
 import time
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -53,6 +55,7 @@ from src.backend.job_dispatch import (
     job_route,
 )
 from src.backend.message_catalog import backend_message
+from src.backend.premium_routing import PremiumSynthesisRouting
 from src.backend.credits import (
     get_instrumental_charge_state,
     instrumental_charge_scope,
@@ -120,7 +123,7 @@ from src.mcp.logging_utils import (
     get_logger,
     set_log_context,
 )
-from firebase_admin import app_check
+from firebase_admin import app_check, firestore
 
 _PLAYBACK_SECRET_CACHE: dict[tuple[str | None, str, str], str] = {}
 _SYNTHESIS_STREAM_POLL_SECONDS = 1.2
@@ -590,6 +593,8 @@ def create_app() -> FastAPI:
     app.state.orchestrator = orchestrator
     app.state.export_mix_tasks = export_mix_tasks
     app.state.shutdown_coordinator = shutdown_coordinator
+    app.state.share_allowlist = PremiumSynthesisRouting("allowlist")
+    share_requests: dict[tuple[str, str], deque[float]] = {}
 
     cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
     if cors_env:
@@ -835,6 +840,53 @@ def create_app() -> FastAPI:
             clear_log_context()
         return response
 
+    @app.middleware("http")
+    async def public_share_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/public/s/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        return response
+
+    async def can_share(request: Request, user_id: str, user_email: str) -> bool:
+        mode = request.app.state.settings.share_links
+        if mode == "on":
+            return True
+        if mode != "allowlist":
+            return False
+        return await asyncio.to_thread(
+            request.app.state.share_allowlist.is_premium, user_id, user_email
+        )
+
+    async def resolve_share(token: str, request: Request, kind: str):
+        """Resolve a live share while leaving the Song untouched."""
+        now = time.monotonic()
+        key = (_client_ip(request) or "unknown", kind)
+        limit = (settings.share_audio_limit_per_minute if kind == "audio"
+                 else settings.share_page_limit_per_minute)
+        # Each request runs on the event loop and this section contains no await.
+        for old_key, times in list(share_requests.items()):
+            while times and now - times[0] >= 60:
+                times.popleft()
+            if not times:
+                del share_requests[old_key]
+        times = share_requests.setdefault(key, deque())
+        if len(times) >= limit:
+            return _share_error(429, "rate_limited", "share.rate_limited", retry_after="60")
+        times.append(now)
+        if settings.share_links == "off" or not _valid_share_token(token):
+            return _share_error(404, "share_off", "share.off")
+        share = await sessions.get_share(token)
+        if not share:
+            return _share_error(404, "share_off", "share.off")
+        try:
+            state = await sessions.read_shared(share.get("sessionId"))
+        except (KeyError, PermissionError):
+            return _share_error(404, "share_off", "share.off")
+        if state.share_token != token or state.user_id != share.get("ownerUid"):
+            return _share_error(404, "share_off", "share.off")
+        return share, state
+
     @app.post("/sessions")
     async def create_session(request: Request) -> Dict[str, str]:
         """Create a new session for a user."""
@@ -855,7 +907,7 @@ def create_app() -> FastAPI:
         """Everything needed to open a Song: chat, score, jobs and player."""
         sessions: SessionStore = request.app.state.sessions
         job_store: JobStore = request.app.state.job_store
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
         try:
             # The session, not its snapshot: opening a Song never downloads the score.
             state = await sessions.get_session(session_id, user_id)
@@ -865,6 +917,12 @@ def create_app() -> FastAPI:
         song = state.song()
         if song is None:
             return _song_error(404, "song_not_found", "song.not_found")
+        available = await can_share(request, user_id, user_email)
+        song["share"] = {
+            "available": available,
+            "enabled": bool(state.share_token),
+            "url": _share_url(settings, state.share_token) if state.share_token else None,
+        }
         session_jobs = await asyncio.to_thread(
             job_store.list_session_jobs, user_id=user_id, session_id=session_id
         )
@@ -909,6 +967,153 @@ def create_app() -> FastAPI:
             "jobs": jobs,
             "player": player_payload,
         }
+
+    @app.post("/songs/{session_id}/share")
+    async def turn_share_on(session_id: str, request: Request) -> Any:
+        user_id, user_email = await _get_user_context_or_401(request)
+        if not await can_share(request, user_id, user_email):
+            return _share_error(403, "share_not_available", "share.not_available")
+        try:
+            await sessions.get_song_row(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        user_ref = get_firestore_client().collection("users").document(user_id)
+        notice = await asyncio.to_thread(user_ref.get)
+        if not (notice.to_dict() or {}).get("shareNoticeAt"):
+            body = await _json_body_or_none(request)
+            if not isinstance(body, dict) or body.get("notice_accepted") is not True:
+                return _share_error(409, "share_notice_required", "share.notice_required")
+            await asyncio.to_thread(user_ref.set, {"shareNoticeAt": firestore.SERVER_TIMESTAMP}, merge=True)
+        token = await sessions.share_on(session_id, user_id)
+        return {"enabled": True, "url": _share_url(settings, token)}
+
+    @app.delete("/songs/{session_id}/share")
+    async def turn_share_off(session_id: str, request: Request) -> Any:
+        user_id = await _get_user_id_or_401(request)
+        try:
+            await sessions.share_off(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        return {"enabled": False, "url": None}
+
+    @app.get("/public/s/{token}")
+    async def public_share_page(token: str, request: Request) -> Any:
+        resolved = await resolve_share(token, request, "page")
+        if isinstance(resolved, Response):
+            return resolved
+        share, state = resolved
+        player = await sessions.get_player(state.id, share["ownerUid"])
+        player_payload = songs.player_response(player, score_id=state.score_id)
+        job_ids = [str(track.get("sourceJobId")) for track in (player or {}).get("vocals") or []
+                   if track.get("sourceJobId")]
+        jobs = await asyncio.to_thread(request.app.state.job_store.get_jobs, job_ids)
+        voices: list[str] = []
+        base = f"/public/s/{token}"
+        for track, _ in songs.usable_vocals(
+            player, score_id=state.score_id, score_summary=state.score_summary, jobs_by_id=jobs
+        ):
+            vocal = songs.vocal_response(track)
+            voice = vocal["voice_name"]
+            if isinstance(voice, str) and voice and voice not in voices:
+                voices.append(voice)
+            player_payload["vocals"].append({
+                key: vocal[key] for key in (
+                    "key", "mode", "label", "verse_number", "duration_seconds",
+                    "voice_name", "muted", "solo", "volume"
+                )
+            } | {"audio_url": f"{base}/audio?{urlencode({'track': vocal['key']})}"})
+        summary = state.score_summary if isinstance(state.score_summary, dict) else {}
+        performance = summary.get("performance_midi")
+        performance = performance if isinstance(performance, dict) else {}
+        files = state.files
+        midi_key = ("instrumental_midi_expanded_path" if player_payload["repeats"]
+                    else "instrumental_midi_original_path")
+        midi_available = bool(performance.get("has_instrumental_parts") and files.get(midi_key))
+        player_payload = {
+            "repeats": player_payload["repeats"],
+            "vocals": player_payload["vocals"],
+            "instruments": player_payload["instruments"],
+            "bus": player_payload["bus"],
+            "midi_url": f"{base}/midi?expand_repeats={str(player_payload['repeats']).lower()}"
+            if midi_available else None,
+        }
+        viewer = await _get_optional_verified_user_context(request)
+        is_owner = bool(viewer and viewer[0] == share["ownerUid"])
+        return {
+            "title": state.title or songs.UNTITLED_SONG,
+            "is_owner": is_owner,
+            "song_id": state.id if is_owner else None,
+            "score": {
+                "version": state.current_score_version,
+                "url": f"{base}/score",
+                "summary": {
+                    **{key: summary.get(key) for key in (
+                        "duration_seconds", "expanded_duration_seconds",
+                        "repeat_expansion_available", "performance_measure_map"
+                    )},
+                    "performance_midi": {key: performance.get(key) for key in (
+                        "version", "instrumental_parts", "has_instrumental_parts",
+                        "original_midi_available", "expanded_midi_available"
+                    )},
+                },
+            },
+            "player": player_payload,
+            "credits": {"voices": voices},
+        }
+
+    @app.get("/public/s/{token}/score")
+    async def public_share_score(token: str, request: Request) -> Response:
+        resolved = await resolve_share(token, request, "page")
+        if isinstance(resolved, Response):
+            return resolved
+        _, state = resolved
+        return await _serve_score(request.app.state.sessions, settings, state.id, state.user_id,
+                                  state.snapshot(), touch=False)
+
+    @app.get("/public/s/{token}/midi")
+    async def public_share_midi(token: str, request: Request, expand_repeats: bool = False) -> Response:
+        resolved = await resolve_share(token, request, "page")
+        if isinstance(resolved, Response):
+            return resolved
+        _, state = resolved
+        return await _serve_instrumental_midi(
+            request.app.state.sessions, request.app.state.orchestrator, state.id,
+            state.user_id, state.snapshot(), expand_repeats, touch=False,
+        )
+
+    @app.get("/public/s/{token}/audio")
+    async def public_share_audio(token: str, request: Request, track: str = "") -> Response:
+        resolved = await resolve_share(token, request, "audio")
+        if isinstance(resolved, Response):
+            return resolved
+        share, state = resolved
+        player = await sessions.get_player(state.id, share["ownerUid"])
+        job_ids = [str(item.get("sourceJobId")) for item in (player or {}).get("vocals") or []
+                   if item.get("sourceJobId")]
+        jobs = await asyncio.to_thread(request.app.state.job_store.get_jobs, job_ids)
+        usable = ((item, job) for item, job in songs.usable_vocals(
+            player, score_id=state.score_id, score_summary=state.score_summary, jobs_by_id=jobs
+        ) if item.get("key") == track)
+        found = next(usable, None)
+        if found is None:
+            return _share_error(404, "share_track_not_found", "share.track_not_found")
+        item, job = found
+        job_id = item.get("sourceJobId")
+        if job.get("sessionId") != state.id or job.get("userId") != share["ownerUid"]:
+            return _share_error(404, "share_track_not_found", "share.track_not_found")
+        output = job.get("outputPath")
+        if settings.backend_use_storage:
+            path = songs.owned_job_path(output, user_id=share["ownerUid"],
+                                       session_id=state.id, job_id=job_id)
+            if path is None:
+                return _share_error(404, "share_track_not_found", "share.track_not_found")
+            return await _stream_storage_audio(request, settings, path, download=False)
+        if not isinstance(output, str):
+            return _share_error(404, "share_track_not_found", "share.track_not_found")
+        path = (settings.project_root / output).resolve()
+        if not path.is_relative_to(sessions.session_dir(state.id)) or not path.is_file():
+            return _share_error(404, "share_track_not_found", "share.track_not_found")
+        return FileResponse(path, media_type=_audio_media_type(str(path)))
 
     @app.patch("/songs/{session_id}")
     async def rename_song(session_id: str, request: Request) -> Any:
@@ -2336,6 +2541,44 @@ def create_app() -> FastAPI:
         settings: Settings = request.app.state.settings
         user_id = await _get_user_id_or_401(request)
         snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        return await _serve_score(sessions, settings, session_id, user_id, snapshot)
+
+    @app.get("/sessions/{session_id}/instrumental-midi")
+    async def get_instrumental_midi(
+        session_id: str, request: Request, expand_repeats: bool = False
+    ) -> FileResponse:
+        """Serve the session's notation- or played-order instrumental MIDI file."""
+        sessions: SessionStore = request.app.state.sessions
+        settings: Settings = request.app.state.settings
+        user_id = await _get_user_id_or_401(request)
+        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+        return await _serve_instrumental_midi(
+            sessions, request.app.state.orchestrator, session_id, user_id, snapshot,
+            expand_repeats,
+        )
+
+    return app
+
+
+def _valid_share_token(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{22}", token))
+
+
+def _share_url(settings: Settings, token: str) -> str:
+    return f"{settings.share_base_url}/s/{token}"
+
+
+def _share_error(status: int, code: str, message_key: str, *, retry_after: str | None = None) -> JSONResponse:
+    return JSONResponse(
+        status_code=status, content={"code": code, "message": backend_message(message_key)},
+        headers={"Retry-After": retry_after} if retry_after else None,
+    )
+
+
+async def _serve_score(
+    sessions: SessionStore, settings: Settings, session_id: str,
+    user_id: str | None, snapshot: Dict[str, Any], *, touch: bool = True,
+) -> Response:
         # The score's recorded source path may be another backend's disk (the
         # preprocess worker's), so it is never read here: a scored session serves
         # its active artifact, which stays inside this session's folder or comes
@@ -2349,7 +2592,7 @@ def create_app() -> FastAPI:
             score_path = _resolve_allowlisted_score_path(settings, fallback_path)
         else:
             try:
-                score_path = await sessions.ensure_active_musicxml(session_id, user_id)
+                score_path = await sessions.ensure_active_musicxml(session_id, user_id, touch=touch)
             except SessionMusicXmlUnavailableError as exc:
                 raise HTTPException(
                     status_code=409,
@@ -2370,29 +2613,28 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
-    @app.get("/sessions/{session_id}/instrumental-midi")
-    async def get_instrumental_midi(
-        session_id: str, request: Request, expand_repeats: bool = False
-    ) -> FileResponse:
-        """Serve the session's notation- or played-order instrumental MIDI file."""
-        sessions: SessionStore = request.app.state.sessions
-        settings: Settings = request.app.state.settings
-        user_id = await _get_user_id_or_401(request)
-        snapshot = await _get_snapshot_or_404(sessions, session_id, user_id)
+async def _serve_instrumental_midi(
+    sessions: SessionStore, orchestrator: Orchestrator, session_id: str,
+    user_id: str | None, snapshot: Dict[str, Any], expand_repeats: bool,
+    *, touch: bool = True,
+) -> FileResponse:
         files = snapshot.get("files")
         published_signature = (
             files.get(INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY) if isinstance(files, dict) else None
         )
         if not isinstance(snapshot.get("current_score"), dict) or not published_signature:
             raise HTTPException(status_code=404, detail="Instrumental MIDI is unavailable for this score.")
-        orchestrator: Orchestrator = request.app.state.orchestrator
         summary = snapshot.get("score_summary")
         try:
+            musicxml_path = None if touch else await sessions.ensure_active_musicxml(
+                session_id, user_id, touch=False
+            )
             current_signature = await orchestrator.instrumental_midi_signature(
                 session_id,
                 user_id=user_id,
                 score_id=snapshot.get("score_id"),
                 score_summary=summary if isinstance(summary, dict) else None,
+                musicxml_path=musicxml_path,
             )
         except (KeyError, OSError, SessionMusicXmlUnavailableError) as exc:
             raise HTTPException(
@@ -2424,9 +2666,6 @@ def create_app() -> FastAPI:
             filename=midi_path.name,
             headers={"Cache-Control": "no-store"},
         )
-
-    return app
-
 
 def _session_midi_local_path(sessions: SessionStore, session_id: str, stored_path: str) -> Path:
     """Return this instance's path for a published session MIDI file.
