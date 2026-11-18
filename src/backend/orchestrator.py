@@ -1087,6 +1087,7 @@ class Orchestrator:
         billing_components: Optional[List[str]] = None,
         originating_turn_id: Optional[str] = None,
         parent: Optional[Dict[str, str]] = None,
+        defer_dispatch: bool = False,
     ) -> Dict[str, Any]:
         """Create a Firestore job and start it: here, or on the synthesis worker.
 
@@ -1148,7 +1149,7 @@ class Orchestrator:
             "progress_url": _job_progress_url(session_id, job_id),
             "job_id": job_id,
         }
-        if self._synthesis_dispatcher.mode != "inline":
+        if defer_dispatch or self._synthesis_dispatcher.mode != "inline":
             await self._dispatch_synthesis_job(
                 session_id,
                 job_id,
@@ -1160,6 +1161,7 @@ class Orchestrator:
                 output_storage_path=output_storage_path,
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
+                enqueue=not defer_dispatch,
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
@@ -1558,6 +1560,7 @@ class Orchestrator:
         output_storage_path: Optional[str],
         billing_components: Optional[List[str]],
         originating_turn_id: Optional[str],
+        enqueue: bool = True,
     ) -> None:
         """Save what the worker needs to run the job, then hand it to the worker.
 
@@ -1599,6 +1602,8 @@ class Orchestrator:
             synthesisSpecJson=json.dumps(spec, sort_keys=True, default=str),
             dispatchRoute=dispatcher.route.variant,
         )
+        if not enqueue:
+            return
         try:
             await dispatcher.dispatch(job_id)
         except JobDispatchError as exc:
