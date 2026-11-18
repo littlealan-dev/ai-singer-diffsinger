@@ -21,7 +21,10 @@ async def start_render_execution(job_id: str, settings: Any) -> None:
     """Run one Cloud Run Job execution with this parent id as its only override."""
     from google.auth import default
     from google.auth.transport.requests import AuthorizedSession
-    from src.backend.sing_all_render import record_execution
+    from src.backend.sing_all_render import record_execution, reserve_launch
+
+    if not await asyncio.to_thread(reserve_launch, job_id):
+        return
 
     def _start() -> str:
         credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
@@ -42,6 +45,21 @@ async def start_render_execution(job_id: str, settings: Any) -> None:
     await asyncio.to_thread(record_execution, job_id, operation)
 
 
+async def render_operation_done(operation: str) -> bool:
+    """Read the Cloud Run long-running operation for a render execution."""
+    from google.auth import default
+    from google.auth.transport.requests import AuthorizedSession
+
+    def _read() -> bool:
+        credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        response = AuthorizedSession(credentials).get(
+            f"https://run.googleapis.com/v2/{operation}", timeout=30)
+        response.raise_for_status()
+        return bool(response.json().get("done"))
+
+    return await asyncio.to_thread(_read)
+
+
 class SingAllTerminalError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -58,8 +76,28 @@ class SingAllRunner:
                         now: datetime | None = None) -> None:
         for _ in range(64):
             job = await asyncio.to_thread(sing_all_store.load, job_id)
-            if not job or job.get("status") != "running":
+            if not job:
                 return
+            settings = getattr(self.orchestrator, "_settings", None)
+            render_transport = (getattr(settings, "sing_all_singing_transport", "dispatch")
+                                == "render_job")
+            if job.get("status") != "running":
+                if render_transport:
+                    await self._clear_render_slot(job_id)
+                return
+            if render_transport and sweep:
+                from src.backend.sing_all_render import recover_execution
+                await recover_execution(
+                    job_id, self.orchestrator,
+                    operation_done=render_operation_done,
+                    launch_next=lambda next_id: start_render_execution(next_id, settings))
+                job = await asyncio.to_thread(sing_all_store.load, job_id)
+                if not job or job.get("status") != "running":
+                    return
+                render = job.get("render") or {}
+                if (render.get("state") == "running" and not render.get("operation")
+                        and not job.get("cancelRequested")):
+                    await start_render_execution(job_id, settings)
             if job.get("cancelRequested"):
                 for item in job.get("items") or []:
                     if item.get("status") not in {"queued", "running"} or not item.get("childJobId"):
@@ -84,8 +122,6 @@ class SingAllRunner:
             children = await self._children(job, snapshot)
             score_state = await self._score_state(job, snapshot, now=now)
             score_state["sweep"] = sweep
-            render_transport = (getattr(getattr(self.orchestrator, "_settings", None),
-                                        "sing_all_singing_transport", "dispatch") == "render_job")
             score_state["renderTransport"] = render_transport
             if (render_transport and job["stage"] == "singing"
                     and job.get("instrumentalsPrepared")
@@ -151,7 +187,20 @@ class SingAllRunner:
                         await self._terminal_failure(job_id, exc.reason)
                         return
             if job.get("status") != "running":
+                if render_transport:
+                    await self._clear_render_slot(job_id)
                 return
+
+    async def _clear_render_slot(self, job_id: str) -> None:
+        from src.backend.sing_all_render import leave_slot, remove_waiting
+
+        settings = self.orchestrator._settings
+        if await asyncio.to_thread(remove_waiting, job_id):
+            return
+        promoted = await asyncio.to_thread(
+            leave_slot, job_id, retry=False, max_slots=settings.max_render_slots)
+        for next_id in promoted:
+            await start_render_execution(next_id, settings)
 
     async def _terminal_failure(self, job_id: str, reason: str) -> None:
         """End a deterministic preparation failure before any take can start."""

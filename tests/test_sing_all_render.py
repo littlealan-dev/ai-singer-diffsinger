@@ -2,14 +2,12 @@
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from src.backend import sing_all_render, sing_all_store
+from src.backend import sing_all_render, sing_all_runner, sing_all_store
 from src.backend.firebase_app import get_firestore_client
-from src.backend.sing_all import progress
 
 
 @pytest.fixture
@@ -51,6 +49,51 @@ def test_stopped_waiter_leaves_line(render_db):
     sing_all_render.enter_line(third, 1, db=db)
     assert sing_all_render.remove_waiting(second, db=db)
     assert db.collection("singAllJobs").document(third).get().to_dict()["render"]["placeInLine"] == 1
+
+
+def test_incomplete_first_execution_waits_behind_older_parent(render_db):
+    db, (first, second, _) = render_db
+    sing_all_render.enter_line(first, 1, db=db)
+    sing_all_render.enter_line(second, 1, db=db)
+    assert sing_all_render.leave_slot(first, retry=True, max_slots=1, db=db) == [second]
+    first_render = db.collection("singAllJobs").document(first).get().to_dict()["render"]
+    assert first_render["state"] == "waiting"
+    assert first_render["placeInLine"] == 1
+    assert sing_all_render.leave_slot(second, retry=False, max_slots=1, db=db) == [first]
+    assert db.collection("singAllJobs").document(first).get().to_dict()["render"]["attempt"] == 2
+
+
+def test_launch_uses_one_jobs_api_execution_with_parent_override(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sing_all_render, "reserve_launch", lambda job_id: True)
+    monkeypatch.setattr(sing_all_render, "record_execution",
+                        lambda job_id, operation: calls.append((job_id, operation)))
+    monkeypatch.setattr("google.auth.default", lambda **kwargs: (object(), "project"))
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"name": "projects/project/locations/region/operations/op"}
+
+    class Session:
+        def __init__(self, credentials):
+            pass
+
+        def post(self, url, *, json, timeout):
+            calls.append((url, json, timeout))
+            return Response()
+
+    monkeypatch.setattr("google.auth.transport.requests.AuthorizedSession", Session)
+    settings = SimpleNamespace(sing_all_render_job="projects/project/locations/region/jobs/render")
+    asyncio.run(sing_all_runner.start_render_execution("parent", settings))
+    assert calls == [
+        ("https://run.googleapis.com/v2/projects/project/locations/region/jobs/render:run",
+         {"overrides": {"containerOverrides": [{"env": [
+             {"name": "SING_ALL_JOB_ID", "value": "parent"}]}]}}, 30),
+        ("parent", "projects/project/locations/region/operations/op"),
+    ]
 
 
 def _fake_render(monkeypatch, *, stop_after_first=False):

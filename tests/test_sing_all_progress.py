@@ -80,6 +80,14 @@ def test_running_progress_has_contract_fields_and_quote_order(stage, remaining, 
     assert result["endedAt"] is None
 
 
+def test_waiting_render_shows_current_place_in_line():
+    job = _job(stage="singing")
+    job["render"] = {"state": "waiting", "placeInLine": 2}
+    assert progress(job, now=NOW)["render"] == {"state": "waiting", "placeInLine": 2}
+    job["render"]["state"] = "running"
+    assert progress(job, now=NOW)["render"]["placeInLine"] is None
+
+
 @pytest.mark.parametrize("status", ["completed", "partial", "failed", "cancelled"])
 def test_ended_progress_has_receipt_and_no_remaining_time(status):
     job = _job(stage="done", status=status)

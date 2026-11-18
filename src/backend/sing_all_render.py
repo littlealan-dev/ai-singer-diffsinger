@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google.cloud import firestore
@@ -53,7 +53,8 @@ def enter_line(job_id: str, max_slots: int, *, db: Any = None,
             transaction.set(slot_ref, {"running": running, "waiting": waiting})
             transaction.update(job_ref, {"render": {"state": "running", "attempt": 1,
                                                     "placeInLine": None,
-                                                    "queuedAt": None, "operation": None},
+                                                    "queuedAt": None, "operation": None,
+                                                    "launchLeaseUntil": None},
                                          "singingStartedAt": now})
             return "start"
         waiting.append({"jobId": job_id, "queuedAt": now})
@@ -68,7 +69,37 @@ def enter_line(job_id: str, max_slots: int, *, db: Any = None,
 
 def record_execution(job_id: str, operation: str, *, db: Any = None) -> None:
     db = db or get_firestore_client()
-    _job(db, job_id).update({"render.operation": operation})
+    ref = _job(db, job_id)
+
+    @firestore.transactional
+    def _record(transaction: Any) -> None:
+        current = ref.get(transaction=transaction).to_dict() or {}
+        if (current.get("render") or {}).get("state") == "running":
+            transaction.update(ref, {"render.operation": operation,
+                                     "render.launchLeaseUntil": None})
+
+    _record(db.transaction())
+
+
+def reserve_launch(job_id: str, *, db: Any = None,
+                   now: datetime | None = None) -> bool:
+    """Give one caller a short lease to submit the Cloud Run execution."""
+    db = db or get_firestore_client()
+    now = now or datetime.now(timezone.utc)
+    ref = _job(db, job_id)
+
+    @firestore.transactional
+    def _reserve(transaction: Any) -> bool:
+        job = ref.get(transaction=transaction).to_dict() or {}
+        render = job.get("render") or {}
+        lease = render.get("launchLeaseUntil")
+        if (render.get("state") != "running" or render.get("operation")
+                or (isinstance(lease, datetime) and lease > now)):
+            return False
+        transaction.update(ref, {"render.launchLeaseUntil": now + timedelta(minutes=2)})
+        return True
+
+    return _reserve(db.transaction())
 
 
 def remove_waiting(job_id: str, *, db: Any = None) -> bool:
@@ -131,6 +162,7 @@ def leave_slot(job_id: str, *, retry: bool, max_slots: int, db: Any = None,
             transaction.update(_job(db, candidate_id),
                                {"render.state": "running", "render.attempt": attempt,
                                 "render.placeInLine": None, "render.operation": None,
+                                "render.launchLeaseUntil": None,
                                 "singingStartedAt": now})
         if job_id not in promoted:
             transaction.update(_job(db, job_id),
@@ -154,7 +186,8 @@ async def run_parent(job_id: str, orchestrator: Any, *, concurrency: int,
     parent = await asyncio.to_thread(sing_all_store.load, job_id)
     attempt = int(((parent or {}).get("render") or {}).get("attempt") or 1)
     try:
-        items = [item for item in (parent or {}).get("items") or [] if item["type"] == "take"]
+        items = [item for item in (parent or {}).get("items") or []
+                 if item["type"] == "take" and item.get("status") not in _ENDED]
         for offset in range(0, len(items), concurrency):
             parent = await asyncio.to_thread(sing_all_store.load, job_id)
             if not parent or parent.get("status") != "running" or parent.get("cancelRequested"):
@@ -165,7 +198,8 @@ async def run_parent(job_id: str, orchestrator: Any, *, concurrency: int,
                 child = await asyncio.to_thread(orchestrator._job_store.get_job, child_id)
                 if child and child.get("status") in _ENDED:
                     continue
-                if child is None:
+                if child is None or (child.get("status") == "queued"
+                                     and not child.get("synthesisSpecJson")):
                     snapshot = await orchestrator._sessions.get_snapshot(
                         parent["sessionId"], parent["uid"])
                     await runner._start_take(parent, {"itemId": item["itemId"]}, snapshot,
@@ -175,17 +209,26 @@ async def run_parent(job_id: str, orchestrator: Any, *, concurrency: int,
             async def run_child(child_id: str) -> None:
                 worker_id = f"sing-all-render:{uuid.uuid4().hex}"
                 route = orchestrator._synthesis_dispatcher.route
-                claim = await asyncio.to_thread(
-                    orchestrator._job_store.claim_dispatched_job, child_id,
-                    worker_id=worker_id, lease_seconds=route.lease_seconds,
-                    max_attempts=route.max_dispatch_attempts)
+                for _ in range(2):
+                    claim = await asyncio.to_thread(
+                        orchestrator._job_store.claim_dispatched_job, child_id,
+                        worker_id=worker_id, lease_seconds=route.lease_seconds,
+                        max_attempts=route.max_dispatch_attempts)
+                    if claim.outcome != "busy":
+                        break
+                    expiry = claim.job.get("leaseExpiresAt")
+                    if not isinstance(expiry, datetime):
+                        break
+                    delay = max(0.0, (expiry - datetime.now(timezone.utc)).total_seconds())
+                    await asyncio.sleep(min(delay + 0.1, route.lease_seconds + 0.1))
                 if claim.outcome == "claimed":
                     await orchestrator.run_dispatched_synthesis_job(
                         child_id, claim.job, attempt=claim.attempt, worker_id=worker_id)
                 elif claim.outcome == "exhausted":
                     await orchestrator.fail_exhausted_synthesis_job(child_id)
 
-            await asyncio.gather(*(run_child(child_id) for child_id in batch))
+            await asyncio.gather(*(run_child(child_id) for child_id in batch),
+                                 return_exceptions=True)
             await runner.reconcile(job_id)
     finally:
         parent = await asyncio.to_thread(sing_all_store.load, job_id)
@@ -195,27 +238,80 @@ async def run_parent(job_id: str, orchestrator: Any, *, concurrency: int,
         retry = bool(missing and attempt < 2 and parent and parent.get("status") == "running"
                      and not parent.get("cancelRequested"))
         if missing and not retry and attempt >= 2:
-            for item in missing:
-                child = await asyncio.to_thread(
-                    orchestrator._job_store.get_job, item["childJobId"])
-                if child:
-                    await orchestrator._fail_undelivered_synthesis_job(item["childJobId"])
-                else:
-                    from src.backend.credits import release_credits
-                    await asyncio.to_thread(release_credits, parent["uid"], item["childJobId"])
-                    for parent_item in parent["items"]:
-                        if parent_item["itemId"] == item["itemId"]:
-                            parent_item.update(status="failed", reason="render_incomplete")
-            await asyncio.to_thread(
-                sing_all_store.apply, job_id, {"items": parent["items"]},
-                expected_stage="singing", expected_revision=parent.get("revision", 0))
-            await runner.reconcile(job_id)
+            await fail_remaining(job_id, orchestrator)
         promoted = await asyncio.to_thread(
             leave_slot, job_id, retry=retry,
             max_slots=orchestrator._settings.max_render_slots)
         for next_id in promoted:
             await launch_next(next_id)
         await orchestrator._enqueue_sing_all_reconcile(job_id)
+
+
+async def fail_remaining(job_id: str, orchestrator: Any) -> None:
+    """End every take left after the second execution and release its hold."""
+    from src.backend import sing_all_store
+    from src.backend.credits import release_credits
+    from src.backend.sing_all_runner import SingAllRunner
+
+    for _ in range(8):
+        parent = await asyncio.to_thread(sing_all_store.load, job_id)
+        if not parent or parent.get("status") != "running":
+            return
+        missing = [item for item in parent.get("items") or []
+                   if item["type"] == "take" and item["status"]
+                   not in {"done", "failed", "stopped"}]
+        if not missing:
+            break
+        absent = []
+        for item in missing:
+            child = await asyncio.to_thread(orchestrator._job_store.get_job, item["childJobId"])
+            if child:
+                await orchestrator._fail_undelivered_synthesis_job(item["childJobId"])
+            else:
+                await asyncio.to_thread(release_credits, parent["uid"], item["childJobId"])
+                absent.append(item["itemId"])
+        if absent:
+            for item in parent["items"]:
+                if item["itemId"] in absent:
+                    item.update(status="failed", reason="render_incomplete")
+            if not await asyncio.to_thread(
+                sing_all_store.apply, job_id, {"items": parent["items"]},
+                expected_stage="singing", expected_revision=parent.get("revision", 0)):
+                continue
+        await SingAllRunner(orchestrator).reconcile(job_id)
+        return
+
+
+async def recover_execution(job_id: str, orchestrator: Any, *,
+                            operation_done: Any, launch_next: Any) -> None:
+    """Sweep a render execution whose container exited before releasing its slot."""
+    from src.backend import sing_all_store
+    from src.backend.sing_all_runner import SingAllRunner
+
+    parent = await asyncio.to_thread(sing_all_store.load, job_id)
+    if not parent or (parent.get("render") or {}).get("state") != "running":
+        return
+    operation = (parent.get("render") or {}).get("operation")
+    if not operation or not await operation_done(operation):
+        return
+    await SingAllRunner(orchestrator).reconcile(job_id)
+    parent = await asyncio.to_thread(sing_all_store.load, job_id)
+    if not parent or (parent.get("render") or {}).get("state") != "running":
+        return
+    attempt = int(parent["render"].get("attempt") or 1)
+    missing = [item for item in parent.get("items") or []
+               if item["type"] == "take" and item["status"]
+               not in {"done", "failed", "stopped"}]
+    retry = bool(missing and attempt < 2 and parent.get("status") == "running"
+                 and not parent.get("cancelRequested"))
+    if missing and attempt >= 2:
+        await fail_remaining(job_id, orchestrator)
+    promoted = await asyncio.to_thread(
+        leave_slot, job_id, retry=retry,
+        max_slots=orchestrator._settings.max_render_slots)
+    for next_id in promoted:
+        await launch_next(next_id)
+    await orchestrator._enqueue_sing_all_reconcile(job_id)
 
 
 async def _main() -> None:
