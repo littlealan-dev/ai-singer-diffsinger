@@ -564,6 +564,9 @@ def _prepare_app(monkeypatch, overrides=None):
         "src.backend.main.verify_id_token_claims",
         lambda token: {"uid": "test-user", "email": "test@example.com"},
     )
+    # Ordinary API tests use an in-memory Song and have no active Sing All.
+    # Tests for the parent Stop/Replace path override this stub explicitly.
+    monkeypatch.setattr("src.backend.main.active_job_for_song", lambda *_: None)
     monkeypatch.setattr("src.backend.main._get_maintenance_config", lambda: {"enabled": False})
     monkeypatch.setattr(
         "src.backend.credits.get_or_create_credits",
@@ -1451,6 +1454,7 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
     assert response.status_code == 200
     assert response.json() == {
         "result": "stopped",
+        "singAll": None,
         "jobs": [
             {"jobId": "take", "jobKind": "synthesis", "result": "stopped", "refundedCredits": 7},
             {"jobId": "mix", "jobKind": "export_mix", "result": "too_late", "refundedCredits": 0},
@@ -1462,6 +1466,58 @@ def test_stop_session_reports_jobs_and_sets_latest_turn_marker(client, monkeypat
     assert snapshot["history"][-1]["role"] == "assistant"
     assert "7 credits" in snapshot["history"][-2]["content"]
     assert snapshot["history"][-1]["content"] == backend_message("job.stop_split_history")
+
+
+@pytest.mark.parametrize("too_late", [False, True])
+def test_stop_session_reports_parent_without_listing_its_child(client, monkeypatch, too_late):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    parent = {
+        "jobId": "made-up-parent", "status": "running", "stage": "singing",
+        "revision": 0, "items": [{"type": "take", "childJobId": "made-up-child",
+                                  "status": "running"}],
+    }
+    monkeypatch.setattr("src.backend.main.active_job_for_song", lambda *_: parent)
+    monkeypatch.setattr("src.backend.main.load_sing_all_job", lambda *_: parent)
+    def request_cancel(_job_id, fields, **_kwargs):
+        parent.update(fields)
+        return True
+    monkeypatch.setattr("src.backend.main.apply_sing_all_job", request_cancel)
+    async def reconcile(_self, _job_id):
+        if not too_late:
+            parent["status"] = "cancelled"
+    monkeypatch.setattr("src.backend.main.SingAllRunner.reconcile", reconcile)
+    monkeypatch.setattr(app.state.job_store, "list_active_jobs", lambda **_: [
+        ("made-up-child", {"jobKind": "synthesis", "parentJobId": "made-up-parent",
+                            "status": "running"}),
+    ])
+    monkeypatch.setattr(app.state.job_store, "get_job", lambda *_: {
+        "status": "running", "pastStopPoint": too_late,
+    })
+    response = test_client.post(f"/sessions/{session_id}/stop")
+    assert response.status_code == 200
+    assert response.json() == {
+        "result": "too_late" if too_late else "stopped", "jobs": [],
+        "singAll": {"jobId": "made-up-parent",
+                    "result": "too_late" if too_late else "stopping"},
+    }
+
+
+def test_sing_all_sweep_route_reconciles_each_running_parent(client, monkeypatch):
+    test_client, _app = client
+    seen = []
+    async def accept_worker(_request, route):
+        seen.append(route.kind)
+    async def reconcile(_self, job_id, *, sweep=False):
+        seen.append((job_id, sweep))
+    monkeypatch.setattr("src.backend.main._require_worker_caller", accept_worker)
+    monkeypatch.setattr("src.backend.main.running_sing_all_jobs",
+                        lambda: ["made-up-parent-a", "made-up-parent-b"])
+    monkeypatch.setattr("src.backend.main.SingAllRunner.reconcile", reconcile)
+    response = test_client.post("/internal/sing-all/sweep")
+    assert response.status_code == 200 and response.json() == {"status": "done"}
+    assert seen == ["sing_all_reconcile", ("made-up-parent-a", True),
+                    ("made-up-parent-b", True)]
 
 
 def test_stopped_job_release_reports_reserved_credits(client, firestore_emulator, monkeypatch):

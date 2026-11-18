@@ -29,11 +29,21 @@ class SingAllRunner:
     def __init__(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator
 
-    async def reconcile(self, job_id: str) -> None:
+    async def reconcile(self, job_id: str, *, sweep: bool = False,
+                        now: datetime | None = None) -> None:
         for _ in range(64):
             job = await asyncio.to_thread(sing_all_store.load, job_id)
             if not job or job.get("status") != "running":
                 return
+            if job.get("cancelRequested"):
+                for item in job.get("items") or []:
+                    if item.get("status") not in {"queued", "running"} or not item.get("childJobId"):
+                        continue
+                    child = await asyncio.to_thread(
+                        self.orchestrator._job_store.get_job, item["childJobId"])
+                    if child and child.get("status") in {"queued", "running"}:
+                        await asyncio.to_thread(
+                            self.orchestrator._job_store.stop_job, item["childJobId"])
             snapshot = await self.orchestrator._sessions.get_snapshot(
                 job["sessionId"], job["uid"])
             if (job["stage"] == "splitting"
@@ -47,7 +57,8 @@ class SingAllRunner:
                 snapshot = await self.orchestrator._sessions.get_snapshot(
                     job["sessionId"], job["uid"])
             children = await self._children(job, snapshot)
-            score_state = await self._score_state(job, snapshot)
+            score_state = await self._score_state(job, snapshot, now=now)
+            score_state["sweep"] = sweep
             fields, actions = decide(job, children, score_state)
             if not fields and not actions:
                 return
@@ -55,10 +66,30 @@ class SingAllRunner:
             # Releasing holds and saving score answers must succeed before the
             # parent can move past them. A repeat of either operation is safe.
             before = [action for action in actions if action["kind"] in {
-                "release", "save_assignments"}]
+                "release", "save_assignments", "fail_stuck_child"}]
             for action in before:
                 try:
-                    await self._action(job, action, snapshot)
+                    outcome = await self._action(job, action, snapshot)
+                    if (action["kind"] == "release" and outcome == "already_settled"
+                            and "items" in fields):
+                        charged = await asyncio.to_thread(
+                            sing_all_store.settled_credits, action["reservationId"])
+                        if charged is not None:
+                            for item in fields["items"]:
+                                reservation_id = item.get("reservationId") or item.get("childJobId")
+                                if reservation_id == action["reservationId"]:
+                                    item.update(status="done", reason=None, creditsCharged=charged)
+                            if fields.get("stage") == "done":
+                                takes = [item for item in fields["items"]
+                                         if item["type"] == "take"]
+                                if job.get("cancelRequested") and all(
+                                    item["status"] == "done" for item in takes
+                                ):
+                                    fields.update(status="completed", endReason=None)
+                                elif fields.get("endReason") == "stuck" and any(
+                                    item["status"] == "done" for item in takes
+                                ):
+                                    fields["status"] = "partial"
                 except SingAllTerminalError as exc:
                     await self._terminal_failure(job_id, exc.reason)
                     return
@@ -152,14 +183,15 @@ class SingAllRunner:
                     children[child_id] = child
         return children
 
-    async def _score_state(self, job: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    async def _score_state(self, job: dict[str, Any], snapshot: dict[str, Any], *,
+                           now: datetime | None = None) -> dict[str, Any]:
         score = (snapshot.get("current_score") or {}).get("score") or {}
         state: dict[str, Any] = {
             "scoreId": snapshot.get("score_id"),
             "verse": score.get("selected_verse_number"),
-            "now": datetime.now(timezone.utc),
+            "now": now or datetime.now(timezone.utc),
         }
-        if job["stage"] != "reading":
+        if job["stage"] != "reading" or job.get("cancelRequested"):
             return state
         summary = snapshot.get("score_summary") or {}
         voices = await self.orchestrator._get_voicebank_details()
@@ -177,7 +209,7 @@ class SingAllRunner:
         return state
 
     async def _action(self, job: dict[str, Any], action: dict[str, Any],
-                      snapshot: dict[str, Any]) -> None:
+                      snapshot: dict[str, Any]) -> str | None:
         kind = action["kind"]
         uid, session_id = job["uid"], job["sessionId"]
         if kind == "release":
@@ -185,6 +217,13 @@ class SingAllRunner:
             if result.status not in {"released", "already_released", "already_settled",
                                      "reservation_missing"}:
                 raise RuntimeError(f"Credit release: {result.status}")
+            return result.status
+        elif kind == "fail_stuck_child":
+            await asyncio.to_thread(
+                self.orchestrator._job_store.fail_job_if_active,
+                action["childJobId"], message="Sing All child timed out.",
+                error="stuck", job_kind=action["jobKind"],
+            )
         elif kind == "clear_active":
             await asyncio.to_thread(sing_all_store.clear_active, uid, job["jobId"])
         elif kind == "append_end_history":

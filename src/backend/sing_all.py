@@ -442,6 +442,7 @@ def decide(
         return {}, []
     items = deepcopy(job.get("items") or [])
     rows = deepcopy(job.get("rows") or [])
+    now = score_state.get("now")
 
     def finish(status: str, reason: str | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         actions: list[dict[str, Any]] = []
@@ -456,12 +457,48 @@ def decide(
         actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
 
-    if job.get("cancelRequested"):
-        return finish("cancelled", "stopped")
     if score_state.get("terminalFailure"):
         return finish("failed", str(score_state["terminalFailure"]))
 
     stage = job.get("stage")
+    if score_state.get("sweep") and isinstance(now, datetime):
+        stuck = False
+        if stage == "splitting":
+            stuck = any(
+                item["type"] == "split" and item.get("status") == "running"
+                and isinstance(item.get("startedAt"), datetime)
+                and now - item["startedAt"] > timedelta(minutes=30)
+                for item in items
+            )
+        elif stage == "singing":
+            started = job.get("singingStartedAt")
+            latest = job.get("lastTakeAt") or started
+            stuck = (isinstance(started, datetime) and isinstance(latest, datetime)
+                     and now - latest > timedelta(minutes=20)
+                     and any(item["type"] == "take" and item.get("status")
+                             in {"queued", "running"} for item in items))
+        if stuck:
+            actions = []
+            for item in items:
+                if item.get("status") not in {"queued", "running"}:
+                    continue
+                child_id = item.get("childJobId")
+                if child_id and children.get(child_id, {}).get("status") in {"queued", "running"}:
+                    actions.append({"kind": "fail_stuck_child", "childJobId": child_id,
+                                    "jobKind": "preprocess" if item["type"] == "split"
+                                    else "synthesis"})
+                item.update(status="failed", reason="stuck")
+                if item["type"] == "take":
+                    actions.append({"kind": "release", "reservationId": child_id})
+                elif item["type"] == "instrumental":
+                    actions.append({"kind": "release", "reservationId": item["reservationId"]})
+            takes = [item for item in items if item["type"] == "take"]
+            done = sum(item["status"] == "done" for item in takes)
+            actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
+            return {"items": items, "status": "partial" if done else "failed",
+                    "stage": "done", "endReason": "stuck"}, actions
+    if job.get("cancelRequested"):
+        return wind_down(job, children)
     if stage == "reading":
         if score_state.get("scoreId") != job.get("scoreId"):
             return finish("failed", "score_replaced")
@@ -487,6 +524,8 @@ def decide(
                         and isinstance(lease, datetime) and lease > now):
                     return {}, []
                 item["status"] = "running"
+                if isinstance(now, datetime):
+                    item.setdefault("startedAt", now)
                 if isinstance(now, datetime):
                     item["startLeaseUntil"] = now + timedelta(seconds=60)
                 return {"items": items}, [{"kind": "start_split", "itemId": item["itemId"]}]
@@ -552,8 +591,13 @@ def decide(
                     continue
                 item["status"] = "running"
                 if isinstance(now, datetime):
+                    item.setdefault("startedAt", now)
+                if isinstance(now, datetime):
                     item["startLeaseUntil"] = now + timedelta(seconds=60)
-                return {"items": items}, [{"kind": "start_take", "itemId": item["itemId"]}]
+                fields = {"items": items}
+                if isinstance(now, datetime) and not job.get("singingStartedAt"):
+                    fields["singingStartedAt"] = now
+                return fields, [{"kind": "start_take", "itemId": item["itemId"]}]
             if child.get("status") == "running":
                 continue
             if child.get("status") == "completed":
@@ -562,7 +606,7 @@ def decide(
             else:
                 item["status"] = "stopped" if child.get("status") == "cancelled" else "failed"
                 item["reason"] = child.get("error") or "take_failed"
-            return {"items": items}, []
+            return {"items": items, **({"lastTakeAt": now} if isinstance(now, datetime) else {})}, []
         if instrumental and instrumental["status"] == "queued":
             if all(item["type"] != "take" or item["status"] in {"failed", "stopped"} for item in items):
                 instrumental["status"] = "failed"
@@ -574,3 +618,40 @@ def decide(
         return {}, []
 
     return {}, []
+
+
+def wind_down(
+    job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Stop unstarted work, but wait for children already past their stop point."""
+    items = deepcopy(job.get("items") or [])
+    actions: list[dict[str, Any]] = []
+    waiting = False
+    changed = False
+    for item in items:
+        if item.get("status") not in {"queued", "running"}:
+            continue
+        child = children.get(item.get("childJobId")) or {}
+        child_status = child.get("status")
+        if child_status == "running":
+            waiting = True
+            continue
+        if child_status == "completed":
+            item["status"] = "done"
+            if item["type"] == "take":
+                item["creditsCharged"] = child.get("creditsCharged", item["creditsReserved"])
+        else:
+            item["status"] = "stopped"
+            item["reason"] = "stopped"
+            if item["type"] == "take":
+                actions.append({"kind": "release", "reservationId": item["childJobId"]})
+            elif item["type"] == "instrumental":
+                actions.append({"kind": "release", "reservationId": item["reservationId"]})
+        changed = True
+    if waiting:
+        return ({"items": items} if changed else {}), actions
+    takes = [item for item in items if item["type"] == "take"]
+    completed = all(item["status"] == "done" for item in takes)
+    actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
+    return {"items": items, "status": "completed" if completed else "cancelled",
+            "stage": "done", "endReason": None if completed else "stopped"}, actions
