@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 from xml.etree import ElementTree
 
-from src.api.score import expanded_score_for_synthesis, parse_score
+from src.api.score import _signature_of, expanded_score_for_synthesis, parse_score
 from src.api.synthesize import synthesize
 from src.mcp import handlers
 from src.mcp.tools import list_tools
@@ -242,6 +242,45 @@ class UnexpandableRepeatParsingTests(unittest.TestCase):
         self.assertIs(summary["repeat_expansion_available"], False)
         self.assertEqual(summary["duration_seconds"], 2.5)
         self.assertNotIn("expanded_duration_seconds", summary)
+
+    def _assert_written_measure_map(self, measure_map: dict) -> None:
+        self.assertEqual(measure_map["expanded"], [])
+        written = measure_map["written"]
+        self.assertEqual(len(written), 5)
+        for index, entry in enumerate(written):
+            with self.subTest(index=index):
+                self.assertEqual(entry["source_measure_index"], index)
+                self.assertEqual(entry["pass_index"], 0)
+                self.assertEqual(entry["source_measure_number"], str(index + 1))
+                self.assertAlmostEqual(entry["start_seconds"], index * 0.5)
+        self.assertAlmostEqual(written[-1]["end_seconds"], 2.5)
+
+    def test_parse_keeps_written_measure_map_when_repeats_cannot_expand(self) -> None:
+        summary = parse_score(self.SOURCE)["score_summary"]
+
+        self._assert_written_measure_map(summary["performance_measure_map"])
+
+    def test_map_builder_returns_written_order_when_repeats_cannot_expand(self) -> None:
+        measure_map = build_performance_measure_map(self.SOURCE)
+
+        self._assert_written_measure_map(measure_map)
+        self.assertEqual(
+            measure_map,
+            parse_score(self.SOURCE)["score_summary"]["performance_measure_map"],
+        )
+
+    def test_parse_does_not_warn_that_measure_map_failed(self) -> None:
+        with self.assertLogs("src.api.score", level="WARNING") as captured:
+            parse_score(self.SOURCE)
+
+        self.assertFalse(
+            any("performance_measure_map_failed" in message for message in captured.output)
+        )
+
+    def test_unexpandable_repeat_timing_signature_uses_written_map(self) -> None:
+        summary = parse_score(self.SOURCE)["score_summary"]
+
+        self.assertNotEqual(summary["timing_signature"], _signature_of({}))
 
     def test_expandable_scores_carry_no_unavailable_flag(self) -> None:
         score = parse_score(FIXTURE_DIRECTORY / "volta_endings.xml")
