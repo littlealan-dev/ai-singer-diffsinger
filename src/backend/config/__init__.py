@@ -271,6 +271,10 @@ class Settings:
     sing_all_reconcile_worker_token: str = ""
     sing_all_reconcile_invoker_service_account: str = ""
     sing_all_reconcile_audience: str = ""
+    sing_all_singing_transport: str = "dispatch"
+    max_render_slots: int = 1
+    sing_all_render_concurrency: int = 4
+    sing_all_render_job: str = ""
     # A second synthesis worker (the RTX PRO 6000 one) for some users' jobs,
     # dispatched the same way as SYNTHESIS_DISPATCH_MODE with its own URL,
     # audience and queue. "off" sends every job to the standard worker;
@@ -472,6 +476,16 @@ class Settings:
             raise ValueError("SING_ALL_RECONCILE_DISPATCH_MODE must be inline, http, or cloud_tasks.")
         sing_all_reconcile_url = os.getenv("SING_ALL_RECONCILE_URL", "").strip().rstrip("/")
         sing_all_reconcile_tasks_queue = os.getenv("SING_ALL_RECONCILE_TASKS_QUEUE", "").strip()
+        sing_all_singing_transport = os.getenv("SING_ALL_SINGING_TRANSPORT", "dispatch").strip().lower()
+        if sing_all_singing_transport not in {"dispatch", "render_job"}:
+            raise ValueError("SING_ALL_SINGING_TRANSPORT must be dispatch or render_job.")
+        max_render_slots = _env_int("MAX_RENDER_SLOTS", 1)
+        sing_all_render_concurrency = _env_int("SING_ALL_RENDER_CONCURRENCY", 4)
+        if max_render_slots < 1 or sing_all_render_concurrency < 1:
+            raise ValueError("Render slots and concurrency must be positive.")
+        sing_all_render_job = os.getenv("SING_ALL_RENDER_JOB", "").strip()
+        if sing_all_singing_transport == "render_job" and not sing_all_render_job:
+            raise ValueError("SING_ALL_RENDER_JOB is required for render_job transport.")
         if sing_all_reconcile_dispatch_mode != "inline" and not sing_all_reconcile_url:
             raise ValueError("SING_ALL_RECONCILE_URL is required for remote dispatch.")
         if sing_all_reconcile_dispatch_mode == "cloud_tasks" and not sing_all_reconcile_tasks_queue:
@@ -705,6 +719,10 @@ class Settings:
                 15.0, _env_float("SYNTHESIS_JOB_LEASE_SECONDS", 90.0)
             ),
             sing_all_reconcile_dispatch_mode=sing_all_reconcile_dispatch_mode,
+            sing_all_singing_transport=sing_all_singing_transport,
+            max_render_slots=max_render_slots,
+            sing_all_render_concurrency=sing_all_render_concurrency,
+            sing_all_render_job=sing_all_render_job,
             sing_all_reconcile_url=sing_all_reconcile_url,
             sing_all_reconcile_tasks_queue=sing_all_reconcile_tasks_queue,
             sing_all_reconcile_worker_token=os.getenv("SING_ALL_RECONCILE_WORKER_TOKEN", "").strip(),

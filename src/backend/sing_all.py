@@ -235,7 +235,8 @@ def progress(
                     "charged": charged, "refunded": refunded},
         "receipt": receipt, "notes": deepcopy(job.get("notes") or []),
         "elapsedS": elapsed, "remainingS": remaining,
-        "render": {"state": render.get("state", "none"), "placeInLine": None},
+        "render": {"state": render.get("state", "none"),
+                   "placeInLine": render.get("placeInLine") if render.get("state") == "waiting" else None},
         "createdAt": created.isoformat(),
         "endedAt": (ended_at.isoformat() if isinstance(ended_at, datetime)
                     else ended_at),
