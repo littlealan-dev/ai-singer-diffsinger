@@ -42,6 +42,8 @@ def test_share_store_is_atomic_and_read_only(workspace):
             assert share_ref.get().update_time == share_updated
         assert (await store.get_share(first))["sessionId"] == sid
         assert (await store.read_shared(sid)).share_token == first
+        assert (await store.ensure_active_musicxml(sid, owner, touch=False)).is_file()
+        assert (await store.get_player(sid, owner, shared=True)) is not None
         assert (await store.get_song_row(sid, owner))["last_active_at"] == before
         assert (await store.list_songs(owner, 10))[0]["shared"] is True
         await store.share_off(sid, owner)
@@ -337,3 +339,24 @@ def test_share_page_uses_latest_mix_modes_and_score(client_with_env, firestore_e
                          files={"file": ("replacement.xml", b"<score-partwise version='3.1'></score-partwise>", "application/xml")})
     assert replaced.status_code == 200
     assert http.get(base).json()["player"]["vocals"] == []
+
+
+@pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "on", "BACKEND_USE_STORAGE": "true"}], indirect=True)
+def test_share_storage_audio_checks_job_folder_and_streams_ranges(
+    client_with_env, firestore_emulator, monkeypatch,
+):
+    _share_firestore(monkeypatch)
+    http, app = client_with_env
+    sid = _create_session(http)
+    _upload_score(http, sid)
+    path = f"sessions/test-user/{sid}/jobs/made-up-storage-take/output.mp3"
+    take = _start_take(app, sid, "made-up-storage-take", outputPath=path)
+    asyncio.run(app.state.sessions.record_take(sid, "made-up-storage-take", take))
+    token = http.post(f"/songs/{sid}/share", json={"notice_accepted": True}).json()["url"].rsplit("/", 1)[-1]
+    [vocal] = http.get(f"/public/s/{token}").json()["player"]["vocals"]
+    streamed = http.get(vocal["audio_url"], headers={"range": "bytes=0-6"})
+    assert streamed.status_code == 206 and streamed.content == b"storage"
+    assert "content-disposition" not in streamed.headers
+    app.state.job_store.update_job("made-up-storage-take",
+                                   outputPath=f"sessions/test-user/{sid}/jobs/another-job/output.mp3")
+    assert http.get(vocal["audio_url"]).status_code == 404
