@@ -594,6 +594,7 @@ def create_app() -> FastAPI:
     app.state.export_mix_tasks = export_mix_tasks
     app.state.shutdown_coordinator = shutdown_coordinator
     app.state.share_allowlist = PremiumSynthesisRouting("allowlist")
+    app.state.share_clock = time.monotonic
     share_requests: dict[tuple[str, str], deque[float]] = {}
 
     cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
@@ -860,10 +861,11 @@ def create_app() -> FastAPI:
 
     async def resolve_share(token: str, request: Request, kind: str):
         """Resolve a live share while leaving the Song untouched."""
-        now = time.monotonic()
+        share_settings: Settings = request.app.state.settings
+        now = request.app.state.share_clock()
         key = (_client_ip(request) or "unknown", kind)
-        limit = (settings.share_audio_limit_per_minute if kind == "audio"
-                 else settings.share_page_limit_per_minute)
+        limit = (share_settings.share_audio_limit_per_minute if kind == "audio"
+                 else share_settings.share_page_limit_per_minute)
         # Each request runs on the event loop and this section contains no await.
         for old_key, times in list(share_requests.items()):
             while times and now - times[0] >= 60:
@@ -874,7 +876,7 @@ def create_app() -> FastAPI:
         if len(times) >= limit:
             return _share_error(429, "rate_limited", "share.rate_limited", retry_after="60")
         times.append(now)
-        if settings.share_links == "off" or not _valid_share_token(token):
+        if share_settings.share_links == "off" or not _valid_share_token(token):
             return _share_error(404, "share_off", "share.off")
         share = await sessions.get_share(token)
         if not share:
@@ -989,7 +991,9 @@ def create_app() -> FastAPI:
 
     @app.delete("/songs/{session_id}/share")
     async def turn_share_off(session_id: str, request: Request) -> Any:
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
+        if not await can_share(request, user_id, user_email):
+            return _share_error(403, "share_not_available", "share.not_available")
         try:
             await sessions.share_off(session_id, user_id)
         except (KeyError, PermissionError):
@@ -1028,7 +1032,10 @@ def create_app() -> FastAPI:
         files = state.files
         midi_key = ("instrumental_midi_expanded_path" if player_payload["repeats"]
                     else "instrumental_midi_original_path")
-        midi_available = bool(performance.get("has_instrumental_parts") and files.get(midi_key))
+        midi_flag = ("expanded_midi_available" if player_payload["repeats"]
+                     else "original_midi_available")
+        midi_available = bool(performance.get("has_instrumental_parts")
+                              and performance.get(midi_flag) and files.get(midi_key))
         player_payload = {
             "repeats": player_payload["repeats"],
             "vocals": player_payload["vocals"],
@@ -2663,7 +2670,7 @@ async def _serve_instrumental_midi(
         return FileResponse(
             midi_path,
             media_type="audio/midi",
-            filename=midi_path.name,
+            filename=midi_path.name if touch else None,
             headers={"Cache-Control": "no-store"},
         )
 
