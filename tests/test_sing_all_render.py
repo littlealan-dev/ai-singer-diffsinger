@@ -221,3 +221,17 @@ def test_stop_between_batches_ends_run(monkeypatch):
                                            concurrency=4, launch_next=lambda _: None))
     assert started == [f"child-{i}" for i in range(4)]
     assert left == [False]
+
+
+def test_sweep_retries_an_ended_execution_with_missing_takes(monkeypatch):
+    parent, orchestrator, _, left, _ = _fake_render(monkeypatch)
+    parent["render"]["operation"] = "projects/project/locations/region/operations/op"
+
+    async def done(operation):
+        assert operation == parent["render"]["operation"]
+        return True
+
+    asyncio.run(sing_all_render.recover_execution(
+        parent["jobId"], orchestrator, operation_done=done,
+        launch_next=lambda _: None))
+    assert left == [True]
