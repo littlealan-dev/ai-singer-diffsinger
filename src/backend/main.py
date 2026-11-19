@@ -76,6 +76,8 @@ from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
 )
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
+from src.backend.sing_all_mix import TakeRef, plan_mixes
+from src.backend.sing_all_package import track_sounds
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
     active_job_for_song, apply as apply_sing_all_job, create_job_with_reservations,
@@ -1488,6 +1490,9 @@ def create_app() -> FastAPI:
         mode = "solfege" if solfege_only else str(choices.get("mode") or "lyrics")
         if mode not in {"lyrics", "solfege", "both"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
+        mixes = choices.get("mixes", "all")
+        if mixes not in {"all", "full", "none"}:
+            raise HTTPException(status_code=422, detail={"code": "invalid_mixes"})
         repeats_available = summary.get("repeat_expansion_available") is not False
         repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
         verses = sorted({str(value) for value in summary.get("available_verses") or []},
@@ -1577,6 +1582,14 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
         has_instrumentals = score_has_instrumental_parts(priced_summary)
+        instruments_sound = any(sound is not None for sound in track_sounds(priced_summary))
+        effective_mixes = "full" if mixes == "all" and not instruments_sound else mixes
+        refs = [TakeRef(str(row.get("partId") or row["rowId"]),
+                        str(row.get("name") or row["rowId"]), take_mode)
+                for take_mode in (("lyrics", "solfege") if mode == "both" else (mode,))
+                for row in rows if row["include"]]
+        mix_files = {choice: len(plan_mixes(refs, choice, instruments_sound))
+                     for choice in ("all", "full")}
         charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
         charge_required = (has_instrumentals and await asyncio.to_thread(
             get_instrumental_charge_state, charge_scope) != "paid")
@@ -1596,7 +1609,7 @@ def create_app() -> FastAPI:
                       "voice": row["voice"], "voicePicked": row["voicePicked"]}
                      for row in rows],
             "language": language, "solfegeOnly": solfege_only, "mode": mode,
-            "verse": verse, "repeats": repeats,
+            "verse": verse, "repeats": repeats, "mixes": effective_mixes,
         }
         quote_record = await asyncio.to_thread(save_quote, db, {
             "uid": user_id, "sessionId": session_id, "scoreId": score_id,
@@ -1613,7 +1626,8 @@ def create_app() -> FastAPI:
                         "languages": singing_language_options(voicebanks),
                         "mode": mode, "verse": verse, "verses": verses,
                         "repeats": repeats, "repeatsAvailable": repeats_available,
-                        "solfegeOnly": solfege_only},
+                        "solfegeOnly": solfege_only, "mixes": effective_mixes,
+                        "mixFiles": mix_files},
             "lines": quote_lines(items, duration_seconds=duration, balance=balance),
             "total": total, "balance": balance, "blocked": blocked,
             "notes": notes, "style": style,

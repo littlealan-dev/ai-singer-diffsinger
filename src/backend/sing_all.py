@@ -221,8 +221,15 @@ def progress(
         "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
         "status": job["status"], "stage": job["stage"], "endReason": reason,
         "cancelRequested": bool(job.get("cancelRequested")),
-        "choices": {key: choices[key] for key in
-                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "choices": {**{key: choices[key] for key in
+                       ("language", "solfegeOnly", "mode", "verse", "repeats")},
+                    "mixes": choices.get("mixes") or "none"},
+        "package": ({"state": job["package"]["state"],
+                     "mixes": {"done": int((job["package"].get("mixes") or {}).get("done") or 0),
+                               "total": int((job["package"].get("mixes") or {}).get("total") or 0)}}
+                    if job.get("stage") in {"packaging", "done"} and
+                    any(item.get("status") == "done" for item in takes) and
+                    isinstance(job.get("package"), Mapping) else None),
         "counts": {
             "splits": {"done": sum(item.get("status") == "done" for item in splits),
                        "total": len(splits)},
