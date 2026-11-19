@@ -1,19 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { createPerformanceMeasureLookup, positionNativeScoreCursor } from "./scorePlayback";
 import WaveSurfer from "wavesurfer.js";
-import { createToneAdapter, SoundFontCache, type ToneAdapter } from "@waveform-playlist/playout";
-import {
-  WaveformPlaylistProvider,
-  usePlaybackAnimation,
-  usePlaylistControls,
-  usePlaylistData,
-} from "@waveform-playlist/browser";
-import { useAudioTracks } from "@waveform-playlist/browser/tone";
-import { useMidiTracks } from "@waveform-playlist/midi";
-import { getContext as getToneContext } from "tone";
+import type { ToneAdapter } from "@waveform-playlist/playout";
 import {
   MediaRecorder as ExtendableMediaRecorder,
   register as registerExtendableMediaRecorderEncoder,
@@ -51,7 +42,6 @@ import {
   type ChatStream,
   type FeedbackPromptState,
   type FeedbackRatingsRequest,
-  type InstrumentalPart,
   type PerformanceMidi,
   type PerformanceMeasureMapEntry,
   type PlayerMixRequest,
@@ -70,6 +60,34 @@ import {
   type WorkspaceMessage,
   type WorkspaceVocal,
 } from "./api";
+import {
+  DEFAULT_INSTRUMENTAL_BUS,
+  INSTRUMENTAL_BUS_MAX_DB,
+  INSTRUMENTAL_BUS_MIN_DB,
+  decodeVocalAudio,
+  hasAudibleScorePlayerMix,
+  instrumentRowsFromMidi,
+  instrumentalTrackKey,
+  shouldMuteMultiTrackForPlayback,
+  shownVocals,
+  vocalsInBothModes as hasVocalsInBothModes,
+  type InstrumentalBusState,
+  type InstrumentalTrackState,
+  type MultiTrackAudioTrack,
+  type VocalMode,
+} from "./player/tracks";
+import {
+  HorizontalScoreRenderer,
+  applyPageLayoutZoom,
+  countParallelScoreStaves,
+  fitPagePreviewToContainer,
+  getHorizontalScoreIncrementalBatchSize,
+  preparePagePreviewWrappers,
+  scrollScoreMeasureIntoView,
+  type HorizontalScoreRendererHandle,
+  type ScorePreviewLayout,
+} from "./player/score";
+import { ScorePlayerEngine, withoutKeysOutside, type ScorePlayerPlaybackControls } from "./player/ScorePlayerEngine";
 import CreditsHeader from "./components/CreditsHeader";
 import SingAllCard from "./components/SingAllCard";
 import { UserMenu } from "./components/UserMenu";
@@ -239,39 +257,6 @@ type ScorePayload = {
   data: string;
 };
 
-type ScorePreviewLayout = "page" | "horizontal";
-
-type VocalMode = "lyrics" | "solfege";
-
-type MultiTrackAudioTrack = {
-  key: string;
-  label: string;
-  audioUrl: string;
-  partId?: string | null;
-  partIndex?: number | null;
-  verseNumber?: string | number | null;
-  durationSeconds?: number | null;
-  jobId?: string;
-  // The completed job whose asset is currently decoded by the player. This is
-  // distinct from jobId so a historical UI state cannot pair a newer label/job
-  // with an older rendition's audio source. Required: it keys the decoded-buffer
-  // cache, so a track without it cannot be played or cached correctly.
-  sourceJobId: string;
-  // Whether the take was rendered with repeats; unknown for a take from before
-  // jobs recorded it. The player keeps only takes of one repeat setting, and
-  // plays the instrumental MIDI in that order.
-  expandRepeats?: boolean;
-  // The part's take_signature when the take was rendered; null for a take from
-  // before jobs recorded it. A take whose signature no longer matches its part
-  // in the current score summary was sung from music that has since changed.
-  takeSignature?: string | null;
-  // Lyrics or solfège; a take from before Sing All is lyrics.
-  mode?: VocalMode;
-  muted: boolean;
-  solo: boolean;
-  volume: number;
-};
-
 const playbackTokenExpiresAt = (audioUrl: string): number | null => {
   try {
     const token = new URL(audioUrl, window.location.origin).searchParams.get("playback_token");
@@ -292,61 +277,6 @@ const isPlaybackTokenStale = (audioUrl: string): boolean => {
   const expiresAt = playbackTokenExpiresAt(audioUrl);
   return expiresAt !== null && expiresAt <= Date.now() + PLAYBACK_TOKEN_REFRESH_MARGIN_MS;
 };
-
-export type InstrumentalTrackState = {
-  key: string;
-  partId: string;
-  rawPartId: string;
-  partIndex: number;
-  label: string;
-  muted: boolean;
-  unassigned: boolean;
-  solo: boolean;
-  volume: number;
-  gmProgram: number;
-  soundfontBank: number;
-  presetKind: "melodic" | "percussion_kit";
-  percussion?: boolean;
-};
-
-/**
- * The row key of an instrumental part. A part written on several staves, such
- * as a piano, arrives as one entry and one MIDI track per staff, all sharing
- * its raw part ID, so all of them get one row.
- */
-const instrumentalTrackKey = (part: InstrumentalPart): string =>
-  `inst-${part.raw_part_id || part.part_index}`;
-
-/**
- * The row that controls MIDI track `index`. The MIDI has one track per
- * eligible entry, in order, and `midiTrackKeys` holds each track's row key.
- */
-const instrumentalTrackForMidiTrack = (
-  index: number,
-  midiTrackKeys: readonly string[],
-  instrumentalTracks: InstrumentalTrackState[]
-): InstrumentalTrackState | null => {
-  const key = midiTrackKeys[index];
-  if (key !== undefined) return instrumentalTracks.find((track) => track.key === key) ?? null;
-  return instrumentalTracks.length === 1 ? instrumentalTracks[0] : null;
-};
-
-type InstrumentalBusState = {
-  muted: boolean;
-  solo: boolean;
-  levelDb: number;
-};
-
-const DEFAULT_INSTRUMENTAL_BUS: InstrumentalBusState = {
-  muted: false,
-  solo: false,
-  levelDb: 0,
-};
-
-const INSTRUMENTAL_BUS_MIN_DB = -48;
-const INSTRUMENTAL_BUS_MAX_DB = 6;
-
-const dbToGain = (db: number) => Math.pow(10, db / 20);
 
 const formatDb = (db: number) => `${Number.isInteger(db) ? db : db.toFixed(1)} dB`;
 
@@ -693,65 +623,6 @@ const GroupedInstrumentPicker = ({
   );
 };
 
-const FLUID_R3_GM_SOUNDFONT_URL = "/soundfonts/FluidR3_GM.sf2";
-const DEFAULT_INSTRUMENT_TRACK_VOLUME = 0.65;
-let fluidR3SoundFontCachePromise: Promise<SoundFontCache> | null = null;
-
-const loadFluidR3SoundFontCache = (): Promise<SoundFontCache> => {
-  if (!fluidR3SoundFontCachePromise) {
-    fluidR3SoundFontCachePromise = SoundFontCache.fromUrl(FLUID_R3_GM_SOUNDFONT_URL).catch((err) => {
-      fluidR3SoundFontCachePromise = null;
-      throw err;
-    });
-  }
-  return fluidR3SoundFontCachePromise;
-};
-
-const scrollScoreMeasureIntoView = (
-  container: HTMLElement,
-  target: HTMLElement,
-  layout: ScorePreviewLayout,
-) => {
-  const containerRect = container.getBoundingClientRect();
-  const targetRect = target.getBoundingClientRect();
-  const margin = 24;
-  let nextLeft = container.scrollLeft;
-  let nextTop = container.scrollTop;
-
-  if (targetRect.left < containerRect.left + margin) {
-    nextLeft += targetRect.left - containerRect.left - margin;
-  } else if (targetRect.right > containerRect.right - margin) {
-    // Align the arriving measure to the reading origin instead of merely
-    // exposing its right edge. This keeps following measures in view for both
-    // page and horizontal reading, avoiding a scroll on nearly every measure.
-    nextLeft += targetRect.left - containerRect.left - margin;
-  }
-  // Horizontal engraving is one left-to-right score. Following its cursor
-  // vertically makes the preview bounce even though the playback position has
-  // not moved into a new vertical reading region.
-  if (layout === "page") {
-    if (targetRect.top < containerRect.top + margin) {
-      nextTop += targetRect.top - containerRect.top - margin;
-    } else if (targetRect.bottom > containerRect.bottom - margin) {
-      // As above, place the newly followed system at the top of the readable
-      // viewport rather than only making its bottom edge barely visible.
-      nextTop += targetRect.top - containerRect.top - margin;
-    }
-  }
-
-  if (nextLeft !== container.scrollLeft || nextTop !== container.scrollTop) {
-    container.scrollTo({ left: Math.max(0, nextLeft), top: Math.max(0, nextTop), behavior: "smooth" });
-  }
-};
-
-type ScorePlayerPlaybackControls = {
-  play: (startTime?: number) => Promise<void>;
-  pause: () => void;
-  stop: () => void;
-  seekTo: (time: number) => void;
-  setCurrentTime: (time: number) => void;
-};
-
 type BrowserMixBouncePhase = "idle" | "preparing" | "recording" | "finalizing";
 
 type BrowserMixRecorder = {
@@ -770,585 +641,6 @@ type BrowserMixBounceOperation = {
   recordingMimeType: string;
   chunks: Blob[];
   discarded: boolean;
-};
-
-type ScorePlayerEngineProps = {
-  midiUrl: string | null;
-  vocalTracks: MultiTrackAudioTrack[];
-  /** Decoded audio of each take, keyed by its source job. */
-  decodedVocals: ReadonlyMap<string, AudioBuffer>;
-  /** True while any take in the player is still being downloaded and decoded. */
-  vocalsDecoding: boolean;
-  instrumentalTracks?: InstrumentalTrackState[];
-  /** The row key of each instrumental MIDI track, in track order. */
-  instrumentalMidiTrackKeys?: readonly string[];
-  instrumentalBus: InstrumentalBusState;
-  playbackRequestId: number;
-  onControlsChange: (controls: ScorePlayerPlaybackControls | null) => void;
-  onEngineLoading: () => void;
-  onEngineReady: (requestId: number) => void;
-  onPlaybackStateChange: (isPlaying: boolean) => void;
-  onPlaybackPositionChange: (seconds: number) => void;
-  onTimelineDurationChange: (seconds: number) => void;
-  onAdapterChange: (adapter: ToneAdapter | null) => void;
-  onError: (message: string | null) => void;
-  seekBarHost: HTMLDivElement | null;
-  seekDisabled: boolean;
-};
-
-const formatPlaybackTime = (seconds: number): string => {
-  const wholeSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
-  const minutes = Math.floor(wholeSeconds / 60);
-  return `${minutes}:${String(wholeSeconds % 60).padStart(2, "0")}`;
-};
-
-const ScorePlayerEngineBridge = ({
-  onControlsChange,
-  loading,
-  onReady,
-  onPlaybackStateChange,
-  onPlaybackPositionChange,
-  onTimelineDurationChange,
-}: Pick<ScorePlayerEngineProps, "onControlsChange"> & {
-  loading: boolean;
-  onReady: () => void;
-  onPlaybackStateChange: (isPlaying: boolean) => void;
-  onPlaybackPositionChange: (seconds: number) => void;
-  onTimelineDurationChange: (seconds: number) => void;
-}) => {
-  const controls = usePlaylistControls();
-  const { duration, isReady } = usePlaylistData();
-  const { isPlaying, registerFrameCallback, unregisterFrameCallback } = usePlaybackAnimation();
-  const liveControlsRef = useRef(controls);
-  liveControlsRef.current = controls;
-  const stableControlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
-  if (!stableControlsRef.current) {
-    stableControlsRef.current = {
-      play: (startTime) => liveControlsRef.current.play(startTime),
-      pause: () => liveControlsRef.current.pause(),
-      stop: () => liveControlsRef.current.stop(),
-      seekTo: (time) => liveControlsRef.current.seekTo(time),
-      setCurrentTime: (time) => liveControlsRef.current.setCurrentTime(time),
-    };
-  }
-  useEffect(() => {
-    onControlsChange(stableControlsRef.current);
-    return () => onControlsChange(null);
-  }, [onControlsChange]);
-  // Incremental track additions use the provider's engine.addTrack() path and
-  // do not emit the provider-level onReady callback. Notify the outer player
-  // once the already-live engine and its source loaders are both ready.
-  useEffect(() => {
-    if (isReady && !loading) onReady();
-  }, [isReady, loading, onReady]);
-  useEffect(() => {
-    onTimelineDurationChange(duration);
-  }, [duration, onTimelineDurationChange]);
-  // This is the provider's native playback lifecycle state. In particular, it
-  // switches to false when its engine reaches the end of the timeline, which
-  // keeps the outer transport icon in sync after natural completion.
-  useEffect(() => {
-    onPlaybackStateChange(isPlaying);
-  }, [isPlaying, onPlaybackStateChange]);
-  useEffect(() => {
-    if (!isPlaying) return;
-    const callbackId = "sightsinger-score-active-measure";
-    registerFrameCallback(callbackId, ({ visualTime }) => onPlaybackPositionChange(visualTime));
-    return () => unregisterFrameCallback(callbackId);
-  }, [isPlaying, onPlaybackPositionChange, registerFrameCallback, unregisterFrameCallback]);
-  return null;
-};
-
-const ScorePlayerSeekBar = ({
-  host,
-  disabled,
-  onPlaybackPositionChange,
-}: {
-  host: HTMLDivElement | null;
-  disabled: boolean;
-  onPlaybackPositionChange: (seconds: number) => void;
-}) => {
-  const controls = usePlaylistControls();
-  const { duration } = usePlaylistData();
-  const {
-    isPlaying,
-    currentTime,
-    visualTimeRef,
-    registerFrameCallback,
-    unregisterFrameCallback,
-  } = usePlaybackAnimation();
-  const rangeRef = useRef<HTMLInputElement | null>(null);
-  const timerRef = useRef<HTMLSpanElement | null>(null);
-
-  const updateDisplay = useCallback((seconds: number) => {
-    const normalizedDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
-    const normalizedTime = Math.max(0, Math.min(seconds, normalizedDuration));
-    if (rangeRef.current) {
-      rangeRef.current.max = String(normalizedDuration);
-      rangeRef.current.value = String(normalizedTime);
-    }
-    if (timerRef.current) {
-      timerRef.current.textContent = `${formatPlaybackTime(normalizedTime)} / ${formatPlaybackTime(normalizedDuration)}`;
-    }
-  }, [duration]);
-
-  useEffect(() => {
-    updateDisplay(visualTimeRef.current ?? currentTime);
-  }, [currentTime, duration, updateDisplay, visualTimeRef]);
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    const callbackId = "sightsinger-score-master-seek";
-    registerFrameCallback(callbackId, ({ visualTime }) => updateDisplay(visualTime));
-    return () => unregisterFrameCallback(callbackId);
-  }, [isPlaying, registerFrameCallback, unregisterFrameCallback, updateDisplay]);
-
-  if (!host) return null;
-  return createPortal(
-    <div className="score-player-seek" aria-label="Master playback position">
-      <input
-        ref={rangeRef}
-        className="score-player-seek-slider"
-        type="range"
-        min="0"
-        max={Math.max(0, duration)}
-        step="0.01"
-        defaultValue="0"
-        disabled={disabled || duration <= 0}
-        onChange={(event) => {
-          const seconds = Number(event.currentTarget.value);
-          controls.seekTo(seconds);
-          updateDisplay(seconds);
-          onPlaybackPositionChange(seconds);
-        }}
-        aria-label="Seek playback position"
-      />
-      <span ref={timerRef} className="score-player-seek-time" aria-live="off">
-        {formatPlaybackTime(0)} / {formatPlaybackTime(duration)}
-      </span>
-    </div>,
-    host
-  );
-};
-
-const ScorePlayerMixerBridge = ({
-  midiTrackCount,
-  vocalTracks,
-  instrumentalTracks = [],
-  instrumentalMidiTrackKeys = [],
-  instrumentalBus,
-  engineGeneration,
-}: {
-  midiTrackCount: number;
-  vocalTracks: MultiTrackAudioTrack[];
-  instrumentalTracks?: InstrumentalTrackState[];
-  instrumentalMidiTrackKeys?: readonly string[];
-  instrumentalBus: InstrumentalBusState;
-  engineGeneration: number;
-}) => {
-  const controls = usePlaylistControls();
-  const { isReady, trackStates } = usePlaylistData();
-  const controlsRef = useRef(controls);
-  controlsRef.current = controls;
-  // The provider gives every track it adds to the engine, and every track of a
-  // rebuilt engine, the mute, solo and volume from its own track states, which
-  // keep only the last of several mixer edits made in one render. So apply the
-  // rows' state again once the engine holds those tracks: after a rebuild
-  // (engineGeneration), and after tracks are added to the live engine (such as
-  // the MIDI arriving after a take), which the provider follows by growing its
-  // track states.
-  const engineTrackCount = trackStates.length;
-  const vocalMixerSignature = vocalTracks
-    .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
-    .join("\u0001");
-  const instMixerSignature = instrumentalTracks
-    .map((track) => `${track.key}\u0000${track.muted}\u0000${track.solo}\u0000${track.volume}`)
-    .join("\u0001");
-  const instrumentalBusSignature = `${instrumentalBus.muted}\u0000${instrumentalBus.solo}\u0000${instrumentalBus.levelDb}`;
-
-  useEffect(() => {
-    if (!isReady) return;
-    const currentControls = controlsRef.current;
-
-    const hasIndividualInstrumentSolo = instrumentalTracks.some((track) => track.solo);
-    const busGain = dbToGain(instrumentalBus.levelDb);
-    for (let i = 0; i < midiTrackCount; i++) {
-      const track = instrumentalTrackForMidiTrack(i, instrumentalMidiTrackKeys, instrumentalTracks);
-      if (track) {
-        const effectiveSolo = hasIndividualInstrumentSolo ? track.solo : instrumentalBus.solo;
-        currentControls.setTrackMute(i, instrumentalBus.muted || track.muted);
-        currentControls.setTrackSolo(i, effectiveSolo);
-        currentControls.setTrackVolume(i, track.volume * busGain);
-      } else {
-        currentControls.setTrackMute(i, false);
-        currentControls.setTrackSolo(i, false);
-        currentControls.setTrackVolume(i, 1);
-      }
-    }
-
-    // Apply vocal tracks mixer state
-    vocalTracks.forEach((track, index) => {
-      const trackIndex = midiTrackCount + index;
-      currentControls.setTrackMute(trackIndex, track.muted);
-      currentControls.setTrackSolo(trackIndex, track.solo);
-      currentControls.setTrackVolume(trackIndex, track.volume);
-    });
-  }, [
-    isReady,
-    midiTrackCount,
-    vocalMixerSignature,
-    instMixerSignature,
-    instrumentalBusSignature,
-    instrumentalTracks,
-    instrumentalMidiTrackKeys,
-    instrumentalBus,
-    vocalTracks,
-    engineGeneration,
-    engineTrackCount,
-  ]);
-
-  return null;
-};
-
-/** Download and decode one take, in the playback context the player uses. */
-const decodeVocalAudio = async (audioUrl: string): Promise<AudioBuffer> => {
-  // The URL carries its own playback token, as for the player's loader.
-  const response = await fetch(audioUrl);
-  if (!response.ok) {
-    // Keep the status code: an expired token (401) is refreshed on Play.
-    throw new Error(`Failed to fetch ${audioUrl}: ${response.status} ${response.statusText}`);
-  }
-  return getToneContext().rawContext.decodeAudioData(await response.arrayBuffer());
-};
-
-const withoutKeysOutside = <T,>(
-  map: ReadonlyMap<string, T>,
-  live: ReadonlySet<string>
-): ReadonlyMap<string, T> => {
-  if ([...map.keys()].every((key) => live.has(key))) return map;
-  return new Map([...map].filter(([key]) => live.has(key)));
-};
-
-const ScorePlayerEngine = ({
-  midiUrl,
-  vocalTracks,
-  decodedVocals,
-  vocalsDecoding,
-  instrumentalTracks = [],
-  instrumentalMidiTrackKeys = [],
-  instrumentalBus,
-  playbackRequestId,
-  onControlsChange,
-  onEngineLoading,
-  onEngineReady,
-  onPlaybackStateChange,
-  onPlaybackPositionChange,
-  onTimelineDurationChange,
-  onAdapterChange,
-  onError,
-  seekBarHost,
-  seekDisabled,
-}: ScorePlayerEngineProps) => {
-  // WaveformPlaylistProvider treats callback identity changes as an engine
-  // reconfiguration. Keep its callbacks stable so parent state updates (such
-  // as setting the Play button to its active state) cannot dispose the MIDI
-  // adapter while a note sequence is playing.
-  const callbacksRef = useRef({ playbackRequestId, onEngineReady, onError, onAdapterChange });
-  callbacksRef.current = { playbackRequestId, onEngineReady, onError, onAdapterChange };
-  const handleProviderReady = useCallback(() => {
-    const callbacks = callbacksRef.current;
-    callbacks.onEngineReady(callbacks.playbackRequestId);
-  }, []);
-  const handleProviderError = useCallback((error: Error) => {
-    callbacksRef.current.onError(error.message);
-  }, []);
-  // The provider calls onReady after every engine rebuild (a new sound, a
-  // replaced take), but not after an incremental add. Count the rebuilds, so
-  // the mixer bridge applies the rows' state to each new engine.
-  const [engineGeneration, setEngineGeneration] = useState(0);
-  const handleEngineRebuilt = useCallback(() => {
-    setEngineGeneration((generation) => generation + 1);
-  }, []);
-  const adapterRef = useRef<ToneAdapter | null>(null);
-  const soundFontCacheRef = useRef<SoundFontCache | null>(null);
-  const createScorePlayerAdapter = useCallback(() => {
-    // Match the provider's default factory.  In particular, a provider rebuild
-    // after another vocal is added must create MIDI tracks with the already
-    // loaded SoundFont, rather than silently falling back to PolySynth.
-    const adapter = createToneAdapter({ soundFontCache: soundFontCacheRef.current ?? undefined });
-    adapterRef.current = adapter;
-    callbacksRef.current.onAdapterChange(adapter);
-    return adapter;
-  }, []);
-  useEffect(() => () => {
-    adapterRef.current = null;
-    callbacksRef.current.onAdapterChange(null);
-  }, []);
-  const [soundFontCache, setSoundFontCache] = useState<SoundFontCache | null>(null);
-  soundFontCacheRef.current = soundFontCache;
-  const [soundFontLoadState, setSoundFontLoadState] = useState<
-    "idle" | "loading" | "ready" | "fallback"
-  >("idle");
-  const shouldLoadSoundFont = Boolean(midiUrl && instrumentalTracks.length > 0);
-  const soundFontLoading =
-    shouldLoadSoundFont &&
-    soundFontLoadState !== "ready" &&
-    soundFontLoadState !== "fallback";
-  const midiConfigs = useMemo(
-    () => (midiUrl ? [{ src: midiUrl, name: "Score instruments" }] : []),
-    [midiUrl]
-  );
-  // Each take is downloaded and decoded once, when its job completes, into
-  // decodedVocals (see MainApp). The player only ever receives decoded audio:
-  // useAudioTracks never fetches, so a take never needs its playback token
-  // again, and a take still decoding joins the player when its audio is ready.
-  // The mixer bridge maps vocals to provider tracks by position, so it gets
-  // exactly this list too.
-  const playerVocalTracks = useMemo(
-    () => vocalTracks.filter((track) => decodedVocals.has(track.sourceJobId)),
-    [decodedVocals, vocalTracks]
-  );
-  // Mixer changes are forwarded through usePlaylistControls below. Keeping
-  // them out of the source configuration prevents useAudioTracks from
-  // rebuilding its tracks, and the provider its engine, on every Mute/Solo/
-  // volume edit.
-  const vocalSourceSignature = playerVocalTracks
-    .map((track) =>
-      [track.key, track.sourceJobId, track.label, track.durationSeconds ?? ""].join("\u0000")
-    )
-    .join("\u0001");
-  const vocalSources = useMemo(
-    () =>
-      playerVocalTracks.map((track) => ({
-        key: `${track.key}\u0000${track.sourceJobId}`,
-        trackKey: track.key,
-        sourceJobId: track.sourceJobId,
-        audioBuffer: decodedVocals.get(track.sourceJobId) as AudioBuffer,
-        name: track.label,
-        duration: track.durationSeconds ?? undefined,
-        muted: track.muted,
-        soloed: track.solo,
-        volume: track.volume,
-      })),
-    // vocalSourceSignature deliberately excludes mixer-only state.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [vocalSourceSignature]
-  );
-  const audioConfigs = useMemo(
-    () =>
-      vocalSources.map(
-        ({ key: _key, trackKey: _trackKey, sourceJobId: _sourceJobId, ...config }) =>
-          config
-      ),
-    [vocalSources]
-  );
-  const { tracks: midiTracks, loading: midiLoading, error: midiError } = useMidiTracks(
-    midiConfigs,
-    { sampleRate: 48_000 }
-  );
-  const { tracks: audioTracks, loading: audioLoading, error: audioError } = useAudioTracks(
-    audioConfigs
-  );
-  const instrumentalProgramSignature = instrumentalTracks
-    .map((track) => `${track.key}\u0000${track.soundfontBank}\u0000${track.presetKind}\u0000${track.gmProgram}`)
-    .join("\u0001");
-  const configuredMidiTracks = useMemo(
-    () =>
-      midiTracks.map((track, index) => {
-        const instrumentalTrack = instrumentalTrackForMidiTrack(
-          index,
-          instrumentalMidiTrackKeys,
-          instrumentalTracks
-        );
-        if (!instrumentalTrack) return track;
-
-        let changed = false;
-        const clips = track.clips.map((clip) => {
-          if (!clip.midiNotes || clip.midiNotes.length === 0) return clip;
-          if (clip.midiProgram === instrumentalTrack.gmProgram) return clip;
-          changed = true;
-          return { ...clip, midiProgram: instrumentalTrack.gmProgram };
-        });
-        return changed ? { ...track, clips } : track;
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [midiTracks, instrumentalProgramSignature, instrumentalMidiTrackKeys]
-  );
-  // useAudioTracks rebuilds every track object whenever its configs change,
-  // and until it has processed the new configs it still exposes its previous
-  // result. Keep each take's first track object, so the provider sees an
-  // unchanged take as unchanged and appends a new take incrementally.
-  // A loader track belongs to a take only if it was built from that take's
-  // decoded buffer. While the loader catches up after a take is replaced, the
-  // track at that position still carries the previous take's buffer: it stays
-  // in place until the new one arrives, but is never recorded as the new take.
-  const stableAudioTracksRef = useRef(new Map<string, (typeof audioTracks)[number]>());
-  const previousStableAudioTracksRef = useRef<typeof audioTracks | null>(null);
-  // Depend only on decoded audio and memoized sources. Mixer-only edits must
-  // not create a new tracks array: the provider would rebuild its engine.
-  const stableAudioTracks = useMemo(() => {
-    const next = new Map<string, (typeof audioTracks)[number]>();
-    const normalized = audioTracks.map((track, index) => {
-      const source = vocalSources[index];
-      if (!source || track?.clips?.[0]?.audioBuffer !== source.audioBuffer) return track;
-      const resolved = stableAudioTracksRef.current.get(source.key) ?? track;
-      next.set(source.key, resolved);
-      return resolved;
-    });
-    // A take the loader has not re-emitted yet keeps its recorded object.
-    vocalSources.forEach((source) => {
-      const recorded = stableAudioTracksRef.current.get(source.key);
-      if (recorded && !next.has(source.key)) next.set(source.key, recorded);
-    });
-    stableAudioTracksRef.current = next;
-    // Adding a take re-runs this memo before the new vocal is processed while
-    // the tracks are still the same objects. The provider only appends
-    // incrementally when the array grows; a new array of the same length makes
-    // it rebuild its whole engine. Return the previous array when every track
-    // is the same object in the same place. Any real change (a replaced,
-    // removed or reordered take, or a newly processed one) produces a different
-    // object or length and still yields a new array.
-    const previous = previousStableAudioTracksRef.current;
-    if (
-      previous &&
-      previous.length === normalized.length &&
-      normalized.every((track, index) => track === previous[index])
-    ) {
-      return previous;
-    }
-    previousStableAudioTracksRef.current = normalized;
-    return normalized;
-  }, [audioTracks, vocalSources]);
-  const tracks = useMemo(
-    () => [...configuredMidiTracks, ...stableAudioTracks],
-    [configuredMidiTracks, stableAudioTracks]
-  );
-  // The player is still catching up while the tracks it holds differ from the
-  // ones it should hold: a decoded take the audio loader has not built a track
-  // for yet, a removed take still present, or MIDI loaded for an older URL.
-  // These are values of this render, so the bridge's ready check sees them in
-  // the same render it runs in; no later effect can contradict its answer.
-  const takesNotYetInPlayer =
-    !audioError &&
-    (stableAudioTracks.length !== vocalSources.length ||
-      vocalSources.some(
-        (source, index) => stableAudioTracks[index]?.clips?.[0]?.audioBuffer !== source.audioBuffer
-      ));
-  const [loadedMidiUrl, setLoadedMidiUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!midiLoading) setLoadedMidiUrl(midiUrl ?? null);
-    // Recorded once the loader has settled on its tracks for the current URL.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [midiLoading, midiTracks]);
-  const midiNotYetInPlayer = !midiError && (midiUrl ?? null) !== loadedMidiUrl;
-  const engineLoading =
-    midiLoading ||
-    audioLoading ||
-    soundFontLoading ||
-    vocalsDecoding ||
-    takesNotYetInPlayer ||
-    midiNotYetInPlayer;
-  const hasMountedPlayerRef = useRef(false);
-
-  useEffect(() => {
-    if (!shouldLoadSoundFont) {
-      setSoundFontLoadState("idle");
-      return;
-    }
-
-    let cancelled = false;
-    setSoundFontLoadState((current) => (current === "ready" ? current : "loading"));
-    void loadFluidR3SoundFontCache()
-      .then((cache) => {
-        if (cancelled) return;
-        setSoundFontCache(cache);
-        setSoundFontLoadState("ready");
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        console.warn("[score-player] FluidR3_GM.sf2 unavailable; falling back to default MIDI synth.", err);
-        setSoundFontCache(null);
-        setSoundFontLoadState("fallback");
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [shouldLoadSoundFont]);
-
-  useEffect(() => {
-    onError(midiError ?? audioError);
-  }, [audioError, midiError, onError]);
-
-  // `useAudioTracks` and `useMidiTracks` can append decoded sources after the
-  // provider's initial ready event. Keep the outer transport (and bounce
-  // action) disabled for the whole loader lifetime, including the gap before a
-  // loader starts on a new take or MIDI URL. Otherwise a recorder can start
-  // just as the provider disposes/rebuilds its adapter for an incremental track
-  // add. This effect only ever reports loading; the bridge alone reports ready,
-  // so the two cannot run in an order that leaves the player marked loading.
-  useEffect(() => {
-    if (engineLoading) onEngineLoading();
-  }, [engineLoading, onEngineLoading]);
-
-  useEffect(() => {
-    if (tracks.length !== 0 || !adapterRef.current) return;
-    adapterRef.current = null;
-    callbacksRef.current.onAdapterChange(null);
-  }, [tracks.length]);
-
-  // The documented integration mounts after the first complete set of sources.
-  // Later vocal sources remain attached to the existing provider: its supported
-  // incremental-add path calls PlaylistEngine.addTrack() without disposing
-  // MIDI/audio tracks that are already playing.
-  if (tracks.length === 0) {
-    hasMountedPlayerRef.current = false;
-    return null;
-  }
-  if (!hasMountedPlayerRef.current && (midiLoading || audioLoading || vocalsDecoding)) {
-    return null;
-  }
-  hasMountedPlayerRef.current = true;
-
-  return (
-    <WaveformPlaylistProvider
-      tracks={tracks}
-      soundFontCache={soundFontCache ?? undefined}
-      createAdapter={createScorePlayerAdapter}
-      onReady={handleEngineRebuilt}
-      onError={handleProviderError}
-    >
-      <ScorePlayerEngineBridge
-        onControlsChange={onControlsChange}
-        loading={engineLoading}
-        onReady={handleProviderReady}
-        onPlaybackStateChange={onPlaybackStateChange}
-        onPlaybackPositionChange={onPlaybackPositionChange}
-        onTimelineDurationChange={onTimelineDurationChange}
-      />
-      <ScorePlayerMixerBridge
-        midiTrackCount={midiTracks.length}
-        vocalTracks={playerVocalTracks}
-        instrumentalTracks={instrumentalTracks}
-        instrumentalMidiTrackKeys={instrumentalMidiTrackKeys}
-        instrumentalBus={instrumentalBus}
-        engineGeneration={engineGeneration}
-      />
-      <ScorePlayerSeekBar
-        host={seekBarHost}
-        disabled={seekDisabled}
-        onPlaybackPositionChange={onPlaybackPositionChange}
-      />
-    </WaveformPlaylistProvider>
-  );
-};
-
-const shouldMuteMultiTrackForPlayback = (
-  track: MultiTrackAudioTrack,
-  tracks: MultiTrackAudioTrack[]
-): boolean => {
-  const hasSolo = tracks.some((candidate) => candidate.solo);
-  return hasSolo ? !track.solo : track.muted;
 };
 
 const selectAudibleMultiTrackTracks = (
@@ -1375,26 +667,6 @@ const multiTrackAnalyticsParams = (tracks: MultiTrackAudioTrack[]) => {
     solo_track_count: soloTrackCount,
     muted_track_count: mutedTrackCount,
   };
-};
-
-const hasAudibleScorePlayerMix = (
-  vocalTracks: MultiTrackAudioTrack[],
-  instrumentalTracks: InstrumentalTrackState[],
-  instrumentalBus: InstrumentalBusState
-) => {
-  const hasIndividualInstrumentSolo = instrumentalTracks.some((track) => track.solo);
-  const tracks = [
-    ...instrumentalTracks.map((track) => ({
-      muted: instrumentalBus.muted || track.muted,
-      solo: hasIndividualInstrumentSolo ? track.solo : instrumentalBus.solo,
-    })),
-    ...vocalTracks.map((track) => ({ muted: track.muted, solo: track.solo })),
-  ];
-  if (!tracks.length) return false;
-  const hasSolo = tracks.some((track) => track.solo);
-  return hasSolo
-    ? tracks.some((track) => track.solo && !track.muted)
-    : tracks.some((track) => !track.muted);
 };
 
 const synthesisAudioAnalyticsParams = (message: Message) => ({
@@ -1590,7 +862,6 @@ const MultiTrackWaveformLane = ({
     </div>
   );
 };
-
 
 type ScoreTrackControlsPanelProps = {
   vocalTracks: MultiTrackAudioTrack[];
@@ -2024,232 +1295,6 @@ const buildPrintableScoreMarkup = (scoreElement: HTMLElement): string => {
       return `<section class="score-page">${printableSvg.outerHTML}</section>`;
     })
     .join("");
-};
-
-const applyPageLayoutZoom = (osmd: OpenSheetMusicDisplay, zoomLevel: number): void => {
-  // Let OSMD own both engraving scale and system/page breaking. This is the
-  // same native zoom API used by the horizontal renderer; keeping an A4 page
-  // format gives it a fixed printable width in which to recompute measure
-  // wrapping for every zoom level.
-  osmd.setPageFormat("A4_P");
-  osmd.zoom = Number.isFinite(zoomLevel) ? Math.min(2, Math.max(0.6, zoomLevel)) : 1;
-};
-
-/**
- * OSMD emits each page as a `div#osmdCanvasPageN` containing its SVG. Wrap
- * that complete page canvas with its native dimensions so the browser can
- * scale notation and cursor together without another engraving pass.
- */
-const preparePagePreviewWrappers = (container: HTMLElement): void => {
-  const pages = Array.from(container.children).filter(
-    (child): child is HTMLElement =>
-      child instanceof HTMLElement &&
-      child.id.startsWith("osmdCanvasPage") &&
-      Boolean(child.querySelector(":scope > svg"))
-  );
-
-  for (const page of pages) {
-    const bounds = page.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) continue;
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "score-page-virtualizer";
-    wrapper.dataset.nativeWidth = String(bounds.width);
-    wrapper.dataset.nativeHeight = String(bounds.height);
-    wrapper.style.width = `${Math.ceil(bounds.width)}px`;
-    wrapper.style.height = `${Math.ceil(bounds.height)}px`;
-    page.replaceWith(wrapper);
-    wrapper.append(page);
-  }
-};
-
-/**
- * A preview-pane resize must not reload and re-engrave the MusicXML. The
- * wrapper retains the scaled scroll geometry, while an inline transform
- * scales the whole OSMD SVG (notation and cursor included) together.
- */
-const fitPagePreviewToContainer = (container: HTMLElement): void => {
-  let wrappers = Array.from(
-    container.querySelectorAll<HTMLElement>(":scope > .score-page-virtualizer")
-  );
-  // During local hot reload an already engraved score may still have OSMD's
-  // native canvases in the container. Adopt them on the next resize instead
-  // of waiting for the user to re-upload or change layouts.
-  if (wrappers.length === 0) {
-    preparePagePreviewWrappers(container);
-    wrappers = Array.from(
-      container.querySelectorAll<HTMLElement>(":scope > .score-page-virtualizer")
-    );
-  }
-  const firstPage = wrappers[0];
-  if (!firstPage) return;
-
-  const nativeWidth = Number(firstPage.dataset.nativeWidth);
-  if (!Number.isFinite(nativeWidth) || nativeWidth <= 0) return;
-
-  const styles = window.getComputedStyle(container);
-  const horizontalPadding =
-    Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight);
-  const availableWidth = Math.max(0, container.clientWidth - horizontalPadding);
-  const scale = availableWidth > 0 ? availableWidth / nativeWidth : 1;
-  if (!Number.isFinite(scale) || scale <= 0) return;
-
-  for (const wrapper of wrappers) {
-    const width = Number(wrapper.dataset.nativeWidth);
-    const height = Number(wrapper.dataset.nativeHeight);
-    if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
-    const scaledWidth = Math.ceil(width * scale);
-    const scaledHeight = Math.ceil(height * scale);
-    wrapper.style.width = `${scaledWidth}px`;
-    wrapper.style.height = `${scaledHeight}px`;
-
-    // OSMD's SVG does not consistently expose a viewBox, so changing the SVG
-    // CSS viewport can resize only the sheet and clip its fixed-coordinate
-    // notation. Transform the page canvas instead: this scales every SVG
-    // child in the same coordinate system, including the active-measure
-    // cursor.
-    const page = wrapper.querySelector<HTMLElement>(":scope > [id^='osmdCanvasPage']");
-    if (page) {
-      page.style.width = `${Math.ceil(width)}px`;
-      page.style.height = `${Math.ceil(height)}px`;
-      page.style.transform = `scale(${scale})`;
-      page.style.transformOrigin = "top left";
-    }
-  }
-};
-
-// Keep each native incremental-rendering batch within a bounded engraving
-// budget. A two-staff piano part counts as two simultaneous staves, so dense
-// scores naturally render fewer measures ahead than solo scores.
-const HORIZONTAL_SCORE_STAFF_MEASURE_BUDGET = 16;
-const HORIZONTAL_SCORE_MAX_MEASURES_PER_BATCH = 16;
-
-const countParallelScoreStaves = (scoreData: string, fallbackPartCount: number): number => {
-  try {
-    const document = new DOMParser().parseFromString(scoreData, "application/xml");
-    const parts = Array.from(document.querySelectorAll("score-partwise > part"));
-    if (!parts.length) return Math.max(1, fallbackPartCount);
-    return Math.max(
-      1,
-      parts.reduce((total, part) => {
-        const stavesText = part.querySelector("measure > attributes > staves")?.textContent;
-        const staves = Number.parseInt(stavesText ?? "", 10);
-        return total + (Number.isFinite(staves) && staves > 0 ? staves : 1);
-      }, 0)
-    );
-  } catch {
-    return Math.max(1, fallbackPartCount);
-  }
-};
-
-const getHorizontalScoreIncrementalBatchSize = (parallelStaffCount: number): number =>
-  Math.max(
-    1,
-    Math.min(
-      HORIZONTAL_SCORE_MAX_MEASURES_PER_BATCH,
-      Math.floor(HORIZONTAL_SCORE_STAFF_MEASURE_BUDGET / Math.max(1, parallelStaffCount))
-    )
-  );
-
-type HorizontalScoreRendererHandle = {
-  osmd: OpenSheetMusicDisplay;
-  ensureSourceMeasureRendered: (sourceMeasureIndex: number) => void;
-};
-
-type HorizontalScoreRendererProps = {
-  scoreData: string;
-  zoomLevel: number;
-  measuresPerBatch: number;
-  scrollContainerRef: RefObject<HTMLElement>;
-  onRendererChange: (renderer: HorizontalScoreRendererHandle | null) => void;
-  onReady: () => void;
-  onRenderError: () => void;
-};
-
-const HorizontalScoreRenderer = ({
-  scoreData,
-  zoomLevel,
-  measuresPerBatch,
-  scrollContainerRef,
-  onRendererChange,
-  onReady,
-  onRenderError,
-}: HorizontalScoreRendererProps) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    let cancelled = false;
-    let osmd: OpenSheetMusicDisplay | null = null;
-    container.replaceChildren();
-
-    void (async () => {
-      try {
-        osmd = new OpenSheetMusicDisplay(container, {
-          autoResize: false,
-          drawTitle: true,
-          followCursor: false,
-          cursorsOptions: [{ type: 3, color: "#8b5cf6", alpha: 0.24, follow: false }],
-          pageFormat: "Endless",
-          renderSingleHorizontalStaffline: true,
-        });
-        await osmd.load(scoreData);
-        if (cancelled) return;
-        osmd.zoom = zoomLevel;
-
-        // OSMD 2.x keeps one continuous notation model and appends to the
-        // same SVG. Unlike the former range-per-chunk implementation, this
-        // preserves the actual score start (one clef/key/time signature) and
-        // has no fabricated system boundaries between batches.
-        osmd.renderNext({ measures: measuresPerBatch });
-        osmd.cursor.hide();
-        const ensureSourceMeasureRendered = (sourceMeasureIndex: number) => {
-          let guard = 0;
-          while (
-            !osmd!.IncrementalRenderingComplete &&
-            osmd!.IncrementalRenderProgress.renderedMeasures <= sourceMeasureIndex &&
-            guard++ < 256
-          ) {
-            osmd!.renderNext({ measures: measuresPerBatch });
-          }
-        };
-        onRendererChange({ osmd, ensureSourceMeasureRendered });
-        onReady();
-        osmd.enableIncrementalRenderingOnScroll({
-          measures: measuresPerBatch,
-          scrollElement: scrollContainerRef.current ?? undefined,
-        });
-      } catch {
-        if (!cancelled) onRenderError();
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      onRendererChange(null);
-      try {
-        osmd?.disableIncrementalRenderingOnScroll();
-        osmd?.clear();
-      } catch {
-        // Ignore cleanup from a partially initialized renderer.
-      }
-    };
-  }, [measuresPerBatch, onReady, onRenderError, onRendererChange, scoreData, scrollContainerRef, zoomLevel]);
-
-  return (
-    <div
-      className="score-surface horizontal-incremental-score-surface"
-      data-testid="score-preview-surface"
-      data-measures-per-batch={measuresPerBatch}
-    >
-      <div
-        ref={containerRef}
-        className="horizontal-score-incremental-renderer"
-        data-testid="horizontal-score-incremental-renderer"
-      />
-    </div>
-  );
 };
 
 const renderScorePageLayoutForPrint = async (
@@ -2875,16 +1920,10 @@ export default function MainApp() {
   // With takes in both modes the player shows, plays and mixes one mode's takes at a time.
   // The saved mix keeps every take.
   const [vocalModeShown, setVocalModeShown] = useState<VocalMode>("lyrics");
-  const vocalsInBothModes = useMemo(
-    () => new Set(multiTrackAudioTracks.map((track) => track.mode ?? "lyrics")).size > 1,
-    [multiTrackAudioTracks]
-  );
+  const vocalsInBothModes = useMemo(() => hasVocalsInBothModes(multiTrackAudioTracks), [multiTrackAudioTracks]);
   const shownVocalTracks = useMemo(
-    () =>
-      vocalsInBothModes
-        ? multiTrackAudioTracks.filter((track) => (track.mode ?? "lyrics") === vocalModeShown)
-        : multiTrackAudioTracks,
-    [multiTrackAudioTracks, vocalModeShown, vocalsInBothModes]
+    () => shownVocals(multiTrackAudioTracks, vocalModeShown),
+    [multiTrackAudioTracks, vocalModeShown]
   );
   // Decoded audio of each take in the player, keyed by its source job. A take
   // is decoded once, when it enters the player; the player plays only these
@@ -3417,58 +2456,10 @@ export default function MainApp() {
       setInstrumentalTracks([]);
       return;
     }
-    const eligible = performanceMidi.instrumental_parts.filter((p) => p.eligible);
-    // One row per part: a part's later staves share its first staff's row.
-    const rowParts = eligible.filter(
-      (part, index) =>
-        eligible.findIndex((other) => instrumentalTrackKey(other) === instrumentalTrackKey(part)) === index
-    );
     // A reopened Song's saved choices stand in for a row's current values, once.
     const savedChoices = savedInstrumentChoicesRef.current;
     savedInstrumentChoicesRef.current = null;
-    setInstrumentalTracks((current) => {
-      return rowParts.map((part) => {
-        const saved = part.raw_part_id
-          ? savedChoices?.find((choice) => choice.raw_part_id === part.raw_part_id)
-          : undefined;
-        const existing = saved
-          ? {
-              unassigned: saved.unassigned,
-              muted: saved.muted,
-              solo: saved.solo,
-              volume: saved.volume,
-              gmProgram: saved.gm_program ?? part.playback_preset?.program ?? part.midi_program ?? 0,
-              soundfontBank:
-                saved.soundfont_bank ??
-                part.playback_preset?.bank ??
-                part.soundfont_bank ??
-                (part.percussion ? 128 : 0),
-              presetKind:
-                saved.preset_kind ??
-                part.playback_preset?.kind ??
-                (part.percussion ? ("percussion_kit" as const) : ("melodic" as const)),
-            }
-          : part.raw_part_id
-            ? current.find((track) => track.rawPartId === part.raw_part_id)
-            : current.find((track) => track.partId === part.part_id);
-        return {
-          key: instrumentalTrackKey(part),
-          partId: part.part_id,
-          rawPartId: part.raw_part_id,
-          partIndex: part.part_index,
-          label: part.label || `Part ${part.part_index + 1}`,
-          unassigned: part.program_source === "user_assignable" ? (existing ? existing.unassigned : true) : false,
-          muted: existing ? existing.muted : part.program_source === "user_assignable",
-          solo: existing ? existing.solo : false,
-          volume: existing ? existing.volume : DEFAULT_INSTRUMENT_TRACK_VOLUME,
-          gmProgram: existing ? existing.gmProgram : (part.playback_preset?.program ?? part.midi_program ?? 0),
-          // A part with no sound chosen is a drum kit or an instrument as the part itself is.
-          soundfontBank: part.program_source === "user_assignable" ? (part.percussion ? 128 : 0) : existing ? existing.soundfontBank : (part.playback_preset?.bank ?? part.soundfont_bank ?? (part.percussion ? 128 : 0)),
-          presetKind: part.program_source === "user_assignable" ? (part.percussion ? "percussion_kit" : "melodic") : existing ? existing.presetKind : (part.playback_preset?.kind ?? (part.percussion ? "percussion_kit" : "melodic")),
-          percussion: part.percussion,
-        };
-      });
-    });
+    setInstrumentalTracks((current) => instrumentRowsFromMidi(performanceMidi, savedChoices, current));
   }, [performanceMidi]);
 
   const updateInstrumentalTrackMute = useCallback((key: string, muted: boolean) => {
