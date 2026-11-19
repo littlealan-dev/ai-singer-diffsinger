@@ -1,0 +1,18 @@
+# Trial and later package-job image. The licensed soundfont is mounted at run time.
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libfluidsynth3 libsndfile1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --no-cache-dir -r /app/requirements.txt
+COPY src /app/src
+COPY scripts/sing_all_mix_trial.py scripts/sing_all_sync_check.py /app/scripts/
+
+CMD ["python", "-m", "scripts.sing_all_mix_trial", "--help"]
