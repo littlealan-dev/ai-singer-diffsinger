@@ -1,23 +1,31 @@
-# Share link, step 7: Codex task specs
+# Share link, step 7: task specs
 
-2026-11-13. Differences accepted by Alan. Not posted to Linear yet: step 7 comes after steps 2 to 6.
+2026-11-13, revised 2026-11-18. Differences accepted by Alan.
+
+**Revised 2026-11-18** against what steps 1 to 3 built:
+- **A new link each time (Alan, 2026-11-18).** Turning sharing off ends the link for good. Turning it on again makes a new link, and the old one answers "This link was turned off". The Song holds a token only while its link is on, so `shareEnabled` is gone.
+- **Lyrics and solfège.** Step 3 built `mode` on each track and the owner's Lyrics / Solfège switch, so the public page has them too.
+- **Who builds what.** S1 is the only Codex task. Claude builds S2 and S3 in a session.
+- **Parent branch.** It is `feature/share`, cut from `claude/sing-all-ui`, which holds Songs and the Sing All backend and UI.
+- **The notice record.** Codex can't touch billing code, so the `users/{uid}` write is not done there.
+- Names, files and test lists now match the code.
 
 Design: `docs/specs/sing-all-process-backend-hld.md` §14, plus §4, §13, §15 and §16 row 7, on branch `docs/sing-all-process-hld`. This step builds on Songs (step 2, `docs/specs/songs-step2-codex-spec.md`).
 
 A share link is `https://sightsinger.app/s/{token}`. Anyone with the link can listen to the Song and follow its score, without signing in. The link is live: every page load shows the owner's latest score, sung tracks and saved mix. Viewers can't edit, chat or download.
 
-There are three Codex tasks:
-- **S1 Backend**: the share fields, turning a link on and off, and the four public routes.
-- **S2 UI, player module**: move the score player out of `MainApp.tsx`, with no change in behaviour. It starts after the Songs UI task (C2) is merged.
-- **S3 UI, share**: the Share button, the one-time notice, My songs, and the public page `/s/{token}`. It starts after S1 and S2 are merged.
+There are three tasks:
+- **S1 Backend (Codex)**: the share fields, turning a link on and off, and the four public routes.
+- **S2 UI, player module (Claude)**: move the score player out of `MainApp.tsx`, with no change in behaviour. It doesn't need S1.
+- **S3 UI, share (Claude)**: the Share button, the one-time notice, My songs, and the public page `/s/{token}`. It needs S1 and S2.
 
-Parent branch for all three: `feature/sing-all`. Codex PRs go into it, never into main.
+Parent branch for all three: `feature/share`, cut from `claude/sing-all-ui` at a8b0748. That holds Songs (step 2) and the Sing All backend and UI (step 3). The Codex PR goes into it, never into main. Alan merges it onward after Sing All.
 
 The repository is public. Tests, fixtures, commits and PR text use made-up titles, part names and lyrics only, and no real job, session or share ids.
 
 ## Does the step 2 data structure support sharing?
 
-Yes. Sharing adds three fields and one small collection, and changes no field of step 2.
+Yes. Sharing adds two fields and one small collection, and changes no field of step 2 or 3.
 
 The public page never reads Firestore or Storage itself. It calls the backend, and the backend reads the Song for it, from the same three places the owner's workspace uses. So the player record can stay as slim as step 2 makes it.
 
@@ -35,7 +43,8 @@ The public page never reads Firestore or Storage itself. It calls the backend, a
 | Bar positions for the cursor | `scoreSummary.performance_measure_map` | exists |
 | The instrument MIDI | `sessions/{id}.files` (written and with-repeats paths) | exists |
 | Voice credits | `vocals[].voiceName` | step 2 |
-| Is the link on, and which Song | `sessions/{id}.shareToken`, `shareEnabled`; `shares/{token}` | **step 7** |
+| Lyrics or solfège, per track | `vocals[].mode` | step 3 |
+| Is the link on, and which Song | `sessions/{id}.shareToken`; `shares/{token}` | **step 7** |
 | The one-time notice was accepted | `users/{uid}.shareNoticeAt` | **step 7** |
 
 This corrects one line of the Songs spec. Its difference 1 said the extra record fields of the HLD (`scoreVersions`, `measureMaps`, `instrumentalMidi`, `defaultMode`, `voiceCredit`) would be added at step 7, "because the share page can't read the session". The page can't, but the backend can, so they are not needed at step 7 either. The Songs spec is updated to say so.
@@ -51,12 +60,13 @@ Accepted by Alan, 2026-11-13.
 | # | HLD | This spec | Why |
 |---|---|---|---|
 | 1 | `POST/DELETE /sessions/{id}/share` | `POST/DELETE /songs/{id}/share` | The prefix rule agreed on 2026-11-13: an endpoint that needs a Song is under `/songs/` |
-| 2 | `shares/{token}` holds `enabled` | `enabled` is on the Song (`shareEnabled`). `shares/{token}` only maps a token to its Song | The public route reads the Song anyway. One place to write means on/off can't disagree between two documents, and My songs gets "shared" from the fields it already reads |
+| 2 | `shares/{token}` holds `enabled` | A link is on while the Song holds its token (`shareToken`). `shares/{token}` only maps a token to its Song, and is deleted when the link is turned off | The public route reads the Song anyway. One field to check means on/off can't disagree between two documents, and My songs gets "shared" from the fields it already reads |
 | 3 | `GET /public/s/{token}` returns rows already flattened by the server (`flatten`) | It returns the owner's saved mix as it is. The page works out each row's starting on/off and level | The instrument defaults (which sound a part plays with before the owner changes it) are worked out in the UI today. The page runs the owner's own code on the same data, so the two can't drift apart. `flatten` is the same rule, moved to the page |
 | 4 | `/public/s/{token}/audio/{trackKey}` | `/public/s/{token}/audio?track={key}` | A key is `id:{partId}`, and a part id can hold characters that are unsafe in a path |
-| 5 | The payload has `modes`, `defaultMode` and `credits` with a credit text | No modes. Credits are the voice names, with a link to the credits page | The lyrics/solfège switch arrives with Sing All (step 3). No credit text is stored anywhere today |
+| 5 | The payload has `modes`, `defaultMode` and `credits` with a credit text | Each vocal has `mode`. The page works out the switch and its default with the owner's player rule. Credits are the voice names, with a link to the credits page | Step 3 stores `mode` per track, and the owner's player decides from it: the switch shows only with tracks in both modes, and opens on Lyrics. No credit text is stored anywhere today |
 | 6 | The first-share notice is "one-time" | One-time per user, recorded on the server as `users/{uid}.shareNoticeAt` | It is a rights notice, so the record should not live only in one browser |
 | 7 | Not in the HLD | A setting `SHARE_LINKS = off / allowlist / on` | Step 7 is allowlist-only until launch. `off` also stops every existing link at once |
+| 8 | Turning sharing off and on gives the same link back | It makes a new link; the old one stays turned off | Alan, 2026-11-18: turning a link off should end it for whoever had it |
 
 ## Data structure
 
@@ -66,8 +76,8 @@ Accepted by Alan, 2026-11-13.
 │                                                                              │
 │  step 2    title, titleEdited, songCreatedAt, songListed, deletedAt          │
 │                                                                              │
-│  NEW       shareToken    str    made at the first Share, never changed       │
-│            shareEnabled  bool   true = the link works                        │
+│  NEW       shareToken    str    present while the link is on; a new one      │
+│                                 each time sharing is turned on               │
 └───────▲──────────────────────────────────────────────────────────────────────┘
         │ sessionId
 ┌───────┴──────────────────────────────┐      ┌─────────────────────────────────┐
@@ -77,7 +87,7 @@ Accepted by Alan, 2026-11-13.
 │  ownerUid    the Song's owner        │      │       when the owner accepted   │
 │  createdAt                           │      │       the share notice          │
 │                                      │      └─────────────────────────────────┘
-│  written once, never changed         │
+│  deleted when the link is turned off │
 └──────────────────────────────────────┘
 
  Read by the public routes, written by nobody new:
@@ -88,18 +98,17 @@ Accepted by Alan, 2026-11-13.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `sessions/{id}.shareToken` | str or absent | `secrets.token_urlsafe(16)`: 22 characters, 128 random bits. A Song has at most one, for life |
-| `sessions/{id}.shareEnabled` | bool | The only on/off switch |
-| `shares/{token}.sessionId`, `ownerUid`, `createdAt` | | The lookup from a token to its Song. Clients can't read it: `firestore.rules` has no rule for `shares`, so it is denied |
+| `sessions/{id}.shareToken` | str or absent | `secrets.token_urlsafe(16)`: 22 characters, 128 random bits. Present means the link is on: it is the only on/off switch. A token is never used again |
+| `shares/{token}.sessionId`, `ownerUid`, `createdAt` | | The lookup from a token to its Song, while the link is on. Clients can't read it: `firestore.rules` has no rule for `shares`, so it is denied |
 | `users/{uid}.shareNoticeAt` | time or absent | Set once. Clients can't write it: the rules let a user change only `metadata` |
 
 ### Who writes what
 
 | Event | Song document | `shares/{token}` |
 |---|---|---|
-| First Share of a Song | `shareToken`, `shareEnabled = true` | Created, in the same transaction |
-| Share again after turning it off | `shareEnabled = true` | nothing |
-| Turn sharing off | `shareEnabled = false` | nothing |
+| Share, while the link is off | `shareToken` = a new token | Created, in the same transaction |
+| Share, while the link is on | nothing: the same link is returned | nothing |
+| Turn sharing off | `shareToken` removed | Deleted, in the same transaction |
 | Delete the Song (step 2) | `deletedAt`, as in step 2 | nothing: a deleted Song's link answers "turned off" |
 | Replace the score, a new take, a mix change | as in step 2 | nothing: the next page load shows it |
 | A viewer opens the page or plays | **nothing, not even `lastActiveAt`** | nothing |
@@ -129,20 +138,22 @@ def share_on(song, user, body):                    # POST, body {"notice_accepte
         if not body.notice_accepted: return 409 share_notice_required
         user.shareNoticeAt = now
     in one transaction:
-        if not song.shareToken:
+        if not song.shareToken:                    # off: a new link, never an old one
             song.shareToken = secrets.token_urlsafe(16)
             shares[song.shareToken] = {sessionId, ownerUid, createdAt: now}
-        song.shareEnabled = True
     return {"enabled": true, "url": f"{settings.share_base_url}/s/{song.shareToken}"}
 
 def share_off(song):                               # DELETE; fine to call twice
-    song.shareEnabled = False
+    in one transaction:
+        if song.shareToken:
+            delete shares[song.shareToken]
+            remove song.shareToken                 # the old link now answers share_off for good
     return {"enabled": false, "url": null}
 ```
 
 - `share_base_url` is a new setting, `SHARE_BASE_URL`, default `https://sightsinger.app`.
 - Workspace: `"song": {…, "share": {"available": true, "enabled": true, "url": "https://sightsinger.app/s/…"}}`. `available` is `can_share(user)`. `url` is null while the link is off.
-- `GET /songs` rows: `"shared": true` when `shareEnabled`. `list_songs` adds `shareEnabled` to its field projection; no extra read.
+- `GET /songs` rows: `"shared": true` when the Song has a `shareToken`. `list_songs` adds `shareToken` to its field projection; no extra read. The row carries only `shared`, never the token.
 - The server doesn't check that the Song has a sung track. The UI only offers Share when it has one, and a link with nothing sung is a normal state anyway (after Replace).
 
 ### Public, no sign-in
@@ -163,7 +174,7 @@ def resolve_share(token, request, kind):           # the first lines of all four
     share = shares[token]
     if share is None: raise 404 share_off
     song = sessions.read_shared(share.sessionId)   # a field mask without the chat history; never writes lastActiveAt
-    if song is None or song.deletedAt or not song.shareEnabled \
+    if song is None or song.deletedAt \
        or song.shareToken != token or song.userId != share.ownerUid:
         raise 404 share_off
     return share, song
@@ -185,7 +196,8 @@ An unknown token, a link that was turned off and a deleted Song all give the sam
                         "performance_midi": {"version": 1, "instrumental_parts": [], "has_instrumental_parts": true,
                                              "original_midi_available": true, "expanded_midi_available": true}}},
   "player": {"repeats": false,
-             "vocals": [{"key": "id:P1", "label": "Part One", "verse_number": 1, "duration_seconds": 93.4,
+             "vocals": [{"key": "id:P1", "mode": "lyrics", "label": "Part One", "verse_number": 1,
+                         "duration_seconds": 93.4,
                          "voice_name": "Voice A", "muted": false, "solo": false, "volume": 1.0,
                          "audio_url": "/public/s/…/audio?track=id%3AP1"}],
              "instruments": [{"raw_part_id": "P5", "muted": false, "solo": false, "volume": 0.65,
@@ -210,6 +222,7 @@ def share_page(token, request):
 - **A whitelist, not a copy.** `score.summary` holds exactly the five fields shown, copied from the Song's score summary. Vocals hold exactly the fields shown: no `source_job_id`, no `take_signature`, no `part_id`. Nothing in the payload holds a user id, a session id, a job id or a storage path. `song_id` is filled only when `is_owner`.
 - `midi_url` is null when the score has no instrument part or no MIDI for the player's repeat order.
 - `credits.voices` is the distinct `voice_name` of the usable vocals, in track order.
+- `mode` is `lyrics` or `solfege`, as `songs.vocal_response` gives it; a track from before Sing All is `lyrics`.
 
 #### `GET /public/s/{token}/audio?track={key}`
 
@@ -225,7 +238,7 @@ def share_audio(token, track, request):
     return _stream_storage_audio(request, settings, path, download=False)    # byte ranges work as today
 ```
 
-In local mode (no storage) the file is read from the session's folder, as the owner's audio route does. The route never sends `Content-Disposition: attachment` and ignores `download`.
+A Sing All take is an ordinary synthesis job of the Song, so its file is in its own job folder and passes the same check. In local mode (no storage) the file is read from the session's folder, as the owner's audio route does. The route never sends `Content-Disposition: attachment` and ignores `download`.
 
 #### `GET /public/s/{token}/score` and `/midi`
 
@@ -260,14 +273,14 @@ The public routes keep the App Check gate that every route has (it needs no sign
 
 ### Parent
 
-Branch: `feature/sing-all`, after the Songs backend task (C1) is merged into it. PR into it, never main.
+Branch: `feature/share`. PR into it, never main.
 Design: HLD §14, on branch `docs/sing-all-process-hld`. Where this spec and the HLD differ, this spec wins.
 
 ### Rule
 
 A share link is a second, read-only way into a Song. It adds no copy of anything: the public routes read the Song's own documents and files at each request, so the page always shows what the owner has now.
 
-A viewer leaves no trace on the Song. The link itself is the permission: whoever has it can listen, and the owner can end that at any time.
+A viewer leaves no trace on the Song. The link itself is the permission: whoever has it can listen, and the owner can end that at any time. A link that was turned off never works again.
 
 ### Change
 
@@ -278,14 +291,14 @@ A viewer leaves no trace on the Song. The link itself is the permission: whoever
 #### 2. Session stores, `src/backend/session.py`
 
 Both stores (in memory and Firestore) get the same behaviour.
-- `share_on` and `share_off`, as the pseudocode. The Firestore `shares/{token}` document is created in the same transaction that sets `shareToken`.
+- `share_on` and `share_off`, as the pseudocode. The Firestore `shares/{token}` document is created in the same transaction that sets `shareToken`, and deleted in the same transaction that removes it.
 - `get_share(token)`.
 - `read_shared(session_id)`: the Song's data without the chat history, and with no write. Today `_read_owned` sets `lastActiveAt` on every read. Give that read path a way to skip the write, and use it for everything the public routes call, including the score file and the MIDI.
-- `list_songs` adds `shareEnabled` to its projection.
+- `list_songs` adds `shareToken` to its projection.
 
 #### 3. The notice, on the user document
 
-`shareNoticeAt` is read and set where the backend already reads and writes `users/{uid}`. Reuse that code; don't add a second user store.
+Read `shareNoticeAt` the way the Sing All endpoints in `main.py` read `users/{uid}` (one document read). Set it with a merge write of that one field. Don't change the billing modules (`billing_*.py`), which also write this document.
 
 #### 4. Endpoints, `src/backend/main.py`
 
@@ -308,11 +321,12 @@ Backend only: `src/backend/`, its tests, and the messages file. No UI change, no
 
 Each new test fails on the parent commit.
 - **Turn on:** the first `POST` without `notice_accepted` answers 409 `share_notice_required` and creates nothing. With it, it sets `shareNoticeAt`, creates the token and the `shares` document, and returns the link. A later Song of the same user needs no `notice_accepted`.
-- **Same link:** turning a link off and on returns the same URL. Two Songs get different tokens.
-- **Turn off:** after `DELETE`, all four public routes answer 404 `share_off`.
+- **Same link while on:** a second `POST` while the link is on returns the same URL and writes nothing. Two Songs get different tokens.
+- **Turn off:** after `DELETE`, all four public routes answer 404 `share_off`, the Song has no `shareToken`, and `shares/{token}` is gone. A second `DELETE` answers the same.
+- **New link:** turning a link off and on returns a different URL. The new one works. The old one answers 404 `share_off` on all four routes, and keeps doing so.
 - **One answer:** an unknown token, a turned-off link, a deleted Song and `SHARE_LINKS=off` give the same status and body.
 - **Allowlist:** with `SHARE_LINKS=allowlist`, a user who is not on the list gets 403 `share_not_available` and `share.available = false`. A link made by a listed user opens for a signed-out viewer.
-- **Page data:** it returns the title, the whitelisted summary fields, the usable tracks with their saved mix, the instrument choices, the bus and the repeat order. A track whose part was edited since its take is absent. After a Replace the same link returns the new score and no vocals.
+- **Page data:** it returns the title, the whitelisted summary fields, the usable tracks with their saved mix and `mode`, the instrument choices, the bus and the repeat order. A track whose part was edited since its take is absent. After a Replace the same link returns the new score and no vocals. A Song with a lyrics take and a solfège take of one part returns both, each with its `mode`.
 - **Nothing leaks:** the page data's JSON text contains no user id, session id, job id or storage path of the Song. A signed-in viewer who is not the owner gets `is_owner: false` and `song_id: null`. The owner gets `true` and the id. A request with a broken sign-in token is answered as signed-out.
 - **Audio:** the route returns the take's bytes and honours a byte range. An unknown `track`, a stale track, and a job whose `outputPath` is outside the Song's own folder answer 404. No response has an attachment header, with or without `download=1`.
 - **Score and MIDI:** the public routes return the same bytes as the owner's routes.
@@ -328,21 +342,17 @@ P=/Users/alanchan/antigravity/ai-singer-diffsinger/.venv310/bin/python
 FIRESTORE_EMULATOR_AUTOSTART=0 $P -m pytest tests/test_backend_api.py tests/test_job_store_progress.py tests/test_job_dispatch.py tests/test_credits.py tests/test_credit_retry.py tests/test_mcp_progress_firestore.py tests/test_mcp_server.py tests/test_mcp_end_to_end.py tests/test_premium_synthesis_worker.py tests/test_synthesis_pricing.py tests/test_audio_mix.py -q -p no:cacheprovider
 ```
 
-Add your new test files and the Songs test files to the same command. Measure the baseline on the parent commit first. Its known failures are not caused by this work; do not fix them, and the same ones must remain with no new ones. `git diff --check` is clean.
+Add your new test files, `tests/test_songs_backend.py` and `tests/test_sing_all_*.py` to the same command. With those added, drop `FIRESTORE_EMULATOR_AUTOSTART=0` from the command: the Songs, Sing All and share tests need the Firestore emulator, and the conftest fixture then starts it. Measure the baseline on the parent commit first. On `feature/sing-all-core` it was 12 known failures, all in `tests/test_backend_api.py`. Known failures are not caused by this work; do not fix them, and the same ones must remain with no new ones. `git diff --check` is clean.
 
 ### Out of scope
 
-The UI (S2, S3). Free links stopping after 30 days (step 8). The lyrics/solfège switch and `mode` (step 3). A "make a new link" action. Counting views. Any change to `firestore.rules` or `storage.rules`. A limit shared between backend instances.
+The UI (S2, S3). Free links stopping after 30 days (step 8). A "new link" action that keeps sharing on (turning it off and on does that). Counting views. Any change to `firestore.rules` or `storage.rules`. A limit shared between backend instances. The billing modules.
 
 ---
 
-## S2. [Codex] Share, UI: move the score player out of `MainApp.tsx`, with no change in behaviour
+## S2. [Claude] Share, UI: move the score player out of `MainApp.tsx`, with no change in behaviour
 
-Starts after the Songs UI task (C2) is merged into `feature/sing-all`. It doesn't need S1.
-
-### Parent
-
-Branch: `feature/sing-all`. PR into it, never main.
+Built by Claude in a session, on `feature/share`. It doesn't need S1.
 
 ### Rule
 
@@ -357,6 +367,7 @@ moved to ui/src/player/ (new files, exported):
                      instrumentalTrackKey, instrumentalTrackForMidiTrack, dbToGain,
                      decodeVocalAudio, hasAudibleScorePlayerMix,
                      and the function that makes the instrument rows from performance_midi
+    the mode rule:   VocalMode, and which tracks a mode shows (the Lyrics / Solfège rule of step 3)
 stays in MainApp.tsx:
     everything about chat, jobs, takes arriving, link refresh, the instrument picker, export mix, feedback, and the page's own state
 ```
@@ -377,10 +388,10 @@ A function is moved as it is: same name, same body, same props. If a piece can't
 
 ```
 cd ui && npm run build
-cd ui && npx playwright test e2e/specs/core-singing-regression.spec.ts e2e/specs/score-player-takes.spec.ts e2e/specs/score-player-stale-takes.spec.ts e2e/specs/score-player-repeats.spec.ts e2e/specs/demo-songs.spec.ts e2e/specs/progress-poll-recovery.spec.ts e2e/specs/synthesis-stream-recovery.spec.ts
+cd ui && node e2e/run.mjs e2e/specs/core-singing-regression.spec.ts e2e/specs/score-player-takes.spec.ts e2e/specs/score-player-stale-takes.spec.ts e2e/specs/score-player-repeats.spec.ts e2e/specs/score-player-instrument-rows.spec.ts e2e/specs/score-playback-position.spec.ts e2e/specs/demo-songs.spec.ts e2e/specs/progress-poll-recovery.spec.ts e2e/specs/synthesis-stream-recovery.spec.ts e2e/specs/songs.spec.ts e2e/specs/sing-all.spec.ts e2e/specs/stop-work.spec.ts
 ```
 
-Add the Songs UI specs from C2. Measure on the parent commit first.
+Measure on the parent commit first.
 
 ### Out of scope
 
@@ -388,13 +399,9 @@ The share page. Any new prop, option or "read-only" switch on the moved pieces: 
 
 ---
 
-## S3. [Codex] Share, UI: the Share button, the notice, My songs, and the public page
+## S3. [Claude] Share, UI: the Share button, the notice, My songs, and the public page
 
-Starts after S1 and S2 are merged into `feature/sing-all`.
-
-### Parent
-
-Branch: `feature/sing-all`. PR into it, never main.
+Built by Claude in a session, on `feature/share`, after S1 is merged into it and S2 is done.
 
 ### Rule
 
@@ -411,7 +418,7 @@ def on_share_click():
         show the notice; on "Share": r = POST /songs/{id}/share {"notice_accepted": true}; on Cancel: return
     open the share box with r.url
 
-def on_turn_off():                                 # asks first: "Anyone with the link will see 'This link was turned off'."
+def on_turn_off():                                 # asks first: "Anyone with the link will see 'This link was turned off'. Sharing again makes a new link."
     DELETE /songs/{id}/share; close the box
 
 # The public page, /s/{token}
@@ -420,6 +427,8 @@ def open_share_page(token):
         404 -> "This link was turned off"; 429 -> "Too many requests. Try again in a minute."
     score   = GET d.score.url                      # rendered by the same renderer as the app
     rows    = start_rows(d.player, d.score.summary.performance_midi)
+    shown   = the vocal rows of the mode on screen, by the owner's player rule: with tracks in both
+              modes a Lyrics / Solfège switch shows one mode at a time and opens on Lyrics
     takes   = each vocal's audio_url, fetched and decoded as the app does, with the App Check header
     midi    = GET d.player.midi_url, only if at least one instrument row exists
     the soundfont loads on the first Play, only if an instrument row is on; its progress is shown
@@ -448,12 +457,13 @@ def start_rows(player, performance_midi):
 | Solo | The soloed rows start on, the rest off; the viewer can change that |
 | Instrument choice | The MIDI plays with the owner's instrument; no selector |
 | Repeat order | The order of the owner's takes; no switch |
+| Takes in both modes | The Lyrics / Solfège switch, opening on Lyrics; the viewer can switch |
 
 | The page has | The page doesn't have |
 |---|---|
 | The title; a Sign in button (to `/app`) | Chat |
 | The score preview with the moving cursor | The instrument section |
-| Play, pause, seek, master volume | Faders, solo buttons, the repeat switch |
+| Play, pause, seek, master volume; the Lyrics / Solfège switch | Faders, solo buttons, the repeat switch |
 | An on/off switch per row | Any download: no track download, no export mix |
 | The voice names, linking to `/credits-and-ai-voices` | Any editing |
 | A Share button that copies the page's own link | |
@@ -485,7 +495,8 @@ Each new Playwright test fails on the parent commit. The tests run the backend w
 - **The page, signed out:** opening the link in a fresh browser context shows the title, the score and one row per sung part, and Play plays. No request goes to `/sessions` or `/songs`.
 - **The owner's mix:** with one part muted by the owner, that row starts off and the viewer can turn it on. With one part soloed, only that row starts on. After a reload the rows are back at the owner's mix.
 - **Live:** after the owner mutes another part, a reload of the share page shows it off. After a Replace, the same link shows the new score and "No sung parts yet".
-- **Turned off:** after Turn off, the link shows "This link was turned off", and the row in My songs loses its "Shared" mark. Sharing again gives the same link.
+- **Turned off:** after Turn off, the link shows "This link was turned off", and the row in My songs loses its "Shared" mark. Sharing again gives a new link that works, and the old one still shows "This link was turned off".
+- **Lyrics and solfège:** a Song with takes in both modes opens the page on its lyrics rows, and the switch shows the solfège rows. A Song with one mode has no switch.
 - **Owner:** the owner, signed in, sees "Open in SightSinger" and it opens the Song. Another signed-in user doesn't see it.
 - **Nothing to download or edit:** the page has no download control, fader, instrument picker or chat.
 - **No soundfont without instruments:** a Song with only sung parts never requests `/soundfonts/`.
@@ -496,14 +507,14 @@ Each new Playwright test fails on the parent commit. The tests run the backend w
 
 ```
 cd ui && npm run build
-cd ui && npx playwright test e2e/specs/<your new spec files> e2e/specs/core-singing-regression.spec.ts e2e/specs/score-player-takes.spec.ts e2e/specs/score-player-stale-takes.spec.ts e2e/specs/score-player-repeats.spec.ts e2e/specs/demo-songs.spec.ts
+cd ui && node e2e/run.mjs e2e/specs/<the new spec files> e2e/specs/core-singing-regression.spec.ts e2e/specs/score-player-takes.spec.ts e2e/specs/score-player-stale-takes.spec.ts e2e/specs/score-player-repeats.spec.ts e2e/specs/demo-songs.spec.ts e2e/specs/songs.spec.ts e2e/specs/sing-all.spec.ts
 ```
 
-Add the Songs UI specs from C2. Measure on the parent commit first; known failures must stay the same with no new ones.
+Measure on the parent commit first; known failures must stay the same with no new ones.
 
 ### Out of scope
 
-The lyrics/solfège switch (step 3). Link expiry and any "expires on" text (step 8). A view counter. Social preview images. Embedding the player in other sites. Any backend change.
+Swapping the score preview's syllables for solfège (step 3 left that out too). Link expiry and any "expires on" text (step 8). A view counter. Social preview images. Embedding the player in other sites. Any backend change.
 
 ---
 
@@ -511,17 +522,18 @@ The lyrics/solfège switch (step 3). Link expiry and any "expires on" text (step
 
 | Step | Adds to sharing | Data it needs | There already? |
 |---|---|---|---|
-| 3, Sing All | The lyrics/solfège switch on the page | `mode` on each vocal, and the score version of each mode | No. Step 3 adds both for the owner's player; the public payload then gains `modes` and the default one |
+| 3, Sing All | The lyrics/solfège switch on the page | `mode` on each vocal | Yes, built. This step's payload carries it (difference 5). The score preview shows the same score in both modes, as the owner's does |
 | 8, expiry | A free user's link stops 30 days after the owner's last change | The time of the owner's last change, and the owner's plan | Nearly. `lastActiveAt` is the owner's last visit or change, which is kinder than "last change"; S1 keeps viewers from moving it. The plan is on `users/{uid}`. A strict "last change" would be one new field, added at step 8 |
 | 9, launch | Everyone can share | `SHARE_LINKS=on` | Yes |
 
 ## Notes for Alan
 
-- **Turning a link off and on gives the same link back**, as the HLD says. Anyone who kept it can listen again. A "make a new link" action would be a small addition; it's not in this step.
+- **Turning a link off ends it for good** (Alan, 2026-11-18). Sharing again makes a new link, so whoever kept the old one can't listen again. An owner who wants to change the link while keeping sharing on turns it off and on.
 - **"No download" is a rule of the page, not of the network.** The page has no download control, but a browser has to receive the audio to play it, so a determined person can save it. That is true of any web player.
 - **The limits count per backend instance.** With several instances running, the real ceiling is that many times higher. A hard limit needs Cloud Armor or a shared counter, and can wait until there is traffic to protect.
 - **`_client_ip` takes the first address in `X-Forwarded-For`.** A caller can put anything there, so the limit can be dodged by a script that knows this. Which entry Cloud Run itself adds should be checked on prod before the limit is relied on. S1 uses the existing helper as it is.
 - **Songs sung before step 2 ships have no player record**, so their link would show the score with no audio until a part is sung again.
-- **Client rules come first.** Today a browser can write its own job records and session files. The Songs spec's C3 closes that, and it should be deployed before any share link exists.
+- **Client rules come first, and are still open on 2026-11-18.** Today a browser can write its own job records and session files: `firestore.rules` and `storage.rules` are unchanged since Songs. The Songs spec's C3 closes that, and it should be deployed before any share link exists. It is not a Codex task, and who makes it is Alan's call.
 - **Still to test on a real phone before launch**, as the HLD says: the 142 MB soundfont's download time and memory.
-- **Deploy order:** backend (S1) with `SHARE_LINKS=allowlist`, then the UI with `firebase.json` (S3). No Firestore index or data migration is needed.
+- **Deploy order:** backend (S1) with `SHARE_LINKS=allowlist`, then the UI with `firebase.json` (S3). No Firestore index or data migration is needed. The public routes need no hosting rewrite: the app calls the API at its own address (`VITE_API_BASE`), not through `firebase.json`.
+- **`feature/share` holds Sing All.** It is cut from `claude/sing-all-ui`, so it merges after Sing All.
