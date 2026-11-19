@@ -23,7 +23,7 @@ The repository is public. Tests, fixtures and commits use made-up titles, part n
 | 2 | Each mix file is an item at 1 credit | Each mix file is an item at 1 credit, as the HLD says, but all of them share **one reservation**, `{jobId}-mixes`. The package run settles it for the files it made and refunds the rest | Mix files are made together by one run. One reservation per file would be up to 2 × (parts + 1) reservations made and settled in one go, with nothing gained |
 | 3 | `choices.mixes` exists; what it holds is not said | `choices.mixes`: `full` (full mixes only), `all` (full and part-dominant, the default) or `none`. Customise shows it as a choice; the quote prices the files | The user decides what they pay for. `all` is what the HLD's zip lists |
 | 4 | Not covered: the package run fails | The job's status still follows the takes (completed, partial, failed). The mixes reservation is refunded, the card says "The mixes couldn't be made. Your parts are in the player." and there is no zip | The takes are the user's main result and are already in the player. A failed zip must not turn a good job into a failed one |
-| 5 | Sing All takes keep a WAV beside the MP3 | Yes. A Sing All take child is asked for both; the job's item records `wavPath`. Chat takes are unchanged (MP3 only) | As the HLD says: the WAV goes in the zip and feeds the mixes without the MP3 encoder's start delay |
+| 5 | Sing All takes keep a WAV beside the MP3 | Already true for every take: the synthesis save step stores a `.source.wav` and records `losslessOutputPath` on the job (chat and Sing All, inline and the premium worker; the export mix reads it today). No task needed | Found 2026-11-19 while writing M3, which is dropped. The package run reads `losslessOutputPath`, else `outputPath` when the output is itself a WAV, as `main.py`'s export mix does |
 | 6 | Not covered: Stop during packaging | Stop during `packaging` is too late: the run finishes, as a take past its stop point does | The takes are all made; the run takes about a minute. Refunding half-made mixes adds a path with little use |
 | 7 | "Instruments: the score's default instruments" | The sounds the score summary holds when packaging starts: the score's own, plus those the quote chose and "Sing it" saved (step 3, difference 6). A part with no sound chosen is left out, as the player keeps it muted | That is what the player plays by default, so the zip and the first listen agree |
 | 8 | "A deleted Sing All job removes its zip and mixes" | Nothing is removed. Deleting a Song stays a logical delete, as it is today (`deletedAt` set, the Song taken off the list); its jobs, takes, zips and mixes stay where they are | Alan, 2026-11-19: no records are deleted |
@@ -183,14 +183,13 @@ Until M6 merges, the mixes are made at no charge and the quote has no `mixes` li
 |---|---|---|
 | **M1. The mixing code, the trial command, the image and the sync check** | Codex | — |
 | **M2. The listening trial** | Claude runs it, Alan listens | M1 |
-| **M3. Sing All takes keep a WAV** | Codex | — |
-| **M4. The package run** | Codex | M1, M3 |
+| **M4. The package run** | Codex | M1 |
 | **M5. Backend: the mixes choice, the packaging stage, Progress, the download, the opening balance** | Codex | M4 |
 | **M6. Credits for the mixes** | Claude | M5 |
 | **M7. UI** | Claude | the contract above (mocked); M6 for the real-backend run |
 | **M8. Deployment** | Alan | M6, M7 |
 
-Codex builds the backend; Claude builds the UI and the credit code (billing is off limits for Codex, protocol §8). The numbers M2 settles go into M1's constants before M5 ships. M1 and M3 start at once, in parallel.
+Codex builds the backend; Claude builds the UI and the credit code (billing is off limits for Codex, protocol §8). The numbers M2 settles go into M1's constants before M5 ships. M3 ("Sing All takes keep a WAV") was dropped: every take already keeps one (difference 5). The task numbers are kept.
 
 Every Codex task:
 - **Parent:** branch `feature/sing-all-mixes`, cut from `feature/share` (it holds Sing All core, its UI and Share). PR into it, never main. Design: HLD §6, §9, §9.1, §16 row 4, on branch `docs/sing-all-process-hld`; where this spec and the HLD differ, this spec wins.
@@ -263,27 +262,6 @@ First song: the in-app demo **Amazing Grace** (Alan, 2026-11-19), the score a us
 
 Claude runs it through `scripts/sing_all_mix_trial.sh` (Docker, nothing installed on the Mac) and sends Alan the mixes and the stats; Alan listens and sets `FULL_INSTRUMENTS_DB` and `PART_DOMINANT_INSTRUMENTS_DB`, with the command's overrides for a second try if needed. Later songs (one with a loud intro, one a cappella) only if Amazing Grace leaves a question open.
 
-## M3. [Codex] Sing All takes keep a WAV
-
-### Rule
-
-A take started by Sing All writes its WAV next to the MP3 it writes today. Chat takes don't change.
-
-### Change
-
-- The take child's request carries `keep_wav: true` (set where `sing_all_runner` starts a take, and in the render job's per-take call).
-- The synthesis output step keeps the WAV it encodes the MP3 from, stores it beside the MP3 (same folder, `.wav`), and records `wavPath` on the child job.
-- `owned_job_path` already limits a path to the take's own folder; the WAV is in that folder.
-
-### Done when
-
-- A Sing All take (inline transport and render job) has both files and the job has `wavPath`; a chat take has only its MP3 and no `wavPath`.
-- With `BACKEND_AUDIO_FORMAT=wav` (tests), the WAV is the output itself and `wavPath` equals `outputPath`.
-
-### Out of scope
-
-The mixes, the zip. Changing the player's audio.
-
 ## M4. [Codex] The package run
 
 ### Rule
@@ -293,7 +271,7 @@ Given a Sing All job whose takes have ended, make its mix files and its zip, sto
 ### Change
 
 1. `src/backend/sing_all_package.py`: `run_package(job_id)`:
-   - reads the job, its done take items (their `wavPath`), the Song's score summary, MIDI and voices;
+   - reads the job, its done take items (each child job's `losslessOutputPath`, else its `outputPath` when that is a WAV), the Song's score summary, MIDI and voices;
    - writes progress on the job in the contract's shape: `package.state` `"mixing"` then `"zipping"`, and `package.mixes.done` after each mix file;
    - makes the mixes by `plan_mixes` and `balanced_mix`, encodes them to MP3;
    - builds the zip as above and uploads it, and the mixes beside it under `singAll/{uid}/{jobId}/`;
