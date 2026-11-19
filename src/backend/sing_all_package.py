@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import tempfile
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +27,9 @@ from src.backend.storage_client import download_bytes, upload_file
 
 
 def _safe_name(value: Any, *, fallback: str = "Song") -> str:
-    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "-", str(value or ""))
+    name = "".join("-" if unicodedata.category(char) == "Cc" else char
+                   for char in str(value or ""))
+    name = re.sub(r'[\\/:*?"<>|]', "-", name)
     return name.strip(" .")[:80].strip(" .") or fallback
 
 

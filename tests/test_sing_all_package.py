@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import io
 import zipfile
 from types import SimpleNamespace
 
@@ -208,6 +209,7 @@ def test_all_assignable_instruments_make_full_mix_only(monkeypatch, tmp_path):
 
 def test_title_is_sanitized_and_bounded():
     assert package._safe_name("/\\:*?\"<>|\x00") == "-" * 10
+    assert package._safe_name("one\x85two") == "one-two"
     assert package._safe_name("  ") == "Song"
     assert len(package._safe_name("x" * 100)) == 80
 
@@ -262,3 +264,41 @@ def test_start_package_inline_and_cloud_job(monkeypatch):
     assert request["url"].endswith("/projects/example/locations/test/jobs/package:run")
     assert request["json"] == {"overrides": {"containerOverrides": [{"env": [
         {"name": "SING_ALL_JOB_ID", "value": "parent"}]}]}}
+
+
+def test_storage_uploads_mixes_beside_zip_and_resamples(monkeypatch, tmp_path):
+    job, orchestrator, writes, _, _ = _fixture(monkeypatch, tmp_path)
+    second = tmp_path / "sessions/song/second.wav"
+    sf.write(second, np.full(48000, 0.08, dtype=np.float32), 48000)
+    expanded = tmp_path / "sessions/song/expanded.mid"
+    expanded.write_bytes(b"MThd-expanded")
+    job["choices"]["repeats"] = True
+    async def snapshot(*_):
+        return {"score_summary": {"performance_midi": {"instrumental_parts": [
+            {"eligible": True, "part_index": 0, "midi_program": 1}]}},
+                "files": {"instrumental_midi_expanded_path": str(expanded)}}
+    orchestrator._sessions.get_snapshot = snapshot
+    orchestrator._settings.backend_use_storage = True
+    kinds = []
+    async def restore(**kwargs):
+        kinds.append(kwargs["kind"])
+        return True
+    orchestrator.restore_instrumental_midi = restore
+    async def fake_take(child, job, orchestrator, work_dir):
+        path = tmp_path / "sessions/song" / f"{child['jobId']}.wav"
+        return path, path.read_bytes()
+    monkeypatch.setattr(package, "_take_wav", fake_take)
+    uploaded = {}
+    def upload(_, source, destination, _type):
+        uploaded[destination] = source.read_bytes()
+    monkeypatch.setattr(package, "upload_file", upload)
+    asyncio.run(package.run_package("parent", orchestrator))
+    assert writes[-1]["state"] == "done"
+    assert writes[-1]["stats"]["rate"] == 44100
+    assert kinds == ["expanded"]
+    zip_path = "singAll/owner/parent/Song-Title - Sing All.zip"
+    assert writes[-1]["zipPath"] == zip_path
+    assert zip_path in uploaded
+    assert sum(path.startswith("singAll/owner/parent/mixes/") for path in uploaded) == 3
+    with zipfile.ZipFile(io.BytesIO(uploaded[zip_path])) as archive:
+        assert archive.read("Song-Title - Sing All/4 Instrumentals/Song-Title.mid") == b"MThd-expanded"
