@@ -1455,6 +1455,30 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail={"code": "job_not_found"})
         return sing_all_progress(job)
 
+    @app.get("/sing-all/jobs/{job_id}/download")
+    async def download_sing_all_package(job_id: str, request: Request) -> Dict[str, Any]:
+        user_id = await _get_user_id_or_401(request)
+        job = await asyncio.to_thread(load_sing_all_job, job_id)
+        if not job or job.get("uid") != user_id:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"})
+        try:
+            await request.app.state.sessions.get_song_row(job["sessionId"], user_id)
+        except (KeyError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
+        package = job.get("package") or {}
+        settings = request.app.state.settings
+        path = package.get("zipPath")
+        prefix = f"singAll/{user_id}/{job_id}/"
+        if (package.get("state") != "done" or not settings.backend_use_storage
+                or not isinstance(path, str) or not path.startswith(prefix)
+                or not path.endswith(".zip")):
+            raise HTTPException(status_code=409, detail={"code": "zip_unavailable"})
+        from src.backend.storage_client import signed_download_url
+        file_name = path.rsplit("/", 1)[-1]
+        url, expires = await asyncio.to_thread(
+            signed_download_url, settings.storage_bucket, path, file_name)
+        return {"url": url, "fileName": file_name, "expiresAt": expires.isoformat()}
+
     @app.post("/sing-all/quote")
     async def get_sing_all_quote(payload: SingAllQuoteRequest, request: Request) -> Dict[str, Any]:
         """Quote the caller's Song without changing its score or reserving credits."""

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import os
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.auth.credentials import AnonymousCredentials
@@ -54,6 +56,40 @@ def get_bucket(bucket_name: str) -> storage.Bucket:
         raise ValueError("Storage bucket name is required.")
     client = get_storage_client()
     return client.bucket(bucket_name)
+
+
+def signed_download_url(bucket_name: str, object_path: str,
+                        file_name: str) -> tuple[str, datetime]:
+    """Issue a 15-minute GET URL, using IAM signBlob outside the emulator."""
+    expires = datetime.now(timezone.utc) + timedelta(minutes=15)
+    emulator = _storage_emulator_host()
+    if emulator:
+        return (f"{emulator.rstrip('/')}/v0/b/{quote(bucket_name, safe='')}/o/"
+                f"{quote(object_path, safe='')}?alt=media", expires)
+    import google.auth
+    from google.auth.transport.requests import Request
+    import requests
+
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    credentials.refresh(Request())
+    email = getattr(credentials, "service_account_email", None)
+    if not email or email == "default":
+        response = requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "service-accounts/default/email",
+            headers={"Metadata-Flavor": "Google"}, timeout=3)
+        response.raise_for_status()
+        email = response.text.strip()
+    ascii_name = file_name.encode("ascii", "ignore").decode("ascii").strip() or "Sing All.zip"
+    ascii_name = ascii_name.replace("\\", "-").replace('"', "-")
+    disposition = (f'attachment; filename="{ascii_name}"; '
+                   f"filename*=UTF-8''{quote(file_name, safe='')}")
+    url = get_bucket(bucket_name).blob(object_path).generate_signed_url(
+        version="v4", expiration=expires, method="GET",
+        response_disposition=disposition,
+        service_account_email=email, access_token=credentials.token)
+    return url, expires
 
 
 def upload_file(
