@@ -2,19 +2,76 @@
 
 import asyncio
 from copy import deepcopy
+import io
+import json
+import socket
+import subprocess
+import time
+import urllib.request
+import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.backend import main, songs
-from src.backend.sing_all import decide, progress
+from src.backend import main, sing_all_package, songs, storage_client
+from src.backend.sing_all import (
+    decide, progress, quoted_instruments_sound, summary_with_judged_instruments,
+)
+from tests.conftest import _stop_emulator
 from tests.test_sing_all_reconcile import _job
 from tests.test_sing_all_progress import _job as progress_job
 from tests.test_sing_all_quote import _route as quote_route, _row
 
 
 NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def storage_emulator(monkeypatch, tmp_path):
+    """Start only the storage emulator on its configured port and stop our process."""
+    host = "127.0.0.1"
+    port = 9199
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex((host, port)) == 0:
+            pytest.fail("Storage emulator port is already in use.", pytrace=False)
+    config = tmp_path / "firebase.json"
+    config.write_text(json.dumps({
+        "storage": {"rules": str(Path(__file__).resolve().parents[1] / "storage.rules")},
+        "emulators": {"storage": {"host": host, "port": port},
+                      "hub": {"host": host, "port": 4401},
+                      "ui": {"enabled": False}, "singleProjectMode": True},
+    }))
+    log = (tmp_path / "storage-emulator.log").open("w+")
+    process = subprocess.Popen(
+        ["npx", "firebase", "emulators:start", "--only", "storage",
+         "--project", "demo-project", "--config", str(config)],
+        cwd=Path(__file__).resolve().parents[1], stdout=log,
+        stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            with socket.socket() as probe:
+                probe.settimeout(0.5)
+                if probe.connect_ex((host, port)) == 0:
+                    break
+            if process.poll() is not None:
+                break
+            time.sleep(0.25)
+        else:
+            pytest.fail("Storage emulator did not start.", pytrace=False)
+        if process.poll() is not None:
+            pytest.fail("Storage emulator exited during startup.", pytrace=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+        monkeypatch.setenv("STORAGE_EMULATOR_HOST", f"http://{host}:{port}")
+        monkeypatch.setattr(storage_client, "_storage_client", None)
+        yield f"http://{host}:{port}"
+    finally:
+        _stop_emulator(process)
+        log.close()
+        storage_client._storage_client = None
 
 
 @pytest.mark.parametrize("mixes", ["invalid", 1, [], None])
@@ -25,6 +82,64 @@ def test_quote_rejects_invalid_mix_choice(monkeypatch, mixes):
         asyncio.run(endpoint(main.SingAllQuoteRequest(
             songId="song-a", choices={"mixes": mixes}), request))
     assert (error.value.status_code, error.value.detail) == (422, {"code": "invalid_mixes"})
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("lyrics", {"all": 5, "full": 1}),
+    ("both", {"all": 10, "full": 2}),
+])
+def test_quote_counts_ticked_rows_and_keeps_price(monkeypatch, mode, expected):
+    rows = [{**_row(), "rowId": f"line-{index}", "partId": f"P{index}",
+             "sourcePartId": f"P{index}", "name": f"Line {index}"}
+            for index in range(4)]
+    endpoint, request, snapshot = quote_route(
+        monkeypatch, user={"credits": {"balance": 40}}, rows=rows)
+    snapshot["score_summary"]["performance_midi"] = {"instrumental_parts": [
+        {"eligible": True, "raw_part_id": "piano", "program_source": "score",
+         "playback_preset": {"bank": 0, "program": 0}}]}
+    choices = {"mode": mode, "rows": [{"rowId": row["rowId"], "include": True}
+                                  for row in rows]}
+    result = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices=choices), request))
+    assert result["options"]["mixes"] == "all"
+    assert result["options"]["mixFiles"] == expected
+    assert result["total"] == sum(line["credits"] for line in result["lines"]
+                                  if line["kind"] == "singing")
+    unticked = deepcopy(choices)
+    unticked["rows"][-1]["include"] = False
+    fewer = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices=unticked), request))
+    assert fewer["options"]["mixFiles"] == {
+        "all": expected["all"] - (2 if mode == "both" else 1),
+        "full": expected["full"]}
+    no_mixes = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices={**choices, "mixes": "none"}), request))
+    assert no_mixes["options"]["mixes"] == "none"
+    assert no_mixes["options"]["mixFiles"] == expected
+    assert no_mixes["lines"] == result["lines"]
+    assert (no_mixes["total"], no_mixes["balance"]) == (
+        result["total"], result["balance"])
+
+
+def test_quote_sound_choice_agrees_with_package_track_sound():
+    summary = {"parts": [{"part_id": "P2", "instruments": [{
+        "score_instrument_id": "P2-I1", "instrumental_candidate": True,
+        "is_percussion": False, "playback_preset": None,
+        "eligible_for_instrumental_midi": False}]}],
+        "instrument_program_resolution": {
+            "unresolved_score_instrument_ids": ["P2-I1"],
+            "instrumental_score_instrument_ids": [],
+            "unresolved_reasons": {"P2-I1": "undeclared"}}}
+    sound = {"bank": 0, "kind": "melodic", "program": 0,
+             "evidence": ["keyboard staff"]}
+    amended = summary_with_judged_instruments(
+        summary, {"roles": {"P2": "instrument"}, "sounds": {"P2-I1": sound}})
+    assert quoted_instruments_sound(amended)
+    saved = deepcopy(amended)
+    saved["performance_midi"] = {"instrumental_parts": [{
+        "eligible": True, "raw_part_id": "P2", "program_source": "llm_inferred",
+        "playback_preset": amended["parts"][0]["instruments"][0]["playback_preset"]}]}
+    assert any(value is not None for value in sing_all_package.track_sounds(saved))
 
 
 def test_last_take_enters_packaging_once_and_finishes_from_package():
@@ -122,3 +237,31 @@ def test_download_rejects_local_mode_and_deleted_song(monkeypatch):
     with pytest.raises(main.HTTPException) as error:
         asyncio.run(endpoint("parent-a", request))
     assert (error.value.status_code, error.value.detail) == (404, {"code": "job_not_found"})
+
+
+def test_download_url_serves_zip_from_storage_emulator(monkeypatch, storage_emulator):
+    path = "singAll/owner/parent-a/Example tune - Sing All.zip"
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("Example tune - Sing All/README.txt", "Made-up song\n")
+    storage_client.upload_bytes("demo-bucket", payload.getvalue(), path, "application/zip")
+    job = progress_job(stage="done", status="completed")
+    job.update(uid="owner", package={"state": "done", "zipPath": path})
+    async def auth(_):
+        return "owner"
+    class Sessions:
+        async def get_song_row(self, *_):
+            return {}
+    monkeypatch.setattr(main, "_get_user_id_or_401", auth)
+    monkeypatch.setattr(main, "load_sing_all_job", lambda _: job)
+    endpoint = next(route.endpoint for route in main.app.routes
+                    if getattr(route, "path", None) == "/sing-all/jobs/{job_id}/download")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        sessions=Sessions(), settings=SimpleNamespace(
+            backend_use_storage=True, storage_bucket="demo-bucket"))))
+    result = asyncio.run(endpoint("parent-a", request))
+    assert result["fileName"] == "Example tune - Sing All.zip"
+    assert result["url"].startswith(storage_emulator)
+    assert datetime.fromisoformat(result["expiresAt"]) > datetime.now(timezone.utc)
+    with urllib.request.urlopen(result["url"], timeout=5) as response:
+        assert response.read() == payload.getvalue()

@@ -436,6 +436,28 @@ def summary_with_judged_instruments(
     return amended
 
 
+def quoted_instruments_sound(summary: Mapping[str, Any]) -> bool:
+    """Predict whether M4 will have a sound after Sing it builds performance MIDI."""
+    from src.backend.sing_all_package import track_sounds
+
+    if any(sound is not None for sound in track_sounds(dict(summary))):
+        return True
+    resolution = summary.get("instrument_program_resolution") or {}
+    instrumental_ids = set(resolution.get("instrumental_score_instrument_ids") or [])
+    for part in summary.get("parts") or []:
+        for instrument in part.get("instruments") or []:
+            if instrument.get("score_instrument_id") not in instrumental_ids:
+                continue
+            if not instrument.get("eligible_for_instrumental_midi"):
+                continue
+            if instrument.get("program_source") == "user_assignable":
+                continue
+            preset = instrument.get("playback_preset") or {}
+            if preset.get("program") is not None:
+                return True
+    return False
+
+
 def decide(
     job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
     score_state: Mapping[str, Any],

@@ -69,6 +69,7 @@ from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
+    quoted_instruments_sound,
     quote_notes, singing_language_options, style_changes,
     summary_with_judged_instruments, supported_singing_languages,
 )
@@ -77,7 +78,6 @@ from src.backend.sing_all_judgment import (
 )
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.sing_all_mix import TakeRef, plan_mixes
-from src.backend.sing_all_package import track_sounds
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
     active_job_for_song, apply as apply_sing_all_job, create_job_with_reservations,
@@ -1606,20 +1606,21 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
         has_instrumentals = score_has_instrumental_parts(priced_summary)
-        instruments_sound = any(sound is not None for sound in track_sounds(priced_summary))
+        instruments_sound = quoted_instruments_sound(priced_summary)
         effective_mixes = "full" if mixes == "all" and not instruments_sound else mixes
-        refs = [TakeRef(str(row.get("partId") or row["rowId"]),
-                        str(row.get("name") or row["rowId"]), take_mode)
-                for take_mode in (("lyrics", "solfege") if mode == "both" else (mode,))
-                for row in rows if row["include"]]
-        mix_files = {choice: len(plan_mixes(refs, choice, instruments_sound))
-                     for choice in ("all", "full")}
         charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
         charge_required = (has_instrumentals and await asyncio.to_thread(
             get_instrumental_charge_state, charge_scope) != "paid")
         duration = selected_score_duration(summary, expand_repeats=repeats)
         items = build_items(rows, mode=mode, duration_seconds=duration,
                             instrumental_charge_required=charge_required)
+        row_by_id = {row["rowId"]: row for row in rows}
+        refs = [TakeRef(str(row_by_id[item["rowId"]].get("partId") or item["rowId"]),
+                        str(row_by_id[item["rowId"]].get("name") or item["rowId"]),
+                        item["mode"])
+                for item in items if item["type"] == "take"]
+        mix_files = {choice: len(plan_mixes(refs, choice, instruments_sound))
+                     for choice in ("all", "full")}
         total = sum(int(item["creditsReserved"]) for item in items)
         balance = available_balance_from_user(user_record)
         blocked = ("free_plan" if (user_record.get("billing") or {}).get("activePlanKey") == "free"

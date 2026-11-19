@@ -64,7 +64,7 @@ def signed_download_url(bucket_name: str, object_path: str,
     expires = datetime.now(timezone.utc) + timedelta(minutes=15)
     emulator = _storage_emulator_host()
     if emulator:
-        return (f"{emulator.rstrip('/')}/v0/b/{quote(bucket_name, safe='')}/o/"
+        return (f"{emulator.rstrip('/')}/storage/v1/b/{quote(bucket_name, safe='')}/o/"
                 f"{quote(object_path, safe='')}?alt=media", expires)
     import google.auth
     from google.auth.transport.requests import Request
