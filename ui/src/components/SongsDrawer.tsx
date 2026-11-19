@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { ApiError, deleteSong, listSongs, type SongRow } from "../api";
+import ShareSongModal, { type ShareState } from "../share/ShareSongModal";
 import "./SongsDrawer.css";
 
 interface SongsDrawerProps {
@@ -12,6 +13,9 @@ interface SongsDrawerProps {
   canOpen: boolean;
   onOpen: (songId: string) => void;
   onDeleted: (songId: string) => void;
+  /** Whether this user can share; a row offers Share only then. */
+  shareAvailable: boolean;
+  onShareChange: (songId: string, share: ShareState) => void;
 }
 
 const MINUTE_MS = 60 * 1000;
@@ -48,12 +52,15 @@ export default function SongsDrawer({
   canOpen,
   onOpen,
   onDeleted,
+  shareAvailable,
+  onShareChange,
 }: SongsDrawerProps) {
   const [songs, setSongs] = useState<SongRow[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [rowNotice, setRowNotice] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<SongRow | null>(null);
   const requestRef = useRef(0);
   // The parent re-renders often; the list is loaded once per opening all the same.
   const onCloseRef = useRef(onClose);
@@ -151,6 +158,7 @@ export default function SongsDrawer({
                       {working ? <span className="songs-drawer-working">Working…</span> : null}
                       <span>{lastActivityLabel(song.last_active_at, now)}</span>
                       <span>{sungPartsLabel(song.track_count)}</span>
+                      {song.shared ? <span className="songs-drawer-shared">Shared</span> : null}
                     </span>
                   </div>
                   {confirmingId === song.id ? (
@@ -178,6 +186,11 @@ export default function SongsDrawer({
                           Open
                         </button>
                       )}
+                      {shareAvailable && (song.track_count > 0 || song.shared) ? (
+                        <button type="button" className="btn-secondary-inline" onClick={() => setSharing(song)}>
+                          Share
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="btn-secondary-inline"
@@ -198,6 +211,22 @@ export default function SongsDrawer({
           </ul>
         )}
       </aside>
+      {sharing ? (
+        <div onClick={(event) => event.stopPropagation()}>
+          <ShareSongModal
+            songId={sharing.id}
+            title={sharing.title}
+            url={null}
+            onClose={() => setSharing(null)}
+            onShareChange={(songId, share) => {
+              setSongs((current) =>
+                current?.map((row) => (row.id === songId ? { ...row, shared: share.enabled } : row)) ?? current
+              );
+              onShareChange(songId, share);
+            }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

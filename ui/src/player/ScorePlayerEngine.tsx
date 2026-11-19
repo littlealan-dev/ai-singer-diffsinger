@@ -40,6 +40,8 @@ export type ScorePlayerPlaybackControls = {
   stop: () => void;
   seekTo: (time: number) => void;
   setCurrentTime: (time: number) => void;
+  /** 0 to 1, applied after every track; the share page's volume. */
+  setMasterVolume: (volume: number) => void;
 };
 
 export type ScorePlayerEngineProps = {
@@ -99,6 +101,7 @@ export const ScorePlayerEngineBridge = ({
       stop: () => liveControlsRef.current.stop(),
       seekTo: (time) => liveControlsRef.current.seekTo(time),
       setCurrentTime: (time) => liveControlsRef.current.setCurrentTime(time),
+      setMasterVolume: (volume) => liveControlsRef.current.setMasterVolume(volume),
     };
   }
   useEffect(() => {

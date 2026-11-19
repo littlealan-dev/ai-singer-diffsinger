@@ -10,7 +10,7 @@ import {
   register as registerExtendableMediaRecorderEncoder,
 } from "extendable-media-recorder";
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
-import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil } from "lucide-react";
+import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil, Share2 } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Link, useMatch, useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -93,6 +93,7 @@ import SingAllCard from "./components/SingAllCard";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
+import ShareSongModal, { type ShareState } from "./share/ShareSongModal";
 import { logAnalyticsEvent } from "./firebase";
 import { useCredits } from "./hooks/useCredits";
 import { useBillingState } from "./hooks/useBillingState";
@@ -2062,6 +2063,11 @@ export default function MainApp() {
   // exists once its session has a score, and its id is the session id.
   const routeSongId = useMatch("/app/song/:songId")?.params.songId ?? null;
   const [currentSong, setCurrentSong] = useState<SongInfo | null>(null);
+  // Share: the Song whose share box is open, and whether this user can share (from the last
+  // workspace that said so; My songs offers Share only then).
+  const [shareBoxSong, setShareBoxSong] = useState<{ id: string; title: string; url: string | null } | null>(null);
+  const [shareAvailable, setShareAvailable] = useState(false);
+  const shareLookupSongRef = useRef<string | null>(null);
   // Sing All: the caller's running job, from any Song, and each job a card shows.
   const [activeSingAll, setActiveSingAll] = useState<SingAllProgress | null>(null);
   const [singAllJobs, setSingAllJobs] = useState<Record<string, SingAllProgress>>({});
@@ -2824,6 +2830,35 @@ export default function MainApp() {
     handleScorePlayerPlaybackPositionChange(0);
     setMultiTrackPlaying(false);
   }, [handleScorePlayerPlaybackPositionChange, scorePlayerControls]);
+
+  useEffect(() => {
+    if (currentSong?.share) setShareAvailable(currentSong.share.available);
+  }, [currentSong?.share]);
+
+  // A Song started by an upload has no share state yet. Once it has a sung part, read it
+  // from the workspace, once per Song.
+  const hasSungTrack = multiTrackAudioTracks.length > 0;
+  useEffect(() => {
+    const songId = currentSong?.id;
+    if (!songId || currentSong?.share || !hasSungTrack) return;
+    if (shareLookupSongRef.current === songId) return;
+    shareLookupSongRef.current = songId;
+    void fetchWorkspace(songId)
+      .then((workspace) => {
+        const share = workspace.song.share;
+        if (!share) return;
+        setCurrentSong((current) => (current?.id === songId && !current.share ? { ...current, share } : current));
+      })
+      .catch(() => undefined);
+  }, [currentSong?.id, currentSong?.share, hasSungTrack]);
+
+  const handleShareChange = useCallback((songId: string, share: ShareState) => {
+    setCurrentSong((current) =>
+      current?.id === songId
+        ? { ...current, share: { available: current.share?.available ?? true, ...share } }
+        : current
+    );
+  }, []);
 
   const finishBrowserMixBounce = useCallback((discard: boolean) => {
     const operation = browserMixBounceRef.current;
@@ -4992,7 +5027,12 @@ export default function MainApp() {
       savedInstrumentChoicesRef.current = null;
       const uploadedSong = uploadResponse.song;
       if (uploadedSong) {
-        setCurrentSong(uploadedSong);
+        // A Replace keeps the Song, and with it its link; the upload answer doesn't carry it.
+        setCurrentSong((current) =>
+          current?.id === uploadedSong.id && current.share
+            ? { ...uploadedSong, share: current.share }
+            : uploadedSong
+        );
         // The cleared player is this score's saved mix.
         setMixBaselineEpoch((current) => current + 1);
         if (shownSongIdRef.current !== uploadedSong.id) {
@@ -6490,6 +6530,24 @@ export default function MainApp() {
                     <HorizontalViewIcon />
                   </button>
                 </div>
+                {currentSong?.share?.available && (hasSungTrack || currentSong.share.enabled) ? (
+                  <button
+                    type="button"
+                    className="score-action-button"
+                    data-testid="share-song"
+                    onClick={() =>
+                      setShareBoxSong({
+                        id: currentSong.id,
+                        title: currentSong.title,
+                        url: currentSong.share?.enabled ? currentSong.share.url : null,
+                      })
+                    }
+                    aria-label="Share song"
+                    title="Share song"
+                  >
+                    <Share2 size={16} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="score-action-button"
@@ -6700,7 +6758,18 @@ export default function MainApp() {
           setSongsDrawerOpen(false);
           navigate("/app");
         }}
+        shareAvailable={shareAvailable}
+        onShareChange={handleShareChange}
       />
+      {shareBoxSong ? (
+        <ShareSongModal
+          songId={shareBoxSong.id}
+          title={shareBoxSong.title}
+          url={shareBoxSong.url}
+          onClose={() => setShareBoxSong(null)}
+          onShareChange={handleShareChange}
+        />
+      ) : null}
       {pendingUpload && !pendingUpload.waitForWorkToEnd ? (
         <NewSongOrReplaceModal
           scoreName={pendingUpload.file.name}

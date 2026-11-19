@@ -188,7 +188,7 @@ export const instrumentRowsFromMidi = (
 };
 
 // With takes in both modes the player shows one mode's takes at a time; with one mode, all of them.
-export const vocalsInBothModes = (tracks: readonly MultiTrackAudioTrack[]): boolean =>
+export const vocalsInBothModes = (tracks: readonly { mode?: VocalMode }[]): boolean =>
   new Set(tracks.map((track) => track.mode ?? "lyrics")).size > 1;
 
 export const shownVocals = (tracks: MultiTrackAudioTrack[], mode: VocalMode): MultiTrackAudioTrack[] =>

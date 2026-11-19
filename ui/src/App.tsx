@@ -9,6 +9,7 @@ import LegalTerms from "./LegalTerms";
 import LegalPrivacy from "./LegalPrivacy";
 import CookieBanner from "./components/CookieBanner";
 import MaintenancePage from "./MaintenancePage";
+import SharePage from "./share/SharePage";
 import { MarketingOptInProcessor } from "./components/MarketingOptInProcessor";
 
 export default function App() {
@@ -36,6 +37,8 @@ export default function App() {
         </Route>
         {/* The static demo is retired (DemoApp.tsx is kept); the studio has demo songs. */}
         <Route path="/demo/*" element={<Navigate to="/app" replace />} />
+        {/* A shared Song: public, read-only, and never behind sign-in, readiness or maintenance. */}
+        <Route path="/s/:token" element={<SharePage />} />
         <Route path="/maintenance" element={<MaintenancePage />} />
         <Route path="/waitlist/confirmed" element={<WaitlistConfirmed />} />
         <Route path="/legal/terms" element={<LegalTerms />} />

@@ -119,6 +119,8 @@ try {
     SYNTHESIS_DISPATCH_MODE: "http",
     SYNTHESIS_WORKER_URL: "http://127.0.0.1:8003",
     SYNTHESIS_WORKER_TOKEN: "local-ui-regression-synthesis-worker",
+    SHARE_LINKS: "on",
+    SHARE_BASE_URL: `http://127.0.0.1:${uiPort}`,
   };
   const workerEnv = {
     ...env,

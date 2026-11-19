@@ -97,6 +97,14 @@ export type SongInfo = {
   title_edited: boolean;
   created_at: string;
   last_active_at?: string;
+  /** Present on a workspace's Song: whether this user can share, and the link while it is on. */
+  share?: SongShare;
+};
+
+export type SongShare = {
+  available: boolean;
+  enabled: boolean;
+  url: string | null;
 };
 
 /** A row of the My songs list. */
@@ -107,6 +115,8 @@ export type SongRow = {
   last_active_at: string;
   status: "idle" | "working";
   track_count: number;
+  /** True while the Song's share link is on. */
+  shared?: boolean;
 };
 
 export type WorkspaceMessage = {
@@ -179,6 +189,45 @@ export type SongWorkspace = {
   messages: WorkspaceMessage[];
   jobs: WorkspaceJob[];
   player: WorkspacePlayer;
+};
+
+/** A shared Song as the public page gets it: no ids, paths or storage links. */
+export type ShareVocal = {
+  key: string;
+  mode: SingAllTakeMode;
+  label: string;
+  verse_number?: string | number | null;
+  duration_seconds?: number | null;
+  voice_name?: string | null;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  audio_url: string;
+};
+
+export type ShareSummary = {
+  duration_seconds?: number | null;
+  expanded_duration_seconds?: number | null;
+  repeat_expansion_available?: boolean | null;
+  performance_measure_map?: PerformanceMeasureMap | null;
+  performance_midi: Partial<PerformanceMidi> | null;
+};
+
+export type SharePlayer = {
+  repeats: boolean;
+  vocals: ShareVocal[];
+  instruments: WorkspaceInstrument[];
+  bus: WorkspaceBus;
+  midi_url: string | null;
+};
+
+export type SharePageData = {
+  title: string;
+  is_owner: boolean;
+  song_id: string | null;
+  score: { version: number | null; url: string; summary: ShareSummary };
+  player: SharePlayer;
+  credits: { voices: string[] };
 };
 
 export type PlayerMixRequest = {
@@ -963,6 +1012,53 @@ export async function renameSong(songId: string, title: string): Promise<SongRow
 
 export async function deleteSong(songId: string): Promise<void> {
   await request<{ deleted: boolean }>(`/songs/${songId}`, { method: "DELETE" });
+}
+
+export async function shareSong(
+  songId: string,
+  noticeAccepted = false
+): Promise<{ enabled: boolean; url: string | null }> {
+  return request(`/songs/${songId}/share`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(noticeAccepted ? { notice_accepted: true } : {}),
+  });
+}
+
+export async function unshareSong(songId: string): Promise<{ enabled: boolean; url: string | null }> {
+  return request(`/songs/${songId}/share`, { method: "DELETE" });
+}
+
+/** The public page's data. A signed-in viewer's token is sent, so the owner is recognised. */
+export async function fetchSharePage(token: string): Promise<SharePageData> {
+  return request<SharePageData>(`/public/s/${encodeURIComponent(token)}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+}
+
+/** A public share file (score, MIDI or take), with the App Check header and no sign-in. */
+async function fetchShareFile(url: string, fallback: string): Promise<Response> {
+  const response = await fetchWithTimeout(withApiBase(url), {
+    headers: await withAppCheckHeaders(),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await errorFromResponse(response, fallback);
+  }
+  return response;
+}
+
+export async function fetchShareScore(url: string): Promise<string> {
+  return (await fetchShareFile(url, "Failed to load score.")).text();
+}
+
+export async function fetchShareMidi(url: string): Promise<Blob> {
+  return (await fetchShareFile(url, "Failed to load instrumental MIDI.")).blob();
+}
+
+export async function fetchShareAudio(url: string): Promise<ArrayBuffer> {
+  return (await fetchShareFile(url, "Failed to load a sung part.")).arrayBuffer();
 }
 
 export async function savePlayerMix(
