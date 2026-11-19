@@ -46,6 +46,18 @@ def test_last_take_enters_packaging_once_and_finishes_from_package():
     assert {item["kind"] for item in actions} >= {"set_opening_balance"}
 
 
+def test_old_job_gets_a_zip_without_mix_files():
+    job = _job("singing")
+    job["instrumentalsPrepared"] = True
+    job["items"][0]["status"] = "done"
+    job["items"][1]["status"] = "done"
+    job["items"][2]["status"] = "done"
+    fields, actions = decide(job, {}, {"now": NOW, "scoreSummary": {}})
+    assert fields["stage"] == "packaging"
+    assert fields["package"]["mixes"] == {"done": 0, "total": 0}
+    assert actions == [{"kind": "start_package"}]
+
+
 def test_package_stale_and_failure_finish_by_takes():
     job = _job("packaging")
     job["items"][1]["status"] = "done"

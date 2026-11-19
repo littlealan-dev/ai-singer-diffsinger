@@ -644,9 +644,6 @@ def decide(
             done = sum(item["status"] == "done" for item in takes)
             if not done:
                 return finish("failed")
-            if "mixes" not in (job.get("choices") or {}) and not job.get("package"):
-                # Older jobs predate packaging and retain their previous finish path.
-                return finish("completed" if done == len(takes) else "partial")
             from src.backend.sing_all_mix import TakeRef, plan_mixes
             from src.backend.sing_all_package import track_sounds
             row_by_id = {row["rowId"]: row for row in rows}
