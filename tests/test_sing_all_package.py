@@ -339,3 +339,20 @@ def test_package_write_replaces_only_package_map_in_firestore(monkeypatch, fires
     result = ref.get().to_dict()
     assert result == {"status": "completed", "stage": "done", "credits": {"total": 3},
                       "package": {"state": "mixing", "mixes": {"done": 0, "total": 1}}}
+
+
+def test_voicebank_credit_prefers_own_text_then_yaml_and_falls_back(monkeypatch, tmp_path):
+    root = tmp_path / "voicebanks"
+    nested = root / "voice-a" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "dsconfig.yaml").write_text("model: synthetic")
+    (nested / "character.yaml").write_text("name: Synthetic")
+    monkeypatch.setattr(package.voicebank_cache, "_local_voicebanks_root", lambda: root)
+    monkeypatch.setattr(package.voicebank_cache, "_voicebank_bucket", lambda: "")
+    assert package._credit_file("voice-a", "Display") == (
+        "character.yaml", b"name: Synthetic")
+    (nested / "character.txt").write_text("Name: Synthetic")
+    assert package._credit_file("voice-a", "Display") == (
+        "character.txt", b"Name: Synthetic")
+    assert package._credit_file("missing", "Display") == (
+        "character.txt", b"Name: Display\n")

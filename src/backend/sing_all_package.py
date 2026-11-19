@@ -126,8 +126,13 @@ async def _midi(job: dict, snapshot: dict, orchestrator: Any) -> Path | None:
 
 def _credit_file(voice: str, voice_name: str) -> tuple[str, bytes]:
     root = voicebank_cache._local_voicebanks_root()
+    voice_dir = (root / voice).resolve()
+    if not voice_dir.is_relative_to(root.resolve()) or "/" in voice or "\\" in voice:
+        return "character.txt", f"Name: {voice_name}\n".encode()
+    if voice_dir.is_dir():
+        voice_dir = voicebank_cache.discover_voicebank_root(voice_dir) or voice_dir
     for extension in ("txt", "yaml"):
-        path = root / voice / f"character.{extension}"
+        path = voice_dir / f"character.{extension}"
         if path.is_file() and path.resolve().is_relative_to(root.resolve()):
             return path.name, path.read_bytes()
     bucket = voicebank_cache._voicebank_bucket()
@@ -215,6 +220,8 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                 selected = [stem for item, row, _, stem in records
                             if item["mode"] == mix.mode and
                             (mix.kind == "full" or str(row.get("partId") or item["rowId"]) == mix.part_id)]
+                if mix.kind == "part":
+                    selected = selected[:1]
                 audio, stats = await asyncio.to_thread(
                     balanced_mix, selected, instruments,
                     FULL_INSTRUMENTS_DB if mix.kind == "full" else PART_DOMINANT_INSTRUMENTS_DB,
