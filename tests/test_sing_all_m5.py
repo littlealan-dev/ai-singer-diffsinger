@@ -23,6 +23,7 @@ from tests.conftest import _stop_emulator
 from tests.test_sing_all_reconcile import _job
 from tests.test_sing_all_progress import _job as progress_job
 from tests.test_sing_all_quote import _route as quote_route, _row
+from tests.test_score_job_history import workspace  # noqa: F401 - parametrized store fixture
 
 
 NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -249,6 +250,49 @@ def test_opening_balance_preserves_owner_edits():
     assert not songs.apply_sing_all_opening_balance(player, job)
 
 
+def test_player_store_persists_opening_balance_for_workspace(workspace):
+    store, _, _ = workspace
+
+    async def scenario():
+        session_id = (await store.create_session("owner")).id
+        source = store.session_dir(session_id) / "score.xml"
+        source.write_text("<score-partwise/>")
+        await store.commit_uploaded_score(
+            session_id, score_id="score-a", score={"source_musicxml_path": str(source)},
+            summary={"title": "Example tune", "parts": []},
+            files={"musicxml_path": str(source.relative_to(store._project_root))},
+            file_name="example.xml")
+        for child_id, part_id in (("take-a", "P1"), ("take-b", "P2")):
+            await store.record_take(session_id, child_id, {
+                "status": "completed", "scoreId": "score-a", "jobKind": "synthesis",
+                "audioTrack": {"key": f"id:{part_id}", "part_id": part_id}})
+        await store.save_mix(session_id, "owner", songs.PlayerMix.model_validate({
+            "score_id": "score-a", "vocals": [
+                {"key": "id:P1", "muted": False, "solo": False, "volume": 0.7},
+                {"key": "id:P2", "muted": False, "solo": False, "volume": 1}],
+            "instruments": [{"raw_part_id": "P3", "muted": False, "solo": False,
+                             "volume": 1}],
+            "bus": {"muted": False, "solo": False, "level_db": 0}}))
+        job = {"scoreId": "score-a", "items": [
+            {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "take-a"},
+            {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "take-b"}],
+            "package": {"stats": {"balance": {"mode": "lyrics", "stats": {
+                "vocals": [{"gain_db": 0, "dropped": False},
+                           {"gain_db": -6, "dropped": False}],
+                "instruments": {"gain_db": -9}}}}}}
+        await store.set_sing_all_opening_balance(session_id, "owner", job)
+        player = await store.get_player(session_id, "owner")
+        assert player["vocals"][0]["volume"] == 0.7
+        assert player["vocals"][1]["volume"] == pytest.approx(10 ** (-6 / 20))
+        assert player["instruments"][0]["volume"] == 1
+        assert player["bus"]["levelDb"] == -9
+        revision = player["revision"]
+        await store.set_sing_all_opening_balance(session_id, "owner", job)
+        assert (await store.get_player(session_id, "owner"))["revision"] == revision
+
+    asyncio.run(scenario())
+
+
 def test_progress_package_redacts_private_fields():
     job = progress_job(stage="packaging")
     job["items"][0]["status"] = "done"
@@ -356,3 +400,32 @@ def test_download_url_serves_zip_from_storage_emulator(monkeypatch, storage_emul
     assert datetime.fromisoformat(result["expiresAt"]) > datetime.now(timezone.utc)
     with urllib.request.urlopen(result["url"], timeout=5) as response:
         assert response.read() == payload.getvalue()
+
+
+def test_production_download_signs_get_with_iam_and_attachment_name(monkeypatch):
+    import google.auth
+
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("FIREBASE_STORAGE_EMULATOR_HOST", raising=False)
+    calls = {}
+    credentials = SimpleNamespace(token="token", service_account_email="identity",
+                                  refresh=lambda _: calls.update(refreshed=True))
+    monkeypatch.setattr(google.auth, "default", lambda **_: (credentials, "demo-project"))
+    class Blob:
+        def generate_signed_url(self, **kwargs):
+            calls.update(kwargs)
+            return "https://storage.example.invalid/download"
+    monkeypatch.setattr(storage_client, "get_bucket", lambda _: SimpleNamespace(
+        blob=lambda _path: Blob()))
+    url, expires = storage_client.signed_download_url(
+        "demo-bucket", "singAll/owner/parent-a/Résumé - Sing All.zip",
+        "Résumé - Sing All.zip")
+    assert url == "https://storage.example.invalid/download"
+    assert calls["refreshed"] is True
+    assert calls["version"] == "v4" and calls["method"] == "GET"
+    assert calls["service_account_email"] == "identity"
+    assert calls["access_token"] == "token"
+    assert 'filename="Rsum - Sing All.zip"' in calls["response_disposition"]
+    assert "filename*=UTF-8''R%C3%A9sum%C3%A9%20-%20Sing%20All.zip" in (
+        calls["response_disposition"])
+    assert 14 * 60 < (expires - datetime.now(timezone.utc)).total_seconds() <= 15 * 60
