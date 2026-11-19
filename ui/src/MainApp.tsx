@@ -1806,6 +1806,10 @@ const singAllPillStage = (job: SingAllProgress): string => {
       return `Splitting ${job.counts.splits.done}/${job.counts.splits.total}`;
     case "solfege":
       return "Adding solfège";
+    case "packaging":
+      return job.package?.state === "mixing" && job.package.mixes.total > 0
+        ? `Mixing ${job.package.mixes.done}/${job.package.mixes.total}`
+        : "Packing the zip";
     default:
       return `Singing ${job.counts.takes.done}/${job.counts.takes.total}`;
   }
@@ -4181,7 +4185,10 @@ export default function MainApp() {
     setScore({ name: score.name, data });
   }, [score, sessionId]);
 
+  // Jobs this page saw running: only their end changes the player under the owner.
+  const singAllSeenRunningRef = useRef<Set<string>>(new Set());
   const rememberSingAllJob = useCallback((job: SingAllProgress) => {
+    if (job.status === "running") singAllSeenRunningRef.current.add(job.jobId);
     setSingAllJobs((current) => ({ ...current, [job.jobId]: job }));
   }, []);
 
@@ -4289,15 +4296,28 @@ export default function MainApp() {
   };
 
   // Takes made by a Sing All in the Song on screen: each new one reloads the player
-  // and the score, which the job may have split.
+  // and the score, which the job may have split. A finished zip reloads it once more,
+  // with the instruments and the bus: the job set the player to the full mix's balance.
   const singAllTakesHere = Object.values(singAllJobs)
     .filter((job) => job.songId === sessionId)
     .reduce((sum, job) => sum + job.counts.takes.done, 0);
-  const singAllTakesSeenRef = useRef<{ songId: string | null; done: number }>({ songId: null, done: 0 });
+  const singAllPackagesHere = Object.values(singAllJobs).filter(
+    (job) =>
+      job.songId === sessionId &&
+      job.package?.state === "done" &&
+      singAllSeenRunningRef.current.has(job.jobId)
+  ).length;
+  const singAllTakesSeenRef = useRef<{ songId: string | null; done: number; packaged: number }>({
+    songId: null,
+    done: 0,
+    packaged: 0,
+  });
   useEffect(() => {
     const seen = singAllTakesSeenRef.current;
-    singAllTakesSeenRef.current = { songId: sessionId, done: singAllTakesHere };
-    if (!sessionId || seen.songId !== sessionId || singAllTakesHere <= seen.done) return;
+    singAllTakesSeenRef.current = { songId: sessionId, done: singAllTakesHere, packaged: singAllPackagesHere };
+    if (!sessionId || seen.songId !== sessionId) return;
+    const balanced = singAllPackagesHere > seen.packaged;
+    if (singAllTakesHere <= seen.done && !balanced) return;
     const generation = workspaceGenerationRef.current;
     void (async () => {
       let workspace: SongWorkspace;
@@ -4308,6 +4328,14 @@ export default function MainApp() {
       }
       if (workspaceGenerationRef.current !== generation) return;
       const summary = workspace.score.score_summary ?? null;
+      if (balanced) {
+        savedInstrumentChoicesRef.current = workspace.player.instruments;
+        setInstrumentalBus({
+          muted: workspace.player.bus.muted,
+          solo: workspace.player.bus.solo,
+          levelDb: workspace.player.bus.level_db,
+        });
+      }
       setScoreSummary(summary);
       setPerformanceMidi(summary?.performance_midi ?? null);
       setMultiTrackAudioTracks(workspace.player.vocals.map(workspaceVocalTrack));
@@ -4318,7 +4346,7 @@ export default function MainApp() {
         // The preview keeps the score it shows.
       }
     })();
-  }, [sessionId, singAllTakesHere, refreshScorePreview]);
+  }, [sessionId, singAllTakesHere, singAllPackagesHere, refreshScorePreview]);
 
   // The single sink for job progress. Stream events and the polling fallback
   // both land here, so audio, MIDI and estimate updates cannot depend on which
