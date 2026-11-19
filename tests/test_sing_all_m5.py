@@ -19,6 +19,7 @@ from src.backend import main, sing_all_package, songs, storage_client
 from src.backend.sing_all import (
     decide, progress, quoted_instruments_sound, summary_with_judged_instruments,
 )
+from src.backend.sing_all_runner import SingAllRunner
 from tests.conftest import _stop_emulator
 from tests.test_sing_all_reconcile import _job
 from tests.test_sing_all_progress import _job as progress_job
@@ -291,6 +292,16 @@ def test_player_store_persists_opening_balance_for_workspace(workspace):
         assert (await store.get_player(session_id, "owner"))["revision"] == revision
 
     asyncio.run(scenario())
+
+
+def test_deleted_song_does_not_hold_up_package_completion():
+    async def deleted(*_):
+        raise KeyError("deleted")
+    runner = SingAllRunner(SimpleNamespace(_sessions=SimpleNamespace(
+        set_sing_all_opening_balance=deleted)))
+    job = {"uid": "owner", "sessionId": "song-a", "jobId": "parent-a"}
+    assert asyncio.run(runner._action(
+        job, {"kind": "set_opening_balance"}, {})) is None
 
 
 def test_progress_package_redacts_private_fields():

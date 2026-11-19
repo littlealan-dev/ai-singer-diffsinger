@@ -361,8 +361,13 @@ class SingAllRunner:
             from src.backend.sing_all_package import start_package
             await start_package(job["jobId"], self.orchestrator._settings)
         elif kind == "set_opening_balance":
-            await self.orchestrator._sessions.set_sing_all_opening_balance(
-                session_id, uid, job)
+            try:
+                await self.orchestrator._sessions.set_sing_all_opening_balance(
+                    session_id, uid, job)
+            except (KeyError, PermissionError):
+                # The owner can delete the Song while its package is running.
+                # There is then no player to update, but the parent must finish.
+                pass
         else:
             raise ValueError(f"Unknown Sing All action: {kind}")
 
