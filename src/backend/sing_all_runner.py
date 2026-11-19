@@ -123,6 +123,7 @@ class SingAllRunner:
             score_state = await self._score_state(job, snapshot, now=now)
             score_state["sweep"] = sweep
             score_state["renderTransport"] = render_transport
+            score_state["scoreSummary"] = snapshot.get("score_summary") or {}
             if (render_transport and job["stage"] == "singing"
                     and job.get("instrumentalsPrepared")
                     and (job.get("render") or {}).get("state", "none") == "none"
@@ -140,7 +141,7 @@ class SingAllRunner:
             # Releasing holds and saving score answers must succeed before the
             # parent can move past them. A repeat of either operation is safe.
             before = [action for action in actions if action["kind"] in {
-                "release", "save_assignments", "fail_stuck_child"}]
+                "release", "save_assignments", "fail_stuck_child", "set_opening_balance"}]
             for action in before:
                 try:
                     outcome = await self._action(job, action, snapshot)
@@ -356,6 +357,12 @@ class SingAllRunner:
                 raise SingAllTerminalError("quote_changed") from exc
         elif kind == "settle_instrumental":
             await self._settle_instrumental(job)
+        elif kind == "start_package":
+            from src.backend.sing_all_package import start_package
+            await start_package(job["jobId"], self.orchestrator._settings)
+        elif kind == "set_opening_balance":
+            await self.orchestrator._sessions.set_sing_all_opening_balance(
+                session_id, uid, job)
         else:
             raise ValueError(f"Unknown Sing All action: {kind}")
 

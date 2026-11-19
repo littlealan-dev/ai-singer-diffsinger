@@ -1800,22 +1800,27 @@ def create_app() -> FastAPI:
         sing_all = None
         if parent:
             parent_id = parent["jobId"]
-            for _ in range(8):
-                if parent.get("cancelRequested") or await asyncio.to_thread(
-                    apply_sing_all_job, parent_id, {"cancelRequested": True},
-                    expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
-                ):
-                    break
-                parent = await asyncio.to_thread(load_sing_all_job, parent_id)
-                if not parent or parent.get("status") != "running":
-                    break
-            else:
-                raise RuntimeError("Sing All parent changed throughout stop request.")
+            packaging = parent.get("stage") == "packaging"
+            if not packaging:
+                for _ in range(8):
+                    if parent.get("cancelRequested") or await asyncio.to_thread(
+                        apply_sing_all_job, parent_id, {"cancelRequested": True},
+                        expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
+                    ):
+                        break
+                    parent = await asyncio.to_thread(load_sing_all_job, parent_id)
+                    if not parent or parent.get("status") != "running":
+                        break
+                    if parent.get("stage") == "packaging":
+                        packaging = True
+                        break
+                else:
+                    raise RuntimeError("Sing All parent changed throughout stop request.")
             await SingAllRunner(request.app.state.orchestrator).reconcile(parent_id)
             ended = await asyncio.to_thread(load_sing_all_job, parent_id) or parent
             takes = [item for item in ended.get("items") or [] if item.get("type") == "take"]
-            too_late = ended.get("status") == "completed"
-            if ended.get("status") == "running" and takes:
+            too_late = packaging or ended.get("status") == "completed"
+            if not packaging and ended.get("status") == "running" and takes:
                 remaining = [item for item in takes if item.get("status") not in
                              {"done", "failed", "stopped"}]
                 children = await asyncio.gather(*(

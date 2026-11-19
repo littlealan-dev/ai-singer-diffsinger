@@ -469,6 +469,24 @@ def decide(
         return finish("failed", str(score_state["terminalFailure"]))
 
     stage = job.get("stage")
+    if stage == "packaging":
+        package = job.get("package") or {}
+        state = package.get("state")
+        updated = package.get("updatedAt")
+        if isinstance(updated, str):
+            updated = datetime.fromisoformat(updated)
+        stale = (score_state.get("sweep") and isinstance(now, datetime)
+                 and isinstance(updated, datetime) and now - updated > timedelta(minutes=10))
+        if state not in {"done", "failed"} and not stale:
+            return {}, []
+        takes = [item for item in items if item["type"] == "take"]
+        done = sum(item.get("status") == "done" for item in takes)
+        fields, actions = finish("completed" if done == len(takes) else "partial")
+        if stale:
+            fields["package"] = {**package, "state": "failed"}
+        if state == "done":
+            actions.insert(0, {"kind": "set_opening_balance"})
+        return fields, actions
     if score_state.get("sweep") and isinstance(now, datetime):
         stuck = False
         if stage == "splitting":
@@ -624,7 +642,25 @@ def decide(
         takes = [item for item in items if item["type"] == "take"]
         if all(item["status"] in {"done", "failed", "stopped"} for item in takes):
             done = sum(item["status"] == "done" for item in takes)
-            return finish("completed" if done == len(takes) else "partial" if done else "failed")
+            if not done:
+                return finish("failed")
+            if "mixes" not in (job.get("choices") or {}) and not job.get("package"):
+                # Older jobs predate packaging and retain their previous finish path.
+                return finish("completed" if done == len(takes) else "partial")
+            from src.backend.sing_all_mix import TakeRef, plan_mixes
+            from src.backend.sing_all_package import track_sounds
+            row_by_id = {row["rowId"]: row for row in rows}
+            refs = [TakeRef(str((row_by_id.get(item["rowId"]) or {}).get("partId")
+                                or item["rowId"]),
+                            str((row_by_id.get(item["rowId"]) or {}).get("name")
+                                or item["rowId"]), item["mode"])
+                    for item in takes if item["status"] == "done"]
+            sounds = track_sounds(score_state.get("scoreSummary") or {})
+            planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
+                                 any(sound is not None for sound in sounds))
+            package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
+                       "startedAt": now, "updatedAt": now}
+            return {"stage": "packaging", "package": package}, [{"kind": "start_package"}]
         return {}, []
 
     return {}, []
