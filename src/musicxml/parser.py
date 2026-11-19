@@ -209,12 +209,18 @@ def build_performance_measure_map(path: str | Path) -> Dict[str, List[Dict[str, 
     ``music21.expandRepeats()`` creates linear copies of measures.  Its copied
     measures retain a derivation origin, which lets the score player point a
     repeated or navigated pass back to the one measure drawn by OSMD.
+    When repeats cannot be expanded, ``expanded`` is empty.
     """
     source_path = Path(path)
     written_score = load_musicxml_score(source_path)
-    expanded_score = _expand_repeat_navigation(written_score, source_path)
+    written = _build_measure_timing_entries(written_score, written_score)
+    try:
+        expanded_score = _expand_repeat_navigation(written_score, source_path)
+    except RepeatExpansionError:
+        # No played order exists; the score is sung and shown in written order only.
+        return {"written": written, "expanded": []}
     return {
-        "written": _build_measure_timing_entries(written_score, written_score),
+        "written": written,
         "expanded": _build_measure_timing_entries(expanded_score, written_score),
     }
 

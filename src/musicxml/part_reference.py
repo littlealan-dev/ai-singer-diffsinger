@@ -38,9 +38,34 @@ def load_musicxml_score(path: str | Path) -> stream.Score:
         score = converter.parse(str(source_path))
     else:
         score = converter.parseData(read_musicxml_content(source_path), format="musicxml")
+    _name_unnamed_parts(score, source_path)
     _make_part_ids_unique(score)
     normalize_score_tempo_map(score)
     return score
+
+
+def _name_unnamed_parts(score: stream.Score, path: Path) -> None:
+    """Name and identify a part the MusicXML leaves unnamed as the score viewer does.
+
+    OpenSheetMusicDisplay shows such a part as "Instr. <part id>". music21
+    would otherwise name it after its instrument or not at all, and give it
+    that name or a per-run object ID as its ID, so the chat and derived part
+    names would not match what the user sees. A named part already has its
+    name as its ID; this gives an unnamed part the same.
+    """
+    raw_parts = _raw_musicxml_parts(path)
+    unnamed = {raw_part.part_id for raw_part in raw_parts if not raw_part.part_name}
+    if not unnamed:
+        return
+    for index, raw_part_id in _map_score_parts_to_raw_part_ids(score, raw_parts).items():
+        if raw_part_id not in unnamed:
+            continue
+        part = score.parts[index]
+        part.partName = f"Instr. {raw_part_id}"
+        # Only the whole part carries the <part> ID as a group. A staff that
+        # music21 split out keeps its own stable ID (P1-Staff1).
+        if raw_part_id in part.groups:
+            part.id = f"Instr. {raw_part_id}"
 
 
 def _make_part_ids_unique(score: stream.Score) -> None:
@@ -212,6 +237,18 @@ def _map_score_parts_to_raw_part_ids(
         parser_part_id = str(part.id or "").strip()
         parser_part_name = _normalize_part_name(part.partName)
         raw_part_id = parser_part_id if parser_part_id in raw_part_names else ""
+        if not raw_part_id:
+            # music21 replaces the ID of a part with no name by its instrument
+            # name or an object ID, but records the <part> element's ID as a
+            # group. Split staffs have no group; the prefix match covers them.
+            raw_part_id = next(
+                (
+                    group
+                    for group in part.groups
+                    if group in raw_part_names and group not in used_raw_part_ids
+                ),
+                "",
+            )
         if not raw_part_id:
             candidates = raw_ids_by_name.get(parser_part_name, [])
             if candidates:

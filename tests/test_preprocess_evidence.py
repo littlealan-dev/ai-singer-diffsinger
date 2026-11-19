@@ -9,6 +9,7 @@ import pytest
 
 from src.api import parse_score
 from src.api.preprocess_evidence import EvidenceUnavailable, trim_musicxml
+from tests.test_musicxml_parser import unnamed_parts_xml
 from tests.test_preprocess_sheet import SATB
 
 
@@ -131,6 +132,14 @@ def test_trim_keeps_music_and_carries_attributes(tmp_path):
     for old, new in zip(original_notes, new_notes):
         assert tuple(old.get(key) for key in fields) == tuple(new.get(key) for key in fields)
         assert old["offset_beats"] - original_start == new["offset_beats"] - new_start
+
+
+def test_trim_finds_an_unnamed_part_by_its_raw_part_id(tmp_path):
+    source = tmp_path / "unnamed-parts.xml"
+    source.write_text(unnamed_parts_xml(with_instrument=True), encoding="utf-8")
+    score = parse_score(source, verse_number=1)
+    xml = trim_musicxml(score, [score["parts"][0]["raw_part_id"]], {1})
+    assert [item.get("id") for item in ET.fromstring(xml).iter() if _local(item.tag) == "part"] == ["P1"]
 
 
 def test_trim_uses_raw_part_id_for_split_staff_and_derived_part(tmp_path):
