@@ -11,9 +11,20 @@ from src.backend import main, songs
 from src.backend.sing_all import decide, progress
 from tests.test_sing_all_reconcile import _job
 from tests.test_sing_all_progress import _job as progress_job
+from tests.test_sing_all_quote import _route as quote_route, _row
 
 
 NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("mixes", ["invalid", 1, [], None])
+def test_quote_rejects_invalid_mix_choice(monkeypatch, mixes):
+    endpoint, request, _ = quote_route(
+        monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(endpoint(main.SingAllQuoteRequest(
+            songId="song-a", choices={"mixes": mixes}), request))
+    assert (error.value.status_code, error.value.detail) == (422, {"code": "invalid_mixes"})
 
 
 def test_last_take_enters_packaging_once_and_finishes_from_package():

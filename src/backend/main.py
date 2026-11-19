@@ -1515,7 +1515,7 @@ def create_app() -> FastAPI:
         if mode not in {"lyrics", "solfege", "both"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
         mixes = choices.get("mixes", "all")
-        if mixes not in {"all", "full", "none"}:
+        if not isinstance(mixes, str) or mixes not in {"all", "full", "none"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mixes"})
         repeats_available = summary.get("repeat_expansion_available") is not False
         repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
