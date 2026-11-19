@@ -40,7 +40,7 @@ takes (WAV per part and mode) ──read──► numpy arrays ──pyloudnorm:
 score MIDI ──mido: events──► pyfluidsynth (in process, FluidR3_GM.sf2) ──► instruments array ──measure, gain──┘
 ```
 
-- The instruments are rendered with **pyfluidsynth** (Alan, 2026-11-19), the Python binding of the FluidSynth library: no command line, no WAV file in between. `mido` reads the MIDI's events; the code sends each one to the synth (`program_change`, `noteon`, `noteoff`, `cc`, `pitch_bend`) and pulls the samples between events with `get_samples`, at the takes' sample rate, into a numpy array. Tracks of parts with no sound chosen are skipped in that loop. It is the only step that turns MIDI into sound; a Song with no instrument sound chosen (an a cappella score) doesn't run it.
+- The instruments are rendered with **pyfluidsynth** (Alan, 2026-11-19), the Python binding of the FluidSynth library: no command line, no WAV file in between. `mido` reads the MIDI's events; the code sends each one to the synth (`program_change`, `noteon`, `noteoff`, `cc`, `pitch_bend`) and pulls the samples between events with `get_samples`, at the takes' sample rate, into a numpy array. Each track plays the sound the browser player gives its row (bank and program, overriding the file's own program, as `configuredMidiTracks` does); a part with no sound chosen is silent. It is the only step that turns MIDI into sound; a Song with no instrument sound chosen (an a cappella score) doesn't run it.
 - It plays the same `FluidR3_GM.sf2` the browser player loads (`ui/public/soundfonts/`), so the instruments use the same samples; the synth engines differ a little (HLD §9.1).
 - Everything else is arithmetic on arrays (numpy, already used) and the loudness meter (`pyloudnorm`, pure Python). `ffmpeg` is already in the API image.
 - pyfluidsynth needs the FluidSynth library, which is installed in the `sing-all-package` image (`apt-get install libfluidsynth3`); nobody installs it on a laptop: the trial runs in that image with Docker (M1).
@@ -68,7 +68,7 @@ for mode in modes:
                                                                                                                 # and an instrument sounds
 ```
 
-- Instruments: pyfluidsynth renders the MIDI of the job's repeat setting with `FluidR3_GM.sf2`, at the takes' sample rate, after removing the tracks of parts with no sound chosen.
+- Instruments: pyfluidsynth renders the MIDI of the job's repeat setting with `FluidR3_GM.sf2`, at the takes' sample rate, each track with its row's sound from the score summary (`track_sounds`, M4); a part with no sound chosen is silent.
 - Everything starts at time 0 with no offset, as in the player.
 - Loudness: `pyloudnorm` (new dependency). Limiting and MP3 encoding: `ffmpeg`, already used.
 
@@ -92,7 +92,7 @@ Stored at `singAll/{uid}/{jobId}/{title} - Sing All.zip`; the job records `zipPa
   3 Full mixes/             Full mix ({mode}).mp3          (mixes = full or all)
   4 Instrumentals/          {title}.mid                    (when the score has instruments)
   5 Voicebank credits/      {voice}/character.txt, one per voice used
-  README.txt                what each folder holds, the parts, voices, mode, verse and repeats; the receipt
+  README.txt                what each folder holds, the parts, voices, mode, verse and repeats (no prices: the card has the receipt)
 ```
 
 A partial job zips the takes that were made and the mixes made from them. A job with no take done has no package run.
@@ -112,7 +112,7 @@ request   choices.mixes?: "all" | "full" | "none"        # default "all"
   options.mixFiles: {all: int, full: int}                 # how many mix files each choice makes for the ticked
                                                           # rows and the mode (plan_mixes); "none" is always 0.
                                                           # Customise shows them: "Full and part mixes (10)".
-                                                          # No instrument sounds: all == full"
+                                                          # No instrument sounds: all == full
   lines: + {kind: "mixes", files: int, credits: int}      # M6; only when files > 0; placed after "instrumentals",
                                                           # before "total"; "total" includes it
 ```
@@ -204,7 +204,7 @@ The mix rule above, as pure functions over audio arrays, plus the instrument ren
 
 ### Change
 
-1. `src/backend/sing_all_mix.py`: `lufs`, `balanced_mix` (returns the mix and its stats), `limit` (ffmpeg's limiter, replacing hard clipping), `render_instruments(midi_path, soundfont_path, sample_rate, drop_tracks) -> numpy array` (pyfluidsynth, driven by `mido`, as above), `plan_mixes(takes, modes, mixes)` (which files, with their names), and `write_mp3`. Reading audio reuses `audio_mix._read_audio`.
+1. `src/backend/sing_all_mix.py`: `lufs`, `balanced_mix` (returns the mix and its stats), `limit` (ffmpeg's limiter, replacing hard clipping), `render_instruments(midi_path, soundfont_path, sample_rate, sounds) -> numpy array` (pyfluidsynth, driven by `mido`, as above; `sounds` gives each note-bearing track the bank and program the player gives its row, `None` = silent), `plan_mixes(takes, modes, mixes)` (which files, with their names), and `write_mp3`. Reading audio reuses `audio_mix._read_audio`.
 2. `scripts/sing_all_mix_trial.py`: given a folder of take WAVs (or MP3s), a MIDI file and the part names, writes the full and part-dominant mixes and prints each stem's loudness and gain and each mix's loudness, peak and limiting. Constants can be overridden on the command line (`--full-instruments-db -6` …) so Alan can try values without editing code.
 3. `requirements*.txt`: `pyloudnorm`, `pyfluidsynth`, `mido`. `pyfluidsynth` is imported inside `render_instruments` only, so the API and tests run without the FluidSynth library.
 4. `Dockerfile.sing-all-package`: Python slim, `ffmpeg`, `libfluidsynth3`, the backend requirements and the code; the soundfont is mounted or copied from `ui/public/soundfonts/FluidR3_GM.sf2` (not in git). The trial runs in it: `scripts/sing_all_mix_trial.sh <folder>` builds the image once and runs the trial command with the folder mounted, so Alan's Mac needs only Docker. M8 deploys the same image.
@@ -264,94 +264,11 @@ Claude runs it through `scripts/sing_all_mix_trial.sh` (Docker, nothing installe
 
 ## M4. [Codex] The package run
 
-### Rule
-
-Given a Sing All job whose takes have ended, make its mix files and its zip, store them, and report what was made. It doesn't touch credits or the job's status: the reconciler (M5) does.
-
-### Change
-
-1. `src/backend/sing_all_package.py`: `run_package(job_id)`:
-   - reads the job, its done take items (each child job's `losslessOutputPath`, else its `outputPath` when that is a WAV), the Song's score summary, MIDI and voices;
-   - writes progress on the job in the contract's shape: `package.state` `"mixing"` then `"zipping"`, and `package.mixes.done` after each mix file;
-   - makes the mixes by `plan_mixes` and `balanced_mix`, encodes them to MP3;
-   - builds the zip as above and uploads it, and the mixes beside it under `singAll/{uid}/{jobId}/`;
-   - writes `package.state = "done"` with the internal fields `zipPath`, `files: [{name, kind, mode, partId}]` and `stats` (each stem's gain and loudness, as `balanced_mix` returns them), or `package.state = "failed"` with `error`; then enqueues reconcile. `package.updatedAt` is written with every change (the sweeper's 10-minute limit reads it). Progress (M5) exposes only `state` and `mixes`.
-   - Idempotent: a second run for the same job overwrites the same paths and writes the same result.
-2. Entry points: `python -m src.backend.sing_all_package <jobId>` (the Cloud Run Job), and an inline call for local runs and tests, chosen by a setting `SING_ALL_PACKAGE_TRANSPORT = inline | job`, as the render transport is.
-3. The soundfont path is a setting (`SING_ALL_SOUNDFONT_PATH`); in the image it points at the copied soundfont.
-
-### Done when
-
-- On a job with two done takes and instruments, the run writes the zip with the layout above, the mixes and the README, and `package.state = "done"`; the README lists the parts, voices, mode, verse, repeats and receipt.
-- A partial job zips only the takes made.
-- A missing WAV, an instrument render failure or upload failure gives `package.state = "failed"` with the error, and nothing half-written is recorded as done.
-- A second run gives the same files and result.
-- Tests use the inline transport and a fake `render_instruments` (a fixed array) unless the FluidSynth library loads.
-
-### Out of scope
-
-Credits, the job's stages and status, the UI, the Cloud Run Job's deployment.
+The full task text, as posted to Codex, is `/Users/alanchan/antigravity/sightsinger-agents/sing-all-mixes/M4.md` (outside the repo). In short: `src/backend/sing_all_package.py` with `run_package(job_id, orchestrator)`, `start_package(job_id, settings)` (inline or a Cloud Run Job execution, `SING_ALL_PACKAGE_TRANSPORT` / `SING_ALL_PACKAGE_JOB`), `track_sounds(score_summary)` (the player's default instrument sounds), and the settings `SING_ALL_SOUNDFONT_PATH`. It reads each take's `losslessOutputPath`, makes the mixes by `plan_mixes` and `balanced_mix`, builds and uploads the zip, and writes `package {state, mixes, zipPath, files, stats, error, updatedAt}` on the job; `stats.balance` is the full mix's stats of the first mode, also with mixes `none`. It never changes the job's stage, status or credits.
 
 ## M5. [Codex] Backend: the mixes choice, the packaging stage, Progress, the download, the opening balance
 
-### Rule
-
-```python
-# quote: choices.mixes (default "all"; anything else 422 invalid_mixes)
-#   options.mixes = the choice, "full" in place of "all" when no instrument sounds; options.mixFiles = {all: plan_mixes(rows ticked, mode, "all") count,
-#                                                   full: plan_mixes(…, "full") count}
-#   no "mixes" line and no price: M6 adds them
-# "Sing it": job.choices.mixes = the quote's choice
-
-# reconciler, when the singing stage ends:
-if no take done:
-    finish as today ("failed"); package stays null
-else:
-    job.stage = "packaging"; job.package = {state: "mixing", mixes: {done: 0, total: planned files}}
-    start the package run (M4) by SING_ALL_PACKAGE_TRANSPORT
-    # the run writes package.state "mixing" -> "zipping" and mixes.done as it goes
-    on package.state == "done":
-        set the player's opening balance (below)
-        finish("completed" if every take done else "partial")
-    on package.state == "failed", or no package progress for 10 minutes (the sweeper):
-        package.state = "failed"
-        finish by the takes, as above            # the status is never "failed" because of the package
-
-# Stop while stage == "packaging": singAll.result "too_late"; the run finishes
-# a job started before step 4 (no choices.mixes): mixes "none"; it still gets its zip
-```
-
-The player's opening balance, from HLD §9.1:
-
-```python
-mode  = "lyrics" if the job sang lyrics else "solfege"     # the mode the player shows first
-gains = the full mix's step 1 gain of each vocal of that mode, and step 2's instrument gain (package.stats)
-shift = max(gains)                                         # the player's volume tops out at 1
-vocal.volume      = db_to_gain(vocal.gain - shift)         # the job's own tracks of that mode
-instrument.volume = 1;  bus.level_db = instruments.gain - shift
-# Only values still equal to what Sing All wrote when it added the track are replaced:
-# a volume, mute, solo or bus level the owner changed during the job stays as they set it.
-# With mixes "none" the stats are still measured, so the balance is set the same way.
-```
-
-The download: `GET /sing-all/jobs/{jobId}/download`, exactly as the contract says. The signed URL is made with the API's own service account (IAM `signBlob`; M8 grants it), with `response_disposition` set to the attachment header. With the storage emulator, the URL is one the emulator serves without a signature.
-
-### Done when
-
-Each new test fails on the parent commit.
-- **Quote:** `options.mixes` defaults to `all` and follows `choices.mixes`; `options.mixFiles` matches the table under "The mixing rule" (4 parts lyrics only: all 5, full 1; both modes: all 10, full 2) and follows ticked rows; `invalid_mixes` for any other value; the lines and total are unchanged.
-- **Stage:** after the last take, a job with takes done goes to `packaging` with `package.state = "mixing"` and the planned total; the run's progress shows in `GET /sing-all/jobs/{id}`; on done the job ends `completed` or `partial` by its takes, and `package.state = "done"`.
-- **No take done:** the job ends `failed` as in step 3 and `package` is `null`.
-- **Package failure:** a failing run, and a run with no progress for 10 minutes (sweeper, with a fake clock), give `package.state = "failed"` and a job status from its takes.
-- **Stop:** during `packaging` the stop answers `too_late`, the run finishes, and the job ends by its takes.
-- **Opening balance:** after a job, the workspace player's volumes and bus level follow the stats as above; a volume the owner changed during the job, and a mute, stay.
-- **Download:** the owner gets `{url, fileName, expiresAt}` and fetching `url` gives the zip's bytes; another user, a missing job and a job whose Song is deleted get the same 404 `job_not_found`; a job whose package is not done gets 409 `zip_unavailable`.
-- **Old jobs:** a job document with no `choices.mixes` reads `mixes: "none"` in Progress.
-- No job id, session id, user id or storage path appears in a log line at INFO or above.
-
-### Out of scope
-
-Credits: no reservation, settlement, quote line or receipt row for the mixes (M6). The UI (M7). Emails (step 5).
+The full task text, as posted to Codex, is `/Users/alanchan/antigravity/sightsinger-agents/sing-all-mixes/M5.md` (outside the repo): the API contract above, the quote's mixes choice, the `packaging` stage and the `start_package` action, the sweeper's 10-minute limit, Stop too late, the download route, and the player's opening balance from `package.stats.balance`. No credits.
 
 ## M6. [Claude] Credits for the mixes
 
