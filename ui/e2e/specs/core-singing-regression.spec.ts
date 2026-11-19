@@ -2,7 +2,7 @@ import { expect, test, type Page, type Response, type TestInfo } from "@playwrig
 import { copyFile } from "node:fs/promises";
 import path from "node:path";
 import { signInAsE2EUser } from "../auth";
-import { clearLocalArtifacts, getE2EState, type E2EState } from "../support";
+import { chooseReplace, clearLocalArtifacts, getE2EState, type E2EState } from "../support";
 
 const fixtures = path.resolve(import.meta.dirname, "..", "fixtures");
 let sessionId = "";
@@ -502,6 +502,10 @@ async function uploadFixture(page: Page, filename: string): Promise<void> {
     return new URL(response.url()).pathname.endsWith("/upload") && request.method() === "POST";
   });
   await page.getByTestId("score-upload-input").setInputFiles(path.join(fixtures, filename));
+  // A second score into an open Song asks "New song or replace?" first; these tests replace.
+  const replacePrompt = page.getByRole("dialog", { name: "New song or replace?" });
+  await Promise.race([uploadResponse, replacePrompt.waitFor({ state: "visible" }).catch(() => undefined)]);
+  if (await replacePrompt.isVisible()) await chooseReplace(page);
   const response = await uploadResponse;
   expect(response.ok()).toBeTruthy();
   setSessionIdFromResponse(response, "upload");
