@@ -31,16 +31,14 @@ def score_tempo_events(score: stream.Score) -> list[tuple[float, float]]:
     """Collect the score-wide tempo marks in beat order, without duplicates."""
     events: list[tuple[float, float]] = []
     for mark in score.recurse().getElementsByClass(tempo.MetronomeMark):
-        bpm = mark.getQuarterBPM() if hasattr(mark, "getQuarterBPM") else None
+        bpm = _mark_bpm(mark)
         if bpm is None:
-            bpm = mark.number
-        if bpm is None or bpm <= 0:
             continue
         try:
             offset = float(mark.getOffsetInHierarchy(score))
         except Exception:
             offset = float(mark.offset)
-        events.append((offset, float(bpm)))
+        events.append((offset, bpm))
     events.sort(key=lambda event: event[0])
     deduped: list[tuple[float, float]] = []
     for event in events:
@@ -51,7 +49,8 @@ def score_tempo_events(score: stream.Score) -> list[tuple[float, float]]:
 
 
 def normalize_score_tempo_map(score: stream.Score) -> None:
-    """Put the complete score-wide tempo map into every part in memory."""
+    """Drop marks without BPM and put the score-wide tempo map into every part."""
+    _remove_marks_without_bpm(score)
     raw = score_tempo_events(score)
     if not raw:
         return
@@ -73,3 +72,18 @@ def normalize_score_tempo_map(score: stream.Score) -> None:
             measure = next((m for m in reversed(measures) if m.offset <= offset), measures[0])
             measure.insert(offset - measure.offset, tempo.MetronomeMark(number=bpm))
             have.add(key)
+
+
+def _mark_bpm(mark: tempo.MetronomeMark) -> float | None:
+    bpm = mark.getQuarterBPM() if hasattr(mark, "getQuarterBPM") else None
+    if bpm is None:
+        bpm = mark.number
+    if bpm is None or bpm <= 0:
+        return None
+    return float(bpm)
+
+
+def _remove_marks_without_bpm(score: stream.Score) -> None:
+    for mark in list(score.recurse().getElementsByClass(tempo.MetronomeMark)):
+        if _mark_bpm(mark) is None:
+            score.remove(mark, recurse=True)
