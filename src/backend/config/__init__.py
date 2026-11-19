@@ -282,6 +282,9 @@ class Settings:
     max_render_slots: int = 1
     sing_all_render_concurrency: int = 4
     sing_all_render_job: str = ""
+    sing_all_package_transport: str = "inline"
+    sing_all_package_job: str = ""
+    sing_all_soundfont_path: Path = PROJECT_ROOT / "ui/public/soundfonts/FluidR3_GM.sf2"
     # A second synthesis worker (the RTX PRO 6000 one) for some users' jobs,
     # dispatched the same way as SYNTHESIS_DISPATCH_MODE with its own URL,
     # audience and queue. "off" sends every job to the standard worker;
@@ -497,6 +500,15 @@ class Settings:
         sing_all_render_job = os.getenv("SING_ALL_RENDER_JOB", "").strip()
         if sing_all_singing_transport == "render_job" and not sing_all_render_job:
             raise ValueError("SING_ALL_RENDER_JOB is required for render_job transport.")
+        sing_all_package_transport = os.getenv("SING_ALL_PACKAGE_TRANSPORT", "inline").strip().lower()
+        if sing_all_package_transport not in {"inline", "job"}:
+            raise ValueError("SING_ALL_PACKAGE_TRANSPORT must be inline or job.")
+        sing_all_package_job = os.getenv("SING_ALL_PACKAGE_JOB", "").strip()
+        if sing_all_package_transport == "job" and not sing_all_package_job:
+            raise ValueError("SING_ALL_PACKAGE_JOB is required for job transport.")
+        sing_all_soundfont_path = Path(os.getenv(
+            "SING_ALL_SOUNDFONT_PATH", str(PROJECT_ROOT / "ui/public/soundfonts/FluidR3_GM.sf2")
+        ))
         if sing_all_reconcile_dispatch_mode != "inline" and not sing_all_reconcile_url:
             raise ValueError("SING_ALL_RECONCILE_URL is required for remote dispatch.")
         if sing_all_reconcile_dispatch_mode == "cloud_tasks" and not sing_all_reconcile_tasks_queue:
@@ -734,6 +746,9 @@ class Settings:
             max_render_slots=max_render_slots,
             sing_all_render_concurrency=sing_all_render_concurrency,
             sing_all_render_job=sing_all_render_job,
+            sing_all_package_transport=sing_all_package_transport,
+            sing_all_package_job=sing_all_package_job,
+            sing_all_soundfont_path=sing_all_soundfont_path,
             sing_all_reconcile_url=sing_all_reconcile_url,
             sing_all_reconcile_tasks_queue=sing_all_reconcile_tasks_queue,
             sing_all_reconcile_worker_token=os.getenv("SING_ALL_RECONCILE_WORKER_TOKEN", "").strip(),
