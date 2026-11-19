@@ -237,14 +237,25 @@ def test_package_settings_validate_transport(monkeypatch, tmp_path):
 def test_start_package_inline_and_cloud_job(monkeypatch):
     from src.backend import main
     calls = []
+    gate = None
     async def run(job_id, orchestrator):
         calls.append((job_id, orchestrator))
+        await gate.wait()
     marker = object()
     monkeypatch.setattr(main.app.state, "orchestrator", marker, raising=False)
     monkeypatch.setattr(package, "run_package", run)
     async def inline():
+        nonlocal gate
+        gate = asyncio.Event()
         await package.start_package("parent", SimpleNamespace(sing_all_package_transport="inline"))
+        assert len(package._package_tasks) == 1
         await asyncio.sleep(0)
+        assert calls == [("parent", marker)]
+        assert len(package._package_tasks) == 1
+        gate.set()
+        await asyncio.gather(*package._package_tasks)
+        await asyncio.sleep(0)
+        assert not package._package_tasks
     asyncio.run(inline())
     assert calls == [("parent", marker)]
 
@@ -348,11 +359,35 @@ def test_voicebank_credit_prefers_own_text_then_yaml_and_falls_back(monkeypatch,
     (nested / "dsconfig.yaml").write_text("model: synthetic")
     (nested / "character.yaml").write_text("name: Synthetic")
     monkeypatch.setattr(package.voicebank_cache, "_local_voicebanks_root", lambda: root)
-    monkeypatch.setattr(package.voicebank_cache, "_voicebank_bucket", lambda: "")
+    pack = tmp_path / "pack" / "nested"
+    pack.mkdir(parents=True)
+    (pack / "dsconfig.yaml").write_text("model: synthetic")
+    (pack / "character.txt").write_text("Name: Packed")
+    calls = []
+    def resolve(voice):
+        calls.append(voice)
+        if voice == "voice-b":
+            return pack.parent
+        raise FileNotFoundError("synthetic missing text pack")
+    monkeypatch.setattr(package.voicebank_cache, "resolve_voicebank_text_path", resolve)
     assert package._credit_file("voice-a", "Display") == (
         "character.yaml", b"name: Synthetic")
     (nested / "character.txt").write_text("Name: Synthetic")
     assert package._credit_file("voice-a", "Display") == (
         "character.txt", b"Name: Synthetic")
+    assert calls == []
+    assert package._credit_file("voice-b", "Display") == (
+        "character.txt", b"Name: Packed")
     assert package._credit_file("missing", "Display") == (
         "character.txt", b"Name: Display\n")
+    assert calls == ["voice-b", "missing"]
+
+
+def test_solo_and_part_mix_share_m1_safe_part_name(monkeypatch, tmp_path):
+    job, orchestrator, writes, _, _ = _fixture(monkeypatch, tmp_path, second=False)
+    job["rows"][0]["name"] = "S/A"
+    asyncio.run(package.run_package("parent", orchestrator))
+    with _zip(writes) as archive:
+        names = archive.namelist()
+        assert "Song-Title - Sing All/1 Solo vocals/S_A (lyrics).wav" in names
+        assert "Song-Title - Sing All/2 Part-dominant mixes/S_A (lyrics).mp3" in names

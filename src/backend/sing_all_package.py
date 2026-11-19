@@ -20,10 +20,13 @@ from src.backend import sing_all_store
 from src.backend.audio_mix import _read_audio
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all_mix import (
-    FULL_INSTRUMENTS_DB, PART_DOMINANT_INSTRUMENTS_DB, Stem, TakeRef,
+    FULL_INSTRUMENTS_DB, PART_DOMINANT_INSTRUMENTS_DB, Stem, TakeRef, _file_part_name,
     TrackSound, balanced_mix, plan_mixes, render_instruments, write_mp3,
 )
 from src.backend.storage_client import download_bytes, upload_file
+
+
+_package_tasks: set[asyncio.Task[None]] = set()
 
 
 def _safe_name(value: Any, *, fallback: str = "Song") -> str:
@@ -135,15 +138,15 @@ def _credit_file(voice: str, voice_name: str) -> tuple[str, bytes]:
         path = voice_dir / f"character.{extension}"
         if path.is_file() and path.resolve().is_relative_to(root.resolve()):
             return path.name, path.read_bytes()
-    bucket = voicebank_cache._voicebank_bucket()
-    if bucket:
-        prefix = voicebank_cache._voicebank_prefix()
+    try:
+        text_dir = voicebank_cache.resolve_voicebank_text_path(voice)
+        text_dir = voicebank_cache.discover_voicebank_root(text_dir) or text_dir
         for extension in ("txt", "yaml"):
-            try:
-                data = download_bytes(bucket, f"{prefix}/{voice}/character.{extension}")
-                return f"character.{extension}", data
-            except Exception:
-                continue
+            path = text_dir / f"character.{extension}"
+            if path.is_file():
+                return path.name, path.read_bytes()
+    except Exception:
+        pass
     return "character.txt", f"Name: {voice_name}\n".encode()
 
 
@@ -247,7 +250,8 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                 for item, row, original, _ in records:
                     part_id = str(row.get("partId") or item["rowId"])
                     file_mode = "solfège" if item["mode"] == "solfege" else item["mode"]
-                    name = f"1 Solo vocals/{_safe_name(row.get('name') or part_id)} ({file_mode}).wav"
+                    part_name = _file_part_name(str(row.get("name") or part_id), part_id)
+                    name = f"1 Solo vocals/{part_name} ({file_mode}).wav"
                     add(name, original, "solo", item["mode"], part_id, stored=True)
                 for mix, output in mix_outputs:
                     folder = "3 Full mixes" if mix.kind == "full" else "2 Part-dominant mixes"
@@ -319,7 +323,9 @@ async def start_package(job_id: str, settings: Any) -> None:
     """Start one inline package task or one Cloud Run Job execution."""
     if settings.sing_all_package_transport == "inline":
         from src.backend.main import app
-        asyncio.create_task(run_package(job_id, app.state.orchestrator))
+        task = asyncio.create_task(run_package(job_id, app.state.orchestrator))
+        _package_tasks.add(task)
+        task.add_done_callback(_package_tasks.discard)
         return
     from google.auth import default
     from google.auth.transport.requests import AuthorizedSession
