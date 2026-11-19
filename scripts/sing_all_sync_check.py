@@ -52,8 +52,15 @@ def _midi_clock(midi: mido.MidiFile):
     return at_beat, sorted(set(onsets))
 
 
-def _heard_onsets(audio: np.ndarray, sample_rate: int) -> list[float]:
-    """Find rises in short-frame energy, including onsets after quiet gaps."""
+def _heard_note_onsets(
+    audio: np.ndarray, sample_rate: int, expected: list[float],
+) -> list[float]:
+    """Locate the steepest energy rise near each written note boundary.
+
+    A sung vowel can continue across two notes without a quiet gap, so a
+    whole-clip silence or ratio detector misses that second note's attack.
+    The score narrows the search to 60 ms around each expected MIDI onset.
+    """
     mono = np.mean(audio, axis=1) if audio.ndim == 2 else audio
     frame = max(1, round(sample_rate * 0.01))
     count = len(mono) // frame
@@ -61,27 +68,20 @@ def _heard_onsets(audio: np.ndarray, sample_rate: int) -> list[float]:
         return []
     frames = mono[:count * frame].reshape((count, frame))
     rms = np.sqrt(np.mean(np.square(frames.astype(np.float64)), axis=1))
-    smooth = np.convolve(rms, np.ones(3) / 3, mode="same")
-    peak = float(np.max(smooth, initial=0))
-    if peak < 1e-5:
-        return []
-    floor = max(1e-4, peak * 0.04)
-    before = np.r_[0.0, smooth[:-1]]
-    crossings = np.flatnonzero((smooth >= floor) & (before < floor))
-    # Notes sung without a gap can still make a new positive energy slope.
-    earlier = np.r_[np.zeros(5), smooth[:-5]]
-    rises = np.flatnonzero(
-        (smooth >= max(floor, peak * 0.08))
-        & (smooth > earlier * 1.8)
-        & (smooth > np.r_[smooth[1:], 0.0] * 0.98)
-    )
-    candidates = sorted(set(crossings.tolist() + rises.tolist()))
-    selected: list[int] = []
-    for index in candidates:
-        if not selected or index - selected[-1] >= 5:
-            selected.append(index)
-    # The centered three-frame smoothing sees a pulse one frame early.
-    return [(index + 1) * frame / sample_rate for index in selected]
+    rise = np.diff(rms, prepend=0.0)
+    minimum_rise = max(0.005, float(np.max(rms, initial=0)) * 0.02)
+    heard: list[float] = []
+    for onset in expected:
+        center = round(onset * sample_rate / frame)
+        radius = max(1, round(0.06 * sample_rate / frame))
+        start = max(0, center - radius)
+        stop = min(count, center + radius + 1)
+        if start >= stop:
+            continue
+        index = start + int(np.argmax(rise[start:stop]))
+        if rise[index] >= minimum_rise:
+            heard.append(index * frame / sample_rate)
+    return heard
 
 
 def _note_beats(part: dict[str, Any]) -> list[float]:
@@ -128,7 +128,7 @@ def measure_offsets(
         raise ValueError(f"Part not found in score: {part}")
     audio, sample_rate = _read_audio(take_wav)
     expected_vocal = [clock(beat) for beat in _note_beats(vocal_part)]
-    heard_vocal = _heard_onsets(audio, sample_rate)
+    heard_vocal = _heard_note_onsets(audio, sample_rate, expected_vocal)
     vocal_ms, vocal_paired = _paired_offset(expected_vocal, heard_vocal, 0.150)
 
     instrument_beats = sorted({

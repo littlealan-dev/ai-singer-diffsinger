@@ -17,7 +17,8 @@ fi
 
 image="sightsinger-sing-all-package:local"
 if ! docker image inspect "$image" >/dev/null 2>&1; then
-  docker build -f "$repo_root/Dockerfile.sing-all-package" -t "$image" "$repo_root"
+  docker build --build-context "trial-scripts=$repo_root/scripts" \
+    -f "$repo_root/Dockerfile.sing-all-package" -t "$image" "$repo_root"
 fi
 docker run --rm \
   -v "$folder:/work" \

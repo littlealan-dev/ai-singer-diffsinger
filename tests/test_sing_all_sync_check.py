@@ -6,8 +6,10 @@ import mido
 import numpy as np
 import pytest
 import soundfile as sf
+from pathlib import Path
+from xml.etree import ElementTree
 
-from scripts.sing_all_sync_check import measure_offsets
+from scripts.sing_all_sync_check import _note_beats, measure_offsets
 
 
 def _midi_and_score(tmp_path):
@@ -59,3 +61,59 @@ def test_click_track_reports_shift_on_midi_tempo_clock(tmp_path, shift_ms):
     assert abs(offsets["vocal_ms"] - shift_ms) <= 5
     assert offsets["instruments_paired"] == 6
     assert abs(offsets["instruments_ms"]) <= 5
+
+
+@pytest.mark.parametrize(
+    ("feature", "source", "repeats"),
+    [
+        ("repeat-written", "repeat_navigation_piano/forward_repeat.xml", False),
+        ("repeat-played", "repeat_navigation_piano/forward_repeat.xml", True),
+        ("pickup", "late_first_tempo.musicxml", False),
+        ("tempo-change", "late_first_tempo.musicxml", False),
+    ],
+)
+def test_voicebank_take_matches_instrument_midi_clock(
+    tmp_path, feature, source, repeats,
+):
+    """Generate the take at test time; no licensed vocal audio is committed."""
+    from src.api.score import expanded_score_for_synthesis, parse_score
+    from src.api.synthesize import synthesize
+    from src.musicxml.performance_midi import build_instrumental_performance_midis
+
+    root = Path(__file__).parent.parent
+    voicebank = root / "assets/voicebanks/Raine_Rena_2.01"
+    if not (voicebank / "dsmain").is_dir():
+        pytest.skip("Local voicebank is not installed.")
+    source_path = root / "tests/fixtures" / source
+    if feature == "pickup":
+        tree = ElementTree.parse(source_path)
+        for xml_part in tree.getroot().findall("part"):
+            first = xml_part.find("measure")
+            assert first is not None
+            first.set("implicit", "yes")
+            first.set("number", "0")
+            first.find("note/duration").text = "1"
+            first.find("note/type").text = "quarter"
+        source_path = tmp_path / "made-up-pickup.musicxml"
+        tree.write(source_path, encoding="unicode")
+    score = parse_score(str(source_path))
+    original = tmp_path / "written.mid"
+    expanded = tmp_path / "played.mid"
+    result = build_instrumental_performance_midis(
+        source_path, original_output_path=original, expanded_output_path=expanded,
+        score_summary=score.get("score_summary"),
+    )
+    midi_path = expanded if repeats else original
+    assert midi_path.is_file(), f"{feature}: instrument MIDI unavailable: {result['diagnostic']}"
+    take = synthesize(score, voicebank, part_index=0, expand_repeats=repeats, device="cpu")
+    take_path = tmp_path / "generated-at-test-time.wav"
+    sf.write(take_path, take["waveform"], take["sample_rate"])
+    part = score["parts"][0]["part_id"]
+    offsets = measure_offsets(take_path, midi_path, score, part, repeats)
+    sung = expanded_score_for_synthesis(score) if repeats else score
+    vocal_count = len(_note_beats(sung["parts"][0]))
+    instrument_count = len(_note_beats(sung["parts"][1]))
+    assert offsets["vocal_paired"] >= 0.8 * vocal_count, f"{feature}: {offsets}"
+    assert offsets["instruments_paired"] >= 0.8 * instrument_count, f"{feature}: {offsets}"
+    assert offsets["vocal_ms"] is not None and abs(offsets["vocal_ms"]) <= 30, f"{feature}: {offsets}"
+    assert offsets["instruments_ms"] is not None and abs(offsets["instruments_ms"]) <= 30, f"{feature}: {offsets}"
