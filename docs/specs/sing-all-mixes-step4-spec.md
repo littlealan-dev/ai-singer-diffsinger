@@ -208,17 +208,25 @@ The mix rule above, as pure functions over audio arrays, plus the instrument ren
 1. `src/backend/sing_all_mix.py`: `lufs`, `balanced_mix` (returns the mix and its stats), `limit` (ffmpeg's limiter, replacing hard clipping), `render_instruments(midi_path, soundfont_path, sample_rate, drop_tracks) -> numpy array` (pyfluidsynth, driven by `mido`, as above), `plan_mixes(takes, modes, mixes)` (which files, with their names), and `write_mp3`. Reading audio reuses `audio_mix._read_audio`.
 2. `scripts/sing_all_mix_trial.py`: given a folder of take WAVs (or MP3s), a MIDI file and the part names, writes the full and part-dominant mixes and prints each stem's loudness and gain and each mix's loudness, peak and limiting. Constants can be overridden on the command line (`--full-instruments-db -6` …) so Alan can try values without editing code.
 3. `requirements*.txt`: `pyloudnorm`, `pyfluidsynth`, `mido`. `pyfluidsynth` is imported inside `render_instruments` only, so the API and tests run without the FluidSynth library.
-4. `Dockerfile.sing-all-package`: Python slim, `ffmpeg`, `libfluidsynth3`, the backend requirements and the code; the soundfont is mounted or copied from `ui/public/soundfonts/FluidR3_GM.sf2` (not in git). The trial runs in it: `scripts/sing_all_mix_trial.sh <folder>` builds the image once and runs the trial command with the folder mounted, so Alan's Mac needs only Docker. M7 deploys the same image.
-5. **The sync check, for testing only** (Alan, 2026-11-19): `scripts/sing_all_sync_check.py`, never imported by `src/` and never run by a job. `measure_offset_ms(take_wav, midi_path, part, sample_rate)`:
+4. `Dockerfile.sing-all-package`: Python slim, `ffmpeg`, `libfluidsynth3`, the backend requirements and the code; the soundfont is mounted or copied from `ui/public/soundfonts/FluidR3_GM.sf2` (not in git). The trial runs in it: `scripts/sing_all_mix_trial.sh <folder>` builds the image once and runs the trial command with the folder mounted, so Alan's Mac needs only Docker. M8 deploys the same image.
+5. **The sync check, for testing only** (Alan, 2026-11-19): `scripts/sing_all_sync_check.py`, never imported by `src/` and never run by a job. The instrument MIDI holds no vocal part (`performance_midi.py` leaves out parts with lyrics), so the check places the sung part's notes on the MIDI's own clock instead of rendering them:
 
    ```python
-   guide = render the part's own melody track from the MIDI with a plain sound (render_instruments, keeping only that track)
-   onsets_take  = note starts in the take    (librosa.onset.onset_detect, or an energy rise per frame)
-   onsets_guide = note starts in the guide   (the MIDI's own note_on times; no detection needed)
-   pair each guide onset with the nearest take onset within 150 ms
-   return the median difference (take - guide) in ms, and how many pairs were found
+   def measure_offsets(take_wav, midi_path, score, part, repeats):
+       clock  = the MIDI's tempo map, read with mido (tick -> seconds)
+       sung   = the score the take was sung from: expanded_score_for_synthesis(score) if repeats, else score
+       # 1. the take against the MIDI's clock
+       expected = [clock(beat) for each non-rest note start of `part` in `sung`]
+       heard    = note starts in the take: rises in frame energy (numpy; no new dependency)
+       vocal    = median(nearest heard - expected), pairing within 150 ms; and how many paired
+       # 2. the MIDI's notes against the same clock (catches a repeat order that differs)
+       expected = [clock(beat) for each note start of the instrument parts in `sung`]
+       written  = the MIDI's note_on times
+       instruments = median(nearest written - expected), pairing within 50 ms; and how many paired
+       return {vocal_ms, vocal_paired, instruments_ms, instruments_paired}
    ```
 
+   It needs no FluidSynth.
    The trial command prints it per take; the tests below use it. A mix never calls it.
 
 ### Done when
@@ -232,7 +240,8 @@ The mix rule above, as pure functions over audio arrays, plus the instrument ren
   - `plan_mixes` gives the counts of the table above.
   - with no instrument sounding, `plan_mixes` gives the same files for `all` as for `full`.
 - `render_instruments` has one test that runs only when the FluidSynth library loads (`pytest.mark.skipif`), and checks the array's sample rate, length, that a dropped track is silent, and that the result is not silence.
-- Sync (through the sync check, in the Docker run where the FluidSynth library loads): for the fixtures with repeats, a pickup bar and a tempo change, each with a short sung take made once and kept as a fixture WAV, the take and its MIDI are within 30 ms (median), with most notes paired. A failure names the score feature, and is reported to Claude, not fixed in the mix code: the take and the MIDI must agree at the source.
+- Sync (the sync check): for test fixtures with repeats (both settings), a pickup bar and a tempo change, `vocal_ms` and `instruments_ms` are within 30 ms, with at least 80% of the notes paired. The takes are sung at test time with the local voicebank through `src/api/synthesize.synthesize`, and the test is skipped when no voicebank is installed. No sung WAV is committed (the voices' terms of use). A failure names the score feature and is reported to Claude as a `[Codex] Question:`, not fixed in the mix code: the take and the MIDI must agree at the source.
+- The sync check's own logic has unit tests without a voicebank: a synthetic click track built from a score's beats on a MIDI's clock measures 0 ms, and the same track shifted by 40 ms measures 40 ms.
 - The trial command runs on the repo's test fixtures and prints the stats, both directly and through `scripts/sing_all_mix_trial.sh` (Docker), where the pyfluidsynth test also runs.
 
 ### Checks
