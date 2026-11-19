@@ -82,8 +82,8 @@ def test_mix_plan_counts_modes_and_names():
     assert len(plan) == 10
     assert plan[0].file_name == "Full mix (lyrics).mp3"
     assert plan[1].file_name == "Part 0 (lyrics).mp3"
-    assert plan[5].file_name == "Full mix (solfege).mp3"
-    assert plan[-1].file_name == "Part 3 (solfege).mp3"
+    assert plan[5].file_name == "Full mix (solfège).mp3"
+    assert plan[-1].file_name == "Part 3 (solfège).mp3"
     assert mix.plan_mixes(both, "all", False) == mix.plan_mixes(both, "full", False)
     assert mix.plan_mixes(both, "none", True) == []
 
@@ -113,22 +113,39 @@ def _fluid_available() -> bool:
     return Path("ui/public/soundfonts/FluidR3_GM.sf2").is_file()
 
 
-@pytest.mark.skipif(not _fluid_available(), reason="FluidSynth library or soundfont unavailable")
-def test_instrument_render_has_tail_and_honors_drop_tracks(tmp_path):
+def _two_track_midi(tmp_path):
     midi_path = tmp_path / "made-up.mid"
     midi = mido.MidiFile(ticks_per_beat=480)
-    track = mido.MidiTrack()
-    midi.tracks.append(track)
-    track.extend([
-        mido.Message("program_change", channel=0, program=0, time=0),
-        mido.Message("note_on", channel=0, note=60, velocity=90, time=0),
-        mido.Message("note_off", channel=0, note=60, velocity=0, time=960),
-    ])
+    midi.tracks.append(mido.MidiTrack([mido.MetaMessage("set_tempo", tempo=500_000)]))
+    for note in (60, 64):
+        midi.tracks.append(mido.MidiTrack([
+            mido.Message("program_change", channel=0, program=76, time=0),
+            mido.Message("note_on", channel=0, note=note, velocity=90, time=0),
+            mido.Message("note_off", channel=0, note=note, velocity=0, time=960),
+        ]))
     midi.save(midi_path)
+    return midi_path
+
+
+def test_instrument_render_rejects_wrong_track_sound_count(tmp_path):
+    midi_path = _two_track_midi(tmp_path)
+    with pytest.raises(ValueError, match="Expected 2 sounds"):
+        mix.render_instruments(midi_path, tmp_path / "unused.sf2", RATE, [mix.TrackSound(0, 0)])
+
+
+@pytest.mark.skipif(not _fluid_available(), reason="FluidSynth library or soundfont unavailable")
+def test_instrument_render_has_tail_mutes_and_overrides_programs(tmp_path):
+    midi_path = _two_track_midi(tmp_path)
     soundfont = Path("ui/public/soundfonts/FluidR3_GM.sf2")
-    sounding = mix.render_instruments(midi_path, soundfont, RATE, set())
-    dropped = mix.render_instruments(midi_path, soundfont, RATE, {0})
+    piano = mix.render_instruments(
+        midi_path, soundfont, RATE, [mix.TrackSound(0, 0), None]
+    )
+    guitar = mix.render_instruments(
+        midi_path, soundfont, RATE, [mix.TrackSound(0, 24), None]
+    )
+    muted = mix.render_instruments(midi_path, soundfont, RATE, [None, None])
     expected = RATE + round(mix.RELEASE_TAIL_SECONDS * RATE)
-    assert sounding.shape == dropped.shape == (expected, 2)
-    assert np.max(np.abs(sounding)) > 0.01
-    assert np.max(np.abs(dropped)) == 0
+    assert piano.shape == guitar.shape == muted.shape == (expected, 2)
+    assert np.max(np.abs(piano)) > 0.01
+    assert np.max(np.abs(muted)) == 0
+    assert not np.allclose(piano, guitar)

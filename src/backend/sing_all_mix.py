@@ -31,6 +31,12 @@ class Stem:
 
 
 @dataclass(frozen=True)
+class TrackSound:
+    bank: int
+    program: int
+
+
+@dataclass(frozen=True)
 class TakeRef:
     part_id: str
     part_name: str
@@ -168,14 +174,42 @@ def balanced_mix(
 
 def render_instruments(
     midi_path: Path, soundfont_path: Path, sample_rate: int,
-    drop_tracks: set[int],
+    sounds: list[TrackSound | None],
 ) -> np.ndarray:
     """Render MIDI track events directly through an in-process FluidSynth."""
-    import fluidsynth  # Deliberately optional for the API and pure mix tests.
-
     if sample_rate <= 0:
         raise ValueError("sample_rate must be positive.")
     midi = mido.MidiFile(str(midi_path))
+    note_tracks = [
+        index for index, track in enumerate(midi.tracks)
+        if any(message.type == "note_on" and message.velocity for message in track)
+    ]
+    if len(sounds) != len(note_tracks):
+        raise ValueError(
+            f"Expected {len(note_tracks)} sounds for note-bearing tracks, got {len(sounds)}."
+        )
+    if len(note_tracks) > 16:
+        raise ValueError("FluidSynth supports at most 16 distinct track sounds.")
+    for sound in sounds:
+        if sound is not None and (sound.bank not in {0, 128} or not 0 <= sound.program <= 127):
+            raise ValueError("TrackSound needs bank 0 or 128 and program 0–127.")
+    import fluidsynth  # Deliberately optional for the API and pure mix tests.
+
+    # The MIDI's channel and program are not the player's chosen sound. Give
+    # each note-bearing track a private channel so simultaneous tracks cannot
+    # change each other's bank or program.
+    track_sounds = dict(zip(note_tracks, sounds))
+    percussion_track = next(
+        (track for track in note_tracks if track_sounds[track] is not None
+         and track_sounds[track].bank == 128), None
+    )
+    track_channels = {percussion_track: 9} if percussion_track is not None else {}
+    available_channels = [*range(9), *range(10, 16)]
+    if percussion_track is None:
+        available_channels.append(9)
+    for track in note_tracks:
+        if track not in track_channels:
+            track_channels[track] = available_channels.pop(0)
     events: list[tuple[int, int, mido.Message]] = []
     for track_index, track in enumerate(midi.tracks):
         tick = 0
@@ -190,8 +224,12 @@ def render_instruments(
         sfid = synth.sfload(str(soundfont_path))
         if sfid < 0:
             raise ValueError(f"Could not load soundfont: {soundfont_path}")
-        for channel in range(16):
-            synth.program_select(channel, sfid, 128 if channel == 9 else 0, 0)
+        for track_index, channel in track_channels.items():
+            sound = track_sounds[track_index]
+            if sound is not None:
+                synth.program_select(channel, sfid, 0, 0)
+                synth.bank_select(channel, sound.bank)
+                synth.program_change(channel, sound.program)
 
         def pull(frames: int) -> None:
             while frames > 0:
@@ -214,12 +252,10 @@ def render_instruments(
             if message.type == "set_tempo":
                 tempo = message.tempo
                 continue
-            if track_index in drop_tracks or message.is_meta:
+            if track_index not in track_channels or track_sounds[track_index] is None or message.is_meta:
                 continue
-            channel = getattr(message, "channel", 0)
-            if message.type == "program_change":
-                synth.program_change(channel, message.program)
-            elif message.type == "note_on":
+            channel = track_channels[track_index]
+            if message.type == "note_on":
                 if message.velocity:
                     synth.noteon(channel, message.note, message.velocity)
                 else:
@@ -229,7 +265,7 @@ def render_instruments(
             elif message.type == "control_change":
                 synth.cc(channel, message.control, message.value)
             elif message.type == "pitchwheel":
-                synth.pitch_bend(channel, message.pitch)
+                synth.pitch_bend(channel, message.pitch + 8192)
         pull(round(RELEASE_TAIL_SECONDS * sample_rate))
     finally:
         synth.delete()
@@ -255,7 +291,8 @@ def plan_mixes(
         in_mode = [take for take in takes if take.mode == mode]
         if not in_mode:
             continue
-        plan.append(PlannedMix("full", mode, None, f"Full mix ({mode}).mp3"))
+        file_mode = "solfège" if mode == "solfege" else mode
+        plan.append(PlannedMix("full", mode, None, f"Full mix ({file_mode}).mp3"))
         if mixes == "all" and instruments_sound:
             seen: set[str] = set()
             for take in in_mode:
@@ -263,7 +300,7 @@ def plan_mixes(
                     continue
                 seen.add(take.part_id)
                 name = _file_part_name(take.part_name, take.part_id)
-                plan.append(PlannedMix("part", mode, take.part_id, f"{name} ({mode}).mp3"))
+                plan.append(PlannedMix("part", mode, take.part_id, f"{name} ({file_mode}).mp3"))
     return plan
 
 

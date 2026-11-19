@@ -29,7 +29,10 @@ def main() -> None:
     parser.add_argument("--soundfont", type=Path, help="FluidR3_GM.sf2 (required with --midi)")
     parser.add_argument("--score", help="MusicXML score for the optional sync report")
     parser.add_argument("--repeats", action="store_true")
-    parser.add_argument("--drop-track", type=int, action="append", default=[])
+    parser.add_argument(
+        "--track-sound", action="append", default=[], metavar="BANK:PROGRAM|none",
+        help="Repeat once per note-bearing MIDI track in file order; none mutes it.",
+    )
     parser.add_argument("--mixes", choices=("all", "full", "none"), default="all")
     parser.add_argument("--output", type=Path, help="Output folder (default: FOLDER/mixes)")
     for flag, default in (
@@ -52,6 +55,10 @@ def main() -> None:
         parser.error("Provide at least one --take PART_ID PART_NAME MODE FILE.")
     if args.midi and not args.soundfont:
         parser.error("--soundfont is required with --midi.")
+    if args.midi and not args.track_sound:
+        parser.error("--midi requires a --track-sound for each note-bearing MIDI track.")
+    if args.track_sound and not args.midi:
+        parser.error("--track-sound requires --midi.")
     if args.score and not args.midi:
         parser.error("--score requires --midi.")
 
@@ -86,9 +93,19 @@ def main() -> None:
 
     instruments = None
     if args.midi:
+        sounds: list[mix.TrackSound | None] = []
+        for value in args.track_sound:
+            if value.lower() == "none":
+                sounds.append(None)
+                continue
+            try:
+                bank_text, program_text = value.split(":", 1)
+                sounds.append(mix.TrackSound(int(bank_text), int(program_text)))
+            except ValueError:
+                parser.error(f"Invalid --track-sound {value!r}; use BANK:PROGRAM or none.")
         instruments = mix.render_instruments(
             _path_in_folder(folder, args.midi), args.soundfont, sample_rate,
-            set(args.drop_track),
+            sounds,
         )
     instruments_sound = instruments is not None and bool(
         float(abs(instruments).max(initial=0)) > 1e-6
