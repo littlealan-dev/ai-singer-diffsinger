@@ -171,10 +171,10 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                 child = {**child, "jobId": item["childJobId"]}
                 error_code = "missing_wav"
                 local, original = await _take_wav(child, job, orchestrator, work_dir)
-                audio, source_rate = _read_wav(local)
+                audio, source_rate = await asyncio.to_thread(_read_wav, local)
                 if rate is None:
                     rate = source_rate
-                audio = _resample(audio, source_rate, rate)
+                audio = await asyncio.to_thread(_resample, audio, source_rate, rate)
                 row = rows.get(str(item.get("rowId"))) or {}
                 records.append((item, row, original, Stem(str(row.get("name") or item["rowId"]), audio)))
             assert rate is not None
@@ -182,8 +182,8 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
             instruments = None
             if midi and any(sound is not None for sound in sounds):
                 error_code = "render_failed"
-                instruments = render_instruments(
-                    midi, Path(settings.sing_all_soundfont_path), rate, sounds)
+                instruments = await asyncio.to_thread(
+                    render_instruments, midi, Path(settings.sing_all_soundfont_path), rate, sounds)
             refs = [TakeRef(str(row.get("partId") or item["rowId"]),
                             str(row.get("name") or item["rowId"]), item["mode"])
                     for item, row, _, _ in records]
@@ -197,19 +197,20 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                         if any(item["mode"] == value for item, _, _, _ in records))
             full_vocals = [stem for item, _, _, stem in records if item["mode"] == mode]
             error_code = "mix_failed"
-            _, balance = balanced_mix(full_vocals, instruments, FULL_INSTRUMENTS_DB, rate)
+            _, balance = await asyncio.to_thread(
+                balanced_mix, full_vocals, instruments, FULL_INSTRUMENTS_DB, rate)
             mix_outputs: list[tuple[Any, Path]] = []
             mix_stats: list[dict] = []
             for mix in planned:
                 selected = [stem for item, row, _, stem in records
                             if item["mode"] == mix.mode and
                             (mix.kind == "full" or str(row.get("partId") or item["rowId"]) == mix.part_id)]
-                audio, stats = balanced_mix(
-                    selected, instruments,
+                audio, stats = await asyncio.to_thread(
+                    balanced_mix, selected, instruments,
                     FULL_INSTRUMENTS_DB if mix.kind == "full" else PART_DOMINANT_INSTRUMENTS_DB,
                     rate)
                 output = work_dir / mix.file_name
-                write_mp3(audio, rate, output)
+                await asyncio.to_thread(write_mp3, audio, rate, output)
                 mix_outputs.append((mix, output))
                 mix_stats.append({"file_name": mix.file_name, **stats})
                 package["mixes"]["done"] += 1
