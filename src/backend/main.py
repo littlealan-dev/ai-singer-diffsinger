@@ -1844,7 +1844,8 @@ def create_app() -> FastAPI:
             await SingAllRunner(request.app.state.orchestrator).reconcile(parent_id)
             ended = await asyncio.to_thread(load_sing_all_job, parent_id) or parent
             takes = [item for item in ended.get("items") or [] if item.get("type") == "take"]
-            too_late = packaging or ended.get("status") == "completed"
+            too_late = (packaging or ended.get("stage") == "packaging"
+                        or ended.get("status") == "completed")
             if not packaging and ended.get("status") == "running" and takes:
                 remaining = [item for item in takes if item.get("status") not in
                              {"done", "failed", "stopped"}]

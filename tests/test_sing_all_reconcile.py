@@ -270,9 +270,29 @@ def test_stop_waits_for_a_take_past_its_stop_point_then_completes():
     assert fields == {} and actions == []
     fields, actions = decide(job, {"take-b": {"status": "completed", "creditsCharged": 2}},
                              _score(job))
-    assert fields["status"] == "completed" and fields["endReason"] is None
+    assert fields["stage"] == "packaging" and fields["package"]["state"] == "mixing"
     assert [item["creditsCharged"] for item in fields["items"] if item["type"] == "take"] == [2, 2]
+    assert actions == [{"kind": "start_package"}]
     assert not any(action["kind"] == "release" for action in actions)
+    job.update(fields)
+    job["package"] = {**job["package"], "state": "done"}
+    fields, actions = decide(job, {}, _score(job))
+    assert fields["status"] == "completed" and fields["endReason"] is None
+    assert actions[0] == {"kind": "set_opening_balance"}
+
+
+def test_stop_then_package_releases_unstarted_instrumental_reservation():
+    job = _job("singing", instrumental=True)
+    job["cancelRequested"] = True
+    job["items"][0]["status"] = "done"
+    for item in job["items"]:
+        if item["type"] == "take":
+            item.update(status="done", creditsCharged=2)
+    fields, actions = decide(job, {}, _score(job))
+    assert fields["stage"] == "packaging"
+    assert fields["items"][-1]["status"] == "stopped"
+    assert actions == [{"kind": "release", "reservationId": "parent-instrumentals"},
+                       {"kind": "start_package"}]
 
 
 def test_sweep_expires_each_split_after_its_own_30_minutes():

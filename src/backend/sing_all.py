@@ -487,6 +487,25 @@ def decide(
         actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
 
+    def enter_packaging(settled_items: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from src.backend.sing_all_mix import TakeRef, plan_mixes
+        from src.backend.sing_all_package import track_sounds
+
+        row_by_id = {row["rowId"]: row for row in rows}
+        refs = [TakeRef(str((row_by_id.get(item["rowId"]) or {}).get("partId")
+                            or item["rowId"]),
+                        str((row_by_id.get(item["rowId"]) or {}).get("name")
+                            or item["rowId"]), item["mode"])
+                for item in settled_items if item["type"] == "take"
+                and item["status"] == "done"]
+        sounds = track_sounds(score_state.get("scoreSummary") or {})
+        planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
+                             any(sound is not None for sound in sounds))
+        package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
+                   "startedAt": now, "updatedAt": now}
+        return {"stage": "packaging", "package": package,
+                "items": settled_items}, [{"kind": "start_package"}]
+
     if score_state.get("terminalFailure"):
         return finish("failed", str(score_state["terminalFailure"]))
 
@@ -546,7 +565,12 @@ def decide(
             return {"items": items, "status": "partial" if done else "failed",
                     "stage": "done", "endReason": "stuck"}, actions
     if job.get("cancelRequested"):
-        return wind_down(job, children)
+        fields, actions = wind_down(job, children)
+        if stage == "singing" and fields.get("status") == "completed":
+            package_fields, package_actions = enter_packaging(fields["items"])
+            return package_fields, [action for action in actions
+                                    if action["kind"] == "release"] + package_actions
+        return fields, actions
     if stage == "reading":
         if score_state.get("scoreId") != job.get("scoreId"):
             return finish("failed", "score_replaced")
@@ -666,20 +690,7 @@ def decide(
             done = sum(item["status"] == "done" for item in takes)
             if not done:
                 return finish("failed")
-            from src.backend.sing_all_mix import TakeRef, plan_mixes
-            from src.backend.sing_all_package import track_sounds
-            row_by_id = {row["rowId"]: row for row in rows}
-            refs = [TakeRef(str((row_by_id.get(item["rowId"]) or {}).get("partId")
-                                or item["rowId"]),
-                            str((row_by_id.get(item["rowId"]) or {}).get("name")
-                                or item["rowId"]), item["mode"])
-                    for item in takes if item["status"] == "done"]
-            sounds = track_sounds(score_state.get("scoreSummary") or {})
-            planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
-                                 any(sound is not None for sound in sounds))
-            package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
-                       "startedAt": now, "updatedAt": now}
-            return {"stage": "packaging", "package": package}, [{"kind": "start_package"}]
+            return enter_packaging(items)
         return {}, []
 
     return {}, []
