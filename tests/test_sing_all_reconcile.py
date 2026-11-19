@@ -181,6 +181,12 @@ def test_singing_starts_each_take_then_finishes_partial():
     fields, _ = decide(job, {"take-b": {"status": "failed", "error": "render_failed"}}, _score(job))
     job.update(fields)
     fields, actions = decide(job, {}, _score(job))
+    assert fields["stage"] == "packaging"
+    assert fields["package"]["mixes"] == {"done": 0, "total": 0}
+    assert actions == [{"kind": "start_package"}]
+    job.update(fields)
+    job["package"]["state"] = "failed"
+    fields, actions = decide(job, {}, _score(job))
     assert fields["status"] == "partial" and fields["stage"] == "done"
     assert [action["kind"] for action in actions] == ["clear_active", "append_end_history"]
 

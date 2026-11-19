@@ -8,13 +8,36 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.backend import main, sing_all_runner, sing_all_store, songs
+from src.backend import main, sing_all_package, sing_all_runner, sing_all_store, songs
 from src.backend.credits import (
     get_instrumental_charge_state, get_or_create_credits, instrumental_charge_scope,
     release_credits, settle_credits,
 )
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all_runner import SingAllRunner
+
+
+@pytest.fixture(autouse=True)
+def complete_test_package(monkeypatch):
+    """Keep older orchestration tests focused on takes while packaging finishes."""
+    async def start_package(job_id, _settings):
+        get_firestore_client().collection("singAllJobs").document(job_id).update({
+            "package.state": "done", "package.stats.balance": {},
+            "package.updatedAt": datetime.now(timezone.utc),
+        })
+    monkeypatch.setattr(sing_all_package, "start_package", start_package)
+    original_action = SingAllRunner._action
+
+    async def action(runner, job, request, snapshot):
+        if request["kind"] == "start_package":
+            await sing_all_package.start_package(job["jobId"], None)
+            return None
+        if (request["kind"] == "set_opening_balance" and
+                not hasattr(runner.orchestrator._sessions, "set_sing_all_opening_balance")):
+            return None
+        return await original_action(runner, job, request, snapshot)
+
+    monkeypatch.setattr(SingAllRunner, "_action", action)
 
 
 @pytest.fixture
@@ -884,8 +907,9 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
     assert parent["songId"] == session_id
     assert parent["title"] == "Made-up song"
     assert parent["status"] == "running" and parent["stage"] == "reading"
-    assert parent["choices"] == {key: choices[key] for key in
-                                 ("language", "solfegeOnly", "mode", "verse", "repeats")}
+    assert parent["choices"] == {**{key: choices[key] for key in
+                                   ("language", "solfegeOnly", "mode", "verse", "repeats")},
+                                 "mixes": "none"}
     assert parent["counts"] == {"splits": {"done": 0, "total": 0},
                                  "takes": {"done": 0, "failed": 0, "total": 4}}
     assert len(parent["rows"]) == 4
