@@ -193,6 +193,29 @@ def render_instruments(
     for sound in sounds:
         if sound is not None and (sound.bank not in {0, 128} or not 0 <= sound.program <= 127):
             raise ValueError("TrackSound needs bank 0 or 128 and program 0–127.")
+
+    events: list[tuple[int, int, mido.Message]] = []
+    for track_index, track in enumerate(midi.tracks):
+        tick = 0
+        for message in track:
+            tick += message.time
+            events.append((tick, track_index, message))
+    events.sort(key=lambda event: (event[0], event[1]))
+
+    if all(sound is None for sound in sounds):
+        # FluidSynth's 16-bit output is dithered, including when every track
+        # is muted. Return exact silence with the same MIDI-clock length.
+        tempo = 500_000
+        tick = 0
+        elapsed = 0.0
+        for event_tick, _, message in events:
+            elapsed += mido.tick2second(event_tick - tick, midi.ticks_per_beat, tempo)
+            tick = event_tick
+            if message.type == "set_tempo":
+                tempo = message.tempo
+        length = round(elapsed * sample_rate) + round(RELEASE_TAIL_SECONDS * sample_rate)
+        return np.zeros((length, 2), dtype=np.float32)
+
     import fluidsynth  # Deliberately optional for the API and pure mix tests.
 
     # The MIDI's channel and program are not the player's chosen sound. Give
@@ -210,13 +233,6 @@ def render_instruments(
     for track in note_tracks:
         if track not in track_channels:
             track_channels[track] = available_channels.pop(0)
-    events: list[tuple[int, int, mido.Message]] = []
-    for track_index, track in enumerate(midi.tracks):
-        tick = 0
-        for message in track:
-            tick += message.time
-            events.append((tick, track_index, message))
-    events.sort(key=lambda event: (event[0], event[1]))
 
     synth = fluidsynth.Synth(samplerate=sample_rate)
     output: list[np.ndarray] = []

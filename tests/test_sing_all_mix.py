@@ -145,6 +145,15 @@ def test_instrument_render_rejects_wrong_track_sound_count(tmp_path):
         mix.render_instruments(midi_path, tmp_path / "unused.sf2", RATE, [mix.TrackSound(0, 0)])
 
 
+def test_all_muted_tracks_are_exactly_silent_without_fluidsynth(tmp_path):
+    midi_path = _two_track_midi(tmp_path)
+    muted = mix.render_instruments(midi_path, tmp_path / "unused.sf2", RATE, [None, None])
+    expected = RATE + round(mix.RELEASE_TAIL_SECONDS * RATE)
+    assert muted.shape == (expected, 2)
+    assert muted.dtype == np.float32
+    assert np.max(np.abs(muted)) == 0
+
+
 @pytest.mark.skipif(not _fluid_available(), reason="FluidSynth library or soundfont unavailable")
 def test_instrument_render_has_tail_mutes_and_overrides_programs(tmp_path):
     midi_path = _two_track_midi(tmp_path)
@@ -156,8 +165,14 @@ def test_instrument_render_has_tail_mutes_and_overrides_programs(tmp_path):
         midi_path, soundfont, RATE, [mix.TrackSound(0, 24), None]
     )
     muted = mix.render_instruments(midi_path, soundfont, RATE, [None, None])
+    solo_midi = mido.MidiFile(midi_path)
+    solo_midi.tracks.pop()
+    solo_path = tmp_path / "first-track-only.mid"
+    solo_midi.save(solo_path)
+    solo = mix.render_instruments(solo_path, soundfont, RATE, [mix.TrackSound(0, 0)])
     expected = RATE + round(mix.RELEASE_TAIL_SECONDS * RATE)
-    assert piano.shape == guitar.shape == muted.shape == (expected, 2)
+    assert piano.shape == guitar.shape == muted.shape == solo.shape == (expected, 2)
     assert np.max(np.abs(piano)) > 0.01
     assert np.max(np.abs(muted)) == 0
+    assert np.max(np.abs(piano - solo)) <= 1 / 32768
     assert not np.allclose(piano, guitar)
