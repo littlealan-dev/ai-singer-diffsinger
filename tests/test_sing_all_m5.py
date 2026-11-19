@@ -119,6 +119,30 @@ def test_quote_counts_ticked_rows_and_keeps_price(monkeypatch, mode, expected):
     assert no_mixes["lines"] == result["lines"]
     assert (no_mixes["total"], no_mixes["balance"]) == (
         result["total"], result["balance"])
+    snapshot["score_summary"].pop("performance_midi")
+    no_sound = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices=choices), request))
+    assert no_sound["options"]["mixes"] == "full"
+    assert no_sound["options"]["mixFiles"] == {
+        "all": expected["full"], "full": expected["full"]}
+
+
+def test_quote_uses_actual_wordless_take_modes(monkeypatch):
+    rows = [{**_row(), "rowId": f"line-{index}", "partId": f"P{index}",
+             "sourcePartId": f"P{index}", "hasWords": index < 3}
+            for index in range(4)]
+    endpoint, request, snapshot = quote_route(
+        monkeypatch, user={"credits": {"balance": 40}}, rows=rows)
+    snapshot["score_summary"]["performance_midi"] = {"instrumental_parts": [
+        {"eligible": True, "raw_part_id": "piano", "program_source": "score",
+         "playback_preset": {"bank": 0, "program": 0}}]}
+    selected = [{"rowId": row["rowId"], "include": True} for row in rows]
+    lyrics = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices={"mode": "lyrics", "rows": selected}), request))
+    both = asyncio.run(endpoint(main.SingAllQuoteRequest(
+        songId="song-a", choices={"mode": "both", "rows": selected}), request))
+    assert lyrics["options"]["mixFiles"] == {"all": 6, "full": 2}
+    assert both["options"]["mixFiles"] == {"all": 9, "full": 2}
 
 
 def test_quote_sound_choice_agrees_with_package_track_sound():
@@ -186,21 +210,42 @@ def test_package_stale_and_failure_finish_by_takes():
     assert decide(job, {}, {"now": NOW})[0]["status"] == "partial"
 
 
+def test_no_take_done_finishes_without_package():
+    job = _job("singing")
+    job["choices"]["mixes"] = "full"
+    job["instrumentalsPrepared"] = True
+    for item in job["items"]:
+        item["status"] = "failed"
+    fields, actions = decide(job, {}, {"now": NOW})
+    assert (fields["status"], fields["stage"]) == ("failed", "done")
+    assert "package" not in fields
+    assert not any(action["kind"] == "start_package" for action in actions)
+
+
 def test_opening_balance_preserves_owner_edits():
     job = {"scoreId": "score", "items": [
         {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "a"},
-        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "b"}],
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "b"},
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "c"},
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "d"}],
         "package": {"stats": {"balance": {"mode": "lyrics", "stats": {
             "vocals": [{"gain_db": 0, "dropped": False},
-                       {"gain_db": -6, "dropped": False}],
-            "instruments": {"gain_db": -12}}}}}}
+                       {"gain_db": -6, "dropped": False},
+                       {"gain_db": -12, "dropped": False},
+                       {"gain_db": -3, "dropped": False}],
+            "instruments": {"gain_db": -9}}}}}}
     player = songs.empty_player("owner", "score")
     player["vocals"] = [{"sourceJobId": "a", "volume": 1, "muted": False, "solo": False},
-                        {"sourceJobId": "b", "volume": 0.7, "muted": False, "solo": False}]
+                        {"sourceJobId": "b", "volume": 0.7, "muted": False, "solo": False},
+                        {"sourceJobId": "c", "volume": 1, "muted": False, "solo": False},
+                        {"sourceJobId": "d", "volume": 1, "muted": True, "solo": False}]
     assert songs.apply_sing_all_opening_balance(player, job)
     assert player["vocals"][0]["volume"] == 1
     assert player["vocals"][1]["volume"] == 0.7
-    assert player["bus"]["levelDb"] == -12
+    assert player["vocals"][2]["volume"] == pytest.approx(10 ** (-12 / 20))
+    assert player["vocals"][3]["volume"] == 1
+    assert player["vocals"][3]["muted"] is True
+    assert player["bus"]["levelDb"] == -9
     assert not songs.apply_sing_all_opening_balance(player, job)
 
 
@@ -211,6 +256,36 @@ def test_progress_package_redacts_private_fields():
                       "zipPath": "private", "files": ["private"], "error": "private"}
     assert progress(job, now=NOW)["package"] == {
         "state": "mixing", "mixes": {"done": 1, "total": 2}}
+
+
+def test_stop_during_packaging_is_too_late(monkeypatch):
+    parent = {"jobId": "parent-a", "uid": "owner", "sessionId": "song-a",
+              "stage": "packaging", "status": "running", "cancelRequested": False,
+              "items": [{"type": "take", "status": "done"}],
+              "package": {"state": "mixing", "updatedAt": NOW}}
+    async def auth(_):
+        return "owner"
+    class Sessions:
+        async def get_session(self, *_):
+            return SimpleNamespace(history=[])
+        async def set_metadata(self, *_):
+            pass
+    async def reconcile(*_):
+        pass
+    monkeypatch.setattr(main, "_get_user_id_or_401", auth)
+    monkeypatch.setattr(main, "active_job_for_song", lambda *_: parent)
+    monkeypatch.setattr(main, "load_sing_all_job", lambda _: parent)
+    monkeypatch.setattr(main.SingAllRunner, "reconcile", reconcile)
+    endpoint = next(route.endpoint for route in main.app.routes
+                    if getattr(route, "path", None) == "/sessions/{session_id}/stop")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        sessions=Sessions(), orchestrator=SimpleNamespace(),
+        job_store=SimpleNamespace(list_active_jobs=lambda **_: []))))
+    result = asyncio.run(endpoint("song-a", request))
+    assert result["singAll"] == {"jobId": "parent-a", "result": "too_late"}
+    assert parent["cancelRequested"] is False
+    parent["package"]["state"] = "done"
+    assert decide(parent, {}, {"now": NOW})[0]["status"] == "completed"
 
 
 def test_download_rejects_local_mode_and_deleted_song(monkeypatch):
@@ -237,6 +312,22 @@ def test_download_rejects_local_mode_and_deleted_song(monkeypatch):
     with pytest.raises(main.HTTPException) as error:
         asyncio.run(endpoint("parent-a", request))
     assert (error.value.status_code, error.value.detail) == (404, {"code": "job_not_found"})
+    request.app.state.sessions = Sessions()
+    job["uid"] = "other"
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(endpoint("parent-a", request))
+    assert (error.value.status_code, error.value.detail) == (404, {"code": "job_not_found"})
+    job["uid"] = "owner"
+    monkeypatch.setattr(main, "load_sing_all_job", lambda _: None)
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(endpoint("parent-a", request))
+    assert (error.value.status_code, error.value.detail) == (404, {"code": "job_not_found"})
+    monkeypatch.setattr(main, "load_sing_all_job", lambda _: job)
+    request.app.state.settings = SimpleNamespace(backend_use_storage=True)
+    job["package"]["state"] = "zipping"
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(endpoint("parent-a", request))
+    assert (error.value.status_code, error.value.detail) == (409, {"code": "zip_unavailable"})
 
 
 def test_download_url_serves_zip_from_storage_emulator(monkeypatch, storage_emulator):
