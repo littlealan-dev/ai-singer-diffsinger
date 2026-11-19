@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import mido
 import numpy as np
 import pytest
@@ -45,7 +47,7 @@ def _midi_and_score(tmp_path):
     return midi_path, score
 
 
-@pytest.mark.parametrize("shift_ms", [0, 40])
+@pytest.mark.parametrize("shift_ms", [0, 40, 100, 140])
 def test_click_track_reports_shift_on_midi_tempo_clock(tmp_path, shift_ms):
     midi_path, score = _midi_and_score(tmp_path)
     rate = 16000
@@ -96,6 +98,18 @@ def test_voicebank_take_matches_instrument_midi_clock(
             first.find("note/type").text = "quarter"
         source_path = tmp_path / "made-up-pickup.musicxml"
         tree.write(source_path, encoding="unicode")
+    elif feature == "tempo-change":
+        tree = ElementTree.parse(source_path)
+        voice = tree.getroot().find("part")
+        assert voice is not None
+        measures = voice.findall("measure")
+        later_direction = deepcopy(measures[2].find("direction"))
+        assert later_direction is not None
+        later_direction.find("sound").set("tempo", "90")
+        later_direction.find("direction-type/metronome/per-minute").text = "90"
+        measures[3].insert(0, later_direction)
+        source_path = tmp_path / "made-up-tempo-change.musicxml"
+        tree.write(source_path, encoding="unicode")
     score = parse_score(str(source_path))
     original = tmp_path / "written.mid"
     expanded = tmp_path / "played.mid"
@@ -105,6 +119,12 @@ def test_voicebank_take_matches_instrument_midi_clock(
     )
     midi_path = expanded if repeats else original
     assert midi_path.is_file(), f"{feature}: instrument MIDI unavailable: {result['diagnostic']}"
+    if feature == "tempo-change":
+        tempos = {
+            message.tempo for track in mido.MidiFile(midi_path).tracks
+            for message in track if message.type == "set_tempo"
+        }
+        assert len(tempos) >= 2, f"{feature}: MIDI has no real tempo change: {tempos}"
     take = synthesize(score, voicebank, part_index=0, expand_repeats=repeats, device="cpu")
     take_path = tmp_path / "generated-at-test-time.wav"
     sf.write(take_path, take["waveform"], take["sample_rate"])

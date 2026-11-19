@@ -160,7 +160,7 @@ def balanced_mix(
         else:
             limiting_db = overshoot
         mix *= np.float32(10 ** (gain_db / 20))
-    result = limit(mix, sample_rate)
+    result = limit(mix, sample_rate, PEAK_LIMIT_DB)
     return result, {
         "vocals": vocal_stats,
         "instruments": instrument_stats,

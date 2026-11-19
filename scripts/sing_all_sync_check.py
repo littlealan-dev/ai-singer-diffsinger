@@ -59,7 +59,8 @@ def _heard_note_onsets(
 
     A sung vowel can continue across two notes without a quiet gap, so a
     whole-clip silence or ratio detector misses that second note's attack.
-    The score narrows the search to 60 ms around each expected MIDI onset.
+    The score narrows the search to the 150 ms pairing tolerance around each
+    expected MIDI onset.
     """
     mono = np.mean(audio, axis=1) if audio.ndim == 2 else audio
     frame = max(1, round(sample_rate * 0.01))
@@ -73,7 +74,7 @@ def _heard_note_onsets(
     heard: list[float] = []
     for onset in expected:
         center = round(onset * sample_rate / frame)
-        radius = max(1, round(0.06 * sample_rate / frame))
+        radius = max(1, round(0.150 * sample_rate / frame))
         start = max(0, center - radius)
         stop = min(count, center + radius + 1)
         if start >= stop:

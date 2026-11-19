@@ -72,6 +72,18 @@ def test_excessive_peak_accepts_quieter_mix():
     assert np.max(np.abs(rendered)) <= 10 ** (mix.PEAK_LIMIT_DB / 20) + 1e-5
 
 
+def test_peak_limit_override_reaches_the_limiter(monkeypatch):
+    monkeypatch.setattr(mix, "PEAK_LIMIT_DB", -3.0)
+    audio = _tone(5, 0.01)
+    audio[RATE] = 0.99
+    rendered, stats = mix.balanced_mix(
+        [mix.Stem("Made Up", audio)], None,
+        mix.FULL_INSTRUMENTS_DB, RATE,
+    )
+    assert np.max(np.abs(rendered)) <= 10 ** (-3 / 20) + 1e-5
+    assert stats["mix"]["peak_db"] <= -3 + 0.01
+
+
 def test_mix_plan_counts_modes_and_names():
     lyrics = [mix.TakeRef(f"P{i}", f"Part {i}", "lyrics") for i in range(4)]
     both = lyrics + [mix.TakeRef(t.part_id, t.part_name, "solfege") for t in lyrics]
