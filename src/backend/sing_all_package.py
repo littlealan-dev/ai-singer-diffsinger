@@ -14,10 +14,10 @@ from typing import Any
 
 import ffmpeg
 import numpy as np
-import soundfile as sf
 
 from src.api import voicebank_cache
 from src.backend import sing_all_store
+from src.backend.audio_mix import _read_audio
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all_mix import (
     FULL_INSTRUMENTS_DB, PART_DOMINANT_INSTRUMENTS_DB, Stem, TakeRef,
@@ -66,7 +66,7 @@ def _package_write(job_id: str, package: dict[str, Any]) -> None:
 
 
 def _read_wav(path: Path) -> tuple[np.ndarray, int]:
-    audio, rate = sf.read(str(path), dtype="float32", always_2d=True)
+    audio, rate = _read_audio(path)
     if audio.shape[1] == 1:
         audio = np.repeat(audio, 2, axis=1)
     if audio.shape[1] != 2 or rate <= 0:
@@ -85,7 +85,9 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
 
 
 async def _take_wav(child: dict, job: dict, orchestrator: Any, work_dir: Path) -> tuple[Path, bytes]:
-    stored = child.get("losslessOutputPath") or child.get("outputPath")
+    stored = next((value for value in (
+        child.get("losslessOutputPath"), child.get("outputPath"))
+        if isinstance(value, str) and Path(value).suffix.lower() == ".wav"), None)
     if not isinstance(stored, str) or Path(stored).suffix.lower() != ".wav":
         raise ValueError("missing_wav")
     settings = orchestrator._settings
@@ -122,7 +124,7 @@ async def _midi(job: dict, snapshot: dict, orchestrator: Any) -> Path | None:
     return path
 
 
-def _credit_file(voice: str, settings: Any) -> tuple[str, bytes]:
+def _credit_file(voice: str, voice_name: str) -> tuple[str, bytes]:
     root = voicebank_cache._local_voicebanks_root()
     for extension in ("txt", "yaml"):
         path = root / voice / f"character.{extension}"
@@ -137,7 +139,7 @@ def _credit_file(voice: str, settings: Any) -> tuple[str, bytes]:
                 return f"character.{extension}", data
             except Exception:
                 continue
-    return "character.txt", f"Name: {voice}\n".encode()
+    return "character.txt", f"Name: {voice_name}\n".encode()
 
 
 async def run_package(job_id: str, orchestrator: Any) -> None:
@@ -151,7 +153,12 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
         takes = [item for item in job.get("items") or []
                  if item.get("type") == "take" and item.get("status") == "done"]
         if not takes:
-            raise ValueError("no_takes")
+            now = datetime.now(timezone.utc)
+            package = {"state": "failed", "error": "no_takes",
+                       "mixes": {"done": 0, "total": 0},
+                       "startedAt": now, "updatedAt": now}
+            await asyncio.to_thread(_package_write, job_id, package)
+            return
         rows = {str(row.get("rowId")): row for row in job.get("rows") or []}
         snapshot = await orchestrator._sessions.get_snapshot(job["sessionId"], job["uid"])
         score = snapshot.get("score_summary") or {}
@@ -190,7 +197,7 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
             refs = [TakeRef(str(row.get("partId") or item["rowId"]),
                             str(row.get("name") or item["rowId"]), item["mode"])
                     for item, row, _, _ in records]
-            planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "all",
+            planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
                                  any(sound is not None for sound in sounds))
             started = datetime.now(timezone.utc)
             package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
@@ -232,7 +239,8 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
 
                 for item, row, original, _ in records:
                     part_id = str(row.get("partId") or item["rowId"])
-                    name = f"1 Solo vocals/{_safe_name(row.get('name') or part_id)} ({item['mode']}).wav"
+                    file_mode = "solfège" if item["mode"] == "solfege" else item["mode"]
+                    name = f"1 Solo vocals/{_safe_name(row.get('name') or part_id)} ({file_mode}).wav"
                     add(name, original, "solo", item["mode"], part_id, stored=True)
                 for mix, output in mix_outputs:
                     folder = "3 Full mixes" if mix.kind == "full" else "2 Part-dominant mixes"
@@ -241,18 +249,27 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                         mix.mode, mix.part_id, stored=True)
                 if midi:
                     add(f"4 Instrumentals/{title}.mid", midi.read_bytes(), "midi")
-                voices = sorted({str(row.get("voice") or "") for _, row, _, _ in records} - {""})
-                for voice in voices:
-                    credit_name, credit = await asyncio.to_thread(_credit_file, voice, settings)
-                    add(f"5 Voicebank credits/{_safe_name(voice)}/{credit_name}", credit, "credits")
+                voices: dict[str, str] = {}
+                for _, row, _, _ in records:
+                    voice = str(row.get("voice") or "")
+                    if voice and voice not in voices:
+                        voices[voice] = str(row.get("voiceName") or voice)
+                for voice, voice_name in sorted(voices.items()):
+                    credit_name, credit = await asyncio.to_thread(
+                        _credit_file, voice, voice_name)
+                    add(f"5 Voicebank credits/{_safe_name(voice_name)}/{credit_name}",
+                        credit, "credits")
                 readme = ["Sing All package", "1 Solo vocals: original WAV takes",
                           "2 Part-dominant mixes: one voice ahead of instruments",
                           "3 Full mixes: all voices and instruments",
                           "4 Instrumentals: source MIDI", "5 Voicebank credits: voicebank authors",
-                          f"Title: {title}", f"Modes: {(job.get('choices') or {}).get('mode', '')}",
+                          f"Title: {job.get('title') or title}",
+                          f"Modes: {(job.get('choices') or {}).get('mode', '')}",
                           f"Verse: {(job.get('choices') or {}).get('verse', '')}",
-                          f"Repeats: {bool((job.get('choices') or {}).get('repeats'))}"]
-                readme.extend(f"Take: {row.get('name') or item['rowId']} / {row.get('voice') or ''} / {item['mode']}"
+                          "with repeats" if (job.get("choices") or {}).get("repeats") else "as written"]
+                readme.extend(f"Take: {row.get('name') or item['rowId']} / "
+                              f"{row.get('voiceName') or row.get('voice') or ''} / "
+                              f"{'solfège' if item['mode'] == 'solfege' else item['mode']}"
                               for item, row, _, _ in records)
                 add("README.txt", ("\n".join(readme) + "\n").encode(), "readme")
             error_code = "upload_failed"

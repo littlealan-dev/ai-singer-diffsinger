@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import soundfile as sf
+from google.cloud import firestore
 
 from src.backend import sing_all_package as package
 from src.backend.config import Settings
@@ -188,7 +189,7 @@ def test_no_done_takes_records_failure_and_reconciles(monkeypatch, tmp_path):
     job, orchestrator, writes, reconciled, _ = _fixture(monkeypatch, tmp_path)
     job["items"] = []
     asyncio.run(package.run_package("parent", orchestrator))
-    assert writes[-1]["error"] == "no_takes:ValueError"
+    assert writes[-1]["error"] == "no_takes"
     assert reconciled == ["parent"]
 
 
@@ -302,3 +303,39 @@ def test_storage_uploads_mixes_beside_zip_and_resamples(monkeypatch, tmp_path):
     assert sum(path.startswith("singAll/owner/parent/mixes/") for path in uploaded) == 3
     with zipfile.ZipFile(io.BytesIO(uploaded[zip_path])) as archive:
         assert archive.read("Song-Title - Sing All/4 Instrumentals/Song-Title.mid") == b"MThd-expanded"
+
+
+def test_default_no_mixes_uses_wav_fallback_and_display_voice_name(monkeypatch, tmp_path):
+    job, orchestrator, writes, _, wavs = _fixture(monkeypatch, tmp_path)
+    job["choices"].pop("mixes")
+    job["choices"]["mode"] = "solfege"
+    job["items"][0]["mode"] = "solfege"
+    job["items"][1]["status"] = "failed"
+    job["rows"][0]["voiceName"] = "A/Display"
+    orchestrator._job_store.get_job = lambda _: {
+        "losslessOutputPath": str(wavs["first"].with_suffix(".mp3")),
+        "outputPath": str(wavs["first"])}
+    asyncio.run(package.run_package("parent", orchestrator))
+    assert writes[-1]["state"] == "done"
+    assert writes[-1]["mixes"] == {"done": 0, "total": 0}
+    with _zip(writes) as archive:
+        root = "Song-Title - Sing All/"
+        assert archive.read(root + "1 Solo vocals/Soprano (solfège).wav") == wavs["first"].read_bytes()
+        assert root + "5 Voicebank credits/A-Display/character.txt" in archive.namelist()
+        readme = archive.read(root + "README.txt").decode()
+        assert "Title: Song/Title" in readme
+        assert "as written" in readme
+        assert "A/Display / solfège" in readme
+
+
+def test_package_write_replaces_only_package_map_in_firestore(monkeypatch, firestore_emulator):
+    db = firestore.Client(project="demo-project")
+    ref = db.collection("singAllJobs").document("synthetic-package-parent")
+    ref.set({"status": "completed", "stage": "done", "credits": {"total": 3},
+             "package": {"state": "done", "zipPath": "old.zip"}})
+    monkeypatch.setattr(package, "get_firestore_client", lambda: db)
+    package._package_write("synthetic-package-parent", {"state": "mixing",
+                                                        "mixes": {"done": 0, "total": 1}})
+    result = ref.get().to_dict()
+    assert result == {"status": "completed", "stage": "done", "credits": {"total": 3},
+                      "package": {"state": "mixing", "mixes": {"done": 0, "total": 1}}}
