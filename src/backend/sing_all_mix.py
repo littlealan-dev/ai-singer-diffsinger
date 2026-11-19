@@ -188,8 +188,8 @@ def render_instruments(
         raise ValueError(
             f"Expected {len(note_tracks)} sounds for note-bearing tracks, got {len(sounds)}."
         )
-    if len(note_tracks) > 16:
-        raise ValueError("FluidSynth supports at most 16 distinct track sounds.")
+    if len(note_tracks) > 256:
+        raise ValueError("FluidSynth supports at most 256 distinct track sounds.")
     for sound in sounds:
         if sound is not None and (sound.bank not in {0, 128} or not 0 <= sound.program <= 127):
             raise ValueError("TrackSound needs bank 0 or 128 and program 0–127.")
@@ -204,7 +204,7 @@ def render_instruments(
          and track_sounds[track].bank == 128), None
     )
     track_channels = {percussion_track: 9} if percussion_track is not None else {}
-    available_channels = [*range(9), *range(10, 16)]
+    available_channels = [channel for channel in range(256) if channel != 9]
     if percussion_track is None:
         available_channels.append(9)
     for track in note_tracks:
@@ -265,7 +265,7 @@ def render_instruments(
             elif message.type == "control_change":
                 synth.cc(channel, message.control, message.value)
             elif message.type == "pitchwheel":
-                synth.pitch_bend(channel, message.pitch + 8192)
+                synth.pitch_bend(channel, message.pitch)
         pull(round(RELEASE_TAIL_SECONDS * sample_rate))
     finally:
         synth.delete()
