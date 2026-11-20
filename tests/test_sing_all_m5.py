@@ -90,7 +90,7 @@ def test_quote_rejects_invalid_mix_choice(monkeypatch, mixes):
     ("lyrics", {"all": 5, "full": 1}),
     ("both", {"all": 10, "full": 2}),
 ])
-def test_quote_counts_ticked_rows_and_keeps_price(monkeypatch, mode, expected):
+def test_quote_counts_ticked_rows_and_prices_mixes(monkeypatch, mode, expected):
     rows = [{**_row(), "rowId": f"line-{index}", "partId": f"P{index}",
              "sourcePartId": f"P{index}", "name": f"Line {index}"}
             for index in range(4)]
@@ -105,8 +105,10 @@ def test_quote_counts_ticked_rows_and_keeps_price(monkeypatch, mode, expected):
         songId="song-a", choices=choices), request))
     assert result["options"]["mixes"] == "all"
     assert result["options"]["mixFiles"] == expected
-    assert result["total"] == sum(line["credits"] for line in result["lines"]
-                                  if line["kind"] == "singing")
+    singing = sum(line["credits"] for line in result["lines"] if line["kind"] == "singing")
+    # M6: one credit per mix file, in its own line, in the total.
+    assert {"kind": "mixes", "files": expected["all"], "credits": expected["all"]} in result["lines"]
+    assert result["total"] == singing + expected["all"]
     unticked = deepcopy(choices)
     unticked["rows"][-1]["include"] = False
     fewer = asyncio.run(endpoint(main.SingAllQuoteRequest(
@@ -118,9 +120,10 @@ def test_quote_counts_ticked_rows_and_keeps_price(monkeypatch, mode, expected):
         songId="song-a", choices={**choices, "mixes": "none"}), request))
     assert no_mixes["options"]["mixes"] == "none"
     assert no_mixes["options"]["mixFiles"] == expected
-    assert no_mixes["lines"] == result["lines"]
+    assert no_mixes["lines"][:-2] == [line for line in result["lines"][:-2]
+                                      if line["kind"] != "mixes"]
     assert (no_mixes["total"], no_mixes["balance"]) == (
-        result["total"], result["balance"])
+        result["total"] - expected["all"], result["balance"])
     snapshot["score_summary"].pop("performance_midi")
     no_sound = asyncio.run(endpoint(main.SingAllQuoteRequest(
         songId="song-a", choices=choices), request))
