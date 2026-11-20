@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent 
 import clsx from "clsx";
 import {
   ApiError,
+  fetchSingAllDownload,
   isSingAllQuote,
   requestSingAllQuote,
   startSingAll,
   type SingAllChoices,
   type SingAllControls,
+  type SingAllMixes,
   type SingAllMode,
   type SingAllNote,
   type SingAllProgress,
@@ -246,6 +248,7 @@ function SingAllQuoteView({
       mode: quote.options.mode,
       verse: quote.options.verse,
       repeats: quote.options.repeats,
+      ...(quote.options.mixes ? { mixes: quote.options.mixes } : {}),
       rows: quote.rows.map(({ rowId, include, voice, voicePicked }) => ({ rowId, include, voice, voicePicked })),
       ...patch,
     });
@@ -457,6 +460,20 @@ function SingAllQuoteView({
                   <td className="sing-all-num">{line.credits} cr</td>
                 </tr>
               );
+            case "mixes":
+              return (
+                <tr key="mixes">
+                  <td>
+                    Mixes
+                    <span className="sing-all-muted sing-all-inline-note">
+                      {" "}
+                      {line.files} file{line.files === 1 ? "" : "s"}
+                    </span>
+                    <InfoTip text="Balanced MP3 mixes of the sung parts, in the zip you download when it's done." />
+                  </td>
+                  <td className="sing-all-num">{line.credits} cr</td>
+                </tr>
+              );
             case "total":
               return (
                 <tr key="total" className={clsx("sing-all-total", notEnough && "sing-all-short")}>
@@ -510,6 +527,24 @@ function SingAllQuoteView({
     );
 
   const languages = q.options.languages;
+  // With no instrument sounding, part mixes would repeat the solo vocals: only the full mix is offered.
+  // A backend from before step 4 sends no mix counts, and the card offers no mixes.
+  const mixFiles = q.options.mixFiles ?? null;
+  const allFiles = mixFiles?.all ?? 0;
+  const fullFiles = mixFiles?.full ?? 0;
+  const partMixesOffered = allFiles !== fullFiles;
+  const quotedMixes = q.options.mixes ?? "all";
+  const shownMixes: SingAllMixes = !partMixesOffered && quotedMixes === "all" ? "full" : quotedMixes;
+  const mixChoices: Array<[SingAllMixes, string]> = partMixesOffered
+    ? [
+        ["all", `Full and part mixes (${allFiles})`],
+        ["full", `Full mix only (${fullFiles})`],
+        ["none", "None"],
+      ]
+    : [
+        ["full", `Full mix (${fullFiles})`],
+        ["none", "None"],
+      ];
   const customiseRows = (
     <div className="sing-all-rows">
       <div className="sing-all-row">
@@ -643,6 +678,26 @@ function SingAllQuoteView({
         </span>
       </div>
 
+      {mixFiles && (
+        <div className="sing-all-row">
+          <span className="sing-all-row-label">Mixes</span>
+          <div className="sing-all-segmented" role="group" aria-label="Mixes">
+            {mixChoices.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={clsx(shownMixes === value && "active")}
+                aria-pressed={shownMixes === value}
+                disabled={pending}
+                onClick={() => customise({ mixes: value })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="sing-all-row-block">
         <div className="sing-all-row">
           <span className="sing-all-row-label">Style notes</span>
@@ -761,6 +816,8 @@ function SingAllJobView({
 }: SingAllCardProps & { jobId: string }) {
   const [confirmStop, setConfirmStop] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!job) onLoadJob(jobId);
@@ -784,7 +841,7 @@ function SingAllJobView({
   const { splits, takes } = job.counts;
   const solfege = job.choices.mode !== "lyrics";
   const stages: Array<{ key: string; label: string; state: "done" | "now" | "later" }> = [];
-  const order = ["reading", "splitting", "solfege", "singing", "done"];
+  const order = ["reading", "splitting", "solfege", "singing", "packaging", "done"];
   const at = order.indexOf(job.stage);
   const stateOf = (stage: string): "done" | "now" | "later" => {
     const index = order.indexOf(stage);
@@ -807,6 +864,45 @@ function SingAllJobView({
       : `Singing (${takes.done} of ${takes.total})`,
     state: stateOf("singing"),
   });
+  // Packaging: the mixes, then the zip. A job with no mixes chosen only packs the zip.
+  // A backend from before step 4 sends no mixes choice, and its jobs have no packaging.
+  const pack = job.package ?? null;
+  const packaging = stateOf("packaging");
+  const packs = job.choices.mixes !== undefined;
+  const mixing = packs && job.choices.mixes !== "none" && (!pack || pack.mixes.total > 0);
+  const mixingNow = mixing && (!pack || pack.state === "mixing");
+  if (mixing) {
+    stages.push({
+      key: "mixing",
+      label: pack ? `Mixing (${pack.mixes.done} of ${pack.mixes.total})` : "Mixing",
+      state: packaging === "now" ? (mixingNow ? "now" : "done") : packaging,
+    });
+  }
+  if (packs) {
+    stages.push({
+      key: "zipping",
+      label: "Packing the zip",
+      state: packaging === "now" ? (mixingNow ? "later" : "now") : packaging,
+    });
+  }
+
+  const download = async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const { url } = await fetchSingAllDownload(job.jobId);
+      window.location.assign(url);
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : undefined;
+      setDownloadError(
+        code === "zip_unavailable" || code === "job_not_found"
+          ? "The zip isn't available."
+          : "Couldn't get the zip. Try again."
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const stop = async () => {
     setStopping(true);
@@ -899,6 +995,27 @@ function SingAllJobView({
           {job.endReason && job.status !== "completed" && (
             <p className="sing-all-muted">{END_REASON[job.endReason] ?? "It stopped early."}</p>
           )}
+          {pack?.state === "failed" && (
+            <p className="sing-all-muted">
+              {job.choices.mixes === "none"
+                ? "The zip couldn't be made. Your parts are in the player."
+                : "The mixes and the zip couldn't be made. The mixes were refunded; your parts are in the player."}
+            </p>
+          )}
+          {pack?.state === "done" && (
+            <div className="sing-all-actions">
+              {downloadError ? <p className="sing-all-warning">{downloadError}</p> : <span />}
+              <button
+                type="button"
+                className="selection-send"
+                data-testid="sing-all-download"
+                disabled={downloading}
+                onClick={() => void download()}
+              >
+                {downloading ? "Preparing…" : "Download zip"}
+              </button>
+            </div>
+          )}
           {job.receipt.length > 0 && (
             <table className="sing-all-table sing-all-receipt">
               <thead>
@@ -913,9 +1030,11 @@ function SingAllJobView({
                     <td>
                       {item.type === "instrumental"
                         ? "Instrumentals"
-                        : item.type === "split"
-                          ? `Split ${item.name ?? "a part"}`
-                          : `${item.name ?? "A part"}${item.mode === "solfege" ? " (solfège)" : ""}`}
+                        : item.type === "mixes"
+                          ? `Mixes (${item.files ?? 0} file${item.files === 1 ? "" : "s"})`
+                          : item.type === "split"
+                            ? `Split ${item.name ?? "a part"}`
+                            : `${item.name ?? "A part"}${item.mode === "solfege" ? " (solfège)" : ""}`}
                     </td>
                     <td className="sing-all-num">
                       {item.outcome === "included"

@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { firebaseIdToken, signInAsE2EUser } from "../auth";
 
@@ -87,9 +88,13 @@ test("Sing All runs from the chat button to its receipt, with every response in 
   for (const field of ["quoteId", "rows", "voices", "lines", "total", "balance", "notes", "style", "choicesHash"]) {
     expect(quote, field).toHaveProperty(field);
   }
-  for (const field of ["languages", "solfegeOnly", "verse", "verses", "repeats", "repeatsAvailable"]) {
+  for (const field of ["languages", "solfegeOnly", "verse", "verses", "repeats", "repeatsAvailable",
+    "mixes", "mixFiles"]) {
     expect(quote.options, field).toHaveProperty(field);
   }
+  // The piano has a sound: a full mix and one part mix per part, one credit each.
+  expect(quote.options).toMatchObject({ mixes: "all", mixFiles: { all: 3, full: 1 } });
+  expect(quote.lines).toContainEqual({ kind: "mixes", files: 3, credits: 3 });
   expect(quote.rows.map((row: { name: string }) => row.name)).toEqual(["Soprano", "Alto"]);
   expect(quote.rows.every((row: { include: boolean }) => row.include)).toBe(true);
   expect(quote.lines.map((line: { kind: string }) => line.kind)).toContain("total");
@@ -146,6 +151,28 @@ test("Sing All runs from the chat button to its receipt, with every response in 
   expect(ended.receipt.length).toBeGreaterThan(0);
   expect(ended.rows.map((row: { takes: { status: string }[] }) => row.takes.map((take) => take.status)))
     .toEqual([["done"], ["done"]]);
+  expect(ended.package).toEqual({ state: "done", mixes: { done: 3, total: 3 } });
+  expect(ended.receipt).toContainEqual(expect.objectContaining(
+    { type: "mixes", outcome: "charged", credits: 3, files: 3 }));
+
+  // The zip: the card's Download zip, then the folders inside it.
+  const linkResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === `/sing-all/jobs/${jobId}/download`);
+  const fileDownload = page.waitForEvent("download");
+  await card(page).getByTestId("sing-all-download").click();
+  const link = await (await linkResponse).json();
+  expect(link.fileName).toMatch(/ - Sing All\.zip$/);
+  const zipPath = test.info().outputPath("sing-all.zip");
+  await (await fileDownload).saveAs(zipPath);
+  const entries = execFileSync("unzip", ["-Z1", zipPath], { encoding: "utf8" }).split("\n").filter(Boolean);
+  const root = link.fileName.replace(/\.zip$/, "");
+  expect(entries.every((entry) => entry.startsWith(`${root}/`))).toBe(true);
+  const top = [...new Set(entries.map((entry) => entry.slice(root.length + 1).split("/")[0]))].sort();
+  expect(top).toEqual(["1 Solo vocals", "2 Part-dominant mixes", "3 Full mixes", "4 Instrumentals",
+    "5 Voicebank credits", "README.txt"]);
+  expect(entries.filter((entry) => entry.includes("/3 Full mixes/"))).toEqual([
+    `${root}/3 Full mixes/Full mix (lyrics).mp3`]);
+  expect(entries.filter((entry) => entry.includes("/1 Solo vocals/"))).toHaveLength(2);
   expect((await api(page, request, "/sing-all/active")).job).toBeNull();
 
   // The Song: two lyrics tracks, the history ids, and no Sing All child among its jobs.

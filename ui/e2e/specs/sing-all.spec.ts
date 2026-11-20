@@ -4,9 +4,10 @@ import path from "node:path";
 
 import { signInAsE2EUser } from "../auth";
 
-// The Sing All card, on a mocked backend that answers as the API contract in
-// docs/specs/sing-all-core-step3-spec.md says: the chat reply that opens it, the
-// quote, "Sing it", the running job and its end, and a reload.
+// The Sing All card, on a mocked backend that answers as the API contracts in
+// docs/specs/sing-all-core-step3-spec.md and sing-all-mixes-step4-spec.md say: the chat
+// reply that opens it, the quote, "Sing it", the running job, its mixes and zip, its end,
+// and a reload.
 
 type Json = Record<string, unknown>;
 type Answer = { status?: number; body: Json; hold?: Promise<void> };
@@ -16,6 +17,9 @@ type Backend = {
   nextQuote: (answer: (choices: Json) => Answer) => void;
   nextStart: (answer: Answer) => void;
   setJob: (job: Json | null, { active }?: { active?: boolean }) => void;
+  nextDownload: (answer: Answer) => void;
+  downloads: number;
+  workspaceReads: number;
   history: Json[];
   vocals: Json[];
 };
@@ -52,6 +56,8 @@ function quoteFor(choices: Json, overrides: Json = {}): Json {
       verses: ["1", "2"],
       repeats: choices.repeats ?? true,
       repeatsAvailable: true,
+      mixes: choices.mixes ?? "all",
+      mixFiles: { all: sung + 1, full: 1 },
     },
     lines: [
       { kind: "singing", parts: sung, takes: sung, secondsEach: 30, credits: sung },
@@ -79,7 +85,7 @@ function progress(overrides: Json = {}): Json {
     stage: "reading",
     endReason: null,
     cancelRequested: false,
-    choices: { language: "en", solfegeOnly: false, mode: "lyrics", verse: "1", repeats: true },
+    choices: { language: "en", solfegeOnly: false, mode: "lyrics", verse: "1", repeats: true, mixes: "all" },
     counts: { splits: { done: 0, total: 0 }, takes: { done: 0, failed: 0, total: 2 } },
     rows: [
       { rowId: "P1", name: "Soprano", voice: "voice-a", voiceName: "Voice A", split: false,
@@ -93,6 +99,7 @@ function progress(overrides: Json = {}): Json {
     elapsedS: 20,
     remainingS: 180,
     render: { state: "none", placeInLine: null },
+    package: null,
     createdAt: "2026-01-01T10:00:00Z",
     endedAt: null,
     ...overrides,
@@ -103,6 +110,7 @@ async function mockBackend(page: Page): Promise<Backend> {
   const xml = await readFile(path.resolve("e2e/fixtures/basic-one-part.xml"));
   const quoteAnswers: Array<(choices: Json) => Answer> = [];
   const startAnswers: Answer[] = [];
+  const downloadAnswers: Answer[] = [];
   const backend: Backend = {
     quotes: [],
     starts: [],
@@ -112,6 +120,9 @@ async function mockBackend(page: Page): Promise<Backend> {
       job = next;
       jobActive = active;
     },
+    nextDownload: (answer) => downloadAnswers.push(answer),
+    downloads: 0,
+    workspaceReads: 0,
     history: [],
     vocals: [],
   };
@@ -157,9 +168,25 @@ async function mockBackend(page: Page): Promise<Backend> {
       return json(answer.body, answer.status ?? 200);
     }
     if (at === "/sing-all/active") return json({ job: jobActive ? job : null });
+    if (at === "/sing-all/jobs/job-1/download") {
+      backend.downloads += 1;
+      const answer = downloadAnswers.shift() ?? {
+        body: { url: "http://127.0.0.1:8000/zips/test-hymn.zip", fileName: "Test Hymn - Sing All.zip",
+          expiresAt: "2026-01-01T10:20:00Z" },
+      };
+      return json(answer.body, answer.status ?? 200);
+    }
+    if (at === "/zips/test-hymn.zip") {
+      return route.fulfill({
+        contentType: "application/zip",
+        headers: { "Content-Disposition": 'attachment; filename="Test Hymn - Sing All.zip"' },
+        body: Buffer.from("PK\u0005\u0006" + "\u0000".repeat(18), "binary"),
+      });
+    }
     if (at.startsWith("/sing-all/jobs/")) return job ? json(job) : json({ detail: { code: "job_not_found" } }, 404);
 
     if (at === `/songs/${SONG}/workspace`) {
+      backend.workspaceReads += 1;
       return json({
         session_id: SONG,
         song: { id: SONG, title: "Test Hymn", title_edited: false, created_at: "2026-01-01T00:00:00Z" },
@@ -468,4 +495,153 @@ test("from another Song the pill opens the running job's Song", async ({ page })
   await expect(page.getByTestId("sing-all-button")).toBeEnabled();
   await pill.click();
   await expect(page).toHaveURL(/\/app\/song\/song-other$/);
+});
+
+test("Customise offers the mixes; with no instrument sounding, only the full mix or none", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-mixes-choice");
+  await goToSong(page);
+  backend.nextQuote((choices) => ({
+    body: quoteFor(choices, {
+      lines: [
+        { kind: "singing", parts: 2, takes: 2, secondsEach: 30, credits: 2 },
+        { kind: "mixes", files: 3, credits: 3 },
+        { kind: "total", credits: 5 },
+        { kind: "balance", before: 42, after: 37 },
+      ],
+      total: 5,
+    }),
+  }));
+  await openCard(page);
+  await expect(card(page).locator(".sing-all-quote-table")).toContainText("Mixes 3 files");
+  await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 5 cr");
+
+  await card(page).getByRole("button", { name: /Customise/ }).click();
+  const mixes = card(page).getByRole("group", { name: "Mixes" });
+  await expect(mixes.getByRole("button")).toHaveText(["Full and part mixes (3)", "Full mix only (1)", "None"]);
+  await expect(mixes.getByRole("button", { name: "Full and part mixes (3)" })).toHaveAttribute("aria-pressed", "true");
+
+  await mixes.getByRole("button", { name: "Full mix only (1)" }).click();
+  await expect.poll(() => backend.quotes.length).toBe(2);
+  expect(backend.quotes[1]).toMatchObject({ mixes: "full" });
+  await expect(mixes.getByRole("button", { name: "Full mix only (1)" })).toHaveAttribute("aria-pressed", "true");
+
+  // A later change keeps the choice.
+  await card(page).getByRole("button", { name: "Both" }).click();
+  await expect.poll(() => backend.quotes.length).toBe(3);
+  expect(backend.quotes[2]).toMatchObject({ mode: "both", mixes: "full" });
+
+  // No instrument sounds: part mixes would repeat the solo vocals, so they aren't offered.
+  backend.nextQuote((choices) => ({
+    body: quoteFor(choices, {
+      options: { ...(quoteFor(choices).options as Json), mixes: "full", mixFiles: { all: 1, full: 1 } },
+    }),
+  }));
+  await mixes.getByRole("button", { name: "None" }).click();
+  await expect.poll(() => backend.quotes.length).toBe(4);
+  await expect(mixes.getByRole("button")).toHaveText(["Full mix (1)", "None"]);
+  await expect(mixes.getByRole("button", { name: "Full mix (1)" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("packaging shows Mixing, then Packing the zip; the ended card downloads the zip", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-package");
+  await goToSong(page);
+  await openCard(page);
+  await page.getByTestId("sing-all-sing-it").click();
+  await expect(card(page)).toContainText("Mixing");
+  await expect(card(page)).toContainText("Packing the zip");
+
+  const takesDone = { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, total: 2 } };
+  const readsAtStart = backend.workspaceReads;
+  backend.setJob(progress({ stage: "packaging", counts: takesDone,
+    package: { state: "mixing", mixes: { done: 1, total: 3 } } }));
+  await expect(card(page).locator(".sing-all-stage.is-now")).toHaveText("Mixing (1 of 3)");
+  await expect(page.getByTestId("sing-all-pill")).toContainText("Sing All · Mixing 1/3");
+
+  backend.setJob(progress({ stage: "packaging", counts: takesDone,
+    package: { state: "zipping", mixes: { done: 3, total: 3 } } }));
+  await expect(card(page).locator(".sing-all-stage.is-now")).toHaveText("Packing the zip");
+  await expect(card(page).locator(".sing-all-stage", { hasText: "Mixing (3 of 3)" })).toHaveClass(/is-done/);
+  await expect(page.getByTestId("sing-all-pill")).toContainText("Sing All · Packing the zip");
+
+  // The two new takes reloaded the player once; the zip being done reloads it once more.
+  await expect.poll(() => backend.workspaceReads).toBe(readsAtStart + 1);
+  const readsBefore = backend.workspaceReads;
+  backend.setJob(progress({
+    status: "completed", stage: "done", endedAt: "2026-01-01T10:05:00Z", remainingS: null, counts: takesDone,
+    package: { state: "done", mixes: { done: 3, total: 3 } },
+    credits: { reserved: 0, charged: 5, refunded: 0 },
+    receipt: [
+      { itemId: "take:P1:lyrics", type: "take", rowId: "P1", mode: "lyrics", name: "Soprano", credits: 1,
+        outcome: "charged", reason: null, files: null },
+      { itemId: "take:P2:lyrics", type: "take", rowId: "P2", mode: "lyrics", name: "Alto", credits: 1,
+        outcome: "charged", reason: null, files: null },
+      { itemId: "job-1-mixes", type: "mixes", rowId: null, mode: null, name: null, credits: 3,
+        outcome: "charged", reason: null, files: 3 },
+    ],
+  }), { active: false });
+  await expect(card(page)).toContainText("Done: every part is sung");
+  await expect(card(page).locator(".sing-all-receipt")).toContainText("Mixes (3 files)3 cr");
+  // The job set the player to the full mix's balance: the page reads the player again.
+  await expect.poll(() => backend.workspaceReads).toBeGreaterThan(readsBefore);
+
+  const download = page.waitForEvent("download");
+  await card(page).getByTestId("sing-all-download").click();
+  expect((await download).suggestedFilename()).toBe("Test Hymn - Sing All.zip");
+  expect(backend.downloads).toBe(1);
+});
+
+test("a failed package says so with no zip; a zip that's gone says it isn't available", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-package-failed");
+  const ended = (pack: Json, receipt: Json[] = []) => progress({
+    status: "completed", stage: "done", endedAt: "2026-01-01T10:05:00Z", remainingS: null,
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, total: 2 } },
+    package: pack, credits: { reserved: 0, charged: 2, refunded: 3 }, receipt,
+  });
+  backend.history.push(
+    { id: "turn-1", role: "assistant", content: "Sing All started.", timestamp: "2026-01-01T10:00:01Z",
+      singAllJobId: "job-1" },
+  );
+  backend.setJob(ended({ state: "failed", mixes: { done: 1, total: 3 } }, [
+    { itemId: "job-1-mixes-refunded", type: "mixes", rowId: null, mode: null, name: null, credits: 3,
+      outcome: "refunded", reason: "package_failed", files: 3 },
+  ]), { active: false });
+  await goToSong(page);
+  await expect(card(page)).toContainText(
+    "The mixes and the zip couldn't be made. The mixes were refunded; your parts are in the player.",
+  );
+  await expect(card(page).locator(".sing-all-receipt")).toContainText("Mixes (3 files)3 cr refunded");
+  await expect(card(page).getByTestId("sing-all-download")).toHaveCount(0);
+
+  backend.setJob(ended({ state: "done", mixes: { done: 3, total: 3 } }), { active: false });
+  backend.nextDownload({ status: 409, body: { detail: { code: "zip_unavailable" } } });
+  await page.reload();
+  await goToSong(page);
+  await card(page).getByTestId("sing-all-download").click();
+  await expect(card(page)).toContainText("The zip isn't available.");
+});
+
+test("a backend from before step 4 shows no mixes choice and no packaging stages", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-before-mixes");
+  await goToSong(page);
+  backend.nextQuote((choices) => {
+    const quote = quoteFor(choices);
+    const { mixes: _mixes, mixFiles: _files, ...options } = quote.options as Json;
+    return { body: { ...quote, options } };
+  });
+  const { mixes: _mixes, ...choices } = progress().choices as Json;
+  const { package: _package, ...oldJob } = progress({ choices });
+  backend.nextStart({ body: oldJob });
+  await openCard(page);
+  await card(page).getByRole("button", { name: /Customise/ }).click();
+  await expect(card(page).getByRole("group", { name: "Sing in" })).toBeVisible();
+  await expect(card(page).getByRole("group", { name: "Mixes" })).toHaveCount(0);
+  await card(page).getByRole("button", { name: "Both" }).click();
+  await expect.poll(() => backend.quotes.length).toBe(2);
+  expect(backend.quotes[1].mixes).toBeUndefined();
+  await card(page).getByRole("button", { name: "Apply" }).click();
+
+  await page.getByTestId("sing-all-sing-it").click();
+  await expect(card(page)).toContainText("Reading the score");
+  await expect(card(page)).not.toContainText("Mixing");
+  await expect(card(page)).not.toContainText("Packing the zip");
 });

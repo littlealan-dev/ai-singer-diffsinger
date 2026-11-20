@@ -1340,6 +1340,9 @@ export type SingAllTakeMode = "lyrics" | "solfege";
 
 export type SingAllOpen = { language: string; solfegeOnly: boolean };
 
+/** Which mix files a Sing All makes: full and part-dominant, full only, or none. */
+export type SingAllMixes = "all" | "full" | "none";
+
 export type SingAllRowChoice = {
   rowId: string;
   include: boolean;
@@ -1355,6 +1358,7 @@ export type SingAllChoices = {
   repeats?: boolean;
   rows?: SingAllRowChoice[];
   styleNote?: string;
+  mixes?: SingAllMixes;
 };
 
 export type SingAllRow = SingAllRowChoice & {
@@ -1372,6 +1376,7 @@ export type SingAllLine =
   | { kind: "singing"; parts: number; takes: number; secondsEach: number; credits: number }
   | { kind: "preparing"; credits: number }
   | { kind: "instrumentals"; credits: number }
+  | { kind: "mixes"; files: number; credits: number }
   | { kind: "total"; credits: number }
   | { kind: "balance"; before: number; after: number };
 
@@ -1403,6 +1408,10 @@ export type SingAllQuote = {
     verses: string[];
     repeats: boolean;
     repeatsAvailable: boolean;
+    /** The choice in effect: "all" is answered as "full" when no instrument sounds. Absent before step 4. */
+    mixes?: SingAllMixes;
+    /** How many mix files each choice makes; equal when no instrument sounds. Absent before step 4. */
+    mixFiles?: { all: number; full: number };
   };
   lines: SingAllLine[];
   total: number;
@@ -1427,7 +1436,7 @@ export const isSingAllQuote = (response: SingAllQuoteResponse): response is Sing
 
 export type SingAllItemStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export type SingAllStatus = "running" | "completed" | "partial" | "failed" | "cancelled";
-export type SingAllStage = "reading" | "splitting" | "solfege" | "singing" | "done";
+export type SingAllStage = "reading" | "splitting" | "solfege" | "singing" | "packaging" | "done";
 
 export type SingAllProgress = {
   jobId: string;
@@ -1437,7 +1446,15 @@ export type SingAllProgress = {
   stage: SingAllStage;
   endReason: string | null;
   cancelRequested: boolean;
-  choices: { language: string; solfegeOnly: boolean; mode: SingAllMode; verse: string; repeats: boolean };
+  choices: {
+    language: string;
+    solfegeOnly: boolean;
+    mode: SingAllMode;
+    verse: string;
+    repeats: boolean;
+    /** Absent from a backend before step 4. */
+    mixes?: SingAllMixes;
+  };
   counts: {
     splits: { done: number; total: number };
     takes: { done: number; failed: number; total: number };
@@ -1453,18 +1470,25 @@ export type SingAllProgress = {
   credits: { reserved: number; charged: number; refunded: number };
   receipt: Array<{
     itemId: string;
-    type: "take" | "split" | "instrumental";
+    type: "take" | "split" | "instrumental" | "mixes";
     rowId: string | null;
     mode: SingAllTakeMode | null;
     name: string | null;
     credits: number;
     outcome: "charged" | "refunded" | "included";
     reason: string | null;
+    /** The number of mix files on a "mixes" row, else null. */
+    files?: number | null;
   }>;
   notes: SingAllNote[];
   elapsedS: number;
   remainingS: number | null;
   render: { state: "none" | "waiting" | "running" | "ended"; placeInLine: number | null };
+  /** The mixes and zip run: null until the packaging stage, and when no take was done. */
+  package?: null | {
+    state: "mixing" | "zipping" | "done" | "failed";
+    mixes: { done: number; total: number };
+  };
   createdAt: string;
   endedAt: string | null;
 };
@@ -1496,4 +1520,11 @@ export async function fetchActiveSingAll(): Promise<SingAllProgress | null> {
 
 export async function fetchSingAllJob(jobId: string): Promise<SingAllProgress> {
   return request(`/sing-all/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+}
+
+export type SingAllDownload = { url: string; fileName: string; expiresAt: string };
+
+/** A short-lived link to a finished job's zip; the page navigates to it. */
+export async function fetchSingAllDownload(jobId: string): Promise<SingAllDownload> {
+  return request(`/sing-all/jobs/${encodeURIComponent(jobId)}/download`, { method: "GET" });
 }
