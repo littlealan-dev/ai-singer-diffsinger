@@ -172,8 +172,8 @@ def test_quote_contract_labels_repeats_and_structured_notes(monkeypatch):
                                         {"code": "ja", "label": None},
                                         {"code": "zh", "label": "Mandarin Chinese"}],
         "solfegeOnly": False, "mode": "lyrics", "verse": "1", "verses": ["1", "3"],
-            "repeats": False, "repeatsAvailable": False,
-            "mixes": "full", "mixFiles": {"all": 1, "full": 1},
+        "repeats": False, "repeatsAvailable": False,
+        "mixes": "full", "mixFiles": {"all": 1, "full": 1},
     }
     assert result["notes"] == [
         {"code": "cannot_split_without_lyrics", "partId": "P1", "partName": "Lead"},

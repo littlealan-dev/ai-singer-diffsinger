@@ -147,26 +147,58 @@ def test_quote_uses_actual_wordless_take_modes(monkeypatch):
     assert both["options"]["mixFiles"] == {"all": 9, "full": 2}
 
 
-def test_quote_sound_choice_agrees_with_package_track_sound():
-    summary = {"parts": [{"part_id": "P2", "instruments": [{
-        "score_instrument_id": "P2-I1", "instrumental_candidate": True,
-        "is_percussion": False, "playback_preset": None,
-        "eligible_for_instrumental_midi": False}]}],
-        "instrument_program_resolution": {
-            "unresolved_score_instrument_ids": ["P2-I1"],
-            "instrumental_score_instrument_ids": [],
-            "unresolved_reasons": {"P2-I1": "undeclared"}}}
-    sound = {"bank": 0, "kind": "melodic", "program": 0,
-             "evidence": ["keyboard staff"]}
-    amended = summary_with_judged_instruments(
-        summary, {"roles": {"P2": "instrument"}, "sounds": {"P2-I1": sound}})
-    assert quoted_instruments_sound(amended)
-    saved = deepcopy(amended)
-    saved["performance_midi"] = {"instrumental_parts": [{
-        "eligible": True, "raw_part_id": "P2", "program_source": "llm_inferred",
-        "playback_preset": amended["parts"][0]["instruments"][0]["playback_preset"]}]}
-    assert any(value is not None for value in sing_all_package.track_sounds(saved))
+# A made-up score: a sung line, and a wordless part that declares no sound.
+UNDECLARED_ACCOMPANIMENT = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Lead</part-name></score-part>
+    <score-part id="P2"><part-name>Accompaniment</part-name>
+      <score-instrument id="P2-I1"><instrument-name>Accompaniment</instrument-name></score-instrument>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type>
+        <lyric number="1"><syllabic>single</syllabic><text>la</text></lyric></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>half</type>
+        <lyric number="1"><syllabic>single</syllabic><text>la</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>
+"""
 
+
+@pytest.mark.parametrize("sound, expected", [
+    ({"bank": 0, "kind": "melodic", "program": 0, "evidence": ["keyboard staff"]}, True),
+    (None, False),
+])
+def test_quote_sound_choice_agrees_with_package_track_sound(tmp_path, sound, expected):
+    from src.api.score import parse_score
+    from src.musicxml.instrument_programs import llm_program_assignments_from_summary
+    from src.musicxml.performance_midi import build_instrumental_performance_midis
+
+    source = tmp_path / "made-up.musicxml"
+    source.write_text(UNDECLARED_ACCOMPANIMENT)
+    summary = parse_score(str(source))["score_summary"]
+    assert summary["instrument_program_resolution"]["unresolved_score_instrument_ids"] == ["P2-I1"]
+    part_id = next(part["part_id"] for part in summary["parts"]
+                   if any(route.get("score_instrument_id") == "P2-I1" for route in part["instruments"]))
+    amended = summary_with_judged_instruments(
+        summary, {"roles": {part_id: "instrument"}, "sounds": {"P2-I1": sound}})
+    # What "Sing it" saves, then the MIDI build prepare_instrumentals runs on it.
+    performance = build_instrumental_performance_midis(
+        source, original_output_path=tmp_path / "written.mid", expanded_output_path=tmp_path / "played.mid",
+        instrument_program_assignments=llm_program_assignments_from_summary(amended), score_summary=amended)
+    saved = {**amended, "performance_midi": performance}
+    assert quoted_instruments_sound(amended) is expected
+    assert any(value is not None for value in sing_all_package.track_sounds(saved)) is expected
 
 def test_last_take_enters_packaging_once_and_finishes_from_package():
     job = _job("singing")
@@ -231,7 +263,7 @@ def test_opening_balance_preserves_owner_edits():
         {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "c"},
         {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "d"}],
         "package": {"stats": {"balance": {"mode": "lyrics", "stats": {
-            "vocals": [{"gain_db": 0, "dropped": False},
+            "vocals": [{"gain_db": 2, "dropped": False},
                        {"gain_db": -6, "dropped": False},
                        {"gain_db": -12, "dropped": False},
                        {"gain_db": -3, "dropped": False}],
@@ -241,13 +273,17 @@ def test_opening_balance_preserves_owner_edits():
                         {"sourceJobId": "b", "volume": 0.7, "muted": False, "solo": False},
                         {"sourceJobId": "c", "volume": 1, "muted": False, "solo": False},
                         {"sourceJobId": "d", "volume": 1, "muted": True, "solo": False}]
+    player["bus"]["muted"] = True
+    # shift = the loudest gain (+2): the loudest part plays at 1, the rest under it.
     assert songs.apply_sing_all_opening_balance(player, job)
     assert player["vocals"][0]["volume"] == 1
     assert player["vocals"][1]["volume"] == 0.7
-    assert player["vocals"][2]["volume"] == pytest.approx(10 ** (-12 / 20))
-    assert player["vocals"][3]["volume"] == 1
+    assert player["vocals"][2]["volume"] == pytest.approx(10 ** (-14 / 20))
+    # A mute the owner set stays, and the volume under it still gets the balance.
+    assert player["vocals"][3]["volume"] == pytest.approx(10 ** (-5 / 20))
     assert player["vocals"][3]["muted"] is True
-    assert player["bus"]["levelDb"] == -9
+    assert player["bus"]["levelDb"] == -11
+    assert player["bus"]["muted"] is True
     assert not songs.apply_sing_all_opening_balance(player, job)
 
 

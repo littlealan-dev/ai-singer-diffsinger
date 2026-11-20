@@ -150,16 +150,15 @@ def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) 
     changed = False
     for track in player.get("vocals") or []:
         value = by_job.get(track.get("sourceJobId"))
-        if (value is None or track.get("volume", DEFAULT_VOCAL_VOLUME) != DEFAULT_VOCAL_VOLUME
-                or track.get("muted") or track.get("solo")):
+        # Per value: the owner's mute and solo stay; a volume still at Sing All's default is replaced.
+        if value is None or track.get("volume", DEFAULT_VOCAL_VOLUME) != DEFAULT_VOCAL_VOLUME:
             continue
         volume = 10 ** ((float(value["gain_db"]) - shift) / 20)
         if track.get("volume") != volume:
             track["volume"] = volume
             changed = True
     bus = player.get("bus") or {}
-    if (instrument_gain is not None and not bus.get("muted") and not bus.get("solo")
-            and bus.get("levelDb", 0.0) == 0.0):
+    if instrument_gain is not None and bus.get("levelDb", 0.0) == 0.0:
         level = float(instrument_gain) - shift
         if bus.get("levelDb") != level:
             bus["levelDb"] = level
