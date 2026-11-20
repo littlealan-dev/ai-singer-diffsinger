@@ -54,14 +54,16 @@ def test_running_progress_has_contract_fields_and_quote_order(stage, remaining, 
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
         "cancelRequested", "choices", "counts", "rows", "credits", "receipt",
-        "notes", "elapsedS", "remainingS", "render", "createdAt", "endedAt",
+        "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert (result["jobId"], result["songId"], result["title"]) == (
         "parent-a", "song-a", "Example Tune")
     assert (result["status"], result["stage"], result["endReason"]) == (
         "running", stage, None)
     assert result["choices"] == {"language": "en", "solfegeOnly": False,
-                                 "mode": "both", "verse": "1", "repeats": False}
+                                 "mode": "both", "verse": "1", "repeats": False,
+                                 "mixes": "none"}
+    assert result["package"] is None
     assert result["counts"] == {"splits": {"done": int(split_done), "total": 1},
                                  "takes": {"done": 0, "failed": 0, "total": 2}}
     assert result["rows"] == [{
@@ -100,7 +102,7 @@ def test_ended_progress_has_receipt_and_no_remaining_time(status):
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
         "cancelRequested", "choices", "counts", "rows", "credits", "receipt",
-        "notes", "elapsedS", "remainingS", "render", "createdAt", "endedAt",
+        "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert result["endReason"] == "instrumentals_failed"
     assert result["counts"] == {"splits": {"done": 1, "total": 1},

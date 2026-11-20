@@ -612,6 +612,15 @@ class SessionStore(WorkspacePersistence):
             state.player = self._stamped_player(player)
             return player["revision"]
 
+    async def set_sing_all_opening_balance(self, session_id: str, user_id: str,
+                                           job: Dict[str, Any]) -> None:
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            player = copy.deepcopy(state.player)
+            if player and songs.apply_sing_all_opening_balance(player, job):
+                player["revision"] = int(player.get("revision") or 0) + 1
+                state.player = self._stamped_player(player)
+
     async def rename_song(self, session_id: str, user_id: str, title: str) -> Dict[str, Any]:
         async with self._lock:
             state = self._song_locked(session_id, user_id)
@@ -1281,6 +1290,26 @@ class FirestoreSessionStore(WorkspacePersistence):
             def commit(txn) -> None:
                 self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
                 txn.update(session_ref, {"songListed": False, "deletedAt": firestore.SERVER_TIMESTAMP})
+
+            commit(self._client.transaction())
+
+        await self._run_session_io(session_id, run)
+
+    async def set_sing_all_opening_balance(self, session_id: str, user_id: str,
+                                           job: Dict[str, Any]) -> None:
+        def run() -> None:
+            session_ref, player_ref = self._doc_ref(session_id), self._player_ref(session_id)
+
+            @firestore.transactional
+            def commit(txn) -> None:
+                self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
+                current = player_ref.get(transaction=txn)
+                if not current.exists:
+                    return
+                player = current.to_dict() or {}
+                if songs.apply_sing_all_opening_balance(player, job):
+                    player["revision"] = int(player.get("revision") or 0) + 1
+                    txn.set(player_ref, self._stamped_player(player))
 
             commit(self._client.transaction())
 

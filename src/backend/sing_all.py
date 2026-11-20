@@ -13,7 +13,7 @@ from music21 import pitch
 from src.backend.language_selection import normalize_language_code
 from src.backend.credits import _user_credits_from_data
 from src.backend.synthesis_pricing import (
-    INSTRUMENTAL_CREDIT_DURATION_SECONDS, VOCAL_CREDIT_DURATION_SECONDS,
+    INSTRUMENTAL_CREDIT_DURATION_SECONDS, MIX_CREDITS_PER_FILE, VOCAL_CREDIT_DURATION_SECONDS,
     credits_for_duration,
 )
 from src.musicxml.instrument_programs import (
@@ -127,6 +127,8 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
             item["childJobId"] = uuid4().hex
         elif item["type"] == "instrumental":
             item["reservationId"] = f"{job_id}-instrumentals"
+        elif item["type"] == "mixes":
+            item["reservationId"] = f"{job_id}-mixes"
     rows = deepcopy(quote["rows"])
     for row in rows:
         row["partId"] = None if row.get("split") else row.get("sourcePartId")
@@ -191,6 +193,9 @@ def progress(
             kind = item.get("type")
             reserved = int(item.get("creditsReserved") or 0)
             item_charged = int(item.get("creditsCharged") or 0)
+            if kind == "mixes":
+                receipt.extend(_mixes_receipt_rows(item))
+                continue
             receipt.append({
                 "itemId": item["itemId"], "type": kind,
                 "rowId": item.get("rowId") if kind == "take" else None,
@@ -201,7 +206,7 @@ def progress(
                 "credits": item_charged if item_charged else reserved,
                 "outcome": "included" if reserved == 0 else
                            "charged" if item_charged else "refunded",
-                "reason": item.get("reason"),
+                "reason": item.get("reason"), "files": None,
             })
     remaining = None
     if not ended:
@@ -221,8 +226,15 @@ def progress(
         "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
         "status": job["status"], "stage": job["stage"], "endReason": reason,
         "cancelRequested": bool(job.get("cancelRequested")),
-        "choices": {key: choices[key] for key in
-                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "choices": {**{key: choices[key] for key in
+                       ("language", "solfegeOnly", "mode", "verse", "repeats")},
+                    "mixes": choices.get("mixes") or "none"},
+        "package": ({"state": job["package"]["state"],
+                     "mixes": {"done": int((job["package"].get("mixes") or {}).get("done") or 0),
+                               "total": int((job["package"].get("mixes") or {}).get("total") or 0)}}
+                    if job.get("stage") in {"packaging", "done"} and
+                    any(item.get("status") == "done" for item in takes) and
+                    isinstance(job.get("package"), Mapping) else None),
         "counts": {
             "splits": {"done": sum(item.get("status") == "done" for item in splits),
                        "total": len(splits)},
@@ -246,6 +258,56 @@ def progress(
 def available_balance_from_user(user: Mapping[str, Any]) -> int:
     """Read the same monthly plus top-up availability as UserCredits."""
     return _user_credits_from_data(dict(user)).available_balance
+
+
+def _mixes_receipt_rows(item: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The files made (charged) and the files not made (refunded), each as its own row."""
+    files = int(item.get("files") or 0)
+    made = int(item.get("filesMade") or 0) if item.get("status") == "done" else 0
+    charged = int(item.get("creditsCharged") or 0)
+    rows = []
+    if made:
+        rows.append({"itemId": "mixes", "type": "mixes", "rowId": None, "mode": None, "name": None,
+                     "credits": charged, "outcome": "charged", "reason": None, "files": made})
+    if files > made:
+        rows.append({"itemId": "mixes:refunded", "type": "mixes", "rowId": None, "mode": None,
+                     "name": None, "credits": int(item.get("creditsReserved") or 0) - charged,
+                     "outcome": "refunded", "reason": item.get("reason"), "files": files - made})
+    return rows
+
+
+def add_mixes_item(
+    items: list[dict[str, Any]], rows: Sequence[Mapping[str, Any]], *,
+    mixes: str, instruments_sound: bool,
+) -> dict[str, int]:
+    """Count each mix choice's files for the priced takes, and price the chosen one as one item."""
+    from src.backend.sing_all_mix import TakeRef, plan_mixes
+
+    row_by_id = {row["rowId"]: row for row in rows}
+    refs = [TakeRef(str(row_by_id[item["rowId"]].get("partId") or item["rowId"]),
+                    str(row_by_id[item["rowId"]].get("name") or item["rowId"]),
+                    item["mode"])
+            for item in items if item["type"] == "take"]
+    mix_files = {choice: len(plan_mixes(refs, choice, instruments_sound))
+                 for choice in ("all", "full")}
+    files = mix_files.get(mixes, 0)
+    if files:
+        items.append({
+            "itemId": "mixes", "type": "mixes", "files": files,
+            "estimatedSeconds": 0, "unitSeconds": None, "range": None,
+            "creditsReserved": files * MIX_CREDITS_PER_FILE, "creditsCharged": 0,
+            "status": "queued", "reason": None,
+        })
+    return mix_files
+
+
+def _release_action(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The release of an item's own reservation; splits hold none."""
+    if item["type"] == "take":
+        return {"kind": "release", "reservationId": item["childJobId"]}
+    if item["type"] in {"instrumental", "mixes"}:
+        return {"kind": "release", "reservationId": item["reservationId"]}
+    return None
 
 
 def build_items(
@@ -301,6 +363,7 @@ def quote_lines(items: Sequence[Mapping[str, Any]], *,
     takes = [item for item in items if item["type"] == "take"]
     split = any(item["type"] == "split" for item in items)
     instrumental = next((item for item in items if item["type"] == "instrumental"), None)
+    mixes = next((item for item in items if item["type"] == "mixes"), None)
     total = sum(int(item["creditsReserved"]) for item in items)
     lines: list[dict[str, Any]] = [{
         "kind": "singing", "parts": len({item["rowId"] for item in takes}),
@@ -311,6 +374,8 @@ def quote_lines(items: Sequence[Mapping[str, Any]], *,
         lines.append({"kind": "preparing", "credits": 0})
     if instrumental is not None:
         lines.append({"kind": "instrumentals", "credits": instrumental["creditsReserved"]})
+    if mixes is not None:
+        lines.append({"kind": "mixes", "files": mixes["files"], "credits": mixes["creditsReserved"]})
     lines.extend([{"kind": "total", "credits": total},
                   {"kind": "balance", "before": balance, "after": balance - total}])
     return lines
@@ -429,6 +494,28 @@ def summary_with_judged_instruments(
     return amended
 
 
+def quoted_instruments_sound(summary: Mapping[str, Any]) -> bool:
+    """Predict whether M4 will have a sound after Sing it builds performance MIDI."""
+    from src.backend.sing_all_package import track_sounds
+
+    if any(sound is not None for sound in track_sounds(dict(summary))):
+        return True
+    resolution = summary.get("instrument_program_resolution") or {}
+    instrumental_ids = set(resolution.get("instrumental_score_instrument_ids") or [])
+    for part in summary.get("parts") or []:
+        for instrument in part.get("instruments") or []:
+            if instrument.get("score_instrument_id") not in instrumental_ids:
+                continue
+            if not instrument.get("eligible_for_instrumental_midi"):
+                continue
+            if instrument.get("program_source") == "user_assignable":
+                continue
+            preset = instrument.get("playback_preset") or {}
+            if preset.get("program") is not None:
+                return True
+    return False
+
+
 def decide(
     job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
     score_state: Mapping[str, Any],
@@ -451,17 +538,68 @@ def decide(
             if item.get("status") in {"queued", "running"}:
                 item["status"] = "stopped" if status == "cancelled" else "failed"
                 item["reason"] = reason
-                if item["type"] == "take":
-                    actions.append({"kind": "release", "reservationId": item["childJobId"]})
-                elif item["type"] == "instrumental":
-                    actions.append({"kind": "release", "reservationId": item["reservationId"]})
+                if release := _release_action(item):
+                    actions.append(release)
         actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
+
+    def enter_packaging(settled_items: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from src.backend.sing_all_mix import TakeRef, plan_mixes
+        from src.backend.sing_all_package import track_sounds
+
+        row_by_id = {row["rowId"]: row for row in rows}
+        refs = [TakeRef(str((row_by_id.get(item["rowId"]) or {}).get("partId")
+                            or item["rowId"]),
+                        str((row_by_id.get(item["rowId"]) or {}).get("name")
+                            or item["rowId"]), item["mode"])
+                for item in settled_items if item["type"] == "take"
+                and item["status"] == "done"]
+        sounds = track_sounds(score_state.get("scoreSummary") or {})
+        planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
+                             any(sound is not None for sound in sounds))
+        package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
+                   "startedAt": now, "updatedAt": now}
+        return {"stage": "packaging", "package": package,
+                "items": settled_items}, [{"kind": "start_package"}]
 
     if score_state.get("terminalFailure"):
         return finish("failed", str(score_state["terminalFailure"]))
 
     stage = job.get("stage")
+    if stage == "packaging":
+        package = job.get("package") or {}
+        state = package.get("state")
+        updated = package.get("updatedAt")
+        if isinstance(updated, str):
+            updated = datetime.fromisoformat(updated)
+        stale = (score_state.get("sweep") and isinstance(now, datetime)
+                 and isinstance(updated, datetime) and now - updated > timedelta(minutes=10))
+        if state not in {"done", "failed"} and not stale:
+            return {}, []
+        takes = [item for item in items if item["type"] == "take"]
+        done = sum(item.get("status") == "done" for item in takes)
+        # The mixes are charged for the files made, and the rest is refunded.
+        mixes_actions = []
+        mixes_item = next((item for item in items if item["type"] == "mixes"
+                           and item.get("status") == "queued"), None)
+        if mixes_item is not None:
+            made = (min(int((package.get("mixes") or {}).get("done") or 0), int(mixes_item["files"]))
+                    if state == "done" and not stale else 0)
+            if made:
+                mixes_item.update(status="done", filesMade=made,
+                                  creditsCharged=made * MIX_CREDITS_PER_FILE)
+                mixes_actions.append({"kind": "settle_mixes",
+                                      "reservationId": mixes_item["reservationId"],
+                                      "credits": made * MIX_CREDITS_PER_FILE})
+            else:
+                mixes_item.update(status="failed", reason="package_failed")
+                mixes_actions.append(_release_action(mixes_item))
+        fields, actions = finish("completed" if done == len(takes) else "partial")
+        if stale:
+            fields["package"] = {**package, "state": "failed"}
+        if state == "done":
+            actions.insert(0, {"kind": "set_opening_balance"})
+        return fields, mixes_actions + actions
     if score_state.get("sweep") and isinstance(now, datetime):
         stuck = False
         if stage == "splitting":
@@ -489,17 +627,20 @@ def decide(
                                     "jobKind": "preprocess" if item["type"] == "split"
                                     else "synthesis"})
                 item.update(status="failed", reason="stuck")
-                if item["type"] == "take":
-                    actions.append({"kind": "release", "reservationId": child_id})
-                elif item["type"] == "instrumental":
-                    actions.append({"kind": "release", "reservationId": item["reservationId"]})
+                if release := _release_action(item):
+                    actions.append(release)
             takes = [item for item in items if item["type"] == "take"]
             done = sum(item["status"] == "done" for item in takes)
             actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
             return {"items": items, "status": "partial" if done else "failed",
                     "stage": "done", "endReason": "stuck"}, actions
     if job.get("cancelRequested"):
-        return wind_down(job, children)
+        fields, actions = wind_down(job, children, packaging_follows=stage == "singing")
+        if stage == "singing" and fields.get("status") == "completed":
+            package_fields, package_actions = enter_packaging(fields["items"])
+            return package_fields, [action for action in actions
+                                    if action["kind"] == "release"] + package_actions
+        return fields, actions
     if stage == "reading":
         if score_state.get("scoreId") != job.get("scoreId"):
             return finish("failed", "score_replaced")
@@ -617,7 +758,9 @@ def decide(
         takes = [item for item in items if item["type"] == "take"]
         if all(item["status"] in {"done", "failed", "stopped"} for item in takes):
             done = sum(item["status"] == "done" for item in takes)
-            return finish("completed" if done == len(takes) else "partial" if done else "failed")
+            if not done:
+                return finish("failed")
+            return enter_packaging(items)
         return {}, []
 
     return {}, []
@@ -625,14 +768,19 @@ def decide(
 
 def wind_down(
     job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
+    *, packaging_follows: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Stop unstarted work, but wait for children already past their stop point."""
+    """Stop unstarted work, but wait for children already past their stop point.
+
+    The mixes are made after the takes: they stay reserved when every take is done
+    and the job goes on to packaging, and are refunded otherwise.
+    """
     items = deepcopy(job.get("items") or [])
     actions: list[dict[str, Any]] = []
     waiting = False
     changed = False
     for item in items:
-        if item.get("status") not in {"queued", "running"}:
+        if item.get("status") not in {"queued", "running"} or item["type"] == "mixes":
             continue
         child = children.get(item.get("childJobId")) or {}
         child_status = child.get("status")
@@ -646,15 +794,18 @@ def wind_down(
         else:
             item["status"] = "stopped"
             item["reason"] = "stopped"
-            if item["type"] == "take":
-                actions.append({"kind": "release", "reservationId": item["childJobId"]})
-            elif item["type"] == "instrumental":
-                actions.append({"kind": "release", "reservationId": item["reservationId"]})
+            if release := _release_action(item):
+                actions.append(release)
         changed = True
     if waiting:
         return ({"items": items} if changed else {}), actions
     takes = [item for item in items if item["type"] == "take"]
     completed = all(item["status"] == "done" for item in takes)
+    if not (completed and packaging_follows):
+        for item in items:
+            if item["type"] == "mixes" and item.get("status") == "queued":
+                item.update(status="stopped", reason="stopped")
+                actions.append(_release_action(item))
     actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
     return {"items": items, "status": "completed" if completed else "cancelled",
             "stage": "done", "endReason": None if completed else "stopped"}, actions

@@ -9,6 +9,8 @@ from typing import Any, Mapping, Optional
 
 VOCAL_CREDIT_DURATION_SECONDS = 30
 INSTRUMENTAL_CREDIT_DURATION_SECONDS = 120
+# A Sing All's server mixes: each mix file costs the same, whatever its length.
+MIX_CREDITS_PER_FILE = 1
 CREDIT_DURATION_PRECISION_SECONDS = 0.001
 SYNTHESIS_PRICING_VERSION = 1
 

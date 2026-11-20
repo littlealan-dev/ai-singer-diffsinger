@@ -115,6 +115,12 @@ def create_job_with_reservations(
     reservations: list[ReservationItem] = []
     for item in job.get("items") or []:
         kind = item.get("type")
+        if kind == "mixes":
+            reservations.append(ReservationItem(
+                job_id=item["reservationId"], estimated_credits=int(item["creditsReserved"]),
+                billing_components=("mixes",), job_kind="sing_all_mixes",
+            ))
+            continue
         if kind not in {"take", "instrumental"}:
             continue
         instrumental = kind == "instrumental"

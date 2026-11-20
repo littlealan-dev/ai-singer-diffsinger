@@ -9,7 +9,9 @@ from typing import Any
 
 from src.api.sing_all_estimate import quote_facts
 from src.backend import sing_all_store
-from src.backend.credits import release_credits, settle_instrumental_reservation
+from src.backend.credits import (
+    release_credits, settle_instrumental_reservation, settle_mixes_reservation,
+)
 from src.backend.message_catalog import backend_message
 from src.backend.sing_all import (
     decide, materialize_rows, mark_voice_ranges, summary_with_judged_instruments,
@@ -123,6 +125,7 @@ class SingAllRunner:
             score_state = await self._score_state(job, snapshot, now=now)
             score_state["sweep"] = sweep
             score_state["renderTransport"] = render_transport
+            score_state["scoreSummary"] = snapshot.get("score_summary") or {}
             if (render_transport and job["stage"] == "singing"
                     and job.get("instrumentalsPrepared")
                     and (job.get("render") or {}).get("state", "none") == "none"
@@ -140,7 +143,8 @@ class SingAllRunner:
             # Releasing holds and saving score answers must succeed before the
             # parent can move past them. A repeat of either operation is safe.
             before = [action for action in actions if action["kind"] in {
-                "release", "save_assignments", "fail_stuck_child"}]
+                "release", "settle_mixes", "save_assignments", "fail_stuck_child",
+                "set_opening_balance"}]
             for action in before:
                 try:
                     outcome = await self._action(job, action, snapshot)
@@ -356,6 +360,22 @@ class SingAllRunner:
                 raise SingAllTerminalError("quote_changed") from exc
         elif kind == "settle_instrumental":
             await self._settle_instrumental(job)
+        elif kind == "settle_mixes":
+            result = await asyncio.to_thread(
+                settle_mixes_reservation, uid, action["reservationId"], action["credits"])
+            if result.status not in {"settled", "already_settled"}:
+                raise RuntimeError(f"Mixes settlement: {result.status}")
+        elif kind == "start_package":
+            from src.backend.sing_all_package import start_package
+            await start_package(job["jobId"], self.orchestrator._settings)
+        elif kind == "set_opening_balance":
+            try:
+                await self.orchestrator._sessions.set_sing_all_opening_balance(
+                    session_id, uid, job)
+            except (KeyError, PermissionError):
+                # The owner can delete the Song while its package is running.
+                # There is then no player to update, but the parent must finish.
+                pass
         else:
             raise ValueError(f"Unknown Sing All action: {kind}")
 

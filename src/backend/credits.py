@@ -1354,12 +1354,25 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Set
     Atomically settle credits for a job.
     Returns an explicit settlement outcome.
     """
+    return _settle_reservation_credits(uid, job_id, estimate_credits(actual_duration_seconds))
+
+
+def settle_mixes_reservation(uid: str, reservation_id: str, actual_credits: int) -> SettleCreditsResult:
+    """Charge a Sing All's mixes for the files made; the rest of the reservation is freed.
+
+    The reservation holds every quoted mix file. A charge above it is refused, never taken.
+    """
+    return _settle_reservation_credits(uid, reservation_id, int(actual_credits), at_most_estimate=True)
+
+
+def _settle_reservation_credits(
+    uid: str, job_id: str, actual_credits: int, *, at_most_estimate: bool = False,
+) -> SettleCreditsResult:
+    """Settle one pending reservation for a known credit amount."""
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
     res_ref = db.collection("credit_reservations").document(job_id)
-    
-    actual_credits = estimate_credits(actual_duration_seconds)
-    
+
     @firestore.transactional
     def _transactional_settle(transaction):
         res_snapshot = res_ref.get(transaction=transaction)
@@ -1403,7 +1416,14 @@ def settle_credits(uid: str, job_id: str, actual_duration_seconds: float) -> Set
             )
             
         estimated_credits = res_data.get("estimatedCredits", 0)
-        
+        if at_most_estimate and actual_credits > int(estimated_credits or 0):
+            logger.error("Settlement blocked: reservation %s charge exceeds its estimate", job_id)
+            return SettleCreditsResult(
+                status="reconciliation_required",
+                actual_credits=actual_credits,
+                overdrafted=False,
+            )
+
         user_snapshot = user_ref.get(transaction=transaction)
         if not user_snapshot.exists:
             return SettleCreditsResult(

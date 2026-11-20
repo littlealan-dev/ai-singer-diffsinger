@@ -4,7 +4,7 @@ import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
-from src.backend import sing_all_runner
+from src.backend import sing_all_package, sing_all_runner
 
 
 def _run_job(monkeypatch, job, children):
@@ -37,12 +37,21 @@ def _run_job(monkeypatch, job, children):
     monkeypatch.setattr(sing_all_runner, "release_credits",
                         lambda uid, job_id: (events.append(("release", job_id))
                                              or SimpleNamespace(status="released")))
+    async def start_package(*args):
+        events.append(("start_package", args[0]))
+        record["package"] = {"state": "done", "mixes": {"done": 0, "total": 0},
+                             "stats": {"balance": {}}}
+    monkeypatch.setattr(sing_all_package, "start_package", start_package)
     async def snapshot(*args):
         return {"current_score": {"version": 3, "score": {}}, "score_id": "score-a"}
     async def history(*args, **kwargs):
         events.append(("history", kwargs.get("sing_all_job_id")))
+    async def balance(*args):
+        events.append(("balance", args[0]))
     orchestrator = SimpleNamespace(
-        _sessions=SimpleNamespace(get_snapshot=snapshot, append_history=history),
+        _settings=SimpleNamespace(),
+        _sessions=SimpleNamespace(get_snapshot=snapshot, append_history=history,
+                                  set_sing_all_opening_balance=balance),
         _job_store=SimpleNamespace(get_job=lambda job_id: children.get(job_id)),
     )
     runner = sing_all_runner.SingAllRunner(orchestrator)
@@ -80,13 +89,14 @@ def test_cancel_releases_every_hold_before_terminal_state_and_writes_one_history
 
 def test_completed_child_is_counted_once_then_parent_finishes(monkeypatch):
     job = _job([{"itemId": "take:a:lyrics", "type": "take", "mode": "lyrics",
-                "childJobId": "take-a", "status": "running", "creditsReserved": 2,
+                "rowId": "a", "childJobId": "take-a", "status": "running", "creditsReserved": 2,
                 "creditsCharged": 0}])
     record, events = _run_job(monkeypatch, job, {
         "take-a": {"status": "completed", "creditsCharged": 2}})
     assert record["status"] == "completed"
     assert record["items"][0]["creditsCharged"] == 2
     assert events.count(("history", "parent-a")) == 1
+    assert events.count(("start_package", "parent-a")) == 1
     assert not any(event[0] == "release" for event in events)
 
 
