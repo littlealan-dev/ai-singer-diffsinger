@@ -88,14 +88,22 @@ def test_voicebank_take_matches_instrument_midi_clock(
         pytest.skip("Local voicebank is not installed.")
     source_path = root / "tests/fixtures" / source
     if feature == "pickup":
+        # Quarter notes: one in the pickup bar, four in each later bar. The
+        # first note's vowel starts late (its consonant has no room before
+        # time 0), so with only 4 notes one more misheard onset moved the median.
         tree = ElementTree.parse(source_path)
         for xml_part in tree.getroot().findall("part"):
-            first = xml_part.find("measure")
-            assert first is not None
-            first.set("implicit", "yes")
-            first.set("number", "0")
-            first.find("note/duration").text = "1"
-            first.find("note/type").text = "quarter"
+            measures = xml_part.findall("measure")
+            measures[0].set("implicit", "yes")
+            measures[0].set("number", "0")
+            for index, measure in enumerate(measures):
+                note = measure.find("note")
+                assert note is not None
+                note.find("duration").text = "1"
+                note.find("type").text = "quarter"
+                position = list(measure).index(note)
+                for _ in range(3 if index else 0):
+                    measure.insert(position + 1, deepcopy(note))
         source_path = tmp_path / "made-up-pickup.musicxml"
         tree.write(source_path, encoding="unicode")
     elif feature == "tempo-change":
