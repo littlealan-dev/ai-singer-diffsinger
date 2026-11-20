@@ -221,8 +221,15 @@ def progress(
         "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
         "status": job["status"], "stage": job["stage"], "endReason": reason,
         "cancelRequested": bool(job.get("cancelRequested")),
-        "choices": {key: choices[key] for key in
-                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
+        "choices": {**{key: choices[key] for key in
+                       ("language", "solfegeOnly", "mode", "verse", "repeats")},
+                    "mixes": choices.get("mixes") or "none"},
+        "package": ({"state": job["package"]["state"],
+                     "mixes": {"done": int((job["package"].get("mixes") or {}).get("done") or 0),
+                               "total": int((job["package"].get("mixes") or {}).get("total") or 0)}}
+                    if job.get("stage") in {"packaging", "done"} and
+                    any(item.get("status") == "done" for item in takes) and
+                    isinstance(job.get("package"), Mapping) else None),
         "counts": {
             "splits": {"done": sum(item.get("status") == "done" for item in splits),
                        "total": len(splits)},
@@ -429,6 +436,28 @@ def summary_with_judged_instruments(
     return amended
 
 
+def quoted_instruments_sound(summary: Mapping[str, Any]) -> bool:
+    """Predict whether M4 will have a sound after Sing it builds performance MIDI."""
+    from src.backend.sing_all_package import track_sounds
+
+    if any(sound is not None for sound in track_sounds(dict(summary))):
+        return True
+    resolution = summary.get("instrument_program_resolution") or {}
+    instrumental_ids = set(resolution.get("instrumental_score_instrument_ids") or [])
+    for part in summary.get("parts") or []:
+        for instrument in part.get("instruments") or []:
+            if instrument.get("score_instrument_id") not in instrumental_ids:
+                continue
+            if not instrument.get("eligible_for_instrumental_midi"):
+                continue
+            if instrument.get("program_source") == "user_assignable":
+                continue
+            preset = instrument.get("playback_preset") or {}
+            if preset.get("program") is not None:
+                return True
+    return False
+
+
 def decide(
     job: Mapping[str, Any], children: Mapping[str, Mapping[str, Any]],
     score_state: Mapping[str, Any],
@@ -458,10 +487,47 @@ def decide(
         actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
 
+    def enter_packaging(settled_items: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from src.backend.sing_all_mix import TakeRef, plan_mixes
+        from src.backend.sing_all_package import track_sounds
+
+        row_by_id = {row["rowId"]: row for row in rows}
+        refs = [TakeRef(str((row_by_id.get(item["rowId"]) or {}).get("partId")
+                            or item["rowId"]),
+                        str((row_by_id.get(item["rowId"]) or {}).get("name")
+                            or item["rowId"]), item["mode"])
+                for item in settled_items if item["type"] == "take"
+                and item["status"] == "done"]
+        sounds = track_sounds(score_state.get("scoreSummary") or {})
+        planned = plan_mixes(refs, (job.get("choices") or {}).get("mixes") or "none",
+                             any(sound is not None for sound in sounds))
+        package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
+                   "startedAt": now, "updatedAt": now}
+        return {"stage": "packaging", "package": package,
+                "items": settled_items}, [{"kind": "start_package"}]
+
     if score_state.get("terminalFailure"):
         return finish("failed", str(score_state["terminalFailure"]))
 
     stage = job.get("stage")
+    if stage == "packaging":
+        package = job.get("package") or {}
+        state = package.get("state")
+        updated = package.get("updatedAt")
+        if isinstance(updated, str):
+            updated = datetime.fromisoformat(updated)
+        stale = (score_state.get("sweep") and isinstance(now, datetime)
+                 and isinstance(updated, datetime) and now - updated > timedelta(minutes=10))
+        if state not in {"done", "failed"} and not stale:
+            return {}, []
+        takes = [item for item in items if item["type"] == "take"]
+        done = sum(item.get("status") == "done" for item in takes)
+        fields, actions = finish("completed" if done == len(takes) else "partial")
+        if stale:
+            fields["package"] = {**package, "state": "failed"}
+        if state == "done":
+            actions.insert(0, {"kind": "set_opening_balance"})
+        return fields, actions
     if score_state.get("sweep") and isinstance(now, datetime):
         stuck = False
         if stage == "splitting":
@@ -499,7 +565,12 @@ def decide(
             return {"items": items, "status": "partial" if done else "failed",
                     "stage": "done", "endReason": "stuck"}, actions
     if job.get("cancelRequested"):
-        return wind_down(job, children)
+        fields, actions = wind_down(job, children)
+        if stage == "singing" and fields.get("status") == "completed":
+            package_fields, package_actions = enter_packaging(fields["items"])
+            return package_fields, [action for action in actions
+                                    if action["kind"] == "release"] + package_actions
+        return fields, actions
     if stage == "reading":
         if score_state.get("scoreId") != job.get("scoreId"):
             return finish("failed", "score_replaced")
@@ -617,7 +688,9 @@ def decide(
         takes = [item for item in items if item["type"] == "take"]
         if all(item["status"] in {"done", "failed", "stopped"} for item in takes):
             done = sum(item["status"] == "done" for item in takes)
-            return finish("completed" if done == len(takes) else "partial" if done else "failed")
+            if not done:
+                return finish("failed")
+            return enter_packaging(items)
         return {}, []
 
     return {}, []

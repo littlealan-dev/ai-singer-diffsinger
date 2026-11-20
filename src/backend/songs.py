@@ -123,6 +123,50 @@ def apply_take(player: Dict[str, Any], job_id: str, job: Dict[str, Any]) -> bool
     return True
 
 
+def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) -> bool:
+    """Apply the package's measured balance to untouched Song mixer defaults."""
+    if player.get("scoreId") != job.get("scoreId"):
+        return False
+    balance = ((job.get("package") or {}).get("stats") or {}).get("balance") or {}
+    stats = balance.get("stats") or {}
+    mode = balance.get("mode")
+    if mode not in {"lyrics", "solfege"}:
+        return False
+    vocals = stats.get("vocals") or []
+    instruments = stats.get("instruments") or {}
+    gains = [float(value["gain_db"]) for value in vocals
+             if not value.get("dropped") and value.get("gain_db") is not None]
+    instrument_gain = instruments.get("gain_db") if isinstance(instruments, dict) else None
+    if instrument_gain is not None:
+        gains.append(float(instrument_gain))
+    if not gains:
+        return False
+    shift = max(gains)
+    done = [item for item in job.get("items") or []
+            if item.get("type") == "take" and item.get("status") == "done"
+            and item.get("mode") == mode]
+    by_job = {item.get("childJobId"): value for item, value in zip(done, vocals)
+              if not value.get("dropped") and value.get("gain_db") is not None}
+    changed = False
+    for track in player.get("vocals") or []:
+        value = by_job.get(track.get("sourceJobId"))
+        # Per value: the owner's mute and solo stay; a volume still at Sing All's default is replaced.
+        if value is None or track.get("volume", DEFAULT_VOCAL_VOLUME) != DEFAULT_VOCAL_VOLUME:
+            continue
+        volume = 10 ** ((float(value["gain_db"]) - shift) / 20)
+        if track.get("volume") != volume:
+            track["volume"] = volume
+            changed = True
+    bus = player.get("bus") or {}
+    if instrument_gain is not None and bus.get("levelDb", 0.0) == 0.0:
+        level = float(instrument_gain) - shift
+        if bus.get("levelDb") != level:
+            bus["levelDb"] = level
+            player["bus"] = bus
+            changed = True
+    return changed
+
+
 class MixVocal(BaseModel):
     model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
     key: str = Field(max_length=200)

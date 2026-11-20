@@ -69,6 +69,7 @@ from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
     available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
+    quoted_instruments_sound,
     quote_notes, singing_language_options, style_changes,
     summary_with_judged_instruments, supported_singing_languages,
 )
@@ -76,6 +77,7 @@ from src.backend.sing_all_judgment import (
     QuoteUnavailable, StyleUnavailable, input_hash, quote_judgment, style_judgment,
 )
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
+from src.backend.sing_all_mix import TakeRef, plan_mixes
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
     active_job_for_song, apply as apply_sing_all_job, create_job_with_reservations,
@@ -1453,6 +1455,30 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail={"code": "job_not_found"})
         return sing_all_progress(job)
 
+    @app.get("/sing-all/jobs/{job_id}/download")
+    async def download_sing_all_package(job_id: str, request: Request) -> Dict[str, Any]:
+        user_id = await _get_user_id_or_401(request)
+        job = await asyncio.to_thread(load_sing_all_job, job_id)
+        if not job or job.get("uid") != user_id:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"})
+        try:
+            await request.app.state.sessions.get_song_row(job["sessionId"], user_id)
+        except (KeyError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
+        package = job.get("package") or {}
+        settings = request.app.state.settings
+        path = package.get("zipPath")
+        prefix = f"singAll/{user_id}/{job_id}/"
+        if (package.get("state") != "done" or not settings.backend_use_storage
+                or not isinstance(path, str) or not path.startswith(prefix)
+                or not path.endswith(".zip")):
+            raise HTTPException(status_code=409, detail={"code": "zip_unavailable"})
+        from src.backend.storage_client import signed_download_url
+        file_name = path.rsplit("/", 1)[-1]
+        url, expires = await asyncio.to_thread(
+            signed_download_url, settings.storage_bucket, path, file_name)
+        return {"url": url, "fileName": file_name, "expiresAt": expires.isoformat()}
+
     @app.post("/sing-all/quote")
     async def get_sing_all_quote(payload: SingAllQuoteRequest, request: Request) -> Dict[str, Any]:
         """Quote the caller's Song without changing its score or reserving credits."""
@@ -1488,6 +1514,9 @@ def create_app() -> FastAPI:
         mode = "solfege" if solfege_only else str(choices.get("mode") or "lyrics")
         if mode not in {"lyrics", "solfege", "both"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mode"})
+        mixes = choices.get("mixes", "all")
+        if not isinstance(mixes, str) or mixes not in {"all", "full", "none"}:
+            raise HTTPException(status_code=422, detail={"code": "invalid_mixes"})
         repeats_available = summary.get("repeat_expansion_available") is not False
         repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
         verses = sorted({str(value) for value in summary.get("available_verses") or []},
@@ -1577,12 +1606,21 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=503, detail={"code": "quote_unavailable"}) from exc
         has_instrumentals = score_has_instrumental_parts(priced_summary)
+        instruments_sound = quoted_instruments_sound(priced_summary)
+        effective_mixes = "full" if mixes == "all" and not instruments_sound else mixes
         charge_scope = instrumental_charge_scope(user_id, session_id, score_id)
         charge_required = (has_instrumentals and await asyncio.to_thread(
             get_instrumental_charge_state, charge_scope) != "paid")
         duration = selected_score_duration(summary, expand_repeats=repeats)
         items = build_items(rows, mode=mode, duration_seconds=duration,
                             instrumental_charge_required=charge_required)
+        row_by_id = {row["rowId"]: row for row in rows}
+        refs = [TakeRef(str(row_by_id[item["rowId"]].get("partId") or item["rowId"]),
+                        str(row_by_id[item["rowId"]].get("name") or item["rowId"]),
+                        item["mode"])
+                for item in items if item["type"] == "take"]
+        mix_files = {choice: len(plan_mixes(refs, choice, instruments_sound))
+                     for choice in ("all", "full")}
         total = sum(int(item["creditsReserved"]) for item in items)
         balance = available_balance_from_user(user_record)
         blocked = ("free_plan" if (user_record.get("billing") or {}).get("activePlanKey") == "free"
@@ -1596,7 +1634,7 @@ def create_app() -> FastAPI:
                       "voice": row["voice"], "voicePicked": row["voicePicked"]}
                      for row in rows],
             "language": language, "solfegeOnly": solfege_only, "mode": mode,
-            "verse": verse, "repeats": repeats,
+            "verse": verse, "repeats": repeats, "mixes": effective_mixes,
         }
         quote_record = await asyncio.to_thread(save_quote, db, {
             "uid": user_id, "sessionId": session_id, "scoreId": score_id,
@@ -1613,7 +1651,8 @@ def create_app() -> FastAPI:
                         "languages": singing_language_options(voicebanks),
                         "mode": mode, "verse": verse, "verses": verses,
                         "repeats": repeats, "repeatsAvailable": repeats_available,
-                        "solfegeOnly": solfege_only},
+                        "solfegeOnly": solfege_only, "mixes": effective_mixes,
+                        "mixFiles": mix_files},
             "lines": quote_lines(items, duration_seconds=duration, balance=balance),
             "total": total, "balance": balance, "blocked": blocked,
             "notes": notes, "style": style,
@@ -1786,22 +1825,28 @@ def create_app() -> FastAPI:
         sing_all = None
         if parent:
             parent_id = parent["jobId"]
-            for _ in range(8):
-                if parent.get("cancelRequested") or await asyncio.to_thread(
-                    apply_sing_all_job, parent_id, {"cancelRequested": True},
-                    expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
-                ):
-                    break
-                parent = await asyncio.to_thread(load_sing_all_job, parent_id)
-                if not parent or parent.get("status") != "running":
-                    break
-            else:
-                raise RuntimeError("Sing All parent changed throughout stop request.")
+            packaging = parent.get("stage") == "packaging"
+            if not packaging:
+                for _ in range(8):
+                    if parent.get("cancelRequested") or await asyncio.to_thread(
+                        apply_sing_all_job, parent_id, {"cancelRequested": True},
+                        expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
+                    ):
+                        break
+                    parent = await asyncio.to_thread(load_sing_all_job, parent_id)
+                    if not parent or parent.get("status") != "running":
+                        break
+                    if parent.get("stage") == "packaging":
+                        packaging = True
+                        break
+                else:
+                    raise RuntimeError("Sing All parent changed throughout stop request.")
             await SingAllRunner(request.app.state.orchestrator).reconcile(parent_id)
             ended = await asyncio.to_thread(load_sing_all_job, parent_id) or parent
             takes = [item for item in ended.get("items") or [] if item.get("type") == "take"]
-            too_late = ended.get("status") == "completed"
-            if ended.get("status") == "running" and takes:
+            too_late = (packaging or ended.get("stage") == "packaging"
+                        or ended.get("status") == "completed")
+            if not packaging and ended.get("status") == "running" and takes:
                 remaining = [item for item in takes if item.get("status") not in
                              {"done", "failed", "stopped"}]
                 children = await asyncio.gather(*(
