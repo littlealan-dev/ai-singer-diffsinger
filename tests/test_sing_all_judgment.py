@@ -96,10 +96,35 @@ def test_quote_reply_schema_uses_route_constants_and_compatible_voices() -> None
     assert schema["properties"]["roles"]["properties"]["p1"]["enum"] == [
         "voice", "instrument", "unsure"]
     sounds = schema["properties"]["sounds"]["properties"]
-    assert sounds["p1"]["properties"]["bank"]["enum"] == [FLUIDR3_MELODIC_BANK]
-    assert sounds["i1"]["properties"]["bank"]["enum"] == [FLUIDR3_PERCUSSION_BANK]
+    melodic, drums = sounds["p1"]["properties"], sounds["i1"]["properties"]
+    assert (melodic["bank"]["minimum"], melodic["bank"]["maximum"]) == (
+        FLUIDR3_MELODIC_BANK, FLUIDR3_MELODIC_BANK)
+    assert (drums["bank"]["minimum"], drums["bank"]["maximum"]) == (
+        FLUIDR3_PERCUSSION_BANK, FLUIDR3_PERCUSSION_BANK)
     assert schema["properties"]["voices"]["properties"]["r1"]["enum"] == [
         "voice_a", "voice_b"]
+
+
+def _enums_off_strings(schema, path="schema"):
+    found = []
+    if isinstance(schema, dict):
+        if "enum" in schema and schema.get("type") != "STRING":
+            found.append(path)
+        for key, value in schema.items():
+            found += _enums_off_strings(value, f"{path}.{key}")
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            found += _enums_off_strings(value, f"{path}[{index}]")
+    return found
+
+
+def test_quote_and_style_schemas_put_enum_only_on_strings() -> None:
+    """Gemini rejects a request whose schema has an enum on any other type (400)."""
+    questions = build_request(_facts(), "en", _VOICES)
+    assert _enums_off_strings(quote_reply_schema(
+        questions, compatible_voicebanks(_VOICES, "en"))) == []
+    assert _enums_off_strings(style_reply_schema(
+        [{"rowId": "lead", "voice": "voice_a"}], {"voice_a": _VOICES[0]})) == []
 
 
 @pytest.mark.parametrize(
@@ -110,6 +135,8 @@ def test_quote_reply_schema_uses_route_constants_and_compatible_voices() -> None
             "bank": 0, "kind": "melodic", "program": 0, "evidence": []}}),
         lambda reply: reply["sounds"]["i1"].update({"bank": 0, "kind": "melodic"}),
         lambda reply: reply["sounds"]["i1"].update({"program": 128}),
+        # Inside the schema's range but not a drum kit.
+        lambda reply: reply["sounds"]["i1"].update({"program": 1}),
     ],
 )
 def test_invalid_sounds_are_identified_for_one_reask(mutation) -> None:

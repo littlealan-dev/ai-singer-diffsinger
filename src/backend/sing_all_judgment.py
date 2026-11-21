@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 import json
 
 from src.backend.language_selection import normalize_language_code
+from src.mcp.logging_utils import get_logger
 from src.mcp.tools import list_tools
 from src.musicxml.instrument_programs import (
     FLUIDR3_MELODIC_BANK,
@@ -18,6 +19,8 @@ from src.musicxml.instrument_programs import (
     _normalise_preset,
     _valid_preset_for_instrument,
 )
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -143,15 +146,18 @@ def build_request(facts: Mapping[str, Any], language: str,
 
 def _sound_schema(route: Mapping[str, Any]) -> dict[str, Any]:
     percussion = bool(route.get("is_percussion"))
+    bank = FLUIDR3_PERCUSSION_BANK if percussion else FLUIDR3_MELODIC_BANK
+    # Gemini accepts enum only on strings, so integers are ranges. check_reply still
+    # holds each sound to the exact bank and drum-kit programs, with one re-ask.
     return {
         "type": "OBJECT", "nullable": True,
         "required": ["bank", "kind", "program", "evidence"],
         "properties": {
-            "bank": {"type": "INTEGER", "enum": [
-                FLUIDR3_PERCUSSION_BANK if percussion else FLUIDR3_MELODIC_BANK]},
+            "bank": {"type": "INTEGER", "minimum": bank, "maximum": bank},
             "kind": {"type": "STRING", "enum": [
                 "percussion_kit" if percussion else "melodic"]},
-            "program": ({"type": "INTEGER", "enum": sorted(FLUIDR3_PERCUSSION_PROGRAMS)}
+            "program": ({"type": "INTEGER", "minimum": min(FLUIDR3_PERCUSSION_PROGRAMS),
+                         "maximum": max(FLUIDR3_PERCUSSION_PROGRAMS)}
                         if percussion else {"type": "INTEGER", "minimum": 0, "maximum": 127}),
             "evidence": {"type": "ARRAY", "items": {"type": "STRING"}},
         },
@@ -351,6 +357,9 @@ async def quote_judgment(
             try:
                 candidate = _parse_reply(await call(asked, response_schema=schema))
             except Exception as exc:
+                # The card only says the quote couldn't be made; the log says why.
+                logger.warning("sing_all_quote_call_failed attempt=%s error_type=%s error=%s",
+                               attempt + 1, type(exc).__name__, str(exc)[:300])
                 raise QuoteUnavailable("quote_call_failed") from exc
             errors, sound_errors = check_reply(questions, candidate, compatible)
             if not errors:
