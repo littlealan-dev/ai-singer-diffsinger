@@ -121,6 +121,13 @@ try {
     SYNTHESIS_WORKER_TOKEN: "local-ui-regression-synthesis-worker",
     // The syllable aligner dev and prod run.
     SYLLABLE_ALIGNER_V2: "1",
+    // Sing All emails are queued as in prod, but sent to a closed local port with a
+    // made-up key, so nothing reaches Brevo and the outbox document stays unsent.
+    SING_ALL_EMAILS: "on",
+    SING_ALL_EMAIL_FROM: "songs@example.test",
+    SING_ALL_EMAIL_REPLY_TO: "help@example.test",
+    SING_ALL_EMAIL_API_URL: "http://127.0.0.1:9/v3/smtp/email",
+    BREVO_WAITLIST_API_KEY: "e2e-not-a-key",
     SHARE_LINKS: "on",
     SHARE_BASE_URL: `http://127.0.0.1:${uiPort}`,
   };

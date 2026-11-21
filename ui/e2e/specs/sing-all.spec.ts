@@ -645,3 +645,83 @@ test("a backend from before step 4 shows no mixes choice and no packaging stages
   await expect(card(page)).not.toContainText("Mixing");
   await expect(card(page)).not.toContainText("Packing the zip");
 });
+
+// Step 5: the link in a Sing All's ended email, /jobs/{jobId}, and the card's email line.
+
+function endedJob(): Json {
+  return progress({
+    status: "completed", stage: "done", remainingS: null, endedAt: "2026-01-01T10:05:00Z",
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, total: 2 } },
+    credits: { reserved: 0, charged: 3, refunded: 0 },
+    receipt: [
+      { itemId: "take:P1:lyrics", type: "take", rowId: "P1", mode: "lyrics", name: "Soprano", credits: 1,
+        outcome: "charged", reason: null, files: null },
+    ],
+  });
+}
+
+function historyWithJobThenChat(backend: Backend) {
+  backend.history.push(
+    { id: "turn-1", role: "user", content: "Sing All", timestamp: "2026-01-01T10:00:00Z" },
+    { id: "turn-2", role: "assistant", content: "Sing All started: 2 takes, 3 credits reserved.",
+      timestamp: "2026-01-01T10:00:01Z", singAllJobId: "job-1" },
+    // Later chat pushes the card out of view, so opening the link has to scroll to it.
+    ...Array.from({ length: 24 }, (_, index) => ({
+      id: `later-${index}`, role: index % 2 ? "assistant" : "user",
+      content: `A later made-up message, number ${index}.`, timestamp: "2026-01-01T11:00:00Z",
+    })),
+  );
+}
+
+test("an email's job link opens the job's Song with its card in view", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-job-link");
+  historyWithJobThenChat(backend);
+  backend.setJob(endedJob(), { active: false });
+  await page.goto("/jobs/job-1");
+  await expect(page).toHaveURL(new RegExp(`/app/song/${SONG}$`));
+  const linked = page.locator('[data-sing-all-job="job-1"]');
+  await expect(linked).toHaveClass(/sing-all-linked/);
+  await expect(linked.getByTestId("sing-all-card")).toBeInViewport();
+  await expect(linked).not.toHaveClass(/sing-all-linked/, { timeout: 5_000 });
+});
+
+test("signed out, the job link signs in first and then opens the Song", async ({ page }) => {
+  const backend = await mockBackend(page);
+  historyWithJobThenChat(backend);
+  backend.setJob(endedJob(), { active: false });
+  await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+  await page.goto("/jobs/job-1");
+  await expect(page.getByText("Sign in to open this song.")).toBeVisible();
+  await page.evaluate(async () => {
+    const firebase = await import("/src/firebase.ts");
+    await firebase.signInForE2E("e2e-sing-all-job-link-signed-out", "e2e-sing-all-job-link-signed-out@example.test");
+  });
+  await expect(page).toHaveURL(new RegExp(`/app/song/${SONG}$`));
+  await expect(page.locator('[data-sing-all-job="job-1"]').getByTestId("sing-all-card")).toBeInViewport();
+});
+
+test("another user's job link says it isn't theirs", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-job-link-other");
+  backend.setJob(null);
+  await page.goto("/jobs/job-of-someone-else");
+  await expect(page.getByTestId("job-link-message")).toContainText(
+    "This job isn't yours. Ask the owner for a share link.");
+  await page.getByRole("link", { name: "Go to SightSinger" }).click();
+  await expect(page).toHaveURL(/\/app$/);
+});
+
+test("the running card says an email will come only when the job will send one", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-email-line");
+  backend.history.push(
+    { id: "turn-2", role: "assistant", content: "Sing All started: 2 takes, 3 credits reserved.",
+      timestamp: "2026-01-01T10:00:01Z", singAllJobId: "job-1" },
+  );
+  backend.setJob(progress({ stage: "singing", emailOnEnd: true }));
+  await goToSong(page);
+  await expect(card(page)).toContainText("You can close this page. We'll email you when it's done.");
+
+  backend.setJob(progress({ stage: "singing", emailOnEnd: false }));
+  await page.reload();
+  await expect(card(page)).toContainText("You can close this page. Your song will be here when you come back.");
+  await expect(card(page)).not.toContainText("We'll email you");
+});

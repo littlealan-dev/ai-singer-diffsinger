@@ -285,6 +285,12 @@ class Settings:
     sing_all_package_transport: str = "inline"
     sing_all_package_job: str = ""
     sing_all_soundfont_path: Path = PROJECT_ROOT / "ui/public/soundfonts/FluidR3_GM.sf2"
+    # The email sent when a Sing All ends, through Brevo with the marketing key.
+    sing_all_emails: str = "off"
+    sing_all_email_from: str = ""
+    sing_all_email_reply_to: str = ""
+    # Brevo's send address; a test run points it elsewhere so nothing reaches Brevo.
+    sing_all_email_api_url: str = "https://api.brevo.com/v3/smtp/email"
     # A second synthesis worker (the RTX PRO 6000 one) for some users' jobs,
     # dispatched the same way as SYNTHESIS_DISPATCH_MODE with its own URL,
     # audience and queue. "off" sends every job to the standard worker;
@@ -509,6 +515,17 @@ class Settings:
         sing_all_soundfont_path = Path(os.getenv(
             "SING_ALL_SOUNDFONT_PATH", str(PROJECT_ROOT / "ui/public/soundfonts/FluidR3_GM.sf2")
         ))
+        sing_all_emails = os.getenv("SING_ALL_EMAILS", "off").strip().lower()
+        if sing_all_emails not in {"off", "on"}:
+            raise ValueError("SING_ALL_EMAILS must be off or on.")
+        sing_all_email_from = os.getenv("SING_ALL_EMAIL_FROM", "").strip()
+        sing_all_email_reply_to = os.getenv("SING_ALL_EMAIL_REPLY_TO", "").strip()
+        if sing_all_emails == "on" and not sing_all_email_from:
+            raise ValueError("SING_ALL_EMAIL_FROM is required when SING_ALL_EMAILS is on.")
+        if sing_all_emails == "on" and not sing_all_email_reply_to:
+            raise ValueError("SING_ALL_EMAIL_REPLY_TO is required when SING_ALL_EMAILS is on.")
+        sing_all_email_api_url = os.getenv(
+            "SING_ALL_EMAIL_API_URL", "https://api.brevo.com/v3/smtp/email").strip()
         if sing_all_reconcile_dispatch_mode != "inline" and not sing_all_reconcile_url:
             raise ValueError("SING_ALL_RECONCILE_URL is required for remote dispatch.")
         if sing_all_reconcile_dispatch_mode == "cloud_tasks" and not sing_all_reconcile_tasks_queue:
@@ -748,6 +765,10 @@ class Settings:
             sing_all_render_job=sing_all_render_job,
             sing_all_package_transport=sing_all_package_transport,
             sing_all_package_job=sing_all_package_job,
+            sing_all_emails=sing_all_emails,
+            sing_all_email_from=sing_all_email_from,
+            sing_all_email_reply_to=sing_all_email_reply_to,
+            sing_all_email_api_url=sing_all_email_api_url,
             sing_all_soundfont_path=sing_all_soundfont_path,
             sing_all_reconcile_url=sing_all_reconcile_url,
             sing_all_reconcile_tasks_queue=sing_all_reconcile_tasks_queue,

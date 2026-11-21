@@ -211,6 +211,15 @@
         ]
       },
       {
+        "source": "/jobs/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
         "source": "/s/**",
         "headers": [
           {
@@ -348,6 +357,10 @@
       },
       {
         "source": "/s/**",
+        "destination": "/app.html"
+      },
+      {
+        "source": "/jobs/**",
         "destination": "/app.html"
       },
       {

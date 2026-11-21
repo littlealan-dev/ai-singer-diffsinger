@@ -395,6 +395,12 @@
    and the total bar sticks to the bottom of the chat while the bubble is in view. */
 .chat-bubble.sing-all-inline-bubble {
   align-self: stretch;
+  transition: box-shadow 1s ease-out;
+}
+
+/* The card an email's job link opened, highlighted once; the outline fades when it ends. */
+.chat-bubble.sing-all-linked {
+  box-shadow: 0 0 0 2px rgba(127, 224, 166, 0.9);
 }
 
 .sing-all-inline .sing-all-title {

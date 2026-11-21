@@ -258,7 +258,7 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
                                   "duration_seconds": 59}}
     events = []
     async def auth(request):
-        return "owner"
+        return "owner", "owner@example.test"
     async def owned(sessions, session_id, uid):
         return snapshot
     async def voices():
@@ -267,7 +267,7 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
         events.append(("history", kwargs["sing_all_job_id"]))
     async def enqueue(job_id):
         events.append(("enqueue", job_id))
-    monkeypatch.setattr(main, "_get_user_id_or_401", auth)
+    monkeypatch.setattr(main, "_get_user_context_or_401", auth)
     monkeypatch.setattr(main, "_get_snapshot_or_404", owned)
     monkeypatch.setattr(main, "read_quote", lambda db, quote_id, uid: quote)
     user = {"billing": {"activePlanKey": "plus"}}

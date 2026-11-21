@@ -24,7 +24,7 @@ def _run_job(monkeypatch, job, children):
 
     monkeypatch.setattr(sing_all_runner.sing_all_store, "load", load)
     monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
-    def finish(job_id, fields, *, expected_stage, expected_revision):
+    def finish(job_id, fields, *, expected_stage, expected_revision, queue_email=False):
         assert (record["stage"], record["revision"]) == (expected_stage, expected_revision)
         events.append(("finish", fields["status"], fields["stage"]))
         record.update(deepcopy(fields))
