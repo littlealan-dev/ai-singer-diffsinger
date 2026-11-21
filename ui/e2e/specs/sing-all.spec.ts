@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { signInAsE2EUser } from "../auth";
+import { firebaseIdToken, signInAsE2EUser } from "../auth";
 
 // The Sing All card, on a mocked backend that answers as the API contracts in
 // docs/specs/sing-all-core-step3-spec.md and sing-all-mixes-step4-spec.md say: the chat
@@ -361,6 +361,34 @@ test("a free plan sees Upgrade, and too few credits sees Top up", async ({ page 
   await card(page).getByRole("button", { name: "Apply" }).click();
   await expect(card(page).getByRole("button", { name: "Top up" })).toBeVisible();
   await expect(page.getByTestId("sing-all-sing-it")).toHaveCount(0);
+});
+
+test("upgrading while the card shows Upgrade asks for the quote again with the same choices", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-upgrade-refresh");
+  await goToSong(page);
+  backend.nextQuote((choices) => ({ body: quoteFor(choices, { blocked: "free_plan" }) }));
+  await openCard(page);
+  await expect(card(page).getByRole("button", { name: "Upgrade to sing" })).toBeVisible();
+  expect(backend.quotes).toHaveLength(1);
+
+  // The plan reaches the page from the user's document, as after a real upgrade.
+  const token = await firebaseIdToken(page);
+  const uid: string = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString()).user_id;
+  const response = await fetch(
+    `http://127.0.0.1:8080/v1/projects/demo-sightsinger-e2e/databases/(default)/documents/users/${uid}` +
+      "?updateMask.fieldPaths=billing.activePlanKey",
+    {
+      method: "PATCH",
+      headers: { Authorization: "Bearer owner", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fields: { billing: { mapValue: { fields: { activePlanKey: { stringValue: "solo_monthly" } } } } },
+      }),
+    },
+  );
+  expect(response.ok, await response.text()).toBeTruthy();
+  await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 3 cr");
+  expect(backend.quotes).toHaveLength(2);
+  expect(backend.quotes[1]).toEqual(backend.quotes[0]);
 });
 
 test("Sing it after the score changed shows the new quote, then the job runs to its receipt", async ({ page }) => {

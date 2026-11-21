@@ -40,6 +40,8 @@ type SingAllCardProps = {
   onTopUp: () => void;
   onUpgrade: () => void;
   onStop: (songId: string) => Promise<void>;
+  // Changes when the owner's plan or available credits change, e.g. "plus:42".
+  billingKey?: string;
   // Step 6: a decision or retry answered with fresh progress, a retry started, a job opened by id.
   onJobUpdated?: (job: SingAllProgress) => void;
   onRetryStarted?: (job: SingAllProgress) => void;
@@ -178,6 +180,7 @@ function SingAllQuoteView({
   onOpenSong,
   onTopUp,
   onUpgrade,
+  billingKey,
 }: SingAllCardProps) {
   const defaults = useMemo<SingAllChoices>(
     () => ({ language: open?.language ?? "en", solfegeOnly: open?.solfegeOnly ?? false }),
@@ -222,6 +225,15 @@ function SingAllQuoteView({
   useEffect(() => {
     void askQuote(defaults);
   }, [askQuote, defaults]);
+
+  // An upgrade or a top-up can lift "Upgrade to sing" or "Top up": ask again with the same choices.
+  const billingSeen = useRef(billingKey);
+  useEffect(() => {
+    if (billingSeen.current === billingKey) return;
+    billingSeen.current = billingKey;
+    const blocked = state.kind === "ready" ? state.quote.blocked : null;
+    if (blocked === "free_plan" || blocked === "not_enough_credits") void askQuote(choices);
+  }, [billingKey, state, choices, askQuote]);
 
   const quote = state.kind === "ready" ? state.quote : null;
   const shownTotal = quote?.total ?? null;

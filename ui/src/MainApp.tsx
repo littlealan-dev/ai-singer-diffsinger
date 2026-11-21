@@ -5963,6 +5963,7 @@ export default function MainApp() {
                     onOpenSong={(songId) => navigate(`/app/song/${songId}`)}
                     onTopUp={() => openPaywall("insufficient_credits")}
                     onUpgrade={() => openPaywall("billing_menu")}
+                    billingKey={`${billing.activePlanKey}:${available}`}
                     onStop={handleSingAllStop}
                     onJobUpdated={handleSingAllJobUpdated}
                     onRetryStarted={handleSingAllRetryStarted}
