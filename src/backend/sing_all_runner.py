@@ -457,7 +457,7 @@ class SingAllRunner:
                 self.orchestrator._router.call_tool, "add_solfege_lyric_verse",
                 {"source_musicxml_path": self.orchestrator._mcp_musicxml_path(source),
                  "output_musicxml_path": str(output.relative_to(self.orchestrator._settings.project_root)),
-                 "part_ids": sorted(targets),
+                 "parts": sorted(targets),
                  "settings": dict(snapshot.get("solfege_settings") or {})},
             )
         except Exception:

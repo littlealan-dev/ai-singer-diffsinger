@@ -1,8 +1,11 @@
 """The parent runner orders credit releases and durable transitions."""
 
 import asyncio
+import shutil
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 from src.backend import sing_all_package, sing_all_runner
 
@@ -149,6 +152,50 @@ def test_solfege_tool_failure_marks_quoted_rows_skipped(monkeypatch, tmp_path):
     asyncio.run(runner._add_solfege(job, {}))
     assert updates == [{"solfegePrepared": True, "solfegeFailedRows": ["row-a"],
                         "solfegeSelections": {}}]
+
+
+def test_solfege_runs_the_real_tool_and_prepares_every_row(monkeypatch):
+    """The other solfège tests stub the tool; this one calls it, so its arguments must match."""
+    from src.mcp.tools import call_tool
+
+    root = Path(__file__).resolve().parent.parent
+    work = root / "tests" / "output" / f"sing-all-solfege-{uuid4().hex}"
+    work.mkdir(parents=True)
+    source = work / "score.xml"
+    shutil.copy(root / "tests/fixtures/late_first_tempo.musicxml", source)
+    updates, persisted = [], []
+
+    def apply(_job_id, fields, **_kwargs):
+        updates.append(fields)
+        return True
+
+    async def persist(_session_id, result):
+        persisted.append(result)
+
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(
+            ensure_active_musicxml=lambda *_args: _async_value(source),
+            session_dir=lambda *_args: work,
+        ),
+        _router=SimpleNamespace(call_tool=lambda name, args: call_tool(name, args, "cpu")),
+        _mcp_musicxml_path=lambda path: str(Path(path).relative_to(root)),
+        _persist_solfege_result=persist,
+        _settings=SimpleNamespace(project_root=root),
+    )
+    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a"}],
+               rows=[{"rowId": "row-a", "partId": "Soprano"}], stage="solfege")
+    try:
+        asyncio.run(sing_all_runner.SingAllRunner(orchestrator)._add_solfege(
+            job, {"solfege_settings": {"system": "movable_do", "mode": "major", "revision": 1}}))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    assert len(updates) == 1
+    assert updates[0]["solfegeFailedRows"] == []
+    assert updates[0]["solfegePrepared"] is True
+    assert set(updates[0]["solfegeSelections"]) == {"Soprano"}
+    assert isinstance(updates[0]["solfegeSelections"]["Soprano"], dict)
+    assert len(persisted) == 1
 
 
 def test_lyrics_take_uses_lowest_numbered_line_when_verse_is_absent():
