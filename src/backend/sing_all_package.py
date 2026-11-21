@@ -172,7 +172,10 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
         score = snapshot.get("score_summary") or {}
         sounds = track_sounds(score)
         performance = score.get("performance_midi") or {}
-        has_instrument_parts = bool(performance.get("instrumental_parts"))
+        # The list holds every part, each eligible or not; voices are listed too. Only an
+        # eligible part has a MIDI track, as in the player (an a cappella score has none).
+        has_instrument_parts = any(part.get("eligible")
+                                   for part in performance.get("instrumental_parts") or [])
         title = _safe_name(job.get("title"))
         root = f"{title} - Sing All"
         settings = orchestrator._settings

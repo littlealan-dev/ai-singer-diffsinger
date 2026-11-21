@@ -208,6 +208,28 @@ def test_all_assignable_instruments_make_full_mix_only(monkeypatch, tmp_path):
     assert writes[-1]["mixes"] == {"done": 1, "total": 1}
 
 
+def test_a_cappella_score_packages_without_midi(monkeypatch, tmp_path):
+    """Every part is listed but none is eligible, and the Song has no instrumental MIDI."""
+    _, orchestrator, writes, _, _ = _fixture(monkeypatch, tmp_path)
+    async def snapshot(*_):
+        return {"score_summary": {"performance_midi": {"instrumental_parts": [
+            {"eligible": False, "part_id": "P1", "raw_part_id": "P1"},
+            {"eligible": False, "part_id": "P2", "raw_part_id": "P2"}]}},
+                "files": {"instrumental_midi_original_path": "",
+                          "instrumental_midi_expanded_path": ""}}
+    async def no_midi(**_):
+        raise AssertionError("an a cappella score has no MIDI to restore")
+    orchestrator._sessions.get_snapshot = snapshot
+    orchestrator.restore_instrumental_midi = no_midi
+    asyncio.run(package.run_package("parent", orchestrator))
+    assert writes[-1]["state"] == "done"
+    assert writes[-1]["mixes"]["total"] >= 1
+    with _zip(writes) as archive:
+        names = archive.namelist()
+        assert not any("Instrumentals/" in name for name in names)
+        assert any("3 Full mixes/" in name for name in names)
+
+
 def test_title_is_sanitized_and_bounded():
     assert package._safe_name("/\\:*?\"<>|\x00") == "-" * 10
     assert package._safe_name("one\x85two") == "one-two"
