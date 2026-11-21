@@ -95,6 +95,10 @@ class DiffSingerEnglishPhonemizer:
                 "Install it with: python -m nltk.downloader cmudict"
             ) from exc
 
+    def is_known_word(self, token: str) -> bool:
+        """Check g2p_en's own CMU word list before using its prediction path."""
+        return normalize_word_for_english_g2p(token) in self._g2p().cmu
+
     def phonemize(self, token: str) -> Sequence[str]:
         unsupported = first_non_latin_letter(token)
         if unsupported is not None:

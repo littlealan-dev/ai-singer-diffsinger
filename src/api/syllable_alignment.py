@@ -139,6 +139,34 @@ def _is_chinese_syllable_carrier(note: Dict[str, Any]) -> bool:
     )
 
 
+def _split_group_at_carriers(
+    group: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """Split a syllabic group while attaching sustains to their carrier."""
+    expanded_groups: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for note, note_idx in zip(group.get("notes") or [], group.get("note_indices") or []):
+        if _is_sustain_note(note):
+            # A chain beginning with an extension is malformed. Preserve it.
+            if current is None:
+                return None
+            current["notes"].append(note)
+            current["note_indices"].append(note_idx)
+            current["sustain_indices"].append(note_idx)
+            continue
+
+        current = {
+            "notes": [note],
+            "note_indices": [note_idx],
+            "is_rest": False,
+            "is_syllabic_chain": False,
+            "sustain_indices": [],
+            "carrier_indices": [note_idx],
+        }
+        expanded_groups.append(current)
+    return expanded_groups
+
+
 def split_chinese_syllabic_groups(
     groups: List[Dict[str, Any]],
     language: str,
@@ -164,7 +192,6 @@ def split_chinese_syllabic_groups(
             continue
 
         notes = list(group.get("notes") or [])
-        note_indices = list(group.get("note_indices") or [])
         carrier_notes = [note for note in notes if not _is_sustain_note(note)]
         if (
             not carrier_notes
@@ -173,32 +200,8 @@ def split_chinese_syllabic_groups(
             split_groups.append(group)
             continue
 
-        expanded_groups: List[Dict[str, Any]] = []
-        current: Optional[Dict[str, Any]] = None
-        malformed = False
-        for note, note_idx in zip(notes, note_indices):
-            if _is_sustain_note(note):
-                # A valid syllabic group begins with its sounding carrier. If
-                # malformed input begins with an extension, preserve the old
-                # group unchanged rather than silently losing that note.
-                if current is None:
-                    malformed = True
-                    break
-                current["notes"].append(note)
-                current["note_indices"].append(note_idx)
-                current["sustain_indices"].append(note_idx)
-                continue
-
-            current = {
-                "notes": [note],
-                "note_indices": [note_idx],
-                "is_rest": False,
-                "is_syllabic_chain": False,
-                "sustain_indices": [],
-                "carrier_indices": [note_idx],
-            }
-            expanded_groups.append(current)
-        if malformed:
+        expanded_groups = _split_group_at_carriers(group)
+        if expanded_groups is None:
             split_groups.append(group)
         else:
             split_groups.extend(expanded_groups)
@@ -229,6 +232,95 @@ def _split_phonemize_result(phoneme_result: Dict[str, Any]) -> List[Dict[str, An
         )
         offset += count
     return out
+
+
+def split_unknown_word_syllabic_groups(
+    groups: List[Dict[str, Any]],
+    word_phonemes: List[Dict[str, Any]],
+    phonemizer: Phonemizer,
+    *,
+    voicebank_path: Path,
+    language: str,
+    solfege_pronunciation_patch: bool,
+    pronunciation_adapters: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Give each written syllable a vowel when an unknown join loses one."""
+    if language != "en" or pronunciation_adapters:
+        return groups, word_phonemes
+
+    candidates: Dict[int, List[Dict[str, Any]]] = {}
+    word_idx = 0
+    for group_idx, group in enumerate(groups):
+        if group.get("is_rest"):
+            continue
+        bundle = word_phonemes[word_idx]
+        word_idx += 1
+        carriers = [
+            str(note.get("lyric", "") or "").strip()
+            for note in group.get("notes") or []
+            if str(note.get("lyric", "") or "").strip()
+            and not str(note.get("lyric", "") or "").strip().startswith("+")
+        ]
+        if not group.get("is_syllabic_chain") or len(carriers) < 2:
+            continue
+        if sum(phonemizer.is_vowel(phone) for phone in bundle["phonemes"]) >= len(carriers):
+            continue
+        if phonemizer.is_known_word(_resolve_group_lyric(group)):
+            continue
+        if any(
+            not any(
+                letter in "aeiou"
+                for letter in unicodedata.normalize("NFKD", carrier).casefold()
+                if not unicodedata.combining(letter)
+            )
+            for carrier in carriers
+        ):
+            continue
+        parts = _split_group_at_carriers(group)
+        if parts is not None:
+            candidates[group_idx] = parts
+
+    if not candidates:
+        return groups, word_phonemes
+
+    parts = [part for group_parts in candidates.values() for part in group_parts]
+    part_bundles = _split_phonemize_result(
+        phonemize(
+            [_resolve_group_lyric(part) for part in parts],
+            voicebank_path,
+            language=language,
+            solfege_pronunciation_patch=solfege_pronunciation_patch,
+            logical_pronunciation=bool(pronunciation_adapters),
+        )
+    )
+    if len(part_bundles) != len(parts):
+        raise ValueError("Phonemize output does not match split syllables.")
+
+    replacement: Dict[int, tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
+    offset = 0
+    for group_idx, group_parts in candidates.items():
+        bundles = part_bundles[offset : offset + len(group_parts)]
+        offset += len(group_parts)
+        if all(any(phonemizer.is_vowel(phone) for phone in bundle["phonemes"])
+               for bundle in bundles):
+            replacement[group_idx] = (group_parts, bundles)
+
+    expanded_groups: List[Dict[str, Any]] = []
+    expanded_bundles: List[Dict[str, Any]] = []
+    word_idx = 0
+    for group_idx, group in enumerate(groups):
+        if group.get("is_rest"):
+            expanded_groups.append(group)
+            continue
+        if group_idx in replacement:
+            group_parts, bundles = replacement[group_idx]
+            expanded_groups.extend(group_parts)
+            expanded_bundles.extend(bundles)
+        else:
+            expanded_groups.append(group)
+            expanded_bundles.append(word_phonemes[word_idx])
+        word_idx += 1
+    return expanded_groups, expanded_bundles
 
 
 def _resolve_duration_model_groups(
@@ -934,6 +1026,16 @@ def align(
         )
         if len(word_phonemes) != len(lyrics):
             raise ValueError("Phonemize output does not match grouped lyrics.")
+
+    groups, word_phonemes = split_unknown_word_syllabic_groups(
+        groups,
+        word_phonemes,
+        phonemizer,
+        voicebank_path=voicebank_path,
+        language=language,
+        solfege_pronunciation_patch=solfege_pronunciation_patch,
+        pronunciation_adapters=pronunciation_adapters,
+    )
 
     phrase_groups: List[Dict[str, Any]] = []
     note_phonemes: Dict[int, List[str]] = {}
