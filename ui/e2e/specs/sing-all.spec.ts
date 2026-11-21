@@ -941,6 +941,12 @@ test("Retry failed parts shows the mini quote, starts a new job and links to it"
   expect(backend.retryStarts).toEqual([{ total: 1 }, { total: 2 }]);
   const retryCard = page.locator('[data-sing-all-job="job-2"]').getByTestId("sing-all-card");
   await expect(retryCard).toContainText("Singing your song");
+  // Its bubble has no reply text, so only the Sing All bubble rule gives it the chat's width.
+  const widths = await page.evaluate(() => ({
+    card: document.querySelector('[data-sing-all-job="job-2"]')!.getBoundingClientRect().width,
+    chat: document.querySelector('[data-testid="chat-stream"]')!.getBoundingClientRect().width,
+  }));
+  expect(widths.card).toBeGreaterThan(widths.chat * 0.8);
   const original = page.locator('[data-sing-all-job="job-1"]').getByTestId("sing-all-card");
   await expect(original).toContainText("Retried");
   await expect(original.getByTestId("sing-all-retry")).toHaveCount(0);

@@ -392,8 +392,10 @@
 }
 
 /* Quick mode inside the chat ("Sing All (3)"): the bubble takes the chat's full width,
-   and the total bar sticks to the bottom of the chat while the bubble is in view. */
-.chat-bubble.sing-all-inline-bubble {
+   and the total bar sticks to the bottom of the chat while the bubble is in view.
+   The card adds no width of its own (container-type: inline-size), and styles.css loads
+   after this file, so the selector must outrank .chat-bubble.assistant's align-self. */
+.chat-bubble.assistant.sing-all-inline-bubble {
   align-self: stretch;
   transition: box-shadow 1s ease-out;
 }
