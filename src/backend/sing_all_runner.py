@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.api.sing_all_estimate import quote_facts
-from src.backend import sing_all_store
+from src.backend import sing_all_mail, sing_all_store
 from src.backend.credits import (
     release_credits, settle_instrumental_reservation, settle_mixes_reservation,
 )
@@ -173,18 +173,27 @@ class SingAllRunner:
                     return
             if fields:
                 terminal = fields.get("stage") == "done"
+                email = terminal and self._queues_email(actions)
                 if terminal:
                     fields = {**fields, "finalScoreVersion":
                               (snapshot.get("current_score") or {}).get("version")}
-                write = sing_all_store.finish if terminal else sing_all_store.apply
-                if not await asyncio.to_thread(
-                    write, job_id, fields, expected_stage=job["stage"],
-                    expected_revision=job.get("revision", 0)):
+                    written = await asyncio.to_thread(
+                        sing_all_store.finish, job_id, fields, expected_stage=job["stage"],
+                        expected_revision=job.get("revision", 0), queue_email=email)
+                else:
+                    written = await asyncio.to_thread(
+                        sing_all_store.apply, job_id, fields, expected_stage=job["stage"],
+                        expected_revision=job.get("revision", 0))
+                if not written:
                     continue
                 job = {**job, **fields, "revision": int(job.get("revision", 0)) + 1}
+                if email:
+                    await sing_all_mail.send_outbox(
+                        sing_all_mail.outbox_id(job_id, fields["status"]), settings)
             for action in actions:
                 if action not in before and not (fields and fields.get("stage") == "done"
-                                                 and action["kind"] in {"clear_active", "append_end_history"}):
+                                                 and action["kind"] in {"clear_active", "append_end_history",
+                                                                        "queue_email"}):
                     try:
                         await self._action(job, action, snapshot)
                     except SingAllTerminalError as exc:
@@ -194,6 +203,10 @@ class SingAllRunner:
                 if render_transport:
                     await self._clear_render_slot(job_id)
                 return
+
+    def _queues_email(self, actions: list[dict[str, Any]]) -> bool:
+        return (sing_all_mail.emails_on(getattr(self.orchestrator, "_settings", None))
+                and any(action["kind"] == "queue_email" for action in actions))
 
     async def _clear_render_slot(self, job_id: str) -> None:
         from src.backend.sing_all_render import leave_slot, remove_waiting
@@ -216,10 +229,16 @@ class SingAllRunner:
             for action in actions:
                 if action["kind"] == "release":
                     await self._action(job, action, {})
+            email = self._queues_email(actions)
             if await asyncio.to_thread(
                 sing_all_store.finish, job_id, fields,
                 expected_stage=job["stage"], expected_revision=job.get("revision", 0),
+                queue_email=email,
             ):
+                if email:
+                    await sing_all_mail.send_outbox(
+                        sing_all_mail.outbox_id(job_id, fields["status"]),
+                        self.orchestrator._settings)
                 return
         raise RuntimeError("Sing All parent changed throughout failure settlement.")
 

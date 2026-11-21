@@ -53,11 +53,16 @@ def test_running_progress_has_contract_fields_and_quote_order(stage, remaining, 
     result = progress(job, now=NOW)
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
-        "cancelRequested", "choices", "counts", "rows", "credits", "receipt",
+        "cancelRequested", "emailOnEnd", "choices", "counts", "rows", "credits", "receipt",
         "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert (result["jobId"], result["songId"], result["title"]) == (
         "parent-a", "song-a", "Example Tune")
+    assert result["emailOnEnd"] is False
+    assert progress({**job, "notifyEmail": "owner@example.test"}, now=NOW)["emailOnEnd"] is False
+    assert progress({**job, "notifyEmail": "owner@example.test"}, now=NOW,
+                    emails_on=True)["emailOnEnd"] is True
+    assert progress(job, now=NOW, emails_on=True)["emailOnEnd"] is False
     assert (result["status"], result["stage"], result["endReason"]) == (
         "running", stage, None)
     assert result["choices"] == {"language": "en", "solfegeOnly": False,
@@ -101,7 +106,7 @@ def test_ended_progress_has_receipt_and_no_remaining_time(status):
     result = progress(job, now=NOW + timedelta(seconds=5))
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
-        "cancelRequested", "choices", "counts", "rows", "credits", "receipt",
+        "cancelRequested", "emailOnEnd", "choices", "counts", "rows", "credits", "receipt",
         "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert result["endReason"] == "instrumentals_failed"

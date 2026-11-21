@@ -188,7 +188,8 @@ def test_singing_starts_each_take_then_finishes_partial():
     job["package"]["state"] = "failed"
     fields, actions = decide(job, {}, _score(job))
     assert fields["status"] == "partial" and fields["stage"] == "done"
-    assert [action["kind"] for action in actions] == ["clear_active", "append_end_history"]
+    assert [action["kind"] for action in actions] == [
+        "clear_active", "append_end_history", "queue_email"]
 
 
 def test_queued_take_is_retried_after_its_start_lease():

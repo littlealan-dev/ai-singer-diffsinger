@@ -44,6 +44,16 @@ async function moveToAPaidPlan(page: Page) {
   expect(response.ok, await response.text()).toBeTruthy();
 }
 
+/** The ended email's outbox document, or null; it is server-only, so read it as the emulator owner. */
+async function outboxDocument(jobId: string, status: string): Promise<Record<string, any> | null> {
+  const response = await fetch(`${FIRESTORE}/mailOutbox/${jobId}-${status}`,
+    { headers: { Authorization: "Bearer owner" } });
+  if (response.status === 404) return null;
+  const text = await response.text();
+  expect(response.ok, text).toBeTruthy();
+  return JSON.parse(text).fields;
+}
+
 async function uploadFixture(page: Page, filename: string): Promise<string> {
   const upload = page.waitForResponse(
     (response) => new URL(response.url()).pathname.endsWith("/upload") && response.request().method() === "POST",
@@ -130,7 +140,9 @@ test("Sing All runs from the chat button to its receipt, with every response in 
     expect(progress, field).toHaveProperty(field);
   }
   const jobId: string = progress.jobId;
-  await expect(card(page)).toContainText("You can close this page.");
+  expect(progress.emailOnEnd).toBe(true);
+  expect(progress).not.toHaveProperty("notifyEmail");
+  await expect(card(page)).toContainText("You can close this page. We'll email you when it's done.");
   await expect(page.getByTestId("sing-all-pill")).toContainText("Sing All");
 
   const active = await api(page, request, "/sing-all/active");
@@ -187,6 +199,21 @@ test("Sing All runs from the chat button to its receipt, with every response in 
   // A reload shows the ended card again from the Song's history.
   await page.reload();
   await expect(card(page)).toContainText("Done: every part is sung");
+
+  // The end queued one email to the signed-in address. The harness sends it to a closed
+  // port, so it stays unsent with one failed attempt, for the sweeper to retry.
+  const outbox = await outboxDocument(jobId, "completed");
+  expect(outbox).not.toBeNull();
+  expect(outbox!.to.stringValue).toMatch(/@example\.test$/);
+  expect(outbox!.state.stringValue).toBe("pending");
+  expect(outbox!.attempts.integerValue).toBe("1");
+  expect(outbox!.lastError.stringValue).toBe("transport_error");
+
+  // The email's link opens the Song on the job's card.
+  await page.goto(`/jobs/${jobId}`);
+  await expect(page).toHaveURL(new RegExp(`/app/song/${songId}$`));
+  await expect(page.locator(`[data-sing-all-job="${jobId}"]`).getByTestId("sing-all-card").first())
+    .toBeInViewport();
 });
 
 test("Stop next to Send ends the run, and every credit is either charged or refunded", async ({ page, request }) => {
@@ -230,6 +257,12 @@ test("Stop next to Send ends the run, and every credit is either charged or refu
   expect(ended.credits.reserved).toBe(0);
   expect(ended.credits.charged + ended.credits.refunded).toBe(quote.total);
   if (ended.status === "cancelled") expect(ended.endReason).toBe("stopped");
+  // A stopped job sends no email.
+  if (ended.status === "cancelled") {
+    for (const status of ["completed", "partial", "failed", "cancelled"]) {
+      expect(await outboxDocument(jobId, status), status).toBeNull();
+    }
+  }
   expect((await api(page, request, "/sing-all/active")).job).toBeNull();
   // The player keeps exactly the takes that were made.
   const workspace = await api(page, request, `/songs/${songId}/workspace`);

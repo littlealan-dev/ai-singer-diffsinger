@@ -216,9 +216,14 @@ def apply(
 
 def finish(
     job_id: str, fields: Mapping[str, Any], *,
-    expected_stage: str, expected_revision: int,
+    expected_stage: str, expected_revision: int, queue_email: bool = False,
 ) -> bool:
-    """End the parent, clear its guard and append its receipt in one transaction."""
+    """End the parent, clear its guard and append its receipt in one transaction.
+
+    With queue_email, the same transaction writes the ended email's outbox document.
+    """
+    from src.backend import sing_all_mail
+
     if fields.get("status") not in {"completed", "partial", "failed", "cancelled"}:
         raise ValueError("A terminal status is required.")
     db = get_firestore_client()
@@ -253,6 +258,9 @@ def finish(
         if user.get("activeSingAllJobId") == job_id:
             transaction.update(user_ref, {"activeSingAllJobId": firestore.DELETE_FIELD})
         transaction.update(session_ref, {"history": firestore.ArrayUnion([entry])})
+        if queue_email:
+            sing_all_mail.queue_email(transaction, db, {**current, "jobId": job_id},
+                                     fields["status"])
         return True
 
     try:

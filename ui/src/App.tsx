@@ -10,6 +10,7 @@ import LegalPrivacy from "./LegalPrivacy";
 import CookieBanner from "./components/CookieBanner";
 import MaintenancePage from "./MaintenancePage";
 import SharePage from "./share/SharePage";
+import JobLinkPage from "./components/JobLinkPage";
 import { MarketingOptInProcessor } from "./components/MarketingOptInProcessor";
 
 export default function App() {
@@ -35,6 +36,17 @@ export default function App() {
           <Route index element={null} />
           <Route path="song/:songId" element={null} />
         </Route>
+        {/* A Sing All's email link: signs in if needed, then opens the job's Song. */}
+        <Route
+          path="/jobs/:jobId"
+          element={
+            <ProtectedRoute>
+              <BackendReadinessGate>
+                <JobLinkPage />
+              </BackendReadinessGate>
+            </ProtectedRoute>
+          }
+        />
         {/* The static demo is retired (DemoApp.tsx is kept); the studio has demo songs. */}
         <Route path="/demo/*" element={<Navigate to="/app" replace />} />
         {/* A shared Song: public, read-only, and never behind sign-in, readiness or maintenance. */}
