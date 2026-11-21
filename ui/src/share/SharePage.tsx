@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
+import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Link, useParams } from "react-router-dom";
 import { Pause, Play, Share2, Square, Volume2 } from "lucide-react";
 import { getContext as getToneContext } from "tone";
@@ -19,10 +21,14 @@ import {
 } from "../player/ScorePlayerEngine";
 import {
   HorizontalScoreRenderer,
+  HorizontalViewIcon,
+  PageScoreRenderer,
+  PageViewIcon,
   countParallelScoreStaves,
   getHorizontalScoreIncrementalBatchSize,
   scrollScoreMeasureIntoView,
   type HorizontalScoreRendererHandle,
+  type ScorePreviewLayout,
 } from "../player/score";
 import {
   DEFAULT_INSTRUMENTAL_BUS,
@@ -135,6 +141,11 @@ function SharedSong({ data }: { data: SharePageData }) {
   const playPendingRef = useRef(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<HorizontalScoreRendererHandle | null>(null);
+  const pageOsmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  // The page view by default, as in the app.
+  const [layout, setLayout] = useState<ScorePreviewLayout>("page");
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const lookupRef = useRef(createPerformanceMeasureLookup());
   const activeMeasureKeyRef = useRef<string | null>(null);
 
@@ -275,19 +286,21 @@ function SharedSong({ data }: { data: SharePageData }) {
     const map = summary.performance_measure_map;
     const entries = data.player.repeats ? map?.expanded : map?.written;
     const measure: PerformanceMeasureMapEntry | null = lookupRef.current(entries, seconds);
-    const renderer = rendererRef.current;
-    if (!measure || !renderer) return;
+    const horizontal = layoutRef.current === "horizontal";
+    const renderer = horizontal ? rendererRef.current : null;
+    const osmd = horizontal ? renderer?.osmd : pageOsmdRef.current;
+    if (!measure || !osmd) return;
     const key = `${measure.played_measure_index}:${measure.source_measure_index}`;
     if (activeMeasureKeyRef.current === key) return;
     try {
-      renderer.ensureSourceMeasureRendered(measure.source_measure_index);
-      if (!positionNativeScoreCursor(renderer.osmd, measure.source_measure_index)) return;
+      renderer?.ensureSourceMeasureRendered(measure.source_measure_index);
+      if (!positionNativeScoreCursor(osmd, measure.source_measure_index)) return;
       activeMeasureKeyRef.current = key;
-      const cursorElement = renderer.osmd.cursor.cursorElement;
+      const cursorElement = osmd.cursor.cursorElement;
       cursorElement.classList.add("score-active-measure-highlight");
       cursorElement.dataset.testid = "active-score-measure";
       const canvas = canvasRef.current;
-      if (canvas) scrollScoreMeasureIntoView(canvas, cursorElement, "horizontal");
+      if (canvas) scrollScoreMeasureIntoView(canvas, cursorElement, layoutRef.current);
     } catch {
       // The cursor is visual only; it never stops playback.
     }
@@ -458,8 +471,42 @@ function SharedSong({ data }: { data: SharePageData }) {
         ) : null}
       </section>
 
-      <div ref={canvasRef} className="score-canvas horizontal-layout share-song-score">
-        {scoreXml ? (
+      <div className="share-song-score-bar">
+        <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
+          {(["page", "horizontal"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={clsx("score-layout-option", { selected: layout === option })}
+              aria-pressed={layout === option}
+              aria-label={option === "page" ? "Page view" : "Horizontal view"}
+              title={option === "page" ? "Page view" : "Horizontal view"}
+              disabled={!scoreXml}
+              onClick={() => {
+                activeMeasureKeyRef.current = null;
+                setLayout(option);
+              }}
+            >
+              {option === "page" ? <PageViewIcon /> : <HorizontalViewIcon />}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div
+        ref={canvasRef}
+        className={clsx("score-canvas share-song-score", { "horizontal-layout": layout === "horizontal" })}
+      >
+        {scoreXml && layout === "page" ? (
+          <PageScoreRenderer
+            scoreData={scoreXml}
+            onOsmdChange={(osmd) => {
+              pageOsmdRef.current = osmd;
+              activeMeasureKeyRef.current = null;
+            }}
+            onReady={() => setScoreError(null)}
+            onRenderError={() => setScoreError("Couldn't show the score.")}
+          />
+        ) : scoreXml ? (
           <HorizontalScoreRenderer
             scoreData={scoreXml}
             zoomLevel={1}

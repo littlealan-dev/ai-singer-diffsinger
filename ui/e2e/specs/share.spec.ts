@@ -432,6 +432,36 @@ test("the page, signed out: title, score, one row per sung part, and Play plays"
   await viewer.context().close();
 });
 
+test("the score opens in page view, switches to horizontal, and the page fits a phone", async ({ page, browser }) => {
+  const backend = await createBackend();
+  backend.state.noticeAccepted = true;
+  backend.state.vocals.push({ key: "P1:lyrics", label: "Soprano", mode: "lyrics" });
+  await openSongAsOwner(page, backend, "share-layout");
+  const link = await shareFromTheApp(page);
+
+  const viewer = await openAsViewer(browser, backend, link);
+  const score = viewer.locator(".share-song-score");
+  await expect(viewer.getByRole("button", { name: "Page view" })).toHaveAttribute("aria-pressed", "true");
+  await expect(score.locator(".score-page-virtualizer svg").first()).toBeVisible();
+  await expect(score).not.toHaveClass(/horizontal-layout/);
+
+  await viewer.getByRole("button", { name: "Horizontal view" }).click();
+  await expect(viewer.getByRole("button", { name: "Horizontal view" })).toHaveAttribute("aria-pressed", "true");
+  await expect(score).toHaveClass(/horizontal-layout/);
+  await expect(score.locator("svg").first()).toBeVisible();
+
+  // On a phone the page stays inside the screen; the score scrolls in its own box.
+  await viewer.setViewportSize({ width: 375, height: 812 });
+  const widths = await viewer.evaluate(() => ({
+    screen: document.documentElement.clientWidth,
+    page: Math.round(document.querySelector(".share-page")!.getBoundingClientRect().right),
+    left: Math.round(document.querySelector(".share-page")!.getBoundingClientRect().left),
+  }));
+  expect(widths.left).toBeGreaterThanOrEqual(0);
+  expect(widths.page).toBeLessThanOrEqual(widths.screen);
+  await expect(score).toHaveCSS("overflow-y", "auto");
+});
+
 test("the owner's mix: a muted part starts off, a soloed one alone starts on, and a reload restores it", async ({ page, browser }) => {
   const backend = await createBackend();
   backend.state.noticeAccepted = true;

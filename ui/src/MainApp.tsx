@@ -78,6 +78,8 @@ import {
 } from "./player/tracks";
 import {
   HorizontalScoreRenderer,
+  HorizontalViewIcon,
+  PageViewIcon,
   applyPageLayoutZoom,
   countParallelScoreStaves,
   fitPagePreviewToContainer,
@@ -280,26 +282,6 @@ const isPlaybackTokenStale = (audioUrl: string): boolean => {
 };
 
 const formatDb = (db: number) => `${Number.isInteger(db) ? db : db.toFixed(1)} dB`;
-
-const PageViewIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 10.9231H4.57087C4.25599 10.9231 4 11.1938 4 11.5384C4 11.8831 4.25599 12.1538 4.57087 12.1538H19.4291C19.744 12.1538 20 11.8831 20 11.5384C20 11.1938 19.744 10.9231 19.4291 10.9231Z" />
-    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 7.49449H4.57087C4.25599 7.49449 4 7.76526 4 8.10987C4 8.45449 4.25599 8.72526 4.57087 8.72526H19.4291C19.744 8.72526 20 8.45449 20 8.10987C20 7.76526 19.744 7.49449 19.4291 7.49449Z" />
-    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 14.3516H4.57087C4.25599 14.3516 4 14.6224 4 14.967C4 15.3116 4.25599 15.5824 4.57087 15.5824H19.4291C19.744 15.5824 20 15.3116 20 14.967C20 14.6224 19.744 14.3516 19.4291 14.3516Z" />
-    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 4.06592H4.57087C4.25599 4.06592 4 4.33669 4 4.6813C4 5.02592 4.25599 5.29669 4.57087 5.29669H19.4291C19.744 5.29669 20 5.02592 20 4.6813C20 4.33669 19.744 4.06592 19.4291 4.06592Z" />
-    <path fillRule="evenodd" clipRule="evenodd" d="M19.4291 17.7802H4.57087C4.25599 17.7802 4 18.051 4 18.3956C4 18.7402 4.25599 19.011 4.57087 19.011H19.4291C19.744 19.011 20 18.7402 20 18.3956C20 18.051 19.744 17.7802 19.4291 17.7802Z" />
-  </svg>
-);
-
-const HorizontalViewIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M18.7692 4.94205V19.0598C18.7692 19.5784 19.04 20 19.3846 20C19.7292 20 20 19.5784 20 19.0598V4.94205C20 4.42346 19.7292 4 19.3846 4C19.04 4 18.7692 4.42346 18.7692 4.94205ZM13.8462 4.57087L13.8462 19.4291C13.8462 19.744 14.1169 20 14.4615 20C14.8062 20 15.0769 19.744 15.0769 19.4291L15.0769 4.57087C15.0769 4.25598 14.8062 4 14.4615 4C14.1169 4 13.8462 4.25598 13.8462 4.57087ZM8.92308 19.2008C8.92308 19.6416 9.19385 20 9.53846 20C9.88308 20 10.1538 19.6416 10.1538 19.2008V4.7992C10.1538 4.35837 9.88308 4 9.53846 4C9.19385 4 8.92308 4.35837 8.92308 4.7992ZM5.23077 19.4291L5.23077 4.57087C5.23077 4.25598 4.96 4 4.61538 4C4.27077 4 4 4.25598 4 4.57087L4 19.4291C4 19.744 4.27077 20 4.61538 20C4.96 20 5.23077 19.744 5.23077 19.4291Z"
-    />
-  </svg>
-);
 
 const GM_INSTRUMENTS = [
   { program: 0, label: "Acoustic Grand Piano" },
