@@ -582,8 +582,9 @@ def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
         "current_score": {"version": 2, "score": {
             "parts": [{"part_id": "P1"}, {"part_id": "P2"}],
             "voice_part_transforms": {"made-up-lane": {
+                "part_index": 0, "target_voice_part_id": "V1",
                 "source_part_index": 0, "source_voice_part_id": "V1",
-                "derived_lane": {"slot": 1},
+                "derived_lane": {"slot": 1, "source": {"part_index": 0, "voice_part_id": "V1"}},
                 "appended_part_ref": {"part_index": 1, "part_id": "P2"},
             }},
         }},
@@ -747,8 +748,9 @@ def test_quoted_split_layout_makes_exact_rows_and_completes_takes(parent_environ
         score["parts"] = [{"part_id": "P1"}, {"part_id": "P2"}, {"part_id": "P3"}]
         score["voice_part_transforms"] = {
             f"made-up-{slot}": {
+                "part_index": 0, "target_voice_part_id": "V1",
                 "source_part_index": 0, "source_voice_part_id": "V1",
-                "derived_lane": {"slot": slot},
+                "derived_lane": {"slot": slot, "source": {"part_index": 0, "voice_part_id": "V1"}},
                 "appended_part_ref": {"part_index": slot, "part_id": f"P{slot + 1}"},
             } for slot in (1, 2)
         }

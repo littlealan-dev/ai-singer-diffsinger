@@ -267,17 +267,23 @@ class SingAllRunner:
                         for transform in (score.get("voice_part_transforms") or {}).values():
                             if not isinstance(transform, dict):
                                 continue
-                            source_index = transform.get("source_part_index")
+                            # The lane names the part it was split from and the voice it took
+                            # out. source_part_index and source_voice_part_id say where its
+                            # lyrics came from, which can be another staff's line.
+                            lane = transform.get("derived_lane") or {}
+                            lane_source = lane.get("source") or {}
+                            source_index = lane_source.get("part_index", transform.get("part_index"))
+                            voice_id = lane_source.get("voice_part_id",
+                                                       transform.get("target_voice_part_id"))
                             if not isinstance(source_index, int) or source_index >= len(score_parts):
                                 continue
                             source = score_parts[source_index]
                             if source.get("part_id") != item["sourcePartId"]:
                                 continue
-                            lane = transform.get("derived_lane") or {}
                             appended = transform.get("appended_part_ref") or {}
                             if not lane or appended.get("hidden_default_lane"):
                                 continue
-                            suffix = f":{transform.get('source_voice_part_id')}:slot{lane.get('slot')}"
+                            suffix = f":{voice_id}:slot{lane.get('slot')}"
                             matching = [row for row in job["rows"]
                                         if row.get("sourcePartId") == item["sourcePartId"]
                                         and row.get("split") and row["rowId"].endswith(suffix)]

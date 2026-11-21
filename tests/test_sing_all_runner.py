@@ -250,8 +250,9 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     state = {"current_score": {"score": {
         "parts": [{"part_id": "P1"}, {"part_id": "P2"}],
         "voice_part_transforms": {"a": {
+            "part_index": 0, "target_voice_part_id": "V1",
             "source_part_index": 0, "source_voice_part_id": "V1",
-            "derived_lane": {"slot": 1},
+            "derived_lane": {"slot": 1, "source": {"part_index": 0, "voice_part_id": "V1"}},
             "appended_part_ref": {"part_index": 1, "part_id": "P2"},
         }},
     }}, "score_summary": {"parts": [
@@ -262,6 +263,42 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     assert children["split-a"]["parts"] == [
         {"laneKey": "P1:staff1:V1:slot1", "partId": "P2", "name": "Made-up harmony"}]
     assert children["split-a"]["reviewRequired"] is False
+
+
+def test_a_staff_with_borrowed_lyrics_matches_its_own_rows():
+    """A two-staff part: the bottom staff has no words and borrows the top staff's.
+
+    Its lanes' lyric source is part 0, voice 1, for both voices; the lane's own source
+    says which staff and voice each lane was split from.
+    """
+    runner = sing_all_runner.SingAllRunner(SimpleNamespace(_job_store=SimpleNamespace(
+        get_job=lambda child_id: {"status": "completed", "reviewRequired": False})))
+    job = _job([{"itemId": "split:low", "type": "split", "sourcePartId": "P1-Staff2",
+                 "childJobId": "split-low", "status": "running"}])
+    job["rows"] = [{"rowId": f"P1-Staff2:staff1:voice part {voice}:slot1",
+                    "sourcePartId": "P1-Staff2", "split": True, "voice": "voice_a"}
+                   for voice in (1, 2)]
+    transforms = {f"low-{voice}": {
+        "part_index": 1, "target_voice_part_id": f"voice part {voice}",
+        "source_part_index": 0, "source_voice_part_id": "voice part 1",
+        "derived_lane": {"slot": 1, "source": {"part_index": 1,
+                                               "voice_part_id": f"voice part {voice}"}},
+        "appended_part_ref": {"part_index": 1 + voice, "part_id": f"P-low-{voice}"},
+    } for voice in (1, 2)}
+    state = {"current_score": {"score": {
+        "parts": [{"part_id": "P1-Staff1"}, {"part_id": "P1-Staff2"},
+                  {"part_id": "P-low-1"}, {"part_id": "P-low-2"}],
+        "voice_part_transforms": transforms,
+    }}, "score_summary": {"parts": [
+        {"part_index": 0, "part_id": "P1-Staff1"}, {"part_index": 1, "part_id": "P1-Staff2"},
+        {"part_index": 2, "part_id": "P-low-1", "part_name": "Made-up low 1"},
+        {"part_index": 3, "part_id": "P-low-2", "part_name": "Made-up low 2"},
+    ]}}
+    children = asyncio.run(runner._children(job, state))
+    assert sorted((part["laneKey"], part["partId"]) for part in children["split-low"]["parts"]) == [
+        ("P1-Staff2:staff1:voice part 1:slot1", "P-low-1"),
+        ("P1-Staff2:staff1:voice part 2:slot1", "P-low-2"),
+    ]
 
 
 def test_concurrent_reconcile_starts_one_solfege_transform(monkeypatch):
